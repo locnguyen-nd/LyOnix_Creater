@@ -1,0 +1,1 @@
+ALTER TABLE "ProviderAccount" ADD COLUMN IF NOT EXISTS "availableModels" TEXT[] DEFAULT ARRAY[]::TEXT[];

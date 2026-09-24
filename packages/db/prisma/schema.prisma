@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  staff
+}
+enum ProviderScope {
+  personal
+  organization
+}
+enum ProviderStatus {
+  unverified
+  verified
+  failed
+  disabled
+}
+enum ChannelAuthType {
+  oauth2
+  token
+  api_key
+  fixture
+}
+enum WorkflowStatus {
+  accepted
+  scripting
+  awaiting_staff_ack
+  producing
+  handoff_workspace_ready
+  failed
+}
+
+model User {
+  id String @id @default(uuid()) @db.Uuid
+  email String @unique
+  displayName String
+  passwordHash String
+  role Role
+  disabled Boolean @default(false)
+  uiLocale String @default("vi")
+  theme String @default("system")
+  timezone String @default("Asia/Ho_Chi_Minh")
+  version Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions Session[]
+  providerAccounts ProviderAccount[]
+  channelConnections ChannelConnection[]
+  teamMembers TeamMember[]
+  channelGrants UserChannelGrant[]
+}
+model Team {
+  id String @id @default(uuid()) @db.Uuid
+  name String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  members TeamMember[]
+  channels TeamChannel[]
+}
+model TeamMember {
+  userId String @db.Uuid
+  teamId String @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  @@id([userId, teamId])
+}
+model TeamChannel {
+  teamId String @db.Uuid
+  channelId String @db.Uuid
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  channel ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  @@id([teamId, channelId])
+}
+model UserChannelGrant {
+  userId String @db.Uuid
+  channelId String @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  @@id([userId, channelId])
+}
+model Session {
+  id String @id @db.Uuid
+  userId String @db.Uuid
+  csrfToken String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, expiresAt])
+}
+model ProviderAccount {
+  id String @id @default(uuid()) @db.Uuid
+  name String
+  provider String
+  role String
+  scope ProviderScope
+  ownerUserId String? @db.Uuid
+  status ProviderStatus @default(unverified)
+  model String
+  availableModels String[] @default([])
+  encryptedSecret String
+  configVersion Int @default(1)
+  isFake Boolean @default(false)
+  version Int @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+  owner User? @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  @@index([ownerUserId, scope, deletedAt])
+}
+model ChannelConnection {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  externalChannelId String
+  displayName String
+  avatarUrl String?
+  username String?
+  authType ChannelAuthType
+  encryptedSecret String?
+  grantedScopes String[]
+  status String @default("connected")
+  isFixture Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshots MetricSnapshot[]
+  teamLinks TeamChannel[]
+  userGrants UserChannelGrant[]
+  @@unique([userId, externalChannelId])
+}
+model MetricSnapshot {
+  id String @id @default(uuid()) @db.Uuid
+  channelId String @db.Uuid
+  metricName String
+  value Decimal? @db.Decimal(20, 4)
+  currency String?
+  availability String
+  reasonCode String?
+  capturedAt DateTime
+  createdAt DateTime @default(now())
+  channel ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  @@index([channelId, metricName, capturedAt])
+}
+model ProductionRequest {
+  id String @id @default(uuid()) @db.Uuid
+  ownerUserId String @db.Uuid
+  topic String
+  locale String
+  status WorkflowStatus @default(accepted)
+  inputFingerprint String @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  scripts ScriptVersion[]
+  handoffs HandoffWorkspace[]
+}
+model ScriptVersion {
+  id String @id @default(uuid()) @db.Uuid
+  productionRequestId String @db.Uuid
+  version Int
+  content Json
+  approvedAt DateTime?
+  createdAt DateTime @default(now())
+  productionRequest ProductionRequest @relation(fields: [productionRequestId], references: [id], onDelete: Cascade)
+  subtitles SubtitleCue[]
+  assets WorkflowAsset[]
+  @@unique([productionRequestId, version])
+}
+model SubtitleCue {
+  id String @id @default(uuid()) @db.Uuid
+  scriptVersionId String @db.Uuid
+  cueIndex Int
+  text String
+  startMs Int?
+  endMs Int?
+  scriptVersion ScriptVersion @relation(fields: [scriptVersionId], references: [id], onDelete: Cascade)
+  @@unique([scriptVersionId, cueIndex])
+}
+model WorkflowAsset {
+  id String @id @default(uuid()) @db.Uuid
+  scriptVersionId String @db.Uuid
+  sceneIndex Int
+  relativePath String
+  mediaType String
+  sha256 String
+  source String
+  scriptVersion ScriptVersion @relation(fields: [scriptVersionId], references: [id], onDelete: Cascade)
+  @@unique([scriptVersionId, sceneIndex])
+}
+model HandoffWorkspace {
+  id String @id @default(uuid()) @db.Uuid
+  productionRequestId String @db.Uuid
+  timelineVersionId String
+  relativePath String
+  fingerprint String @unique
+  status String
+  manifest Json
+  createdAt DateTime @default(now())
+  productionRequest ProductionRequest @relation(fields: [productionRequestId], references: [id], onDelete: Cascade)
+}
