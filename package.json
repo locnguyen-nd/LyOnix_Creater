@@ -1,0 +1,20 @@
+{
+  "name": "lyonix-creater",
+  "private": true,
+  "packageManager": "pnpm@9.15.5",
+  "pnpm": {
+    "overrides": {
+      "confbox": "0.3.1"
+    }
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r build",
+    "dev": "corepack pnpm --parallel --filter @lyonix/api --filter @lyonix/web dev",
+    "lint": "corepack pnpm -r lint",
+    "test": "corepack pnpm -r test",
+    "typecheck": "corepack pnpm -r typecheck"
+  }
+}
