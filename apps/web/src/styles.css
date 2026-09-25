@@ -1,0 +1,107 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+@theme inline {
+  --font-sans: Inter, "Noto Sans JP", "Noto Sans KR", sans-serif;
+  --color-lyx-bg: var(--lyx-bg);
+  --color-lyx-muted: var(--lyx-bg-muted);
+  --color-lyx-elevated: var(--lyx-bg-elevated);
+  --color-lyx-fg: var(--lyx-fg);
+  --color-lyx-fg-muted: var(--lyx-fg-muted);
+  --color-lyx-fg-subtle: var(--lyx-fg-subtle);
+  --color-lyx-border: var(--lyx-border);
+  --color-lyx-strong: var(--lyx-border-strong);
+  --color-lyx-cta: var(--lyx-cta);
+  --color-lyx-cta-fg: var(--lyx-cta-fg);
+  --color-lyx-ok: var(--lyx-ok);
+  --color-lyx-ok-bg: var(--lyx-ok-bg);
+  --color-lyx-warn: var(--lyx-warn);
+  --color-lyx-warn-bg: var(--lyx-warn-bg);
+  --color-lyx-danger: var(--lyx-danger);
+  --color-lyx-danger-bg: var(--lyx-danger-bg);
+  --color-lyx-neutral-bg: var(--lyx-neutral-bg);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  background: var(--lyx-bg);
+  color: var(--lyx-fg);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--lyx-fg);
+  outline-offset: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  color: var(--lyx-fg);
+  background: var(--lyx-bg-muted);
+}
+
+.lyx-btn {
+  display: inline-flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: var(--lyx-radius);
+  padding: 0 13px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.lyx-btn:disabled {
+  opacity: 0.4;
+}
+
+.lyx-btn-primary {
+  background: var(--lyx-cta);
+  color: var(--lyx-cta-fg);
+  border: 1px solid var(--lyx-cta);
+}
+
+.lyx-btn-secondary {
+  background: var(--lyx-bg);
+  color: var(--lyx-fg);
+  border: 1px solid var(--lyx-border);
+}
+
+.lyx-btn-secondary:hover:not(:disabled) {
+  border-color: var(--lyx-border-strong);
+}
+
+.lyx-btn-danger {
+  background: var(--lyx-bg);
+  color: var(--lyx-danger);
+  border: 1px solid var(--lyx-danger);
+}
+
+.lyx-btn-ghost {
+  background: transparent;
+  color: var(--lyx-fg-muted);
+  border: 1px solid transparent;
+}
+
+.lyx-btn-ghost:hover:not(:disabled) {
+  color: var(--lyx-fg);
+}
