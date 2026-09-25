@@ -3,7 +3,7 @@ import type { Request, Response } from "express";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { normalizedError, success } from "./envelopes.js";
-import { CURATED_CONTENT_MODELS, isLiveContentKind } from "@lyonix/providers";
+import { CURATED_CONTENT_MODELS, CURATED_ELEVENLABS_MODELS } from "@lyonix/providers";
 import { ProviderAccountsService, type ProviderRole, type ProviderScope } from "./provider-accounts.service.js";
 
 type CreateBody = { name?: string; provider?: string; role?: ProviderRole; scope?: ProviderScope; model?: string; secret?: string };
@@ -24,6 +24,9 @@ export class ProviderAccountsController {
       { provider: "openai", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.openai },
       { provider: "gemini", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.gemini },
       { provider: "xai", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.xai },
+      { provider: "elevenlabs", role: "tts", implementationStatus: "available", models: [...CURATED_ELEVENLABS_MODELS] },
+      { provider: "pexels", role: "visual", implementationStatus: "available", models: [] },
+      { provider: "creatomate", role: "render", implementationStatus: "available", models: [] },
       { provider: "vrew", role: "render", implementationStatus: "blocked", models: [] },
     ], requestId(response));
   }
@@ -38,12 +41,12 @@ export class ProviderAccountsController {
   async create(@Body() body: CreateBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user, session } = await requireUser(request, response, this.auth);
     requireCsrf(request, response, session);
-    if (!body.name?.trim() || !body.provider || !body.model?.trim() || !body.secret?.trim() || !isLiveContentKind(body.provider) || !["content", "tts", "visual", "render"].includes(body.role ?? "") || !["personal", "organization"].includes(body.scope ?? "")) {
+    if (!body.name?.trim() || !body.provider || !body.model?.trim() || !body.secret?.trim() || !["content", "tts", "visual", "render"].includes(body.role ?? "") || !["personal", "organization"].includes(body.scope ?? "")) {
       throw normalizedError("VALIDATION_FAILED", "Dữ liệu tài khoản provider không hợp lệ", requestId(response));
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini hoặc xAI cho vai trò content", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels (visual) hoặc Creatomate (render)", requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {
