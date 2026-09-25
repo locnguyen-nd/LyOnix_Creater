@@ -19,6 +19,9 @@ importers:
       '@lyonix/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@lyonix/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@lyonix/providers':
         specifier: workspace:*
         version: link:../../packages/providers
@@ -31,6 +34,9 @@ importers:
       '@nestjs/platform-express':
         specifier: ^11.1.6
         version: 11.2.5(@nestjs/common@11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.5)
+      '@nestjs/schedule':
+        specifier: ^5.0.1
+        version: 5.0.1(@nestjs/common@11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.5)
       dotenv:
         specifier: ^17.2.2
         version: 17.4.2
@@ -177,6 +183,10 @@ importers:
         version: 5.9.3
 
   packages/providers:
+    dependencies:
+      '@lyonix/domain':
+        specifier: workspace:*
+        version: link:../domain
     devDependencies:
       typescript:
         specifier: ^5.9.2
@@ -496,6 +506,12 @@ packages:
       '@nestjs/common': ^11.0.0
       '@nestjs/core': ^11.0.0
 
+  '@nestjs/schedule@5.0.1':
+    resolution: {integrity: sha512-kFoel84I4RyS2LNPH6yHYTKxB16tb3auAEciFuc788C3ph6nABkUfzX5IE+unjVaRX+3GuruJwurNepMlHXpQg==}
+    peerDependencies:
+      '@nestjs/common': ^10.0.0 || ^11.0.0
+      '@nestjs/core': ^10.0.0 || ^11.0.0
+
   '@prisma/client@6.19.3':
     resolution: {integrity: sha512-mKq3jQFhjvko5LTJFHGilsuQs+W+T3Gm451NzuTDGQxwCzwXHYnIu2zGkRoW+Exq3Rob7yp2MfzSrdIiZVhrBg==}
     engines: {node: '>=18.18'}
@@ -790,6 +806,9 @@ packages:
   '@types/http-errors@2.0.5':
     resolution: {integrity: sha512-r8Tayk8HJnX0FztbZN7oVqGccWgw98T/0neJphO91KkmOzug1KkofZURD4UaD5uH8AqcFLfdPErnBod0u71/qg==}
 
+  '@types/luxon@3.4.2':
+    resolution: {integrity: sha512-TifLZlFudklWlMBfhubvgqTXRzLDI5pCbGa4P8a3wPyUQSW+1xQ5eDsreP9DWHX3tjq1ke96uYG/nwundroWcA==}
+
   '@types/node@24.13.6':
     resolution: {integrity: sha512-SGrw/h3KPFshy3OE6ZL53LMBG5vGQQ8/gIpiqz/kRZhPJ7HgwCEs8LBuNtWLa8dvGZVpSF7+Bf+c11HUrCb/yg==}
 
@@ -966,6 +985,9 @@ packages:
   cors@2.8.6:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
+
+  cron@3.5.0:
+    resolution: {integrity: sha512-0eYZqCnapmxYcV06uktql93wNWdlTmmBFP2iYz+JPVcQqlyFYcn1lFuIk4R54pkOmE7mcldTAPZv6X5XA4Q46A==}
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
@@ -1290,6 +1312,10 @@ packages:
     resolution: {integrity: sha512-o8C23aXpNQypRY73W7fW02EyvWJinEMXgKeGjFoKym0zj3Q73hD97A1IQps1g8C14HTGsOpZL0Am+xjfgFZAbg==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  luxon@3.5.0:
+    resolution: {integrity: sha512-rh+Zjr6DNfUYR3bPwJEnuwDdqMbxZW7LOQfUN4B54+Cl+0o5zaU9RJ6bcidfDtC1cWCZXQ+nvX8bf6bAji37QQ==}
+    engines: {node: '>=12'}
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -2020,6 +2046,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@nestjs/schedule@5.0.1(@nestjs/common@11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.2.5)':
+    dependencies:
+      '@nestjs/common': 11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      '@nestjs/core': 11.2.5(@nestjs/common@11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/platform-express@11.2.5)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      cron: 3.5.0
+
   '@prisma/client@6.19.3(prisma@6.19.3(typescript@5.9.3))(typescript@5.9.3)':
     optionalDependencies:
       prisma: 6.19.3(typescript@5.9.3)
@@ -2265,6 +2297,8 @@ snapshots:
 
   '@types/http-errors@2.0.5': {}
 
+  '@types/luxon@3.4.2': {}
+
   '@types/node@24.13.6':
     dependencies:
       undici-types: 7.18.2
@@ -2463,6 +2497,11 @@ snapshots:
     dependencies:
       object-assign: 4.1.1
       vary: 1.1.2
+
+  cron@3.5.0:
+    dependencies:
+      '@types/luxon': 3.4.2
+      luxon: 3.5.0
 
   csstype@3.2.3: {}
 
@@ -2772,6 +2811,8 @@ snapshots:
   lucide-react@1.47.0(react@19.3.0):
     dependencies:
       react: 19.3.0
+
+  luxon@3.5.0: {}
 
   magic-string@0.30.21:
     dependencies:
