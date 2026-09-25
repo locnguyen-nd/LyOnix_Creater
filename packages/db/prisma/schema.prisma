@@ -1,0 +1,963 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  staff
+}
+
+enum ProviderScope {
+  personal
+  organization
+}
+
+enum ProviderStatus {
+  unverified
+  verified
+  failed
+  disabled
+}
+
+enum ChannelAuthType {
+  oauth2
+  token
+  api_key
+  fixture
+}
+
+enum WorkflowStatus {
+  accepted
+  scripting
+  awaiting_staff_ack
+  producing
+  handoff_workspace_ready
+  failed
+}
+
+// --- VE2E-00: Auto/Studio E2E domain foundation ---
+
+enum SourceType {
+  topic
+  raw_script
+  article_url
+  file
+}
+
+enum SourceFetchStatus {
+  pending
+  fetched
+  extracted
+  failed
+  blocked
+}
+
+enum MediaAssetKind {
+  image
+  video
+  audio
+  document
+}
+
+enum MediaOrigin {
+  upload
+  import_url
+  generated
+  pexels
+}
+
+enum RetentionClass {
+  project
+  working
+}
+
+enum WorkflowRunMode {
+  auto
+  studio
+}
+
+enum WorkflowRunStatus {
+  draft
+  source_ready
+  scripting
+  awaiting_script_approval
+  voice_generating
+  aligning
+  media_preparing
+  editing
+  ready_to_render
+  render_queued
+  rendering
+  verifying
+  completed
+  blocked_provider
+  needs_input
+  failed
+  cancelled
+  reconciling
+}
+
+enum StepRunStatus {
+  pending
+  running
+  succeeded
+  failed
+  skipped
+}
+
+enum ProviderOperationStatus {
+  pending
+  in_progress
+  succeeded
+  failed
+}
+
+// --- VE2E-05: Creatomate template snapshot + render lifecycle ---
+
+enum RenderJobStatus {
+  accepted
+  queued
+  rendering
+  verifying
+  completed
+  failed
+  cancelled
+  reconciling
+  blocked_provider
+}
+
+// --- VE2E-03: persisted script/scene + audio/subtitle versioning ---
+
+enum ScriptVersionStatus {
+  draft
+  approved
+}
+
+enum AudioVersionStatus {
+  current
+  stale
+}
+
+enum SubtitleVersionStatus {
+  current
+  stale
+}
+
+enum AudioGenerationOperationStatus {
+  queued
+  processing
+  completed
+  failed
+  unknown
+}
+
+model User {
+  id                               String                     @id @default(uuid()) @db.Uuid
+  email                            String                     @unique
+  displayName                      String
+  passwordHash                     String
+  role                             Role
+  disabled                         Boolean                    @default(false)
+  approved                         Boolean                    @default(true)
+  uiLocale                         String                     @default("vi")
+  theme                            String                     @default("system")
+  timezone                         String                     @default("Asia/Ho_Chi_Minh")
+  version                          Int                        @default(1)
+  createdAt                        DateTime                   @default(now())
+  updatedAt                        DateTime                   @updatedAt
+  sessions                         Session[]
+  audioGenerationOperations       AudioGenerationOperation[]
+  providerAccounts                 ProviderAccount[]
+  channelConnections               ChannelConnection[]
+  teamMembers                      TeamMember[]
+  channelGrants                    UserChannelGrant[]
+  projectGrants                    UserProjectGrant[]
+  projectsCreated                  Project[]                  @relation("ProjectCreatedBy")
+  sourceVersionsCreated            SourceVersion[]            @relation("SourceVersionCreatedBy")
+  mediaAssetVersionsCreated        MediaAssetVersion[]        @relation("MediaAssetVersionCreatedBy")
+  automationProfileVersionsCreated AutomationProfileVersion[] @relation("AutomationProfileVersionCreatedBy")
+  workflowRunsCreated              WorkflowRun[]              @relation("WorkflowRunCreatedBy")
+  mediaDeliveryTokensCreated       MediaDeliveryToken[]       @relation("MediaDeliveryTokenCreatedBy")
+  voiceCloneConsentsAttested       VoiceCloneConsentRecord[]  @relation("VoiceCloneConsentAttestedBy")
+  voiceCloneConsentsRevoked        VoiceCloneConsentRecord[]  @relation("VoiceCloneConsentRevokedBy")
+  templateSnapshotsCreated         TemplateSnapshot[]         @relation("TemplateSnapshotCreatedBy")
+  renderJobsCreated                RenderJob[]                @relation("RenderJobCreatedBy")
+  scriptDraftVersionsCreated       ScriptDraftVersion[]       @relation("ScriptDraftVersionCreatedBy")
+  audioVersionsCreated             AudioVersion[]             @relation("AudioVersionCreatedBy")
+  subtitleVersionsCreated          SubtitleVersion[]          @relation("SubtitleVersionCreatedBy")
+}
+
+model Team {
+  id        String        @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  members   TeamMember[]
+  channels  TeamChannel[]
+  projects  TeamProject[]
+}
+
+model TeamMember {
+  userId String @db.Uuid
+  teamId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([userId, teamId])
+}
+
+model TeamChannel {
+  teamId    String            @db.Uuid
+  channelId String            @db.Uuid
+  team      Team              @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  channel   ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, channelId])
+}
+
+model UserChannelGrant {
+  userId    String            @db.Uuid
+  channelId String            @db.Uuid
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, channelId])
+}
+
+model Session {
+  id        String    @id @db.Uuid
+  userId    String    @db.Uuid
+  csrfToken String
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+/// Persistent, atomic login/register throttling shared across API replicas.
+model AuthRateLimitBucket {
+  key       String   @id
+  count     Int
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([resetAt])
+}
+
+model ProviderAccount {
+  id                 String                    @id @default(uuid()) @db.Uuid
+  name               String
+  provider           String
+  role               String
+  scope              ProviderScope
+  ownerUserId        String?                   @db.Uuid
+  status             ProviderStatus            @default(unverified)
+  model              String
+  availableModels    String[]                  @default([])
+  /// V00-10: account-scoped model freshness snapshot, e.g. `[{modelId,status,checkedAt,source,reason?}]`.
+  /// JSON (not a separate table) because it is small, always read/written as one unit per account,
+  /// and never queried by field - see @lyonix/providers ContentModelSnapshotEntry.
+  modelSnapshot      Json?
+  encryptedSecret    String
+  configVersion      Int                       @default(1)
+  isFake             Boolean                   @default(false)
+  version            Int                       @default(1)
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  deletedAt          DateTime?
+  owner              User?                     @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  voiceCloneConsents VoiceCloneConsentRecord[]
+  templateSnapshots  TemplateSnapshot[]
+  renderJobs         RenderJob[]
+  audioVersions      AudioVersion[]
+  audioGenerationOperations AudioGenerationOperation[]
+
+  @@index([ownerUserId, scope, deletedAt])
+}
+
+model ChannelConnection {
+  id                String             @id @default(uuid()) @db.Uuid
+  userId            String             @db.Uuid
+  externalChannelId String
+  displayName       String
+  avatarUrl         String?
+  username          String?
+  authType          ChannelAuthType
+  encryptedSecret   String?
+  grantedScopes     String[]
+  status            String             @default("connected")
+  isFixture         Boolean            @default(false)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  snapshots         MetricSnapshot[]
+  teamLinks         TeamChannel[]
+  userGrants        UserChannelGrant[]
+
+  @@unique([userId, externalChannelId])
+}
+
+model MetricSnapshot {
+  id           String            @id @default(uuid()) @db.Uuid
+  channelId    String            @db.Uuid
+  metricName   String
+  value        Decimal?          @db.Decimal(20, 4)
+  currency     String?
+  availability String
+  reasonCode   String?
+  capturedAt   DateTime
+  createdAt    DateTime          @default(now())
+  channel      ChannelConnection @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, metricName, capturedAt])
+}
+
+model ProductionRequest {
+  id               String             @id @default(uuid()) @db.Uuid
+  ownerUserId      String             @db.Uuid
+  topic            String
+  locale           String
+  status           WorkflowStatus     @default(accepted)
+  inputFingerprint String             @unique
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  scripts          ScriptVersion[]
+  handoffs         HandoffWorkspace[]
+}
+
+model ScriptVersion {
+  id                  String            @id @default(uuid()) @db.Uuid
+  productionRequestId String            @db.Uuid
+  version             Int
+  content             Json
+  approvedAt          DateTime?
+  createdAt           DateTime          @default(now())
+  productionRequest   ProductionRequest @relation(fields: [productionRequestId], references: [id], onDelete: Cascade)
+  subtitles           SubtitleCue[]
+  assets              WorkflowAsset[]
+
+  @@unique([productionRequestId, version])
+}
+
+model SubtitleCue {
+  id              String        @id @default(uuid()) @db.Uuid
+  scriptVersionId String        @db.Uuid
+  cueIndex        Int
+  text            String
+  startMs         Int?
+  endMs           Int?
+  scriptVersion   ScriptVersion @relation(fields: [scriptVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([scriptVersionId, cueIndex])
+}
+
+model WorkflowAsset {
+  id              String        @id @default(uuid()) @db.Uuid
+  scriptVersionId String        @db.Uuid
+  sceneIndex      Int
+  relativePath    String
+  mediaType       String
+  sha256          String
+  source          String
+  scriptVersion   ScriptVersion @relation(fields: [scriptVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([scriptVersionId, sceneIndex])
+}
+
+model HandoffWorkspace {
+  id                  String            @id @default(uuid()) @db.Uuid
+  productionRequestId String            @db.Uuid
+  timelineVersionId   String
+  relativePath        String
+  fingerprint         String            @unique
+  status              String
+  manifest            Json
+  createdAt           DateTime          @default(now())
+  productionRequest   ProductionRequest @relation(fields: [productionRequestId], references: [id], onDelete: Cascade)
+}
+
+// --- VE2E-00 models ---
+
+model Project {
+  id                        String                     @id @default(uuid()) @db.Uuid
+  name                      String
+  description               String?
+  createdByUserId           String                     @db.Uuid
+  archivedAt                DateTime?
+  version                   Int                        @default(1)
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
+  createdBy                 User                       @relation("ProjectCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  userGrants                UserProjectGrant[]
+  teamGrants                TeamProject[]
+  mediaFolders              MediaFolder[]
+  mediaAssetVersions        MediaAssetVersion[]
+  sourceVersions            SourceVersion[]
+  automationProfileVersions AutomationProfileVersion[]
+  workflowRuns              WorkflowRun[]
+  renderJobs                RenderJob[]
+}
+
+model UserProjectGrant {
+  userId    String  @db.Uuid
+  projectId String  @db.Uuid
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([userId, projectId])
+}
+
+model TeamProject {
+  teamId    String  @db.Uuid
+  projectId String  @db.Uuid
+  team      Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, projectId])
+}
+
+model MediaFolder {
+  id        String              @id @default(uuid()) @db.Uuid
+  projectId String              @db.Uuid
+  parentId  String?             @db.Uuid
+  name      String
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  project   Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  parent    MediaFolder?        @relation("MediaFolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  MediaFolder[]       @relation("MediaFolderTree")
+  assets    MediaAssetVersion[]
+
+  @@index([projectId, parentId])
+}
+
+model MediaAssetVersion {
+  id               String               @id @default(uuid()) @db.Uuid
+  projectId        String               @db.Uuid
+  folderId         String?              @db.Uuid
+  kind             MediaAssetKind
+  originalFileName String
+  mimeType         String
+  checksumSha256   String
+  bytes            Int
+  widthPx          Int?
+  heightPx         Int?
+  durationMs       Int?
+  origin           MediaOrigin
+  license          String?
+  provenance       Json                 @default("{}")
+  reusable         Boolean              @default(true)
+  retentionClass   RetentionClass       @default(working)
+  relativePath     String
+  expiresAt        DateTime?
+  version          Int                  @default(1)
+  supersedesId     String?              @db.Uuid
+  createdByUserId  String               @db.Uuid
+  createdAt        DateTime             @default(now())
+  deletedAt        DateTime?
+  // VE2E-04: opaque client-supplied scene identifier (matches ScriptDraftV2 `sceneId`,
+  // which is not itself persisted anywhere yet — see VE2E-01 handoff "ScriptDraftV2
+  // generated is not persisted"). Simple assignment/replacement only; no FK, no
+  // orchestration — full scene/media orchestration is left to VE2E-06.
+  sceneId          String?
+  project          Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  folder           MediaFolder?         @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  createdBy        User                 @relation("MediaAssetVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  supersedes       MediaAssetVersion?   @relation("MediaAssetVersionChain", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy     MediaAssetVersion[]  @relation("MediaAssetVersionChain")
+  deliveryTokens   MediaDeliveryToken[]
+  audioVersions    AudioVersion[]
+
+  @@index([projectId, checksumSha256])
+  @@index([projectId, retentionClass, expiresAt])
+  @@index([projectId, sceneId])
+}
+
+model SourceVersion {
+  id                  String               @id @default(uuid()) @db.Uuid
+  projectId           String               @db.Uuid
+  type                SourceType
+  version             Int                  @default(1)
+  parentId            String?              @db.Uuid
+  originRef           String?
+  rawText             String?
+  extractedText       String?
+  checksumSha256      String?
+  fetchStatus         SourceFetchStatus    @default(pending)
+  fetchError          String?
+  createdByUserId     String               @db.Uuid
+  createdAt           DateTime             @default(now())
+  approvedAt          DateTime?
+  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy           User                 @relation("SourceVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  parent              SourceVersion?       @relation("SourceVersionChain", fields: [parentId], references: [id], onDelete: SetNull)
+  children            SourceVersion[]      @relation("SourceVersionChain")
+  workflowRuns        WorkflowRun[]
+  scriptDraftVersions ScriptDraftVersion[]
+
+  @@index([projectId, createdAt])
+}
+
+model AutomationProfileVersion {
+  id                       String        @id @default(uuid()) @db.Uuid
+  projectId                String?       @db.Uuid
+  name                     String
+  version                  Int           @default(1)
+  contentConfig            Json
+  voiceConfig              Json
+  mediaPolicy              String        @default("project_library_then_pexels")
+  templateSnapshotRef      String?
+  /// VE2E-06: `{providerAccountId}` for the Pexels account used by the Auto media-preparing
+  /// step when the project library has no reusable asset for a scene yet. Nullable because a
+  /// Studio-only profile (or a project whose library is always pre-populated) may never need
+  /// it - `WorkflowRunnerService` requires it present before an Auto run leaves `draft`.
+  mediaConfig              Json?
+  /// VE2E-06: `{providerAccountId, templateSnapshotId, outputFormat?}` for the Creatomate
+  /// account + pinned `TemplateSnapshot` used by the Auto render step. Nullable for the same
+  /// reason as `mediaConfig`.
+  renderConfig             Json?
+  brandOptions             Json          @default("{}")
+  outputPreset             Json
+  locale                   String        @default("vi")
+  durationSec              Int
+  sceneCount               Int
+  costCeilingAmount        Decimal       @db.Decimal(12, 4)
+  costCeilingCurrency      String        @default("USD")
+  retryPolicy              Json          @default("{}")
+  accountFallbackAllowlist Json          @default("[]")
+  createdByUserId          String        @db.Uuid
+  createdAt                DateTime      @default(now())
+  project                  Project?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy                User          @relation("AutomationProfileVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  workflowRuns             WorkflowRun[]
+
+  @@index([projectId, name, version])
+}
+
+model WorkflowRun {
+  id                         String                    @id @default(uuid()) @db.Uuid
+  projectId                  String                    @db.Uuid
+  mode                       WorkflowRunMode
+  automationProfileVersionId String?                   @db.Uuid
+  sourceVersionId            String?                   @db.Uuid
+  status                     WorkflowRunStatus         @default(draft)
+  requestFingerprint         String                    @unique
+  correlationId              String                    @default(uuid())
+  /// VE2E-06: whole-pipeline attempt counter, bounded by `AutomationProfileVersion.retryPolicy.maxAttempts`.
+  /// A retryable provider failure re-queues the entire run (status back to `draft`) rather than
+  /// resuming from the failed step - see workflow-runner.service.ts for the documented tradeoff.
+  attempts                   Int                       @default(1)
+  /// VE2E-06: last terminal-ish failure detail (`{code, message, stepKey}`), same shape/purpose
+  /// as `RenderJob.lastError` - surfaced by `GET /video-productions/:id` without re-deriving it
+  /// from the latest failed `StepRun` row on every read.
+  lastError                  Json?
+  createdByUserId            String                    @db.Uuid
+  createdAt                  DateTime                  @default(now())
+  updatedAt                  DateTime                  @updatedAt
+  project                    Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  automationProfileVersion   AutomationProfileVersion? @relation(fields: [automationProfileVersionId], references: [id], onDelete: SetNull)
+  sourceVersion              SourceVersion?            @relation(fields: [sourceVersionId], references: [id], onDelete: SetNull)
+  createdBy                  User                      @relation("WorkflowRunCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  stepRuns                   StepRun[]
+  providerOperations         ProviderOperation[]
+  mediaDeliveryTokens        MediaDeliveryToken[]
+  renderJobs                 RenderJob[]
+
+  @@index([projectId, status])
+}
+
+model StepRun {
+  id                 String              @id @default(uuid()) @db.Uuid
+  workflowRunId      String              @db.Uuid
+  stepKey            String
+  status             StepRunStatus       @default(pending)
+  attempt            Int                 @default(1)
+  inputRef           Json?
+  outputRef          Json?
+  error              Json?
+  startedAt          DateTime?
+  endedAt            DateTime?
+  createdAt          DateTime            @default(now())
+  workflowRun        WorkflowRun         @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  providerOperations ProviderOperation[]
+
+  @@unique([workflowRunId, stepKey, attempt])
+}
+
+model ProviderOperation {
+  id                String                  @id @default(uuid()) @db.Uuid
+  workflowRunId     String?                 @db.Uuid
+  stepRunId         String?                 @db.Uuid
+  providerAccountId String?                 @db.Uuid
+  role              String
+  operation         String
+  status            ProviderOperationStatus @default(pending)
+  externalRequestId String?
+  correlationId     String
+  costAmount        Decimal?                @db.Decimal(12, 4)
+  costCurrency      String?
+  errorCode         String?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  workflowRun       WorkflowRun?            @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  stepRun           StepRun?                @relation(fields: [stepRunId], references: [id], onDelete: Cascade)
+
+  @@index([workflowRunId, role])
+  @@index([correlationId])
+}
+
+model MediaDeliveryToken {
+  id                  String            @id @default(uuid()) @db.Uuid
+  tokenHash           String            @unique
+  mediaAssetVersionId String            @db.Uuid
+  scope               String
+  expiresAt           DateTime
+  workflowRunId       String?           @db.Uuid
+  createdByUserId     String?           @db.Uuid
+  usedAt              DateTime?
+  revokedAt           DateTime?
+  createdAt           DateTime          @default(now())
+  mediaAssetVersion   MediaAssetVersion @relation(fields: [mediaAssetVersionId], references: [id], onDelete: Cascade)
+  workflowRun         WorkflowRun?      @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
+  createdBy           User?             @relation("MediaDeliveryTokenCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@index([mediaAssetVersionId])
+  @@index([expiresAt])
+}
+
+// --- VE2E-02: ElevenLabs Instant Voice Clone consent audit ---
+
+model VoiceCloneConsentRecord {
+  id                String          @id @default(uuid()) @db.Uuid
+  providerAccountId String          @db.Uuid
+  externalVoiceId   String?
+  voiceName         String
+  statementVersion  String
+  statementText     String
+  sampleChecksums   String[]        @default([])
+  status            String          @default("pending")
+  failureReason     String?
+  attestedByUserId  String          @db.Uuid
+  attestedAt        DateTime
+  createdAt         DateTime        @default(now())
+  revokedAt         DateTime?
+  revokedByUserId   String?         @db.Uuid
+  providerAccount   ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+  attestedBy        User            @relation("VoiceCloneConsentAttestedBy", fields: [attestedByUserId], references: [id], onDelete: Restrict)
+  revokedBy         User?           @relation("VoiceCloneConsentRevokedBy", fields: [revokedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([providerAccountId, externalVoiceId])
+}
+
+// --- VE2E-05: Creatomate template snapshot + render lifecycle ---
+
+/**
+ * Immutable snapshot of a Creatomate template captured at the moment a user pins it
+ * for use. Creatomate templates can change after the fact (edited in their web
+ * builder) — a render must always replay against the exact template shape/modification
+ * schema that was visible when the user chose it, never a later-edited version.
+ */
+model TemplateSnapshot {
+  id                 String          @id @default(uuid()) @db.Uuid
+  providerAccountId  String          @db.Uuid
+  externalTemplateId String
+  name               String
+  previewUrl         String?
+  // TemplateModificationSlot[] derived from the template's element tree at capture time.
+  modifications      Json
+  // Full raw template payload (incl. source/element tree) returned by Creatomate at capture time, kept for audit/debug.
+  rawTemplate        Json
+  capturedAt         DateTime        @default(now())
+  createdByUserId    String          @db.Uuid
+  createdAt          DateTime        @default(now())
+  providerAccount    ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Restrict)
+  createdBy          User            @relation("TemplateSnapshotCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  renderJobs         RenderJob[]
+
+  @@index([externalTemplateId])
+}
+
+/**
+ * One Creatomate render lifecycle. `requestFingerprint` is a deterministic hash of
+ * the fully-resolved submission (project + template snapshot + account + built
+ * modifications [+ optional client idempotency key]) and is unique — a duplicate
+ * submit with identical input finds the existing row via a DB unique-constraint
+ * conflict instead of calling Creatomate a second time (atomic even under
+ * concurrent double-click). `webhookToken` is an unguessable per-job secret embedded
+ * in the webhook URL Creatomate is given, used to authenticate inbound callbacks
+ * (Creatomate has no documented signing secret of its own).
+ */
+model RenderJob {
+  id                   String               @id @default(uuid()) @db.Uuid
+  projectId            String               @db.Uuid
+  templateSnapshotId   String               @db.Uuid
+  providerAccountId    String               @db.Uuid
+  workflowRunId        String?              @db.Uuid
+  requestFingerprint   String               @unique
+  webhookToken         String               @unique
+  status               RenderJobStatus      @default(accepted)
+  externalJobId        String?
+  // Actual Creatomate modifications object this job submitted (or will submit) — server-built, never client-supplied raw JSON.
+  modificationsPayload Json
+  progress             Int?
+  resultUrl            String?
+  resultExpiresAt      DateTime?
+  attempts             Int                  @default(1)
+  lastError            Json?
+  costAmount           Decimal?             @db.Decimal(12, 4)
+  costCurrency         String?
+  renderDurationMs     Int?
+  submittedAt          DateTime?
+  completedAt          DateTime?
+  createdByUserId      String               @db.Uuid
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  project              Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  templateSnapshot     TemplateSnapshot     @relation(fields: [templateSnapshotId], references: [id], onDelete: Restrict)
+  providerAccount      ProviderAccount      @relation(fields: [providerAccountId], references: [id], onDelete: Restrict)
+  workflowRun          WorkflowRun?         @relation(fields: [workflowRunId], references: [id], onDelete: SetNull)
+  createdBy            User                 @relation("RenderJobCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  webhookEvents        RenderWebhookEvent[]
+
+  @@index([projectId, status])
+  @@index([externalJobId])
+}
+
+/**
+ * Webhook inbox: every inbound Creatomate callback is recorded keyed by a
+ * fingerprint of its raw payload before being applied, so an exact-duplicate
+ * delivery (Creatomate retries webhooks) is a guaranteed no-op re-processing.
+ */
+model RenderWebhookEvent {
+  id               String    @id @default(uuid()) @db.Uuid
+  renderJobId      String    @db.Uuid
+  eventFingerprint String    @unique
+  payload          Json
+  receivedAt       DateTime  @default(now())
+  appliedStatus    String?
+  renderJob        RenderJob @relation(fields: [renderJobId], references: [id], onDelete: Cascade)
+
+  @@index([renderJobId])
+}
+
+// --- VE2E-03: persisted ScriptDraftVersion/SceneDraftVersion + AudioVersion/SubtitleVersion ---
+// Named `ScriptDraftVersion`/`SceneDraftVersion` (not `ScriptVersion`/`SceneVersion`) to avoid
+// colliding with the pre-existing legacy `ScriptVersion` model (Vrew-era ProductionRequest
+// workflow above) — that model is unrelated and untouched by this migration.
+
+/**
+ * Persisted, immutable-once-approved `ScriptDraftV2` for a `SourceVersion` (VE2E-01
+ * generated this ephemerally; nothing persisted it until now). Editing an already
+ * approved script creates a new `ScriptDraftVersion` row (never an in-place update)
+ * whose `supersedesId` points back at the version it replaces — approving it is what
+ * drives the AudioVersion/SubtitleVersion invalidation cascade (see
+ * script-versions.service.ts).
+ */
+model ScriptDraftVersion {
+  id              String               @id @default(uuid()) @db.Uuid
+  sourceVersionId String               @db.Uuid
+  version         Int                  @default(1)
+  status          ScriptVersionStatus  @default(draft)
+  schemaVersion   String
+  language        String
+  title           String
+  hook            String
+  body            String
+  cta             String
+  caption         String
+  // { accountId, provider, modelId, configVersion, promptTemplateVersion } pinned at generation time (VE2E-01 shape).
+  providerPin     Json
+  supersedesId    String?              @db.Uuid
+  createdByUserId String               @db.Uuid
+  createdAt       DateTime             @default(now())
+  approvedAt      DateTime?
+  sourceVersion   SourceVersion        @relation(fields: [sourceVersionId], references: [id], onDelete: Cascade)
+  supersedes      ScriptDraftVersion?  @relation("ScriptDraftVersionChain", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy    ScriptDraftVersion[] @relation("ScriptDraftVersionChain")
+  createdBy       User                 @relation("ScriptDraftVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  scenes          SceneDraftVersion[]
+
+  @@unique([sourceVersionId, version])
+  @@index([sourceVersionId, status])
+}
+
+/**
+ * One scene row per `ScriptDraftVersion`, carrying the stable `sceneId` from `ScriptDraftV2` (matches `MediaAssetVersion.sceneId` from VE2E-04, still an opaque string, not FK'd there).
+ */
+model SceneDraftVersion {
+  id                   String             @id @default(uuid()) @db.Uuid
+  scriptDraftVersionId String             @db.Uuid
+  sceneId              String
+  orderIndex           Int
+  narration            String
+  screenText           String
+  visualQuery          String
+  durationHintMs       Int
+  createdAt            DateTime           @default(now())
+  scriptDraftVersion   ScriptDraftVersion @relation(fields: [scriptDraftVersionId], references: [id], onDelete: Cascade)
+  audioVersions        AudioVersion[]
+  audioGenerationOperations AudioGenerationOperation[]
+
+  @@unique([scriptDraftVersionId, sceneId])
+  @@index([scriptDraftVersionId, orderIndex])
+}
+
+/**
+ * Real ElevenLabs TTS-with-timestamps audio + character alignment (VE2E-02 returned
+ * this in the response only; this persists it) pinned to one `SceneDraftVersion`. The
+ * actual audio bytes live in the existing `MediaAssetVersion` (kind `audio`) written by
+ * `ElevenLabsVoiceService.generateTts` — `mediaAssetVersionId` just references it,
+ * avoiding a second storage path. Regenerating audio for the same scene (new voice,
+ * new provider account, or narration text changed) creates a new `version`; the
+ * previous `current` row for that scene flips to `stale`.
+ */
+model AudioVersion {
+  id                  String             @id @default(uuid()) @db.Uuid
+  sceneDraftVersionId String             @db.Uuid
+  version             Int                @default(1)
+  status              AudioVersionStatus @default(current)
+  providerAccountId   String             @db.Uuid
+  provider            String
+  externalVoiceId     String
+  modelId             String
+  // sha256 of the exact narration text this audio was generated from — used to detect staleness if the scene's narration changes without a new render being requested yet.
+  textChecksumSha256  String
+  mediaAssetVersionId String             @db.Uuid
+  durationMs          Int
+  // Full TtsAlignment ({characters, characterStartTimesSeconds, characterEndTimesSeconds}) as returned by the provider, verbatim.
+  alignment           Json
+  supersedesId        String?            @db.Uuid
+  staleAt             DateTime?
+  staleReason         String?
+  createdByUserId     String             @db.Uuid
+  createdAt           DateTime           @default(now())
+  sceneDraftVersion   SceneDraftVersion  @relation(fields: [sceneDraftVersionId], references: [id], onDelete: Cascade)
+  providerAccount     ProviderAccount    @relation(fields: [providerAccountId], references: [id], onDelete: Restrict)
+  mediaAssetVersion   MediaAssetVersion  @relation(fields: [mediaAssetVersionId], references: [id], onDelete: Restrict)
+  supersedes          AudioVersion?      @relation("AudioVersionChain", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy        AudioVersion[]     @relation("AudioVersionChain")
+  createdBy           User               @relation("AudioVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  subtitleVersions    SubtitleVersion[]
+  generationOperation AudioGenerationOperation?
+
+  @@unique([sceneDraftVersionId, version])
+  @@index([sceneDraftVersionId, status])
+}
+
+/// Durable at-most-once work item for paid TTS. Unknown provider outcomes are never retried automatically.
+model AudioGenerationOperation {
+  id                  String                          @id @default(uuid()) @db.Uuid
+  userId              String                          @db.Uuid
+  sceneDraftVersionId String                          @db.Uuid
+  providerAccountId   String                          @db.Uuid
+  idempotencyKey      String
+  requestFingerprint  String
+  voiceId             String
+  modelId             String?
+  status              AudioGenerationOperationStatus  @default(queued)
+  errorCode           String?
+  resultAudioVersionId String?                         @unique @db.Uuid
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime                        @default(now())
+  updatedAt           DateTime                        @updatedAt
+  user                User                            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sceneDraftVersion   SceneDraftVersion               @relation(fields: [sceneDraftVersionId], references: [id], onDelete: Cascade)
+  providerAccount     ProviderAccount                 @relation(fields: [providerAccountId], references: [id], onDelete: Restrict)
+  resultAudioVersion  AudioVersion?                   @relation(fields: [resultAudioVersionId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, idempotencyKey])
+  @@index([status, createdAt])
+}
+
+/**
+ * Timed caption segments derived from one `AudioVersion`'s real character alignment
+ * (`buildCaptionSegmentsFromAlignment` in `@lyonix/domain` — never guessed timing).
+ * Pinned 1:1-per-version to the `AudioVersion` it was generated from; a new
+ * `AudioVersion` gets its own new `SubtitleVersion`, and the old one flips to `stale`
+ * alongside its audio.
+ */
+model SubtitleVersion {
+  id              String                @id @default(uuid()) @db.Uuid
+  audioVersionId  String                @db.Uuid
+  version         Int                   @default(1)
+  status          SubtitleVersionStatus @default(current)
+  source          String                @default("elevenlabs_alignment")
+  // CaptionSegment[] ({text, startMs, endMs}) as produced by buildCaptionSegmentsFromAlignment.
+  segments        Json
+  staleAt         DateTime?
+  staleReason     String?
+  createdByUserId String                @db.Uuid
+  createdAt       DateTime              @default(now())
+  audioVersion    AudioVersion          @relation(fields: [audioVersionId], references: [id], onDelete: Cascade)
+  createdBy       User                  @relation("SubtitleVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([audioVersionId, version])
+}
+
+// --- VE2E-07: Studio legacy-job bridge + persisted TimelineVersion ---
+// Both models below are intentionally self-contained (no new `@relation` fields added to
+// the already-large `Project`/`TemplateSnapshot`/`User` model blocks above) to minimize
+// merge risk with other VE2E tasks editing this same file concurrently. Cross-references
+// are plain scalar UUID columns validated in application code only - the same "opaque
+// reference, no FK" posture already used for `MediaAssetVersion.sceneId`.
+
+/**
+ * One-time bridge from a legacy `ProductionRequest` (the only job entry point the current
+ * web UI has - see JobPage/StudioProPage) into the VE2E-00..05 Project/SourceVersion/
+ * ScriptDraftVersion domain, so Studio can attach real media/audio/template/timeline state
+ * instead of the client-only localStorage scaffold from VE2E-07a. Created once per job the
+ * first time its Studio is opened (`studio-bridge.service.ts`) and never resynced afterwards
+ * (documented known-limitation - see handoff).
+ */
+model StudioProjectBridge {
+  productionRequestId String   @id @db.Uuid
+  projectId            String   @unique @db.Uuid
+  sourceVersionId       String   @db.Uuid
+  scriptDraftVersionId  String   @db.Uuid
+  createdAt             DateTime @default(now())
+}
+
+enum TimelineVersionStatus {
+  draft
+  approved
+}
+
+/**
+ * Persisted Studio timeline (VE2E-VIDEO-PRODUCTION.md §3/§7): ordered scene bindings
+ * (asset/audio/subtitle per scene + an optional text override), template-level option
+ * values and a pinned `templateSnapshotId`. An approved version is the only valid input to
+ * a render submission (`RenderJobsService.submitFromTimelineVersion`). `scenes`/
+ * `optionValues` are JSON (not per-field columns), same posture as `AudioVersion.alignment`/
+ * `SubtitleVersion.segments` above - always read/written as one unit, shape owned by
+ * `@lyonix/contracts` `TimelineSceneBindingResponse`/`TimelineOptionValues`, never queried
+ * by an inner field. `supersedesId` chains versions for optimistic-concurrency saves (a save
+ * is rejected with `VERSION_CONFLICT` if it does not supersede the project's actual latest
+ * version), the same pattern already used by `ScriptDraftVersion`/`AudioVersion` above.
+ */
+model TimelineVersion {
+  id                 String                @id @default(uuid()) @db.Uuid
+  projectId          String                @db.Uuid
+  version            Int                   @default(1)
+  status             TimelineVersionStatus @default(draft)
+  templateSnapshotId String?               @db.Uuid
+  // Ordered TimelineSceneBindingResponse[] ({sceneId, orderIndex, mediaAssetVersionId?, audioVersionId?, subtitleVersionId?, screenTextOverride?, annotation?}).
+  scenes             Json
+  // Record<modificationKey, string> - template-level option values not tied to one scene (secondary text/color/font/volume).
+  optionValues       Json                  @default("{}")
+  supersedesId       String?               @db.Uuid
+  createdByUserId    String                @db.Uuid
+  createdAt          DateTime              @default(now())
+  approvedAt         DateTime?
+  approvedByUserId   String?               @db.Uuid
+
+  @@unique([projectId, version])
+  @@index([projectId, status])
+}
