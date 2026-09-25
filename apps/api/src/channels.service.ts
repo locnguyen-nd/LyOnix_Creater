@@ -178,11 +178,45 @@ export class ChannelsService {
   async sync(id: string, userId: string, role: "admin" | "staff") {
     const row = await this.visible(id, userId, role);
     if (!row || row.status !== "connected" || !row.encryptedSecret) return null;
+    const outcome = await this.performSync(row);
+    if (outcome === "invalid") return "invalid" as const;
+    return this.get(id, userId, role);
+  }
+
+  /**
+   * Privileged sync entry point for the periodic scheduler (`TiktokSyncSchedulerService`):
+   * no `userId`/grant check, because a scheduled tick acts on behalf of the platform, not a
+   * single logged-in user. Iterates every `connected` TikTok channel, syncs it, and never lets
+   * one channel's failure (revoked token, TikTok outage) stop the rest of the batch.
+   */
+  async syncAllConnected(): Promise<{ total: number; synced: number; invalid: number; failed: number }> {
+    const rows = await this.prisma.channelConnection.findMany({ where: { status: "connected", authType: "oauth2" } });
+    let synced = 0;
+    let invalid = 0;
+    let failed = 0;
+    for (const row of rows) {
+      if (!row.encryptedSecret) {
+        invalid += 1;
+        continue;
+      }
+      try {
+        const outcome = await this.performSync(row);
+        if (outcome === "invalid") invalid += 1;
+        else synced += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return { total: rows.length, synced, invalid, failed };
+  }
+
+  private async performSync(row: { id: string; encryptedSecret: string | null; grantedScopes: string[] }): Promise<"synced" | "invalid"> {
+    if (!row.encryptedSecret) return "invalid";
     let tokens = JSON.parse(decryptSecret(row.encryptedSecret)) as TiktokTokenSet;
-    tokens = await this.refreshIfNeeded(id, row.grantedScopes, tokens);
+    tokens = await this.refreshIfNeeded(row.id, row.grantedScopes, tokens);
     let profile = await this.lookupUser(tokens.accessToken);
     if (!profile && tokens.refreshToken) {
-      tokens = await this.refreshIfNeeded(id, row.grantedScopes, { ...tokens, expiresAt: 0 });
+      tokens = await this.refreshIfNeeded(row.id, row.grantedScopes, { ...tokens, expiresAt: 0 });
       profile = await this.lookupUser(tokens.accessToken);
     }
     if (!profile) return "invalid" as const;
@@ -209,7 +243,7 @@ export class ChannelsService {
       snapshot("video_count", user.videoCount, hasTiktokScope(scopes, "user.info.stats")),
       snapshot("revenue_from_views", null, false),
     ];
-    await this.updateChannelRow(id, {
+    await this.updateChannelRow(row.id, {
       displayName: user.displayName,
       username: user.username,
       avatarUrl: user.avatarUrl,
@@ -217,9 +251,9 @@ export class ChannelsService {
       grantedScopes: tokens.scope.length ? tokens.scope : row.grantedScopes,
     });
     await this.prisma.metricSnapshot.createMany({
-      data: metrics.map((metric) => ({ channelId: id, capturedAt, ...metric })),
+      data: metrics.map((metric) => ({ channelId: row.id, capturedAt, ...metric })),
     });
-    return this.get(id, userId, role);
+    return "synced" as const;
   }
 
   private async updateChannelRow(id: string, data: { displayName: string; username: string | null; avatarUrl: string | null; status: string; grantedScopes: string[] }) {
