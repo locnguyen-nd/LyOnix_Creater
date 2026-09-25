@@ -1,0 +1,345 @@
+/**
+ * VE2E-05: server-owned Creatomate render submission, status, webhook inbox and
+ * poll/reconcile fallback. The server is the only thing that ever builds the actual
+ * Creatomate `modifications` object — the client sends a structured, whitelisted
+ * `RenderAssignmentInput[]` (`{modificationKey, kind, ...typed value}`), and every
+ * `modificationKey` must exist on the pinned `TemplateSnapshot` or the request is
+ * rejected before any provider call. `video`/`image` assignments are resolved to a
+ * signed, short-lived `/media-delivery/:token` URL via `MediaDeliveryService` —
+ * Creatomate never sees a filesystem path.
+ */
+import { createHash, randomBytes } from "node:crypto";
+import { Inject, Injectable } from "@nestjs/common";
+import { Prisma } from "@lyonix/db";
+import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
+import { ProviderError, getCreatomateRender, normalizeCreatomateStatus, submitCreatomateRender } from "@lyonix/providers";
+import type { ErrorCode, RenderAssignmentInput, RenderJobResponse, RenderSubmitRequest, TemplateModificationSlotResponse } from "@lyonix/contracts";
+import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
+import { GrantsService } from "./grants.service.js";
+import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
+import { PrismaService } from "./prisma.service.js";
+import { decryptSecret } from "./secret-crypto.js";
+
+export type RenderOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
+
+/** Render assignment value caps — defense in depth against unbounded payloads reaching Creatomate. */
+const MAX_TEXT_LENGTH = 2000;
+const MAX_FONT_LENGTH = 60;
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+const FONT_RE = /^[A-Za-z0-9 _-]+$/;
+/** Signed media-delivery token TTL for a render submission — long enough for Creatomate to fetch under load. */
+const DELIVERY_TOKEN_TTL_SEC = 3600;
+
+const providerErrorMessage: Record<string, string> = {
+  PROVIDER_AUTH_INVALID: "Khóa Creatomate bị từ chối. Verify lại tài khoản.",
+  PROVIDER_RATE_LIMITED: "Creatomate giới hạn tốc độ, thử lại sau.",
+  PROVIDER_CAPABILITY_UNAVAILABLE: "Creatomate không tìm thấy template/render này.",
+  PROVIDER_TIMEOUT: "Yêu cầu Creatomate hết thời gian chờ.",
+  PROVIDER_SCHEMA_INVALID: "Creatomate từ chối payload render.",
+};
+
+const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+  if (error instanceof ProviderError) {
+    const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_AUTH_INVALID";
+    return { code: error.code, message: providerErrorMessage[error.code] ?? "Creatomate từ chối yêu cầu", status: switchable ? 429 : 502, retryable: error.retryable };
+  }
+  return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Creatomate", status: 502, retryable: true };
+};
+
+const clampVolume = (value: number) => Math.max(0, Math.min(200, Math.round(value)));
+
+/** Stable JSON stringify (sorted keys) so the request fingerprint is deterministic regardless of client-side object key order. */
+const stableStringify = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const toJobResponse = (row: {
+  id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
+  resultUrl: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
+  costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
+}): RenderJobResponse => ({
+  id: row.id,
+  projectId: row.projectId,
+  templateSnapshotId: row.templateSnapshotId,
+  status: row.status as RenderJobResponse["status"],
+  externalJobId: row.externalJobId,
+  progress: row.progress,
+  resultUrl: row.resultUrl,
+  resultExpiresAt: row.resultExpiresAt?.toISOString() ?? null,
+  attempts: row.attempts,
+  requestFingerprint: row.requestFingerprint,
+  costAmount: row.costAmount?.toString() ?? null,
+  costCurrency: row.costCurrency,
+  renderDurationMs: row.renderDurationMs,
+  lastError: row.lastError && typeof row.lastError === "object" ? (row.lastError as { code: string; message: string }) : null,
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
+});
+
+@Injectable()
+export class RenderJobsService {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(GrantsService) private readonly grants: GrantsService,
+    @Inject(CreatomateTemplatesService) private readonly templates: CreatomateTemplatesService,
+    @Inject(MediaDeliveryService) private readonly mediaDelivery: MediaDeliveryService,
+  ) {}
+
+  private async assertProjectAccess(projectId: string, userId: string, role: "admin" | "staff") {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) return false;
+    const grants = await this.grants.forUser(userId, role);
+    return canAccessProject(role, grants, projectId);
+  }
+
+  /**
+   * Resolves the server-owned Creatomate `modifications` object from a whitelisted
+   * assignment list, validated against the pinned template snapshot's slots. Returns
+   * an outcome instead of throwing so the caller can normalize the error consistently.
+   */
+  private async buildModifications(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    slots: TemplateModificationSlotResponse[],
+    assignments: RenderAssignmentInput[],
+  ): Promise<RenderOutcome<Record<string, string>>> {
+    const slotByKey = new Map(slots.map((s) => [s.key, s]));
+    const modifications: Record<string, string> = {};
+    const providedKeys = new Set<string>();
+    for (const assignment of assignments) {
+      const slot = slotByKey.get(assignment.modificationKey);
+      if (!slot) return { ok: false, code: "VALIDATION_FAILED", message: `Modification key không thuộc template: ${assignment.modificationKey}` };
+      if (slot.kind !== assignment.kind) return { ok: false, code: "VALIDATION_FAILED", message: `Kind không khớp cho ${assignment.modificationKey}: kỳ vọng ${slot.kind}` };
+      providedKeys.add(slot.key);
+      if (assignment.kind === "text") {
+        const text = assignment.text.trim();
+        if (!text || text.length > MAX_TEXT_LENGTH) return { ok: false, code: "VALIDATION_FAILED", message: `Text không hợp lệ cho ${slot.key}` };
+        modifications[slot.key] = text;
+      } else if (assignment.kind === "video" || assignment.kind === "image" || assignment.kind === "audio") {
+        const asset = await this.prisma.mediaAssetVersion.findFirst({ where: { id: assignment.mediaAssetVersionId, deletedAt: null } });
+        if (!asset) return { ok: false, code: "NOT_FOUND", message: `Không tìm thấy media asset ${assignment.mediaAssetVersionId}`, status: 404 };
+        if (asset.projectId !== projectId) return { ok: false, code: "VALIDATION_FAILED", message: "Media asset không thuộc project này" };
+        const issued = await this.mediaDelivery.issueToken(asset.id, userId, role, DELIVERY_TOKEN_TTL_SEC);
+        if (issued === "not_configured") return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+        if (!issued || issued === "forbidden") return { ok: false, code: "NOT_FOUND", message: `Không thể cấp delivery URL cho ${assignment.mediaAssetVersionId}`, status: 404 };
+        modifications[slot.key] = issued.url;
+      } else if (assignment.kind === "color") {
+        if (!HEX_COLOR_RE.test(assignment.color)) return { ok: false, code: "VALIDATION_FAILED", message: `Màu không hợp lệ cho ${slot.key}` };
+        modifications[slot.key] = assignment.color;
+      } else if (assignment.kind === "font") {
+        const font = assignment.fontFamily.trim();
+        if (!font || font.length > MAX_FONT_LENGTH || !FONT_RE.test(font)) return { ok: false, code: "VALIDATION_FAILED", message: `Font không hợp lệ cho ${slot.key}` };
+        modifications[slot.key] = font;
+      } else if (assignment.kind === "volume") {
+        modifications[slot.key] = `${clampVolume(assignment.volumePercent)}%`;
+      }
+    }
+    const missingRequired = slots.filter((slot) => slot.required && !providedKeys.has(slot.key)).map((slot) => slot.key);
+    if (missingRequired.length > 0) {
+      return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${missingRequired.join(", ")}` };
+    }
+    return { ok: true, data: modifications };
+  }
+
+  /**
+   * `workflowRunId` is intentionally NOT part of the public `RenderSubmitRequest`
+   * contract (a client could otherwise spoof linking its render onto an unrelated
+   * run) — it is only ever passed by `WorkflowRunnerService`, which calls this method
+   * directly (not over HTTP) from the trusted background orchestrator.
+   */
+  async submit(projectId: string, userId: string, role: "admin" | "staff", input: RenderSubmitRequest, workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    // Preflight: provider account usable and PUBLIC_BASE_URL reachable *before* touching the DB or Creatomate — no charge on a preflight failure.
+    const account = await this.templates.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: input.templateSnapshotId } });
+    if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
+    if (snapshot.providerAccountId !== input.providerAccountId) {
+      return { ok: false, code: "VALIDATION_FAILED", message: "providerAccountId không khớp với template snapshot đã pin" };
+    }
+    const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
+    if (!input.assignments?.length) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu assignments cho render" };
+
+    const built = await this.buildModifications(projectId, userId, role, slots, input.assignments);
+    if (!built.ok) return built;
+    const modifications = built.data;
+
+    // Fingerprint must be computed from the client's stable raw input, not the resolved
+    // `modifications` object: video/image assignments resolve through `issueToken()`, which
+    // mints a fresh signed URL (random token + expiry) on every call. Hashing that volatile
+    // URL made an identical duplicate request produce a different fingerprint each time,
+    // defeating the unique-constraint dedupe and double-charging Creatomate.
+    const fingerprint = createHash("sha256")
+      .update(stableStringify({ projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, assignments: input.assignments }))
+      .digest("hex");
+
+    let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
+    try {
+      job = await this.prisma.renderJob.create({
+        data: {
+          projectId,
+          templateSnapshotId: input.templateSnapshotId,
+          providerAccountId: input.providerAccountId,
+          requestFingerprint: fingerprint,
+          webhookToken: randomBytes(24).toString("base64url"),
+          status: "accepted",
+          modificationsPayload: modifications as unknown as Prisma.InputJsonValue,
+          createdByUserId: userId,
+          ...(workflowRunId ? { workflowRunId } : {}),
+        },
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
+        if (existing) return { ok: true, data: toJobResponse(existing) };
+      }
+      throw error;
+    }
+
+    // Only the request that atomically won the fingerprint race actually calls Creatomate.
+    const base = process.env.PUBLIC_BASE_URL!.replace(/\/$/, "");
+    const webhookUrl = `${base}/api/v1/render-webhooks/creatomate/${job.webhookToken}`;
+    try {
+      const submitted = await submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
+        templateId: snapshot.externalTemplateId,
+        modifications,
+        webhookUrl,
+        ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
+      });
+      const reportedStatus = normalizeCreatomateStatus(submitted.status);
+      // The webhook can arrive and complete this job WHILE this submit call is still in
+      // flight (Creatomate may call back before the HTTP response reaches us). Re-read the
+      // latest persisted status and run it through the same monotonic guard as the webhook
+      // path so this response can never regress an already-applied completion/failure.
+      const latest = await this.prisma.renderJob.findUnique({ where: { id: job.id } });
+      const currentStatus = (latest?.status ?? job.status) as RenderJobStatus;
+      const nextStatus = nextRenderJobStatus(currentStatus, reportedStatus);
+      job = await this.prisma.renderJob.update({
+        where: { id: job.id },
+        data: {
+          externalJobId: submitted.externalJobId,
+          submittedAt: new Date(),
+          ...(nextStatus ? { status: nextStatus, progress: submitted.progress } : {}),
+        },
+      });
+    } catch (error) {
+      const mapped = mapProviderError(error);
+      job = await this.prisma.renderJob.update({
+        where: { id: job.id },
+        data: { status: "failed", lastError: { code: mapped.code, message: mapped.message } as unknown as Prisma.InputJsonValue },
+      });
+      return { ok: false, ...mapped };
+    }
+    return { ok: true, data: toJobResponse(job) };
+  }
+
+  async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {
+    const row = await this.prisma.renderJob.findUnique({ where: { id } });
+    if (!row) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy render job", status: 404 };
+    if (!(await this.assertProjectAccess(row.projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy render job", status: 404 };
+    if (!isTerminalRenderStatus(row.status as RenderJobStatus) && row.externalJobId) {
+      const reconciled = await this.reconcileOne(row.id);
+      if (reconciled.ok) return { ok: true, data: reconciled.data };
+    }
+    return { ok: true, data: toJobResponse(row) };
+  }
+
+  /** Applies the monotonic status guard and persists a Creatomate-reported result. Never lets a terminal state regress. */
+  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null }) {
+    const nextStatus = nextRenderJobStatus(current, incoming.status);
+    if (!nextStatus) return null; // stale/out-of-order/duplicate — no-op, current row already reflects the latest applied state.
+    const data: Prisma.RenderJobUpdateInput = { status: nextStatus };
+    if (incoming.progress !== undefined && incoming.progress !== null) data.progress = incoming.progress;
+    if (nextStatus === "completed") {
+      data.resultUrl = incoming.url ?? null;
+      data.completedAt = new Date();
+      if (incoming.renderDurationMs != null) data.renderDurationMs = incoming.renderDurationMs;
+    }
+    if (nextStatus === "failed") {
+      data.completedAt = new Date();
+      data.lastError = { code: "PROVIDER_SUBMIT_UNKNOWN", message: incoming.errorMessage ?? "Creatomate render failed" } as unknown as Prisma.InputJsonValue;
+    }
+    return this.prisma.renderJob.update({ where: { id: jobId }, data });
+  }
+
+  /** Poll/reconcile fallback: fetches live Creatomate status for one job and applies it through the same monotonic guard as the webhook path. Used both by `GET` status (best-effort) and the manual reconcile endpoint. */
+  async reconcileOne(id: string): Promise<RenderOutcome<RenderJobResponse>> {
+    const row = await this.prisma.renderJob.findUnique({ where: { id } });
+    if (!row) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy render job", status: 404 };
+    if (isTerminalRenderStatus(row.status as RenderJobStatus) || !row.externalJobId) return { ok: true, data: toJobResponse(row) };
+    const account = await this.prisma.providerAccount.findFirst({ where: { id: row.providerAccountId, deletedAt: null } });
+    if (!account) return { ok: true, data: toJobResponse(row) };
+    try {
+      const remote = await getCreatomateRender(decryptSecret(account.encryptedSecret), row.externalJobId);
+      const updated = await this.applyStatus(row.id, row.status as RenderJobStatus, {
+        status: normalizeCreatomateStatus(remote.status),
+        url: remote.url,
+        progress: remote.progress,
+        errorMessage: remote.errorMessage,
+        renderDurationMs: remote.renderDurationMs,
+      });
+      return { ok: true, data: toJobResponse(updated ?? row) };
+    } catch {
+      // Reconcile is best-effort; a transient failure just leaves the last known status in place.
+      return { ok: true, data: toJobResponse(row) };
+    }
+  }
+
+  /** Poll/reconcile fallback across every non-terminal job (webhook-missed recovery). Intended to be invoked periodically by an external scheduler — see handoff "known-limitation" for why no in-process cron is wired in this task. */
+  async reconcilePending(): Promise<{ reconciled: number }> {
+    const rows = await this.prisma.renderJob.findMany({ where: { status: { notIn: ["completed", "failed", "cancelled"] }, externalJobId: { not: null } } });
+    for (const row of rows) await this.reconcileOne(row.id);
+    return { reconciled: rows.length };
+  }
+
+  /**
+   * Webhook inbox: `token` authenticates the callback (unguessable per-job secret
+   * embedded in the `webhook_url` given to Creatomate at submit time — Creatomate has
+   * no documented signature scheme of its own). Every payload is recorded by its
+   * content fingerprint before being applied, so an exact-duplicate delivery
+   * (Creatomate retries webhooks) is a guaranteed no-op.
+   */
+  async handleWebhook(token: string, rawBody: unknown): Promise<RenderOutcome<{ received: true }>> {
+    const job = await this.prisma.renderJob.findUnique({ where: { webhookToken: token } });
+    if (!job) return { ok: false, code: "WEBHOOK_INVALID", message: "Webhook token không hợp lệ", status: 404 };
+    const eventFingerprint = createHash("sha256").update(`${job.id}:${stableStringify(rawBody)}`).digest("hex");
+    try {
+      await this.prisma.renderWebhookEvent.create({ data: { renderJobId: job.id, eventFingerprint, payload: (rawBody ?? {}) as Prisma.InputJsonValue } });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") return { ok: true, data: { received: true } }; // exact duplicate delivery — no-op
+      throw error;
+    }
+    const record = (rawBody ?? {}) as Record<string, unknown>;
+    const rawStatus = typeof record.status === "string" ? record.status : "";
+    const normalized = ["planned", "waiting", "transcribing", "rendering", "succeeded", "failed"].includes(rawStatus)
+      ? normalizeCreatomateStatus(rawStatus as Parameters<typeof normalizeCreatomateStatus>[0])
+      : null;
+    if (normalized) {
+      const hasResultUrl = typeof record.url === "string" && record.url.length > 0;
+      // Creatomate reporting `succeeded` without a result URL is a malformed/incomplete
+      // payload, not a valid completion — completing without a URL would leave the job
+      // permanently "done" with nothing to review/export. Treat it as a failure instead so
+      // it surfaces (and can be retried/reconciled), rather than silently closing the job.
+      const outcome = normalized === "completed" && !hasResultUrl
+        ? { status: "failed" as const, errorMessage: "Creatomate báo succeeded nhưng thiếu result URL" }
+        : {
+            status: normalized,
+            url: typeof record.url === "string" ? record.url : null,
+            progress: typeof record.progress === "number" ? record.progress : null,
+            errorMessage: typeof record.error_message === "string" ? record.error_message : null,
+            renderDurationMs: typeof record.render_duration === "number" ? Math.round(record.render_duration * 1000) : null,
+          };
+      const updated = await this.applyStatus(job.id, job.status as RenderJobStatus, outcome);
+      await this.prisma.renderWebhookEvent.updateMany({ where: { renderJobId: job.id, eventFingerprint }, data: { appliedStatus: updated?.status ?? null } });
+    }
+    return { ok: true, data: { received: true } };
+  }
+}
