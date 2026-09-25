@@ -46,3 +46,4 @@ tmp/
 temp/
 *.tmp
 *.log
+.claude/worktrees/
