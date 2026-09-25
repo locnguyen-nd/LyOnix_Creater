@@ -1,8 +1,8 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "creatomate", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
-export type ProviderErrorCode = "PROVIDER_AUTH_INVALID" | "PROVIDER_CAPABILITY_UNAVAILABLE" | "PROVIDER_RATE_LIMITED" | "PROVIDER_QUOTA_EXHAUSTED" | "PROVIDER_SCHEMA_INVALID" | "PROVIDER_CONTENT_REFUSED" | "PROVIDER_TIMEOUT" | "PROVIDER_SUBMIT_UNKNOWN" | "PROVIDER_UNAVAILABLE";
+export type ProviderErrorCode = "PROVIDER_AUTH_INVALID" | "PROVIDER_CAPABILITY_UNAVAILABLE" | "PROVIDER_RATE_LIMITED" | "PROVIDER_QUOTA_EXHAUSTED" | "PROVIDER_SCHEMA_INVALID" | "PROVIDER_CONTENT_REFUSED" | "PROVIDER_TIMEOUT" | "PROVIDER_SUBMIT_UNKNOWN" | "PROVIDER_UNAVAILABLE" | "PROVIDER_NOT_CONFIGURED";
 
 export class ProviderError extends Error {
   constructor(readonly code: ProviderErrorCode, message: string, readonly retryable: boolean, readonly retryAfterMs?: number) { super(message); }
@@ -40,15 +40,101 @@ export interface RenderProviderAdapter extends ProviderAccountAdapter {
 }
 
 export type RegisteredProvider = { kind: ProviderKind; role: ProviderRole; adapter: ProviderAccountAdapter; implementationStatus: "fake" | "available" | "blocked" | "post_mvp" };
+
+/**
+ * Runtime no-mock invariant (VE2E §5): a `fake` provider adapter must never be
+ * registered outside the test process. `nodeEnv` defaults to `process.env.NODE_ENV`
+ * so callers do not need to thread it explicitly; tests run with `NODE_ENV=test`
+ * (vitest default) and are unaffected.
+ */
+export const assertRegistrationAllowed = (kind: ProviderKind, nodeEnv: string | undefined = process.env.NODE_ENV) => {
+  if (kind === "fake" && nodeEnv !== "test") {
+    throw new Error("Fake provider adapters may only be registered when NODE_ENV=test");
+  }
+};
+
 export class ProviderRegistry {
   private readonly providers = new Map<string, RegisteredProvider>();
   private key(kind: ProviderKind, role: ProviderRole) { return `${kind}:${role}`; }
-  register(provider: RegisteredProvider) { const key = this.key(provider.kind, provider.role); if (this.providers.has(key)) throw new Error(`Provider already registered: ${key}`); this.providers.set(key, provider); }
-  resolve(kind: ProviderKind, role: ProviderRole): RegisteredProvider { const provider = this.providers.get(this.key(kind, role)); if (!provider) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", "Provider role is not registered", false); return provider; }
+  register(provider: RegisteredProvider) {
+    assertRegistrationAllowed(provider.kind);
+    const key = this.key(provider.kind, provider.role);
+    if (this.providers.has(key)) throw new Error(`Provider already registered: ${key}`);
+    this.providers.set(key, provider);
+  }
+  resolve(kind: ProviderKind, role: ProviderRole): RegisteredProvider {
+    const provider = this.providers.get(this.key(kind, role));
+    if (!provider) throw new ProviderError("PROVIDER_NOT_CONFIGURED", "Provider role is not registered", false);
+    return provider;
+  }
   catalog() { return [...this.providers.values()].map(({ kind, role, implementationStatus }) => ({ kind, role, implementationStatus })); }
 }
-export { generateGemini, generateOpenAi, generateXai, generateLiveStructured, isLiveContentKind, liveContentKinds, verifyContentKey, type LiveContentInput, type LiveContentKind } from "./live-content.js";
-export { CURATED_CONTENT_MODELS, mergeContentModels, normalizeModelId, isTextContentModel, resolveContentModel, suggestedModelFromError } from "./content-models.js";
+
+// --- VE2E-00: capability preflight contract ---
+
+export type PreflightOperationStatus = "ready" | "not_configured" | "capability_unavailable";
+export type PreflightOperationResult = {
+  role: ProviderRole;
+  operation: string;
+  status: PreflightOperationStatus;
+  code?: "PROVIDER_NOT_CONFIGURED" | "PROVIDER_CAPABILITY_UNAVAILABLE";
+  detail?: string;
+};
+export type CapabilityPreflightResult = {
+  ready: boolean;
+  operations: PreflightOperationResult[];
+};
+
+/** A preflight is only "ready" when every required operation resolved to `ready`. */
+export const summarizePreflight = (operations: PreflightOperationResult[]): CapabilityPreflightResult => ({
+  ready: operations.length > 0 && operations.every((op) => op.status === "ready"),
+  operations,
+});
+export {
+  generateGemini,
+  generateOpenAi,
+  generateXai,
+  generateContentOnce,
+  generateContentStructuredV2,
+  generateLiveStructured,
+  isLiveContentKind,
+  liveContentKinds,
+  verifyContentKey,
+  type LiveContentInput,
+  type LiveContentKind,
+} from "./live-content.js";
+export { CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, suggestedModelFromError } from "./content-models.js";
+export {
+  probeContentModel,
+  pickUsableContentModel,
+  isFreshCheckedAt,
+  findModelSnapshotEntry,
+  CONTENT_MODEL_FRESHNESS_TTL_MS,
+  type ContentModelProbeResult,
+  type PickUsableContentModelResult,
+  type ContentModelStatus,
+  type ContentModelSnapshotEntry,
+} from "./content-probe.js";
+export {
+  SCRIPT_DRAFT_V2_SCHEMA_VERSION,
+  SCRIPT_DRAFT_V2_JSON_SCHEMA,
+  SCRIPT_PROMPT_TEMPLATE_V2_VERSION,
+  buildScriptV2PromptPackage,
+  contentLanguagesV2,
+  extractJsonObjectV2,
+  isContentLanguageV2,
+  isScriptSourceKind,
+  parseScriptDraftV2,
+  validateScriptDraftV2,
+  clipForPromptV2,
+  scriptSourceKinds,
+  type ContentLanguageV2,
+  type ScriptDraftV2,
+  type ScriptDraftSceneV2,
+  type ScriptPromptPackageV2,
+  type ScriptSourceKind,
+} from "./script-draft-v2.js";
+export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result } from "./live-script-v2.js";
 export {
   SCRIPT_DRAFT_SCHEMA_VERSION,
   SCRIPT_DRAFT_V1_JSON_SCHEMA,
@@ -66,6 +152,54 @@ export {
   type ScriptPromptPackage,
 } from "./script-draft-v1.js";
 export { generateFakeScriptDraft } from "./fake-content.js";
+export {
+  CURATED_ELEVENLABS_MODELS,
+  probeElevenLabsAccount,
+  listElevenLabsVoices,
+  getElevenLabsVoice,
+  createElevenLabsVoiceClone,
+  deleteElevenLabsVoice,
+  textToSpeechWithTimestamps,
+  probeElevenLabsTts,
+  type ElevenLabsAccountInfo,
+  type ElevenLabsVoiceSummary,
+  type VoiceCloneConsentEvidence,
+  type VoiceCloneSampleFile,
+  type CreateVoiceCloneInput,
+  type TtsAlignment,
+  type TtsWithTimestampsResult,
+  type TextToSpeechInput,
+} from "./elevenlabs.js";
+export {
+  probePexelsAccount,
+  searchPexelsPhotos,
+  searchPexelsVideos,
+  getPexelsPhoto,
+  getPexelsVideo,
+  pickPexelsVideoFile,
+  isPexelsCdnUrl,
+  type PexelsAttribution,
+  type PexelsPhotoResult,
+  type PexelsVideoFileOption,
+  type PexelsVideoResult,
+  type PexelsSearchOptions,
+} from "./pexels.js";
+export {
+  probeCreatomateAccount,
+  listCreatomateTemplates,
+  getCreatomateTemplate,
+  deriveTemplateModifications,
+  submitCreatomateRender,
+  getCreatomateRender,
+  normalizeCreatomateStatus,
+  type CreatomateTemplateSummary,
+  type CreatomateTemplateDetail,
+  type ModificationKind,
+  type TemplateModificationSlot,
+  type CreatomateRenderStatus,
+  type CreatomateRenderResult,
+  type SubmitRenderInput,
+} from "./creatomate.js";
 export {
   CAPTION_PLAN_SCHEMA_VERSION,
   CAPTION_PLAN_V1_JSON_SCHEMA,

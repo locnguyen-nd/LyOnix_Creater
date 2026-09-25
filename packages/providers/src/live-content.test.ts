@@ -13,7 +13,24 @@ describe("verifyContentKey", () => {
 
   it("maps a models list without treating it as billed generation", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "gpt-4o-mini" }] }), { status: 200 })));
-    await expect(verifyContentKey("openai", "sk-test")).resolves.toMatchObject({ models: expect.arrayContaining(["gpt-4o-mini", "gpt-4o"]) });
+    await expect(verifyContentKey("openai", "sk-test")).resolves.toMatchObject({ models: ["gpt-4o-mini"] });
+  });
+
+  it("V00-10: is account-scoped discovery only - never adds a static-catalog model the account's own listing did not report", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "gpt-4o-mini" }] }), { status: 200 })));
+    const { models } = await verifyContentKey("openai", "sk-test");
+    expect(models).not.toContain("gpt-4o");
+    expect(models).not.toContain("gpt-5");
+  });
+
+  it("V00-10: filters out a Gemini model that explicitly does not support generateContent", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      models: [
+        { name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-count-tokens-only", supportedGenerationMethods: ["countTokens"] },
+      ],
+    }), { status: 200 })));
+    await expect(verifyContentKey("gemini", "key")).resolves.toMatchObject({ models: ["gemini-2.5-flash"] });
   });
 
   it("maps 401 to PROVIDER_AUTH_INVALID", async () => {

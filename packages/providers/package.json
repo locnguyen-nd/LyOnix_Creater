@@ -10,5 +10,6 @@
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": { "@lyonix/domain": "workspace:*" },
   "devDependencies": { "typescript": "^5.9.2", "vitest": "^3.2.4" }
 }

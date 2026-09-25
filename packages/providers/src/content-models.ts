@@ -65,6 +65,26 @@ export const suggestedModelFromError = (detail: string) => {
   return match?.[1] ? normalizeModelId(match[1]) : null;
 };
 
+/**
+ * V00-10: account-scoped discovery only - filters/normalizes the account's own live `/models`
+ * response, but never unions it with the static curated catalog. A missing/retired model
+ * therefore cannot survive into the result just because it used to be a well-known model ID.
+ * This is discovery evidence, not proof of generate access - callers must still probe the
+ * exact generate endpoint before treating a listed model as usable (see `content-probe.ts`).
+ */
+export const discoveredContentModels = (kind: ContentKind, live: readonly string[]) => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of live) {
+    const id = resolveContentModel(kind, item);
+    if (!isTextContentModel(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+};
+
+/** @deprecated kept only for the pre-V00-10 curated-catalog union test; do not use for account-scoped verify. */
 export const mergeContentModels = (kind: ContentKind, live: readonly string[]) => {
   const merged = new Set<string>(CURATED_CONTENT_MODELS[kind].map((id) => resolveContentModel(kind, id)));
   for (const item of live) {

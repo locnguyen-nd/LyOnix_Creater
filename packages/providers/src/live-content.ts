@@ -1,5 +1,5 @@
 import { ProviderError, type ContentGenerationInput, type ContentGenerationResult, type JsonSchema, type ProviderKind } from "./index.js";
-import { mergeContentModels, normalizeModelId, resolveContentModel, suggestedModelFromError, type ContentKind } from "./content-models.js";
+import { discoveredContentModels, normalizeModelId, resolveContentModel, suggestedModelFromError, type ContentKind } from "./content-models.js";
 
 export type LiveContentInput = ContentGenerationInput & { apiKey: string };
 const usage = (body: Record<string, unknown>, requestId: string | null) => {
@@ -35,13 +35,29 @@ export type LiveContentKind = (typeof liveContentKinds)[number];
 export const isLiveContentKind = (value: string): value is LiveContentKind =>
   (liveContentKinds as readonly string[]).includes(value);
 
+/**
+ * V00-10: this is account-scoped discovery only (real `/models` response for this key), never
+ * unioned with a static catalog. Gemini additionally reports `supportedGenerationMethods` per
+ * model - a model listed but missing `generateContent` cannot actually serve
+ * `verifyContentKey`/`generateContentOnce`'s call shape, so it is filtered out here rather than
+ * discovered as "usable" and failing later at generate time.
+ */
 const modelIds = (kind: LiveContentKind, body: Record<string, unknown>) => {
   const list = (body.data ?? body.models) as Array<Record<string, unknown>> | undefined;
-  if (!Array.isArray(list)) return mergeContentModels(kind, []);
-  return mergeContentModels(kind, list.map((item) => String(item.id ?? item.name ?? "")).filter(Boolean));
+  if (!Array.isArray(list)) return [] as string[];
+  const ids = list
+    .filter((item) => {
+      if (kind !== "gemini") return true;
+      const methods = item.supportedGenerationMethods;
+      // Be lenient when the field is absent (not every response includes it); only filter when it explicitly excludes generateContent.
+      return !Array.isArray(methods) || methods.includes("generateContent");
+    })
+    .map((item) => String(item.id ?? item.name ?? ""))
+    .filter(Boolean);
+  return discoveredContentModels(kind, ids);
 };
 
-/** Lightweight credential check. Does not generate billed content. */
+/** Lightweight credential check. Does not generate billed content. Discovery evidence only - see `modelIds`. */
 export async function verifyContentKey(kind: LiveContentKind | Extract<ProviderKind, "openai" | "gemini" | "xai">, apiKey: string) {
   const response = kind === "gemini"
     ? await timedFetch("https://generativelanguage.googleapis.com/v1beta/models", { headers: { "x-goog-api-key": apiKey } })
@@ -124,24 +140,98 @@ async function generateLiveStructuredOnce<T>(kind: LiveContentKind, apiKey: stri
   catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return valid JSON", false); }
 }
 
-export async function generateOpenAi<T>(input: LiveContentInput, schema: JsonSchema): Promise<ContentGenerationResult<T>> {
-  const response = await fetch("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: input.config.modelId, input: input.prompt, text: { format: { type: "json_schema", name: "script_draft", strict: true, schema } } }) });
-  const body = await json(response); const output = body.output_text;
+/**
+ * OpenAI Responses API (preferred over Chat Completions for structured output per
+ * https://platform.openai.com/docs/guides/structured-outputs and DEC-2026-09-24 §VE2E-01).
+ * `apiKey`/`modelId`/`prompt` are passed directly (not wrapped in `ContentGenerationInput`)
+ * so this can be reused by both the account-adapter port and the VE2E-01 ScriptDraftV2 flow.
+ */
+export async function generateOpenAi<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const response = await timedFetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelId,
+      input: prompt,
+      text: schema ? { format: { type: "json_schema", name: "script_draft", strict: true, schema } } : undefined,
+    }),
+  });
+  const body = await json(response);
+  const output = body.output_text;
   if (typeof output !== "string") throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenAI did not return structured text", false);
-  return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) };
+  try { return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenAI did not return valid JSON", false); }
 }
 
-export async function generateGemini<T>(input: LiveContentInput, schema: JsonSchema): Promise<ContentGenerationResult<T>> {
-  const model = encodeURIComponent(input.config.modelId);
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, { method: "POST", headers: { "x-goog-api-key": input.apiKey, "content-type": "application/json" }, body: JSON.stringify({ contents: [{ parts: [{ text: input.prompt }] }], generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema } }) });
-  const body = await json(response); const candidates = body.candidates as Array<Record<string, unknown>> | undefined; const content = candidates?.[0]?.content as Record<string, unknown> | undefined; const parts = content?.parts as Array<Record<string, unknown>> | undefined; const text = parts?.[0]?.text;
-  if (typeof text !== "string") throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return structured text", false);
-  return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) };
+/** Gemini structured output via `generateContent` + `responseJsonSchema` (no separate Responses API). */
+export async function generateGemini<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const model = encodeURIComponent(normalizeModelId(modelId));
+  const response = await timedFetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: "POST",
+    headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: geminiConfig(schema) }),
+  });
+  const body = await json(response);
+  const text = chatText(body);
+  if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return structured text", false);
+  try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return valid JSON", false); }
 }
 
-export async function generateXai<T>(input: LiveContentInput, schema: JsonSchema): Promise<ContentGenerationResult<T>> {
-  const response = await fetch("https://api.x.ai/v1/responses", { method: "POST", headers: { authorization: `Bearer ${input.apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: input.config.modelId, input: input.prompt, text: { format: { type: "json_schema", name: "script_draft", strict: true, schema } } }) });
-  const body = await json(response); const output = body.output_text;
+/** xAI/Grok Responses API, mirrors OpenAI (same wire contract for `/v1/responses`). */
+export async function generateXai<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const response = await timedFetch("https://api.x.ai/v1/responses", {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelId,
+      input: prompt,
+      text: schema ? { format: { type: "json_schema", name: "script_draft", strict: true, schema } } : undefined,
+    }),
+  });
+  const body = await json(response);
+  const output = body.output_text;
   if (typeof output !== "string") throw new ProviderError("PROVIDER_SCHEMA_INVALID", "xAI did not return structured text", false);
-  return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) };
+  try { return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "xAI did not return valid JSON", false); }
+}
+
+/**
+ * Single attempt, exact-endpoint dispatch used by both the operation-specific model probe
+ * (`content-probe.ts`) and `generateContentStructuredV2` below. Network/abort failures are
+ * normalized to `PROVIDER_TIMEOUT` so callers never see a raw fetch rejection.
+ */
+export async function generateContentOnce<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const model = normalizeModelId(modelId);
+  try {
+    if (kind === "gemini") return await generateGemini<T>(apiKey, model, prompt, schema);
+    if (kind === "openai") return await generateOpenAi<T>(apiKey, model, prompt, schema);
+    return await generateXai<T>(apiKey, model, prompt, schema);
+  } catch (error) {
+    if (error instanceof ProviderError) throw error;
+    throw new ProviderError("PROVIDER_TIMEOUT", "Provider generate timed out or network failed", true);
+  }
+}
+
+/**
+ * VE2E-01: resilient structured generate on the exact live endpoint (Responses API for
+ * openai/xai, `generateContent` for gemini) — schema-invalid retries once without the
+ * strict schema, and a retired/capability-unavailable model retries once with the hinted
+ * replacement model (same retry shape as `generateLiveStructured`, kept as a separate
+ * function so the existing ScriptDraftV1 chat-completions path is untouched).
+ */
+export async function generateContentStructuredV2<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const resolved = resolveContentModel(kind as ContentKind, modelId);
+  try {
+    return await generateContentOnce<T>(kind, apiKey, resolved, prompt, schema);
+  } catch (error) {
+    if (schema && error instanceof ProviderError && error.code === "PROVIDER_SCHEMA_INVALID") {
+      return generateContentOnce<T>(kind, apiKey, resolved, prompt);
+    }
+    const hinted = error instanceof ProviderError ? suggestedModelFromError(error.message) : null;
+    if (error instanceof ProviderError && error.code === "PROVIDER_CAPABILITY_UNAVAILABLE" && hinted && hinted !== resolved) {
+      return generateContentOnce<T>(kind, apiKey, hinted, prompt, schema);
+    }
+    throw error;
+  }
 }
