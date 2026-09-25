@@ -1,2 +1,2 @@
-export { PrismaClient } from "@prisma/client";
-export type { Role, User } from "@prisma/client";
+export { Prisma, PrismaClient } from "@prisma/client";
+export type { Role, User, WorkflowRun } from "@prisma/client";
