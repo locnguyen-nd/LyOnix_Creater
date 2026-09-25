@@ -1,0 +1,392 @@
+/**
+ * VE2E-06: background executor for one Auto `WorkflowRun` — the DAG
+ * source→script(auto-approve)→voice→media→timeline→render described in
+ * VE2E-VIDEO-PRODUCTION.md §1/§4/§5. Never runs inside `apps/api`'s HTTP request path
+ * (see `video-productions.service.ts`); intended to be polled by a separate process
+ * (`workflow-worker-main.ts`), the same "enqueue in the request, execute in a worker
+ * loop" shape `AudioVersionsService.processNext()` already established.
+ *
+ * Every provider-calling step is wrapped in `recordStep()`, which writes a `StepRun`
+ * (+ a `ProviderOperation` when the step actually calls a provider) before/after
+ * execution — the durable per-step trail + shared `correlationId` the spec's §3 asks
+ * for ("mọi step có input/output version refs và correlation ID").
+ *
+ * Bounded retry / cost ceiling (known, documented scope limits — see VE2E-06 handoff
+ * for the full reasoning, not repeated here): a transient provider failure re-queues
+ * the ENTIRE run (status back to `draft`, `attempts` incremented) rather than resuming
+ * from the failed step, bounded by `AutomationProfileVersion.retryPolicy.maxAttempts`
+ * (default 2). `costCeiling` is persisted/exposed on the profile but not enforced
+ * against real spend in this pass: no adapter in this codebase currently returns
+ * actual per-call cost/usage (`packages/providers`' `UsageRecord`/`CostEstimate`
+ * types are defined but never populated by any live adapter — confirmed by
+ * repo-wide grep before writing this) — wiring real per-provider cost/usage into a
+ * `CostLedger` is a separate, adapter-level scope change, not invented here.
+ */
+import { Inject, Injectable } from "@nestjs/common";
+import { Prisma } from "@lyonix/db";
+import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
+import { buildAutoRenderAssignments, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
+import type { RenderAssignmentInput } from "@lyonix/contracts";
+import { AudioVersionsService } from "./audio-versions.service.js";
+import { PexelsService } from "./pexels.service.js";
+import { PrismaService } from "./prisma.service.js";
+import { RenderJobsService } from "./render-jobs.service.js";
+import { ScriptGenerationService } from "./script-generation.service.js";
+import { ScriptVersionsService } from "./script-versions.service.js";
+import { SourcesService } from "./sources.service.js";
+
+// --- AutomationProfileVersion JSON config parsing (shared with video-productions.service.ts) ---
+
+export type ContentAccountRef = { providerAccountId: string };
+export type VoiceAccountRef = { providerAccountId: string; voiceId?: string; modelId?: string };
+export type RenderAccountRef = { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif" };
+
+export const asAccountRef = (value: unknown): ContentAccountRef | null => {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return typeof record.providerAccountId === "string" && record.providerAccountId ? { providerAccountId: record.providerAccountId } : null;
+};
+
+export const asVoiceRef = (value: unknown): VoiceAccountRef | null => {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.providerAccountId !== "string" || !record.providerAccountId) return null;
+  return {
+    providerAccountId: record.providerAccountId,
+    ...(typeof record.voiceId === "string" && record.voiceId ? { voiceId: record.voiceId } : {}),
+    ...(typeof record.modelId === "string" && record.modelId ? { modelId: record.modelId } : {}),
+  };
+};
+
+export const asRenderRef = (value: unknown): RenderAccountRef | null => {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.providerAccountId !== "string" || !record.providerAccountId) return null;
+  if (typeof record.templateSnapshotId !== "string" || !record.templateSnapshotId) return null;
+  const outputFormat = record.outputFormat;
+  return {
+    providerAccountId: record.providerAccountId,
+    templateSnapshotId: record.templateSnapshotId,
+    ...(outputFormat === "mp4" || outputFormat === "mov" || outputFormat === "gif" ? { outputFormat } : {}),
+  };
+};
+
+const AUTO_DIRECTION_BY_LOCALE: Record<string, (durationSec: number, sceneCount: number) => string> = {
+  vi: (d, s) => `Video khoảng ${d} giây, chia thành ${s} cảnh, giọng điệu tự nhiên, phù hợp định dạng dọc TikTok/Shorts.`,
+  en: (d, s) => `Video around ${d} seconds, split into ${s} scenes, natural tone, suited for a vertical TikTok/Shorts format.`,
+  ja: (d, s) => `動画は約${d}秒、${s}のシーンに分割し、TikTok/Shorts向けの縦型フォーマットに合う自然なトーンにしてください。`,
+  ko: (d, s) => `영상은 약 ${d}초, ${s}개 장면으로 나누고 TikTok/Shorts 세로 포맷에 맞는 자연스러운 톤으로 만들어 주세요.`,
+};
+const buildAutoDirection = (locale: string, durationSec: number, sceneCount: number): string =>
+  (AUTO_DIRECTION_BY_LOCALE[locale] ?? AUTO_DIRECTION_BY_LOCALE.vi!)(durationSec, sceneCount);
+
+/** Normalized failure raised by a pipeline step; every service call this runner makes already returns an `{ok:false,code,message}` outcome instead of throwing, so each step site converts that into this before `recordStep()`'s catch handles it uniformly. */
+export class WorkflowStepFailure extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+const BLOCKED_CODES = new Set(["PROVIDER_NOT_CONFIGURED", "PROVIDER_CAPABILITY_UNAVAILABLE", "PROVIDER_AUTH_INVALID", "SSRF_BLOCKED"]);
+const NEEDS_INPUT_CODES = new Set(["VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN"]);
+/** Everything else (PROVIDER_RATE_LIMITED/PROVIDER_QUOTA_EXHAUSTED/PROVIDER_TIMEOUT/PROVIDER_UNAVAILABLE/PROVIDER_SUBMIT_UNKNOWN, and any unexpected thrown error) is treated as transient and bounded-retried — never an infinite loop since `attempts` is capped. */
+const classify = (code: string): "blocked_provider" | "needs_input" | "retry" => {
+  if (BLOCKED_CODES.has(code)) return "blocked_provider";
+  if (NEEDS_INPUT_CODES.has(code)) return "needs_input";
+  return "retry";
+};
+
+const DEFAULT_MAX_ATTEMPTS = 2;
+
+type ProviderStepMeta = { role: "content" | "tts" | "visual" | "render"; operation: string; providerAccountId: string };
+
+@Injectable()
+export class WorkflowRunnerService {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(SourcesService) private readonly sources: SourcesService,
+    @Inject(ScriptGenerationService) private readonly scriptGeneration: ScriptGenerationService,
+    @Inject(ScriptVersionsService) private readonly scriptVersions: ScriptVersionsService,
+    @Inject(AudioVersionsService) private readonly audioVersions: AudioVersionsService,
+    @Inject(PexelsService) private readonly pexels: PexelsService,
+    @Inject(RenderJobsService) private readonly renderJobs: RenderJobsService,
+  ) {}
+
+  /** One tick: claim+run at most one draft Auto run, then reconcile every run waiting on a render. Returns whether anything happened (used by the worker loop to decide whether to sleep). */
+  async processNext(): Promise<boolean> {
+    const processedDraft = await this.processOneDraft();
+    const reconciledAny = await this.reconcileRenders();
+    return processedDraft || reconciledAny;
+  }
+
+  private async processOneDraft(): Promise<boolean> {
+    const candidate = await this.prisma.workflowRun.findFirst({ where: { mode: "auto", status: "draft" }, orderBy: { createdAt: "asc" } });
+    if (!candidate) return false;
+    const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
+    if (claimed.count !== 1) return true; // another worker tick/replica won the claim race
+    const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
+    try {
+      await this.runPipeline(run);
+    } catch (error) {
+      await this.handleFailure(run, error);
+    }
+    return true;
+  }
+
+  private async actorFor(userId: string): Promise<{ userId: string; role: "admin" | "staff" } | null> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, role: true } });
+    return user ? { userId: user.id, role: user.role } : null;
+  }
+
+  private async setStatus(id: string, status: WorkflowRunRow["status"]) {
+    await this.prisma.workflowRun.update({ where: { id }, data: { status } });
+  }
+
+  /**
+   * Writes a `StepRun` (and, when `meta` is given, a `ProviderOperation` sharing the
+   * run's own `correlationId`) around `fn`. `fn` must throw `WorkflowStepFailure` for
+   * a normalized outcome failure — every call site below does this immediately after
+   * checking `outcome.ok`, so this stays the single place that persists step/operation
+   * bookkeeping instead of every step re-implementing it.
+   */
+  private async recordStep<T>(run: WorkflowRunRow, stepKey: string, meta: ProviderStepMeta | null, fn: () => Promise<T>): Promise<T> {
+    const stepRun = await this.prisma.stepRun.upsert({
+      where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey, attempt: run.attempts } },
+      create: { workflowRunId: run.id, stepKey, attempt: run.attempts, status: "running", startedAt: new Date() },
+      update: { status: "running", startedAt: new Date(), endedAt: null, error: Prisma.JsonNull },
+    });
+    let operationId: string | null = null;
+    if (meta) {
+      const operation = await this.prisma.providerOperation.create({
+        data: {
+          workflowRunId: run.id,
+          stepRunId: stepRun.id,
+          providerAccountId: meta.providerAccountId,
+          role: meta.role,
+          operation: meta.operation,
+          status: "in_progress",
+          correlationId: run.correlationId,
+        },
+      });
+      operationId = operation.id;
+    }
+    try {
+      const value = await fn();
+      await this.prisma.stepRun.update({ where: { id: stepRun.id }, data: { status: "succeeded", endedAt: new Date() } });
+      if (operationId) await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "succeeded" } });
+      return value;
+    } catch (error) {
+      const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";
+      const message = error instanceof Error ? error.message : "Lỗi không xác định";
+      await this.prisma.stepRun.update({ where: { id: stepRun.id }, data: { status: "failed", endedAt: new Date(), error: { code, message } } });
+      if (operationId) await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "failed", errorCode: code } });
+      throw error;
+    }
+  }
+
+  private async handleFailure(run: WorkflowRunRow, error: unknown): Promise<void> {
+    const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";
+    const message = error instanceof Error ? error.message : "Lỗi không xác định trong workflow runner";
+    const bucket = classify(code);
+    if (bucket === "retry") {
+      const profile = run.automationProfileVersionId ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId } }) : null;
+      const retryPolicy = (profile?.retryPolicy ?? {}) as { maxAttempts?: number };
+      const maxAttempts = typeof retryPolicy.maxAttempts === "number" && retryPolicy.maxAttempts > 0 ? retryPolicy.maxAttempts : DEFAULT_MAX_ATTEMPTS;
+      if (run.attempts < maxAttempts) {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "draft", attempts: { increment: 1 }, lastError: { code, message, retryable: true } } });
+        return;
+      }
+    }
+    const status = bucket === "blocked_provider" ? "blocked_provider" : bucket === "needs_input" ? "needs_input" : "failed";
+    await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status, lastError: { code, message } } });
+  }
+
+  private async runPipeline(run: WorkflowRunRow): Promise<void> {
+    const actor = await this.actorFor(run.createdByUserId);
+    if (!actor) throw new WorkflowStepFailure("NOT_FOUND", "Người tạo video production không còn tồn tại");
+    const { userId, role } = actor;
+
+    if (!run.automationProfileVersionId) throw new WorkflowStepFailure("VALIDATION_FAILED", "WorkflowRun thiếu automationProfileVersionId");
+    const profile = await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId } });
+    if (!profile) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy automation profile");
+
+    const contentConfig = asAccountRef(profile.contentConfig);
+    const voiceConfig = asVoiceRef(profile.voiceConfig);
+    const mediaConfig = asAccountRef(profile.mediaConfig);
+    const renderConfig = asRenderRef(profile.renderConfig);
+    if (!contentConfig || !voiceConfig?.voiceId || !mediaConfig || !renderConfig) {
+      throw new WorkflowStepFailure("PROVIDER_NOT_CONFIGURED", "Automation profile thiếu contentConfig/voiceConfig(voiceId)/mediaConfig/renderConfig cần cho Auto");
+    }
+    if (!run.sourceVersionId) throw new WorkflowStepFailure("VALIDATION_FAILED", "WorkflowRun thiếu sourceVersionId");
+    const sourceVersionId = run.sourceVersionId;
+
+    // --- 1. source ready (extract article_url if needed) ---
+    const source = await this.prisma.sourceVersion.findUnique({ where: { id: sourceVersionId } });
+    if (!source) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn của video production này");
+    if (source.type === "article_url" && source.fetchStatus !== "extracted") {
+      await this.recordStep(run, "extract_source", null, async () => {
+        const result = await this.sources.extractArticle(sourceVersionId, userId, role);
+        if (!result) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
+        if (result === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
+        if (result === "invalid_type") throw new WorkflowStepFailure("VALIDATION_FAILED", "Loại nguồn không hỗ trợ trích xuất");
+        if ("extractFailed" in result) throw new WorkflowStepFailure(result.extractFailed === "ssrf_blocked" ? "SSRF_BLOCKED" : "PROVIDER_UNAVAILABLE", `Trích xuất nguồn thất bại: ${result.extractFailed}`);
+        return result;
+      });
+    }
+
+    // --- 2. script generation (real content provider call) ---
+    await this.setStatus(run.id, "scripting");
+    const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
+    const generation = await this.recordStep(
+      run,
+      "generate_script",
+      { role: "content", operation: "generate_script", providerAccountId: contentConfig.providerAccountId },
+      async () => {
+        const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, { providerAccountId: contentConfig.providerAccountId, language: profile.locale, direction });
+        if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
+        if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
+        if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+        return outcome.response;
+      },
+    );
+
+    // --- 3. persist + zero-human-gate auto-approve (§4: "Auto mode không dùng awaiting_* làm human gate") ---
+    await this.setStatus(run.id, "awaiting_script_approval");
+    const persisted = await this.recordStep(run, "persist_script_version", null, async () => {
+      const outcome = await this.scriptVersions.create(sourceVersionId, userId, role, { draft: generation.draft, providerPin: generation.providerPin });
+      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+      return outcome.data;
+    });
+    const approved = await this.recordStep(run, "approve_script_version", null, async () => {
+      const outcome = await this.scriptVersions.approve(persisted.id, userId, role);
+      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+      return outcome.data;
+    });
+    if (approved.scenes.length === 0) throw new WorkflowStepFailure("VALIDATION_FAILED", "Script được duyệt không có scene nào");
+
+    // --- 4. voice generation + alignment/subtitle per scene ---
+    await this.setStatus(run.id, "voice_generating");
+    const audioByScene = new Map<string, { mediaAssetVersionId: string }>();
+    for (const scene of approved.scenes) {
+      const audio = await this.recordStep(
+        run,
+        `generate_audio_${scene.sceneId}`,
+        { role: "tts", operation: "generate_voice", providerAccountId: voiceConfig.providerAccountId },
+        async () => {
+          const outcome = await this.audioVersions.generateForWorkflowRun(scene.id, userId, role, {
+            providerAccountId: voiceConfig.providerAccountId,
+            voiceId: voiceConfig.voiceId!,
+            ...(voiceConfig.modelId ? { modelId: voiceConfig.modelId } : {}),
+          });
+          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+          return outcome.data;
+        },
+      );
+      audioByScene.set(scene.sceneId, { mediaAssetVersionId: audio.mediaAssetVersionId });
+    }
+    // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
+    await this.setStatus(run.id, "aligning");
+
+    // --- 5. media: project library first, Pexels fallback per scene ---
+    await this.setStatus(run.id, "media_preparing");
+    const mediaByScene = new Map<string, { id: string; kind: "video" | "image" }>();
+    for (const scene of approved.scenes) {
+      const existing = await this.prisma.mediaAssetVersion.findFirst({
+        where: { projectId: run.projectId, sceneId: scene.sceneId, deletedAt: null },
+        orderBy: { createdAt: "desc" },
+      });
+      if (existing && (existing.kind === "video" || existing.kind === "image")) {
+        mediaByScene.set(scene.sceneId, { id: existing.id, kind: existing.kind });
+        continue;
+      }
+      const imported = await this.recordStep(
+        run,
+        `import_media_${scene.sceneId}`,
+        { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+        async () => {
+          const outcome = await this.pexels.autoImportForScene(run.projectId, userId, role, {
+            providerAccountId: mediaConfig.providerAccountId,
+            sceneId: scene.sceneId,
+            query: scene.visualQuery.trim() || scene.narration,
+          });
+          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+          return outcome.data.asset;
+        },
+      );
+      if (imported.kind !== "video" && imported.kind !== "image") throw new WorkflowStepFailure("PROVIDER_SCHEMA_INVALID", `Asset Pexels vừa import có kind không hỗ trợ: ${imported.kind}`);
+      mediaByScene.set(scene.sceneId, { id: imported.id, kind: imported.kind });
+    }
+
+    // --- 6. build timeline assignments (positional best-effort mapping, no human timeline editor in Auto) ---
+    await this.setStatus(run.id, "editing");
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
+    if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
+    if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
+    const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
+    const sceneMedia: AutoSceneMedia[] = approved.scenes.map((scene) => ({
+      sceneId: scene.sceneId,
+      orderIndex: scene.orderIndex,
+      screenText: scene.screenText,
+      visualMediaAssetVersionId: mediaByScene.get(scene.sceneId)?.id ?? null,
+      visualKind: mediaByScene.get(scene.sceneId)?.kind ?? null,
+      audioMediaAssetVersionId: audioByScene.get(scene.sceneId)?.mediaAssetVersionId ?? null,
+    }));
+    const built = buildAutoRenderAssignments(slots, sceneMedia, { title: approved.title, caption: approved.caption });
+    if (!built.ok) {
+      const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
+      throw new WorkflowStepFailure("VALIDATION_FAILED", detail);
+    }
+    await this.setStatus(run.id, "ready_to_render");
+
+    // --- 7. submit render (idempotent by run.requestFingerprint) ---
+    await this.setStatus(run.id, "render_queued");
+    await this.recordStep(
+      run,
+      "submit_render",
+      { role: "render", operation: "render_submit", providerAccountId: renderConfig.providerAccountId },
+      async () => {
+        const outcome = await this.renderJobs.submit(
+          run.projectId,
+          userId,
+          role,
+          {
+            templateSnapshotId: renderConfig.templateSnapshotId,
+            providerAccountId: renderConfig.providerAccountId,
+            assignments: built.assignments as RenderAssignmentInput[],
+            idempotencyKey: run.requestFingerprint,
+            ...(renderConfig.outputFormat ? { outputFormat: renderConfig.outputFormat } : {}),
+          },
+          run.id,
+        );
+        if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+        return outcome.data;
+      },
+    );
+    // Terminal progress (completed/failed) is applied by `reconcileRenders()` as the linked RenderJob advances — never here, since Creatomate rendering is inherently async (webhook/poll).
+  }
+
+  /** Advances every run parked on `render_queued|rendering|verifying` by polling its linked `RenderJob` (best-effort, same monotonic-guarded reconcile the render-jobs poll fallback already uses). */
+  private async reconcileRenders(): Promise<boolean> {
+    const runs = await this.prisma.workflowRun.findMany({ where: { mode: "auto", status: { in: ["render_queued", "rendering", "verifying"] } } });
+    if (runs.length === 0) return false;
+    for (const run of runs) {
+      const job = await this.prisma.renderJob.findFirst({ where: { workflowRunId: run.id }, orderBy: { createdAt: "desc" } });
+      if (!job) continue;
+      const reconciled = await this.renderJobs.reconcileOne(job.id);
+      if (!reconciled.ok) continue;
+      const jobRow = reconciled.data;
+      if (jobRow.status === "completed" && run.status !== "completed") {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "completed" } });
+      } else if (jobRow.status === "failed" && run.status !== "failed") {
+        const lastError = jobRow.lastError ?? { code: "PROVIDER_SUBMIT_UNKNOWN", message: "Creatomate render thất bại" };
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "failed", lastError: { ...lastError, stepKey: "render" } } });
+      } else if (jobRow.status === "rendering" && run.status !== "rendering") {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "rendering" } });
+      } else if (jobRow.status === "verifying" && run.status !== "verifying") {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "verifying" } });
+      }
+      // accepted/queued/blocked_provider/reconciling on the render job -> no WorkflowRun status change yet, keep polling.
+    }
+    return true;
+  }
+}

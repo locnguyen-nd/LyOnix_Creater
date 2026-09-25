@@ -1,0 +1,40 @@
+import "reflect-metadata";
+import { config } from "dotenv";
+import { resolve } from "node:path";
+import { NestFactory } from "@nestjs/core";
+import { WorkflowWorkerModule } from "./workflow-worker.module.js";
+import { WorkflowRunnerService } from "./workflow-runner.service.js";
+
+config({ path: resolve(process.cwd(), ".env") });
+config({ path: resolve(process.cwd(), "../../.env") });
+config({ path: resolve(process.cwd(), ".env.local"), override: true });
+
+/**
+ * VE2E-06: separate background process for the Auto AutomationProfile orchestrator —
+ * `POST /video-productions` only enqueues a `WorkflowRun` row and returns `202`; this
+ * process is what actually calls every provider (content/tts/visual/render), the same
+ * "durable queue + separate worker loop" shape `audio-worker-main.ts` already
+ * established for TTS. Never runs FFmpeg (no media-worker code here) and never runs
+ * inside `apps/api`'s HTTP request path.
+ */
+const bootstrap = async () => {
+  const app = await NestFactory.createApplicationContext(WorkflowWorkerModule, { logger: ["error", "warn", "log"] });
+  const runner = app.get(WorkflowRunnerService);
+  console.info("LyOnix video-production workflow worker started (PostgreSQL durable WorkflowRun queue)");
+  let stopping = false;
+  const stop = () => { stopping = true; };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  while (!stopping) {
+    try {
+      const processed = await runner.processNext();
+      if (!processed) await new Promise((resolveSleep) => setTimeout(resolveSleep, 1000));
+    } catch (error) {
+      console.error("Workflow worker loop failed; run state remains durable", error instanceof Error ? error.message : "unknown error");
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 2000));
+    }
+  }
+  await app.close();
+};
+
+void bootstrap();

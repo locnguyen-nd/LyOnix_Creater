@@ -1,0 +1,151 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@lyonix/db";
+import { VideoProductionsService } from "./video-productions.service.js";
+import type { SourcesService } from "./sources.service.js";
+
+const projectId = "project-1";
+const automationProfileId = "profile-1";
+const sourceId = "source-1";
+const userId = "user-1";
+
+const p2002 = () => new Prisma.PrismaClientKnownRequestError("Unique constraint failed", { code: "P2002", clientVersion: "6.19.3" });
+
+const completeProfile = (overrides: Record<string, unknown> = {}) => ({
+  id: automationProfileId,
+  projectId,
+  version: 1,
+  locale: "vi",
+  durationSec: 30,
+  sceneCount: 4,
+  contentConfig: { providerAccountId: "content-acc" },
+  voiceConfig: { providerAccountId: "voice-acc", voiceId: "voice-1" },
+  mediaConfig: { providerAccountId: "media-acc" },
+  renderConfig: { providerAccountId: "render-acc", templateSnapshotId: "snap-1" },
+  retryPolicy: {},
+  ...overrides,
+});
+
+describe("VideoProductionsService", () => {
+  let prisma: any;
+  let grants: any;
+  let sources: Partial<SourcesService>;
+  let service: VideoProductionsService;
+  let workflowRuns: any[];
+
+  beforeEach(() => {
+    workflowRuns = [];
+    prisma = {
+      project: { findUnique: async ({ where }: any) => (where.id === projectId ? { id: projectId } : null) },
+      automationProfileVersion: { findUnique: async ({ where }: any) => (where.id === automationProfileId ? completeProfile() : null) },
+      sourceVersion: { findUnique: async ({ where }: any) => (where.id === sourceId ? { id: sourceId, projectId } : null) },
+      scriptDraftVersion: { findFirst: async () => null },
+      renderJob: { findFirst: async () => null },
+      stepRun: { findMany: async () => [] },
+      workflowRun: {
+        create: vi.fn(async ({ data }: any) => {
+          if (workflowRuns.some((row) => row.requestFingerprint === data.requestFingerprint)) throw p2002();
+          const row = { id: `run-${workflowRuns.length + 1}`, attempts: 1, correlationId: "corr-1", lastError: null, createdAt: new Date(), updatedAt: new Date(), ...data };
+          workflowRuns.push(row);
+          return row;
+        }),
+        findUnique: vi.fn(async ({ where }: any) => {
+          if (where.id) return workflowRuns.find((row) => row.id === where.id) ?? null;
+          if (where.requestFingerprint) return workflowRuns.find((row) => row.requestFingerprint === where.requestFingerprint) ?? null;
+          return null;
+        }),
+      },
+    };
+    grants = { forUser: vi.fn(async () => ({ projectIds: [projectId] })) };
+    sources = { create: vi.fn(async () => ({ id: "source-new", projectId, type: "topic" }) as any) };
+    service = new VideoProductionsService(prisma, grants, sources as SourcesService);
+  });
+
+  describe("submit", () => {
+    it("rejects mode=studio (not implemented by this endpoint yet)", async () => {
+      const outcome = await service.submit(userId, "staff", { mode: "studio", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+    });
+
+    it("hides an inaccessible project as not-found", async () => {
+      grants.forUser.mockResolvedValue({ projectIds: [] });
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("rejects when both sourceId and source are given (or neither)", async () => {
+      const both = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, source: { type: "topic", topic: "x" } });
+      expect(both).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const neither = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId });
+      expect(neither).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("fails fast with PROVIDER_NOT_CONFIGURED (no row created) when the profile is missing mediaConfig/renderConfig", async () => {
+      prisma.automationProfileVersion.findUnique = async () => completeProfile({ mediaConfig: null, renderConfig: null });
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
+      expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+    });
+
+    it("fails fast when voiceConfig has no voiceId (Auto cannot generate TTS without one)", async () => {
+      prisma.automationProfileVersion.findUnique = async () => completeProfile({ voiceConfig: { providerAccountId: "voice-acc" } });
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
+    });
+
+    it("creates a draft WorkflowRun with an existing sourceId and returns poll/events URLs", async () => {
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: true, data: { status: "draft", pollUrl: expect.stringContaining("/video-productions/"), eventsUrl: expect.stringContaining("/events") } });
+      expect(prisma.workflowRun.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ mode: "auto", sourceVersionId: sourceId, status: "draft" }) }));
+    });
+
+    it("inline-creates a source when `source` is given instead of sourceId", async () => {
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, source: { type: "topic", topic: "Messi" } });
+      expect(outcome.ok).toBe(true);
+      expect(sources.create).toHaveBeenCalledWith(projectId, userId, "staff", { type: "topic", topic: "Messi" });
+      expect(prisma.workflowRun.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ sourceVersionId: "source-new" }) }));
+    });
+
+    it("returns NOT_FOUND when sourceId belongs to a different project", async () => {
+      prisma.sourceVersion.findUnique = async () => ({ id: sourceId, projectId: "other-project" });
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("returns the existing run (idempotent) on a duplicate submit with the same fingerprint", async () => {
+      const first = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      const second = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      expect(first.ok && second.ok && first.data.id === second.data.id).toBe(true);
+      expect(prisma.workflowRun.create).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("get / listEvents", () => {
+    it("reports the linked render job's resultUrl and the latest approved scriptDraftVersionId", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      prisma.scriptDraftVersion.findFirst = async () => ({ id: "script-1" });
+      prisma.renderJob.findFirst = async () => ({ id: "render-1", resultUrl: "https://cdn.example/video.mp4" });
+      const outcome = await service.get(submitted.data.id, userId, "staff");
+      expect(outcome).toMatchObject({ ok: true, data: { scriptDraftVersionId: "script-1", renderJobId: "render-1", resultUrl: "https://cdn.example/video.mp4" } });
+    });
+
+    it("hides a run outside the caller's project grants as not-found", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      grants.forUser.mockResolvedValue({ projectIds: [] });
+      expect(await service.get(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(await service.listEvents(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("lists step events oldest-first", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      prisma.stepRun.findMany = async () => [
+        { stepKey: "generate_script", status: "succeeded", attempt: 1, error: null, startedAt: new Date(), endedAt: new Date() },
+      ];
+      const outcome = await service.listEvents(submitted.data.id, userId, "staff");
+      expect(outcome).toMatchObject({ ok: true, data: [{ stepKey: "generate_script", status: "succeeded" }] });
+    });
+  });
+});
