@@ -88,6 +88,15 @@ export class OrganizationController {
     return success(user, requestId(response));
   }
 
+  @Post("organization/users/:id/approve")
+  async approveUser(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { session } = await this.admin(request, response);
+    requireCsrf(request, response, session);
+    const user = await this.grants.approveUser(id);
+    if (!user) throw normalizedError("NOT_FOUND", "Không tìm thấy người dùng", requestId(response), 404);
+    return success(user, requestId(response));
+  }
+
   @Delete("organization/users/:id")
   async deleteUser(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { session, user } = await this.admin(request, response);

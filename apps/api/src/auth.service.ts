@@ -28,7 +28,9 @@ export class AuthService implements OnModuleInit {
     }
   }
   private async seed(id: string, email: string, displayName: string, role: Role, password: string) {
-    await this.prisma.user.upsert({ where: { email }, update: {}, create: { id, email, displayName, passwordHash: hashPassword(password), role } });
+    // These credentials are explicitly development-only demo accounts. Keep them aligned
+    // with the configured demo password so a stale local hash cannot lock out the demo admin.
+    await this.prisma.user.upsert({ where: { email }, update: { passwordHash: hashPassword(password), disabled: false, approved: true }, create: { id, email, displayName, passwordHash: hashPassword(password), role, approved: true } });
   }
   private map(
     u: { id: string; email: string; displayName: string; passwordHash: string; role: Role; disabled: boolean; uiLocale: string; theme: string; timezone: string; version: number },
@@ -52,7 +54,20 @@ export class AuthService implements OnModuleInit {
   async authenticate(email: string, password: string) {
     const u = await this.prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
     if (!u || u.disabled || !passwordMatches(password, u.passwordHash)) return null;
+    if (!u.approved) return "pending" as const;
     return this.withGrants(u);
+  }
+  async register(input: { email: string; displayName: string; password: string }) {
+    const email = input.email.trim().toLowerCase();
+    const displayName = input.displayName.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || !displayName || displayName.length > 100 || input.password.length < 8 || input.password.length > 128) return "invalid" as const;
+    try {
+      await this.prisma.user.create({ data: { email, displayName, passwordHash: hashPassword(input.password), role: "staff", approved: false } });
+      return "created" as const;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "P2002") return "duplicate" as const;
+      throw error;
+    }
   }
   async createSession(userId: string): Promise<Session> {
     await this.prisma.session.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });

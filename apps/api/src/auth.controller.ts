@@ -4,8 +4,10 @@ import { AuthService } from "./auth.service.js";
 import { attachSessionTokens, clearAuthCookies, cookieValue, currentSession, requestId, requireCsrf, requireUser } from "./auth.helpers.js";
 import { normalizedError, success } from "./envelopes.js";
 import { verifyJwt } from "./jwt.js";
+import { AuthRateLimiter } from "./auth-rate-limit.js";
 
 type LoginBody = { email?: string; password?: string };
+type RegisterBody = { email?: string; displayName?: string; password?: string };
 type RefreshBody = { refreshToken?: string };
 type PreferencesBody = { uiLocale?: "vi" | "en" | "ja" | "ko"; theme?: "light" | "dark" | "system"; timezone?: string };
 type PasswordBody = { currentPassword?: string; newPassword?: string };
@@ -17,13 +19,39 @@ const me = (user: CurrentUser) => ({
 
 @Controller()
 export class AuthController {
-  constructor(@Inject(AuthService) private readonly auth: AuthService) {}
+  constructor(
+    @Inject(AuthService) private readonly auth: AuthService,
+    @Inject(AuthRateLimiter) private readonly rateLimiter: AuthRateLimiter,
+  ) {}
+
+  private async rateLimit(request: Request, response: Response, scope: "login" | "register", identifier: string) {
+    const waitMs = await this.rateLimiter.consume(scope, request.ip ?? request.socket.remoteAddress ?? "unknown", identifier);
+    if (waitMs !== null) {
+      response.setHeader("Retry-After", String(Math.ceil(waitMs / 1000)));
+      throw normalizedError("AUTH_RATE_LIMITED", "Quá nhiều lần thử. Vui lòng thử lại sau.", requestId(response), 429, [], true);
+    }
+  }
+
+  @Post("auth/register")
+  @HttpCode(201)
+  async register(@Body() body: RegisterBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    await this.rateLimit(request, response, "register", body.email ?? "");
+    if (typeof body.email !== "string" || typeof body.displayName !== "string" || typeof body.password !== "string") {
+      throw normalizedError("VALIDATION_FAILED", "Vui lòng nhập đầy đủ thông tin", requestId(response));
+    }
+    const result = await this.auth.register({ email: body.email, displayName: body.displayName, password: body.password });
+    if (result === "invalid") throw normalizedError("VALIDATION_FAILED", "Email không hợp lệ; tên tối đa 100 ký tự và mật khẩu cần từ 8 ký tự", requestId(response));
+    if (result === "duplicate") throw normalizedError("ACCOUNT_EMAIL_TAKEN", "Email đã được sử dụng", requestId(response), 409);
+    return success({ status: "pending_approval" }, requestId(response));
+  }
 
   @Post("auth/login")
   @HttpCode(200)
-  async login(@Body() body: LoginBody, @Res({ passthrough: true }) response: Response) {
+  async login(@Body() body: LoginBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    await this.rateLimit(request, response, "login", body.email ?? "");
     const user = typeof body.email === "string" && typeof body.password === "string" ? await this.auth.authenticate(body.email, body.password) : null;
     if (!user) throw normalizedError("UNAUTHENTICATED", "Email hoặc mật khẩu không đúng", requestId(response), 401);
+    if (user === "pending") throw normalizedError("ACCOUNT_PENDING_APPROVAL", "Tài khoản đang chờ Admin duyệt", requestId(response), 403);
     const session = await this.auth.createSession(user.id);
     const tokens = attachSessionTokens(response, session);
     return success({ ...me(user), tokenType: tokens.tokenType, expiresIn: tokens.expiresIn, accessToken: tokens.accessToken }, requestId(response));

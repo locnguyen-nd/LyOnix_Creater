@@ -13,22 +13,42 @@ export class GrantsService {
 
   async forUser(userId: string, role: Role): Promise<GrantSet> {
     if (role === "admin") {
-      const channels = await this.prisma.channelConnection.findMany({ select: { id: true } });
-      const teams = await this.prisma.team.findMany({ select: { id: true } });
-      return { teamIds: teams.map((item) => item.id), projectIds: [], channelIds: channels.map((item) => item.id) };
+      const [channels, teams, projects] = await Promise.all([
+        this.prisma.channelConnection.findMany({ select: { id: true } }),
+        this.prisma.team.findMany({ select: { id: true } }),
+        this.prisma.project.findMany({ select: { id: true } }),
+      ]);
+      return {
+        teamIds: teams.map((item) => item.id),
+        projectIds: projects.map((item) => item.id),
+        channelIds: channels.map((item) => item.id),
+      };
     }
-    const [memberships, direct] = await Promise.all([
-      this.prisma.teamMember.findMany({ where: { userId }, include: { team: { include: { channels: true } } } }),
+    const [memberships, direct, directProjects] = await Promise.all([
+      this.prisma.teamMember.findMany({ where: { userId }, include: { team: { include: { channels: true, projects: true } } } }),
       this.prisma.userChannelGrant.findMany({ where: { userId } }),
+      this.prisma.userProjectGrant.findMany({ where: { userId } }),
     ]);
     return {
       teamIds: memberships.map((item) => item.teamId),
-      projectIds: [],
+      projectIds: uniqueIds([
+        ...directProjects.map((item) => item.projectId),
+        ...memberships.flatMap((item) => item.team.projects.map((link) => link.projectId)),
+      ]),
       channelIds: mergeChannelGrants(
         direct.map((item) => item.channelId),
         memberships.flatMap((item) => item.team.channels.map((link) => link.channelId)),
       ),
     };
+  }
+
+  async replaceProjectGrants(projectId: string, teamIds: string[], userIds: string[]) {
+    await this.prisma.$transaction([
+      this.prisma.teamProject.deleteMany({ where: { projectId } }),
+      this.prisma.userProjectGrant.deleteMany({ where: { projectId } }),
+      ...uniqueIds(teamIds).map((teamId) => this.prisma.teamProject.create({ data: { teamId, projectId } })),
+      ...uniqueIds(userIds).map((userId) => this.prisma.userProjectGrant.create({ data: { userId, projectId } })),
+    ]);
   }
 
   async listTeams() {
@@ -53,6 +73,7 @@ export class GrantsService {
         displayName: user.displayName,
         role: user.role,
         disabled: user.disabled,
+        approved: user.approved,
         teamIds,
         directChannelIds: user.channelGrants.map((item) => item.channelId),
         channelIds: mergeChannelGrants(user.channelGrants.map((item) => item.channelId), teamChannels),
@@ -122,6 +143,13 @@ export class GrantsService {
         input.channelIds ?? current?.channelGrants.map((item) => item.channelId) ?? [],
       );
     }
+    return (await this.listUsers()).find((item) => item.id === id)!;
+  }
+
+  async approveUser(id: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) return null;
+    await this.prisma.user.update({ where: { id }, data: { approved: true } });
     return (await this.listUsers()).find((item) => item.id === id)!;
   }
 
