@@ -1,0 +1,124 @@
+/**
+ * VE2E-07: typed client for the real API-backed Studio timeline. Replaces
+ * VE2E-07a's `creatomate-placeholder.ts` (static seam data) and `scaffold.ts`
+ * (localStorage-only persistence) with calls to the actual VE2E-00..05 endpoints.
+ */
+import { api, csrfHeaders } from "../api";
+import type {
+  AudioVersionResponse,
+  CreatomateTemplateSummaryResponse,
+  ElevenLabsVoiceSummaryResponse,
+  MediaAssetVersionSummary,
+  MediaDeliveryIssueResponse,
+  PexelsMediaType,
+  PexelsSearchResponse,
+  RenderJobResponse,
+  SaveTimelineVersionRequest,
+  StudioContextResponse,
+  TemplateSnapshotResponse,
+  TimelineRenderPreviewResponse,
+  TimelineVersionResponse,
+} from "@lyonix/contracts";
+
+/** Short-lived signed browser-preview URL for one project media asset (image/video/audio) - same delivery mechanism Creatomate itself uses, just consumed by the Studio UI directly. */
+export async function issueMediaDeliveryToken(mediaAssetVersionId: string): Promise<MediaDeliveryIssueResponse> {
+  return api<MediaDeliveryIssueResponse>(`/media-assets/${mediaAssetVersionId}/delivery-tokens`, { method: "POST", headers: await csrfHeaders() });
+}
+
+export type AudioGenerationAccepted = { operationId: string; status: "queued" | "processing" | "completed" | "failed" | "unknown"; errorCode?: string; audioVersion?: AudioVersionResponse };
+
+export async function fetchStudioContext(jobId: string): Promise<StudioContextResponse> {
+  return api<StudioContextResponse>(`/jobs/${jobId}/studio/context`);
+}
+
+export async function saveTimelineVersion(projectId: string, input: SaveTimelineVersionRequest): Promise<TimelineVersionResponse> {
+  return api<TimelineVersionResponse>(`/projects/${projectId}/timeline-versions`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function approveTimelineVersion(id: string): Promise<TimelineVersionResponse> {
+  return api<TimelineVersionResponse>(`/timeline-versions/${id}/approve`, { method: "POST", headers: await csrfHeaders() });
+}
+
+export async function previewTimelineVersion(id: string): Promise<TimelineRenderPreviewResponse> {
+  return api<TimelineRenderPreviewResponse>(`/timeline-versions/${id}/preview`);
+}
+
+export async function searchPexels(projectId: string, providerAccountId: string, type: PexelsMediaType, query: string): Promise<PexelsSearchResponse> {
+  const params = new URLSearchParams({ providerAccountId, type, query });
+  return api<PexelsSearchResponse>(`/projects/${projectId}/pexels/search?${params.toString()}`);
+}
+
+export async function importPexels(projectId: string, input: { providerAccountId: string; type: PexelsMediaType; externalId: string; sceneId?: string | null }): Promise<{ asset: MediaAssetVersionSummary }> {
+  return api<{ asset: MediaAssetVersionSummary }>(`/projects/${projectId}/pexels/import`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listProjectMedia(projectId: string): Promise<MediaAssetVersionSummary[]> {
+  return api<MediaAssetVersionSummary[]>(`/projects/${projectId}/media-assets`);
+}
+
+export async function listElevenLabsVoices(providerAccountId: string): Promise<ElevenLabsVoiceSummaryResponse[]> {
+  return api<ElevenLabsVoiceSummaryResponse[]>(`/provider-accounts/${providerAccountId}/elevenlabs/voices`);
+}
+
+export async function generateSceneAudio(
+  sceneDraftVersionId: string,
+  input: { providerAccountId: string; voiceId: string; modelId?: string },
+  idempotencyKey: string,
+): Promise<AudioGenerationAccepted> {
+  const headers = { ...(await csrfHeaders()), "idempotency-key": idempotencyKey };
+  return api<AudioGenerationAccepted>(`/scene-versions/${sceneDraftVersionId}/audio-versions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getAudioGenerationOperation(operationId: string): Promise<AudioGenerationAccepted> {
+  return api<AudioGenerationAccepted>(`/audio-generation-operations/${operationId}`);
+}
+
+export async function listCreatomateTemplates(providerAccountId: string): Promise<CreatomateTemplateSummaryResponse[]> {
+  const params = new URLSearchParams({ providerAccountId });
+  return api<CreatomateTemplateSummaryResponse[]>(`/creatomate/templates?${params.toString()}`);
+}
+
+export async function pinTemplateSnapshot(providerAccountId: string, externalTemplateId: string): Promise<TemplateSnapshotResponse> {
+  return api<TemplateSnapshotResponse>(`/creatomate/template-snapshots`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify({ providerAccountId, externalTemplateId }),
+  });
+}
+
+export async function getTemplateSnapshot(id: string): Promise<TemplateSnapshotResponse> {
+  return api<TemplateSnapshotResponse>(`/creatomate/template-snapshots/${id}`);
+}
+
+export async function submitRenderFromTimeline(
+  projectId: string,
+  timelineVersionId: string,
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+): Promise<RenderJobResponse> {
+  // No client-generated idempotencyKey here on purpose: the server's own requestFingerprint
+  // is already derived from the stable (projectId, templateSnapshotId, providerAccountId,
+  // assignments) tuple. Inventing a fresh key per call (e.g. from Date.now()) would defeat
+  // that dedupe instead of reinforcing it - an accidental duplicate submit of the same
+  // approved timeline must resolve to the existing job, not call Creatomate twice.
+  return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/render-jobs`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getRenderJob(id: string): Promise<RenderJobResponse> {
+  return api<RenderJobResponse>(`/render-jobs/${id}`);
+}

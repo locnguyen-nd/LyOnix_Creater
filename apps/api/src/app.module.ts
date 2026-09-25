@@ -44,6 +44,10 @@ import { AudioVersionsService } from "./audio-versions.service.js";
 import { VideoProductionsController } from "./video-productions.controller.js";
 import { VideoProductionsService } from "./video-productions.service.js";
 import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
+import { StudioBridgeController } from "./studio-bridge.controller.js";
+import { StudioBridgeService } from "./studio-bridge.service.js";
+import { TimelineVersionsController } from "./timeline-versions.controller.js";
+import { TimelineVersionsService } from "./timeline-versions.service.js";
 
 @Module({
   imports: [ScheduleModule.forRoot()],
@@ -69,6 +73,8 @@ import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
     ScriptVersionsController,
     AudioVersionsController,
     VideoProductionsController,
+    StudioBridgeController,
+    TimelineVersionsController,
   ],
   providers: [
     PrismaService,
@@ -94,6 +100,8 @@ import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
     AudioVersionsService,
     VideoProductionsService,
     TiktokSyncSchedulerService,
+    StudioBridgeService,
+    TimelineVersionsService,
   ],
 })
 export class AppModule {}

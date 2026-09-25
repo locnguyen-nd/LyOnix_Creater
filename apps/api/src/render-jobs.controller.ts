@@ -39,6 +39,27 @@ export class RenderJobsController {
     return success(outcome.data, requestId(response));
   }
 
+  /** VE2E-07: submits a render from an approved Studio `TimelineVersion` (see `RenderJobsService.submitFromTimelineVersion`). */
+  @Post("projects/:projectId/timeline-versions/:timelineVersionId/render-jobs")
+  async submitFromTimeline(
+    @Param("projectId") projectId: string,
+    @Param("timelineVersionId") timelineVersionId: string,
+    @Body() body: SubmitBody,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    if (!body.providerAccountId?.trim()) throw normalizedError("VALIDATION_FAILED", "Thiếu providerAccountId để submit render", requestId(response));
+    const outcome = await this.renders.submitFromTimelineVersion(projectId, timelineVersionId, user.id, user.role, {
+      providerAccountId: body.providerAccountId,
+      ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
+      ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+    });
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    return success(outcome.data, requestId(response));
+  }
+
   @Get("render-jobs/:id")
   async get(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user } = await requireUser(request, response, this.auth);

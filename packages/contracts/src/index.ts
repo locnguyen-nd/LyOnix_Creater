@@ -526,3 +526,105 @@ export type VideoProductionResponse = {
   createdAt: string;
   updatedAt: string;
 };
+
+// --- VE2E-07: Professional Studio API-backed TimelineVersion ---
+
+export const timelineVersionStatuses = ["draft", "approved"] as const;
+export type TimelineVersionStatus = (typeof timelineVersionStatuses)[number];
+
+/**
+ * One scene's bindings in a Studio timeline. `mediaAssetVersionId`/`audioVersionId`/
+ * `subtitleVersionId` are opaque cross-references (no Prisma FK - same posture as
+ * `MediaAssetVersion.sceneId`), validated against the timeline's own `projectId` in
+ * `timeline-versions.service.ts`, not by the database. `screenTextOverride` lets Studio
+ * show different on-screen text than the pinned script's `screenText` without creating a
+ * new `ScriptDraftVersion` (a real script edit still goes through `script-versions.service.ts`).
+ */
+export type TimelineSceneBindingInput = {
+  sceneId: string;
+  mediaAssetVersionId?: string | null;
+  audioVersionId?: string | null;
+  subtitleVersionId?: string | null;
+  screenTextOverride?: string | null;
+  annotation?: string | null;
+};
+
+export type TimelineSceneBindingResponse = {
+  sceneId: string;
+  orderIndex: number;
+  mediaAssetVersionId: string | null;
+  audioVersionId: string | null;
+  subtitleVersionId: string | null;
+  screenTextOverride: string | null;
+  annotation: string | null;
+};
+
+/** Template-level modification values not tied to one scene (secondary text/color/font/volume), keyed by the pinned `TemplateSnapshot`'s modification key. */
+export type TimelineOptionValues = Record<string, string>;
+
+export type SaveTimelineVersionRequest = {
+  /** id of the version this save supersedes, or `null` for a project's first timeline version. The server rejects with `VERSION_CONFLICT` if this does not match the project's actual latest version (optimistic concurrency, same pattern as `ScriptDraftVersion.supersedesId`). */
+  supersedesId: string | null;
+  templateSnapshotId?: string | null;
+  scenes: TimelineSceneBindingInput[];
+  optionValues?: TimelineOptionValues;
+};
+
+export type TimelineVersionResponse = {
+  id: string;
+  projectId: string;
+  version: number;
+  status: TimelineVersionStatus;
+  templateSnapshotId: string | null;
+  scenes: TimelineSceneBindingResponse[];
+  optionValues: TimelineOptionValues;
+  supersedesId: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+};
+
+/**
+ * Dry-run preview (spec §5 "Render: build dry-run payload"; §7 "preview badge khi chưa
+ * phải Creatomate render thật") - reports which modification keys the current timeline
+ * would fill and which required ones are still missing, without resolving signed media
+ * URLs or calling Creatomate.
+ */
+export type TimelineRenderPreviewResponse = {
+  ready: boolean;
+  filledModificationKeys: string[];
+  missingRequiredModificationKeys: string[];
+};
+
+export type RenderSubmitFromTimelineRequest = {
+  providerAccountId: string;
+  outputFormat?: "mp4" | "mov" | "gif";
+  idempotencyKey?: string;
+};
+
+// --- VE2E-07: legacy-job -> Project/SourceVersion/ScriptDraftVersion Studio bridge ---
+
+export type StudioSceneContextResponse = {
+  /** The persisted `SceneDraftVersion.id` - required by `POST /scene-versions/:id/audio-versions` (VE2E-03), distinct from the opaque `sceneId` string used for media assignment (VE2E-04). */
+  id: string;
+  sceneId: string;
+  orderIndex: number;
+  narration: string;
+  screenText: string;
+  visualQuery: string;
+  durationHintMs: number;
+};
+
+/**
+ * Bootstraps Studio for a legacy job: idempotently provisions (first call) or looks up
+ * (later calls) the `Project`/`SourceVersion`/`ScriptDraftVersion` bridged 1:1 to this
+ * `ProductionRequest`, so Studio can attach real media/audio/template/timeline state
+ * instead of the client-only localStorage scaffold from VE2E-07a.
+ */
+export type StudioContextResponse = {
+  jobId: string;
+  projectId: string;
+  sourceVersionId: string;
+  scriptDraftVersionId: string;
+  scenes: StudioSceneContextResponse[];
+  latestTimelineVersion: TimelineVersionResponse | null;
+};

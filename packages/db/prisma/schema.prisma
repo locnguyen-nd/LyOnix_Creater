@@ -901,3 +901,63 @@ model SubtitleVersion {
 
   @@unique([audioVersionId, version])
 }
+
+// --- VE2E-07: Studio legacy-job bridge + persisted TimelineVersion ---
+// Both models below are intentionally self-contained (no new `@relation` fields added to
+// the already-large `Project`/`TemplateSnapshot`/`User` model blocks above) to minimize
+// merge risk with other VE2E tasks editing this same file concurrently. Cross-references
+// are plain scalar UUID columns validated in application code only - the same "opaque
+// reference, no FK" posture already used for `MediaAssetVersion.sceneId`.
+
+/**
+ * One-time bridge from a legacy `ProductionRequest` (the only job entry point the current
+ * web UI has - see JobPage/StudioProPage) into the VE2E-00..05 Project/SourceVersion/
+ * ScriptDraftVersion domain, so Studio can attach real media/audio/template/timeline state
+ * instead of the client-only localStorage scaffold from VE2E-07a. Created once per job the
+ * first time its Studio is opened (`studio-bridge.service.ts`) and never resynced afterwards
+ * (documented known-limitation - see handoff).
+ */
+model StudioProjectBridge {
+  productionRequestId String   @id @db.Uuid
+  projectId            String   @unique @db.Uuid
+  sourceVersionId       String   @db.Uuid
+  scriptDraftVersionId  String   @db.Uuid
+  createdAt             DateTime @default(now())
+}
+
+enum TimelineVersionStatus {
+  draft
+  approved
+}
+
+/**
+ * Persisted Studio timeline (VE2E-VIDEO-PRODUCTION.md §3/§7): ordered scene bindings
+ * (asset/audio/subtitle per scene + an optional text override), template-level option
+ * values and a pinned `templateSnapshotId`. An approved version is the only valid input to
+ * a render submission (`RenderJobsService.submitFromTimelineVersion`). `scenes`/
+ * `optionValues` are JSON (not per-field columns), same posture as `AudioVersion.alignment`/
+ * `SubtitleVersion.segments` above - always read/written as one unit, shape owned by
+ * `@lyonix/contracts` `TimelineSceneBindingResponse`/`TimelineOptionValues`, never queried
+ * by an inner field. `supersedesId` chains versions for optimistic-concurrency saves (a save
+ * is rejected with `VERSION_CONFLICT` if it does not supersede the project's actual latest
+ * version), the same pattern already used by `ScriptDraftVersion`/`AudioVersion` above.
+ */
+model TimelineVersion {
+  id                 String                @id @default(uuid()) @db.Uuid
+  projectId          String                @db.Uuid
+  version            Int                   @default(1)
+  status             TimelineVersionStatus @default(draft)
+  templateSnapshotId String?               @db.Uuid
+  // Ordered TimelineSceneBindingResponse[] ({sceneId, orderIndex, mediaAssetVersionId?, audioVersionId?, subtitleVersionId?, screenTextOverride?, annotation?}).
+  scenes             Json
+  // Record<modificationKey, string> - template-level option values not tied to one scene (secondary text/color/font/volume).
+  optionValues       Json                  @default("{}")
+  supersedesId       String?               @db.Uuid
+  createdByUserId    String                @db.Uuid
+  createdAt          DateTime              @default(now())
+  approvedAt         DateTime?
+  approvedByUserId   String?               @db.Uuid
+
+  @@unique([projectId, version])
+  @@index([projectId, status])
+}

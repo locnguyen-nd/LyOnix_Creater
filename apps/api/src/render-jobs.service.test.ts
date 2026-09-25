@@ -30,18 +30,29 @@ describe("RenderJobsService", () => {
   let mediaDelivery: Partial<MediaDeliveryService>;
   let service: RenderJobsService;
   let renderJobRows: Map<string, any>;
+  let timelineRows: Map<string, any>;
   let previousBaseUrl: string | undefined;
 
   beforeEach(() => {
     previousBaseUrl = process.env.PUBLIC_BASE_URL;
     process.env.PUBLIC_BASE_URL = "https://api.lyonix.local";
     renderJobRows = new Map();
+    timelineRows = new Map();
     let seq = 0;
     prisma = {
       project: { findUnique: async ({ where }: any) => (where.id === projectId ? { id: projectId } : null) },
       providerAccount: { findFirst: async () => ({ id: providerAccountId, encryptedSecret: "encrypted", deletedAt: null }) },
       templateSnapshot: { findUnique: async ({ where }: any) => (where.id === templateSnapshotId ? snapshotRow : null) },
-      mediaAssetVersion: { findFirst: async ({ where }: any) => (where.id === "asset-1" ? { id: "asset-1", projectId, deletedAt: null } : null) },
+      mediaAssetVersion: {
+        findFirst: async ({ where }: any) => (where.id === "asset-1" ? { id: "asset-1", projectId, deletedAt: null } : null),
+        findMany: async ({ where }: any) =>
+          [
+            { id: "asset-1", projectId, kind: "video" },
+            { id: "asset-audio", projectId, kind: "audio" },
+          ].filter((r) => where.id.in.includes(r.id) && r.projectId === where.projectId),
+      },
+      audioVersion: { findMany: async ({ where }: any) => [{ id: "audio-1", mediaAssetVersionId: "asset-audio" }].filter((r) => where.id.in.includes(r.id)) },
+      timelineVersion: { findUnique: vi.fn(async ({ where }: any) => timelineRows.get(where.id) ?? null) },
       renderJob: {
         create: vi.fn(async ({ data }: any) => {
           const existing = [...renderJobRows.values()].find((r) => r.requestFingerprint === data.requestFingerprint);
@@ -304,6 +315,46 @@ describe("RenderJobsService", () => {
       const result = await service.reconcilePending();
       expect(result.reconciled).toBe(1);
       expect(renderJobRows.get(a.data.id).status).toBe("completed");
+    });
+  });
+
+  describe("submitFromTimelineVersion (VE2E-07)", () => {
+    const timelineVersionId = "timeline-1";
+
+    it("resolves an approved timeline's scene bindings into assignments and submits via the same submit() path", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null }],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected ok");
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.modifications).toEqual({ "Text-1.text": "Xin chào", "Video-1.source": "https://api.lyonix.local/api/v1/media-delivery/tok" });
+    });
+
+    it("rejects submitting a draft (not yet approved) timeline", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [], optionValues: {} });
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
+    });
+
+    it("rejects when the approved timeline is missing a required modification slot", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: null, audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null }], optionValues: {} });
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("returns NOT_FOUND for a timeline version belonging to a different project", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId: "other-project", status: "approved", templateSnapshotId, scenes: [], optionValues: {} });
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
   });
 });

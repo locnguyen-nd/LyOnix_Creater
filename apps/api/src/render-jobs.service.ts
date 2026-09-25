@@ -13,12 +13,21 @@ import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
 import { ProviderError, getCreatomateRender, normalizeCreatomateStatus, submitCreatomateRender } from "@lyonix/providers";
-import type { ErrorCode, RenderAssignmentInput, RenderJobResponse, RenderSubmitRequest, TemplateModificationSlotResponse } from "@lyonix/contracts";
+import type {
+  ErrorCode,
+  RenderAssignmentInput,
+  RenderJobResponse,
+  RenderSubmitFromTimelineRequest,
+  RenderSubmitRequest,
+  TemplateModificationSlotResponse,
+  TimelineSceneBindingResponse,
+} from "@lyonix/contracts";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
+import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping } from "./timeline-render-mapping.js";
 
 export type RenderOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -239,6 +248,44 @@ export class RenderJobsService {
       return { ok: false, ...mapped };
     }
     return { ok: true, data: toJobResponse(job) };
+  }
+
+  /**
+   * VE2E-07: submits a render from an approved Studio `TimelineVersion` instead of a raw
+   * client-supplied assignments array. Resolves the timeline's ordered scene/audio
+   * bindings into the same whitelisted `RenderAssignmentInput[]` shape `submit()` already
+   * validates and delegates to it unchanged - no duplicated Creatomate-call/idempotency/
+   * webhook logic, this is purely an alternate input-building path.
+   */
+  async submitFromTimelineVersion(
+    projectId: string,
+    timelineVersionId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: RenderSubmitFromTimelineRequest,
+  ): Promise<RenderOutcome<RenderJobResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
+    if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
+    if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
+    if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template" };
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
+    if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
+    const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
+    const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
+    const built = buildRenderAssignmentsFromTimeline(slots, resolved, optionValues);
+    if (built.missingRequiredModificationKeys.length > 0) {
+      return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
+    }
+    return this.submit(projectId, userId, role, {
+      templateSnapshotId: timeline.templateSnapshotId,
+      providerAccountId: input.providerAccountId,
+      assignments: built.assignments,
+      ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+    });
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {
