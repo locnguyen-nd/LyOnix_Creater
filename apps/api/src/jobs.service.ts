@@ -27,6 +27,26 @@ import { handoffFingerprint, writeHandoffWorkspace } from "./handoff-workspace.j
 
 export type JobEvent = { id: string; at: string; kind: string; message: string };
 
+/**
+ * VE2E-18: the job's real production step, distinct from the legacy `currentStep`
+ * (which only ever describes the script-writing sub-flow and keeps its old meaning -
+ * `JobStepper` and other legacy UI still read it unchanged). A job with no
+ * `StudioProjectBridge` yet cannot have progressed past scripting, so `pipelineStep`
+ * mirrors legacy `currentStep` for it; once bridged, it reflects real Studio/render
+ * progress. "done" here means an actually rendered, playable video - never just an
+ * approved script (see `pipeline/state.json` CR-JOBS-PIPELINE-STATUS-2026-09-26).
+ */
+export type PipelineStep = "script" | "produce" | "review" | "media" | "voice" | "timeline" | "render" | "done";
+
+export type JobRenderSummary = {
+  id: string;
+  status: string;
+  resultUrl: string | null;
+  renderDurationMs: number | null;
+  costAmount: string | null;
+  costCurrency: string | null;
+};
+
 export type JobRecord = {
   id: string;
   code: string;
@@ -49,6 +69,10 @@ export type JobRecord = {
   captionPlan: CaptionPlanV1 | null;
   handoff: { status: string; relativePath: string; fingerprint: string; sceneCount: number } | null;
   script: ScriptDraft;
+  /** Only populated by `list()`/`getForDisplay()` - internal `get()` callers never need it. */
+  pipelineStep?: PipelineStep;
+  studioProjectId?: string | null;
+  render?: JobRenderSummary | null;
 };
 
 type StoredMeta = {
@@ -120,7 +144,16 @@ export class JobsService {
       },
       orderBy: { updatedAt: "desc" },
     });
-    return rows.map((row) => this.toJob(row)).filter((job) => canReviewJob(role, grants, { ownerUserId: job.createdByUserId, channelId: job.channelId }, userId));
+    const jobs = rows.map((row) => this.toJob(row)).filter((job) => canReviewJob(role, grants, { ownerUserId: job.createdByUserId, channelId: job.channelId }, userId));
+    return this.attachPipelineState(jobs);
+  }
+
+  /** VE2E-18: `GET /jobs/:id` display path - internal `get()` callers (approve/generate/...) don't need pipeline state. */
+  async getForDisplay(id: string, userId: string, role: "admin" | "staff") {
+    const job = await this.get(id, userId, role);
+    if (!job) return null;
+    const [withState] = await this.attachPipelineState([job]);
+    return withState;
   }
 
   async get(id: string, userId: string, role: "admin" | "staff") {
@@ -501,6 +534,108 @@ export class JobsService {
       providerConfigVersion: patch.providerConfigVersion ?? incoming?.providerConfigVersion ?? job.providerConfigVersion ?? 1,
       events: [...(patch.events ?? []), ...prevEvents].slice(0, 40),
     };
+  }
+
+  /**
+   * VE2E-18: batched real-pipeline-step resolution (CR-JOBS-PIPELINE-STATUS-2026-09-26).
+   * Read-only aggregation of existing tables, no new provider calls, no schema change.
+   * A job with no `StudioProjectBridge` (Studio never opened yet) keeps the legacy
+   * `currentStep` value - it genuinely cannot have progressed past scripting. A bridged
+   * job's step is derived from its project's latest `RenderJob`/`TimelineVersion`, falling
+   * back to per-scene media/voice assignment only when neither exists yet (still actively
+   * being worked on the Studio's media/voice tabs).
+   */
+  private async attachPipelineState(jobs: JobRecord[]): Promise<JobRecord[]> {
+    if (jobs.length === 0) return jobs;
+    const bridges = await this.prisma.studioProjectBridge.findMany({ where: { productionRequestId: { in: jobs.map((job) => job.id) } } });
+    if (bridges.length === 0) return jobs.map((job) => ({ ...job, pipelineStep: job.currentStep as PipelineStep, studioProjectId: null, render: null }));
+
+    const bridgeByJobId = new Map(bridges.map((bridge) => [bridge.productionRequestId, bridge]));
+    const projectIds = bridges.map((bridge) => bridge.projectId);
+
+    const [renderRows, timelineRows] = await Promise.all([
+      this.prisma.renderJob.findMany({
+        where: { projectId: { in: projectIds } },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, projectId: true, status: true, resultUrl: true, renderDurationMs: true, costAmount: true, costCurrency: true },
+      }),
+      this.prisma.timelineVersion.findMany({ where: { projectId: { in: projectIds } }, select: { projectId: true } }),
+    ]);
+    const latestRenderByProject = new Map<string, (typeof renderRows)[number]>();
+    for (const row of renderRows) if (!latestRenderByProject.has(row.projectId)) latestRenderByProject.set(row.projectId, row);
+    const hasTimelineByProject = new Set(timelineRows.map((row) => row.projectId));
+
+    // Finer media/voice granularity only matters for a job with neither a render nor a
+    // saved timeline yet - i.e. still actively being worked on inside Studio's tabs.
+    const needsSceneCheck = bridges.filter((bridge) => !latestRenderByProject.has(bridge.projectId) && !hasTimelineByProject.has(bridge.projectId));
+    const sceneStateByProject = new Map<string, { hasMedia: boolean; hasVoice: boolean }>();
+    if (needsSceneCheck.length > 0) {
+      const scenes = await this.prisma.sceneDraftVersion.findMany({
+        where: { scriptDraftVersionId: { in: needsSceneCheck.map((bridge) => bridge.scriptDraftVersionId) } },
+        select: { id: true, sceneId: true, scriptDraftVersionId: true },
+      });
+      const scenesByScriptDraft = new Map<string, typeof scenes>();
+      for (const scene of scenes) {
+        const list = scenesByScriptDraft.get(scene.scriptDraftVersionId) ?? [];
+        list.push(scene);
+        scenesByScriptDraft.set(scene.scriptDraftVersionId, list);
+      }
+      const sceneDraftIds = scenes.map((scene) => scene.id);
+      const [audioRows, mediaRows] = await Promise.all([
+        sceneDraftIds.length
+          ? this.prisma.audioVersion.findMany({ where: { sceneDraftVersionId: { in: sceneDraftIds }, status: "current" }, select: { sceneDraftVersionId: true } })
+          : Promise.resolve([] as Array<{ sceneDraftVersionId: string }>),
+        this.prisma.mediaAssetVersion.findMany({
+          where: { projectId: { in: needsSceneCheck.map((bridge) => bridge.projectId) }, sceneId: { not: null }, deletedAt: null },
+          select: { projectId: true, sceneId: true },
+        }),
+      ]);
+      const audioSceneDraftIds = new Set(audioRows.map((row) => row.sceneDraftVersionId));
+      const mediaScenesByProject = new Map<string, Set<string>>();
+      for (const row of mediaRows) {
+        if (!row.sceneId) continue;
+        const set = mediaScenesByProject.get(row.projectId) ?? new Set<string>();
+        set.add(row.sceneId);
+        mediaScenesByProject.set(row.projectId, set);
+      }
+      for (const bridge of needsSceneCheck) {
+        const sceneRows = scenesByScriptDraft.get(bridge.scriptDraftVersionId) ?? [];
+        const mediaScenes = mediaScenesByProject.get(bridge.projectId) ?? new Set<string>();
+        sceneStateByProject.set(bridge.projectId, {
+          hasMedia: sceneRows.some((scene) => mediaScenes.has(scene.sceneId)),
+          hasVoice: sceneRows.some((scene) => audioSceneDraftIds.has(scene.id)),
+        });
+      }
+    }
+
+    return jobs.map((job) => {
+      const bridge = bridgeByJobId.get(job.id);
+      if (!bridge) return { ...job, pipelineStep: job.currentStep as PipelineStep, studioProjectId: null, render: null };
+      const render = latestRenderByProject.get(bridge.projectId) ?? null;
+      let step: PipelineStep;
+      if (render && render.status === "completed" && render.resultUrl) step = "done";
+      else if (render) step = "render";
+      else if (hasTimelineByProject.has(bridge.projectId)) step = "timeline";
+      else {
+        const sceneState = sceneStateByProject.get(bridge.projectId);
+        step = !sceneState?.hasMedia ? "media" : !sceneState.hasVoice ? "voice" : "timeline";
+      }
+      return {
+        ...job,
+        pipelineStep: step,
+        studioProjectId: bridge.projectId,
+        render: render
+          ? {
+              id: render.id,
+              status: render.status,
+              resultUrl: render.resultUrl,
+              renderDurationMs: render.renderDurationMs,
+              costAmount: render.costAmount ? render.costAmount.toString() : null,
+              costCurrency: render.costCurrency,
+            }
+          : null,
+      };
+    });
   }
 
   private toJob(row: {

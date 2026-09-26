@@ -6,18 +6,47 @@ import { DataTable } from "../components/DataTable";
 import { Button, Select, TextInput } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { PublicChannel } from "../channel-api";
-import type { ApiJob } from "../jobs-api";
+import { isJobDone, routeForJob, type ApiJob } from "../jobs-api";
 
 const tabs = ["all", "running", "review", "blocked", "done", "error"] as const;
 const RUNNING_STATUSES = new Set(["accepted", "validating", "transcribing", "scripting", "producing", "editing", "rendering_vrew", "verifying"]);
 const BLOCKED_STATUSES = new Set(["blocked_provider", "needs_attention", "failed"]);
-const DONE_STATUSES = new Set(["completed", "handoff_workspace_ready"]);
+// VE2E-18: "in progress" now spans Studio's own steps too (CR-JOBS-PIPELINE-STATUS-2026-09-26) -
+// a bridged job sitting in media/voice/timeline/render is still running, not merely "scripting".
+const RUNNING_PIPELINE_STEPS = new Set(["media", "voice", "timeline", "render"]);
 
-function tone(status: string) {
-  if (status === "completed" || status === "handoff_workspace_ready") return "ok" as const;
-  if (status === "failed" || status === "cancelled") return "danger" as const;
-  if (status === "awaiting_staff_ack") return "warn" as const;
+/** VE2E-18: "done" is a real rendered video (`pipelineStep === "done"`), never just an approved script. */
+function tone(job: ApiJob) {
+  if (isJobDone(job)) return "ok" as const;
+  if (job.status === "failed" || job.status === "cancelled") return "danger" as const;
+  if (job.render?.status === "failed") return "danger" as const;
+  if (job.status === "awaiting_staff_ack") return "warn" as const;
   return "neutral" as const;
+}
+
+function pipelineLabel(job: ApiJob, t: (key: string) => string) {
+  switch (job.pipelineStep) {
+    case "media": return t("jobs.pipelineStepMedia");
+    case "voice": return t("jobs.pipelineStepVoice");
+    case "timeline": return t("jobs.pipelineStepTimeline");
+    case "render": return t("jobs.pipelineStepRender");
+    case "done": return t("jobs.pipelineStepDone");
+    case "script": return t("jobs.steps.script");
+    case "produce": return t("jobs.steps.produce");
+    case "review": return t("jobs.steps.review");
+    default: return job.status;
+  }
+}
+
+function formatDuration(ms: number | null | undefined) {
+  if (!ms) return "—";
+  const totalSeconds = Math.round(ms / 1000);
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+function formatCost(job: ApiJob) {
+  if (!job.render?.costAmount) return "—";
+  return job.render.costCurrency ? `${job.render.costAmount} ${job.render.costCurrency}` : job.render.costAmount;
 }
 
 export function JobsPage() {
@@ -43,9 +72,12 @@ export function JobsPage() {
     if (channelId !== "all" && job.channelId !== channelId) return false;
     if (q && !`${job.code} ${job.topic}`.toLowerCase().includes(q.toLowerCase())) return false;
     if (tab === "review") return job.status === "awaiting_staff_ack";
-    if (tab === "running") return job.status === "scripting" || job.status === "accepted" || job.status === "producing";
-    if (tab === "done") return job.status === "handoff_workspace_ready" || job.status === "completed";
-    if (tab === "error") return job.status === "failed" || Boolean(job.lastNotice?.includes("thất bại"));
+    if (tab === "running") {
+      if (job.pipelineStep) return RUNNING_PIPELINE_STEPS.has(job.pipelineStep);
+      return job.status === "scripting" || job.status === "accepted" || job.status === "producing";
+    }
+    if (tab === "done") return isJobDone(job);
+    if (tab === "error") return job.status === "failed" || job.render?.status === "failed" || Boolean(job.lastNotice?.includes("thất bại"));
     return true;
   }), [jobs, q, tab, channelId]);
 
@@ -101,13 +133,15 @@ export function JobsPage() {
           <DataTable
             rows={rows}
             rowKey={(row) => row.id}
-            onRowClick={(row) => navigate(`/jobs/${row.id}/script`)}
+            onRowClick={(row) => navigate(routeForJob(row))}
             empty={<EmptyState title={t("common.empty")} />}
             columns={[
               { key: "code", header: t("jobs.code"), render: (row) => row.code },
               { key: "topic", header: t("jobs.topic"), render: (row) => row.topic },
               { key: "channel", header: t("jobs.channel"), render: (row) => channels.find((item) => item.id === row.channelId)?.name ?? row.channelId },
-              { key: "status", header: t("jobs.status"), render: (row) => <StatusPill tone={tone(row.status)}>{row.status}</StatusPill> },
+              { key: "status", header: t("jobs.status"), render: (row) => <StatusPill tone={tone(row)}>{pipelineLabel(row, t)}</StatusPill> },
+              { key: "duration", header: t("jobs.duration"), render: (row) => (isJobDone(row) ? formatDuration(row.render?.renderDurationMs) : "—") },
+              { key: "cost", header: t("jobs.cost"), render: (row) => (isJobDone(row) ? formatCost(row) : "—") },
               { key: "model", header: t("providers.model"), render: (row) => row.model },
               {
                 key: "delete",
@@ -142,9 +176,9 @@ export function JobsPage() {
                 <span className="text-[14px] font-medium">{channel.name}</span>
                 <StatusPill tone="neutral">{t("jobsByChannel.jobsCount", { count: channelJobs.length })}</StatusPill>
                 <div className="flex-1" />
-                <StatusPill tone="ok">{t("jobsByChannel.statusDone")}: {channelJobs.filter((job) => DONE_STATUSES.has(job.status)).length}</StatusPill>
-                <StatusPill tone="warn">{t("jobsByChannel.statusRunning")}: {channelJobs.filter((job) => RUNNING_STATUSES.has(job.status)).length}</StatusPill>
-                <StatusPill tone="danger">{t("jobsByChannel.statusBlocked")}: {channelJobs.filter((job) => BLOCKED_STATUSES.has(job.status)).length}</StatusPill>
+                <StatusPill tone="ok">{t("jobsByChannel.statusDone")}: {channelJobs.filter((job) => isJobDone(job)).length}</StatusPill>
+                <StatusPill tone="warn">{t("jobsByChannel.statusRunning")}: {channelJobs.filter((job) => (job.pipelineStep ? RUNNING_PIPELINE_STEPS.has(job.pipelineStep) : RUNNING_STATUSES.has(job.status))).length}</StatusPill>
+                <StatusPill tone="danger">{t("jobsByChannel.statusBlocked")}: {channelJobs.filter((job) => BLOCKED_STATUSES.has(job.status) || job.render?.status === "failed").length}</StatusPill>
               </div>
               <div className="flex gap-3 overflow-x-auto pb-1">
                 {channelJobs.length === 0 ? (
@@ -154,13 +188,13 @@ export function JobsPage() {
                   <button
                     key={job.id}
                     type="button"
-                    onClick={() => navigate(`/jobs/${job.id}/script`)}
+                    onClick={() => navigate(routeForJob(job))}
                     className="w-[150px] flex-shrink-0 overflow-hidden rounded-[6px] border border-lyx-border text-left"
                   >
                     <div className="relative flex items-center justify-center bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
                       <span className="text-[10px] text-lyx-fg-subtle">9:16</span>
                       <span className="absolute left-1.5 top-1.5">
-                        <StatusPill tone={tone(job.status)}>{job.status}</StatusPill>
+                        <StatusPill tone={tone(job)}>{pipelineLabel(job, t)}</StatusPill>
                       </span>
                     </div>
                     <div className="p-2">
