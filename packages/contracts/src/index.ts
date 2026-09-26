@@ -544,6 +544,26 @@ export type VideoProductionResponse = {
   updatedAt: string;
 };
 
+/**
+ * VE2E-22: `GET /video-productions` — every Auto submit provisions its own brand-new
+ * `Project` (see `VideoProductionsService.setupAutoProfile`), so a run is never one of
+ * several sharing a project; without this list, a run submitted from `JobNewPage` and
+ * then navigated away from (its id only ever appears once, in that submit response /
+ * URL) had no way to be found again anywhere in the UI or API.
+ */
+export type VideoProductionListItemResponse = {
+  id: string;
+  projectId: string;
+  status: WorkflowRunStatus;
+  sourceVersionId: string | null;
+  resultUrl: string | null;
+  costAmount: string | null;
+  renderDurationMs: number | null;
+  lastError: { code: string; message: string; stepKey?: string } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 // --- VE2E-07: Professional Studio API-backed TimelineVersion ---
 
 export const timelineVersionStatuses = ["draft", "approved"] as const;

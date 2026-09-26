@@ -16,7 +16,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun } from "@lyonix/db";
 import { canAccessProject, canWriteProjectResource } from "@lyonix/domain";
-import type { ErrorCode, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type { ErrorCode, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -180,6 +180,56 @@ export class VideoProductionsService {
       throw error;
     }
     return { ok: true, data: { id: run.id, status: run.status, pollUrl: `/video-productions/${run.id}`, eventsUrl: `/video-productions/${run.id}/events` } };
+  }
+
+  /**
+   * VE2E-22: every run created by `submit()` belongs to a `Project` that
+   * `setupAutoProfile()` provisioned solely for that one run — there is no reuse of an
+   * existing project across separate Auto submits from `JobNewPage`. Filtering strictly
+   * by a single `projectId` would therefore only ever return the one run that project
+   * was created for, which does not solve "let the operator find a run again after
+   * navigating away". `projectId` stays supported (useful for a caller that already
+   * knows which project it wants, e.g. a future per-channel view), but omitting it
+   * returns every Auto run the caller themselves created, across all of their
+   * self-provisioned projects — this is the actual fix for the reported gap.
+   */
+  async list(userId: string, role: "admin" | "staff", projectId?: string): Promise<VideoProductionOutcome<VideoProductionListItemResponse[]>> {
+    if (projectId) {
+      if (!(await this.assertReadAccess(projectId, userId, role))) return notFoundProject;
+    }
+    const runs = await this.prisma.workflowRun.findMany({
+      where: { mode: "auto", ...(projectId ? { projectId } : { createdByUserId: userId }) },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, projectId: true, status: true, sourceVersionId: true, lastError: true, createdAt: true, updatedAt: true },
+    });
+    if (runs.length === 0) return { ok: true, data: [] };
+    const renderRows = await this.prisma.renderJob.findMany({
+      where: { workflowRunId: { in: runs.map((run) => run.id) } },
+      orderBy: { createdAt: "desc" },
+      select: { workflowRunId: true, resultUrl: true, costAmount: true, renderDurationMs: true },
+    });
+    const latestRenderByRun = new Map<string, (typeof renderRows)[number]>();
+    for (const row of renderRows) {
+      if (row.workflowRunId && !latestRenderByRun.has(row.workflowRunId)) latestRenderByRun.set(row.workflowRunId, row);
+    }
+    return {
+      ok: true,
+      data: runs.map((run) => {
+        const render = latestRenderByRun.get(run.id) ?? null;
+        return {
+          id: run.id,
+          projectId: run.projectId,
+          status: run.status,
+          sourceVersionId: run.sourceVersionId,
+          resultUrl: render?.resultUrl ?? null,
+          costAmount: render?.costAmount ? render.costAmount.toString() : null,
+          renderDurationMs: render?.renderDurationMs ?? null,
+          lastError: (run.lastError as VideoProductionListItemResponse["lastError"]) ?? null,
+          createdAt: run.createdAt.toISOString(),
+          updatedAt: run.updatedAt.toISOString(),
+        };
+      }),
+    };
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<VideoProductionResponse>> {

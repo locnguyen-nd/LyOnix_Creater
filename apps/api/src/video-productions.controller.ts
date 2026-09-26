@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Req, Res } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import type { VideoProductionSubmitRequest } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
@@ -64,6 +64,15 @@ export class VideoProductionsController {
     const outcome = await this.productions.submit(user.id, user.role, body as VideoProductionSubmitRequest);
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
     response.status(202);
+    return success(outcome.data, requestId(response));
+  }
+
+  /** VE2E-22: `projectId` is optional — see `VideoProductionsService.list()` for why omitting it (list everything the caller created) is the actual fix, not just a convenience default. */
+  @Get("video-productions")
+  async list(@Query("projectId") projectId: string | undefined, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user } = await requireUser(request, response, this.auth);
+    const outcome = await this.productions.list(user.id, user.role, projectId?.trim() || undefined);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
     return success(outcome.data, requestId(response));
   }
 
