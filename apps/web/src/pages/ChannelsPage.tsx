@@ -8,6 +8,13 @@ import { Button, Field, PasswordInput, Select, TextInput } from "../components/u
 import { API_ORIGIN, api, ApiError, csrfHeaders } from "../api";
 import { PERIODS, METRIC_COLORS, channelHandleLabel, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
 import { useMe } from "../session";
+import type { ChannelVideoResponse } from "@lyonix/contracts";
+
+function formatVideoDuration(ms: number | null) {
+  if (!ms) return "—";
+  const totalSeconds = Math.round(ms / 1000);
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
 
 const LIST_PERIOD: PeriodKey = "7d";
 
@@ -173,6 +180,7 @@ export function ChannelDetailPage() {
   const [period, setPeriod] = useState<PeriodKey>("7d");
   const [metric, setMetric] = useState<"followers" | "likes" | "views" | "comments" | "shares" | "video_count">("followers");
   const [insights, setInsights] = useState<ChannelInsights | null>(null);
+  const [videos, setVideos] = useState<ChannelVideoResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<"sync" | "disable" | null>(null);
@@ -181,6 +189,11 @@ export function ChannelDetailPage() {
     setInsights(await api<ChannelInsights>(`/channels/${id}/insights?period=${period}`));
   };
   useEffect(() => { void load().catch((err) => setError(err instanceof ApiError ? err.message : t("common.error"))); }, [id, period]);
+  // VE2E-19: per-channel finished-video library — independent of the insights period filter above.
+  useEffect(() => {
+    if (!id) return;
+    void api<ChannelVideoResponse[]>(`/channels/${id}/videos`).then(setVideos).catch(() => undefined);
+  }, [id]);
   if (!insights && error) return <Banner variant="danger">{error}</Banner>;
   if (!insights) return <Banner variant="info">{t("common.loading")}</Banner>;
   const channel = insights.channel;
@@ -300,6 +313,39 @@ export function ChannelDetailPage() {
         <TrendChart series={chartSeries} emphasisId={metric} label={t("home.chart")} />
       </div>
       <Banner variant="info">{channel.authType === "oauth2" ? t("channels.metricsHint") : t("channels.secretHint")}</Banner>
+
+      <div className="mt-4">
+        <p className="mb-3 text-[13px] font-bold">{t("channels.videoLibraryTitle")}</p>
+        {videos.length === 0 ? (
+          <EmptyState title={t("channels.videoLibraryEmpty")} />
+        ) : (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {videos.map((video) => (
+              <a
+                key={video.renderJobId}
+                href={video.resultUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="overflow-hidden rounded-[6px] border border-lyx-border text-left"
+              >
+                <div className="relative flex items-center justify-center bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
+                  {video.thumbnailUrl ? (
+                    <img src={video.thumbnailUrl} alt="" className="h-full w-full object-cover" />
+                  ) : (
+                    <span className="text-[10px] text-lyx-fg-subtle">9:16</span>
+                  )}
+                  <span className="absolute bottom-1.5 right-1.5 rounded-[4px] bg-lyx-bg/80 px-1.5 py-0.5 text-[10px] font-medium">
+                    {formatVideoDuration(video.renderDurationMs)}
+                  </span>
+                </div>
+                <div className="p-2">
+                  <div className="line-clamp-2 text-[12px]">{video.caption}</div>
+                </div>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
     </>
   );
 }

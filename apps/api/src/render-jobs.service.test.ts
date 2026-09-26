@@ -246,6 +246,19 @@ describe("RenderJobsService", () => {
       expect(updated.renderDurationMs).toBe(3500);
     });
 
+    it("captures the Creatomate snapshot_url for the finished-video library thumbnail (VE2E-19)", async () => {
+      const job = await submitOne();
+      const row = [...renderJobRows.values()].find((r) => r.id === job.id)!;
+      await service.handleWebhook(row.webhookToken, {
+        id: "rnd_1",
+        status: "succeeded",
+        url: "https://cdn.creatomate.com/rnd_1.mp4",
+        snapshot_url: "https://cdn.creatomate.com/rnd_1.jpg",
+      });
+      const updated = renderJobRows.get(job.id);
+      expect(updated.snapshotUrl).toBe("https://cdn.creatomate.com/rnd_1.jpg");
+    });
+
     it("does not mark a render completed without a result URL", async () => {
       const job = await submitOne();
       const row = renderJobRows.get(job.id)!;
