@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@lyonix/db";
 import { VideoProductionsService } from "./video-productions.service.js";
+import type { AutomationProfilesService } from "./automation-profiles.service.js";
 import type { SourcesService } from "./sources.service.js";
 
 const projectId = "project-1";
@@ -29,13 +30,23 @@ describe("VideoProductionsService", () => {
   let prisma: any;
   let grants: any;
   let sources: Partial<SourcesService>;
+  let automationProfiles: Partial<AutomationProfilesService>;
   let service: VideoProductionsService;
   let workflowRuns: any[];
+  let createdProjects: any[];
 
   beforeEach(() => {
     workflowRuns = [];
+    createdProjects = [];
     prisma = {
-      project: { findUnique: async ({ where }: any) => (where.id === projectId ? { id: projectId } : null) },
+      project: {
+        findUnique: async ({ where }: any) => (where.id === projectId ? { id: projectId } : null),
+        create: vi.fn(async ({ data }: any) => {
+          const row = { id: `project-${createdProjects.length + 1}`, ...data };
+          createdProjects.push(row);
+          return row;
+        }),
+      },
       automationProfileVersion: { findUnique: async ({ where }: any) => (where.id === automationProfileId ? completeProfile() : null) },
       sourceVersion: { findUnique: async ({ where }: any) => (where.id === sourceId ? { id: sourceId, projectId } : null) },
       scriptDraftVersion: { findFirst: async () => null },
@@ -55,9 +66,10 @@ describe("VideoProductionsService", () => {
         }),
       },
     };
-    grants = { forUser: vi.fn(async () => ({ projectIds: [projectId] })) };
+    grants = { forUser: vi.fn(async () => ({ projectIds: [projectId] })), replaceProjectGrants: vi.fn(async () => undefined) };
     sources = { create: vi.fn(async () => ({ id: "source-new", projectId, type: "topic" }) as any) };
-    service = new VideoProductionsService(prisma, grants, sources as SourcesService);
+    automationProfiles = { create: vi.fn(async () => completeProfile() as any) };
+    service = new VideoProductionsService(prisma, grants, sources as SourcesService, automationProfiles as AutomationProfilesService);
   });
 
   describe("submit", () => {
@@ -146,6 +158,54 @@ describe("VideoProductionsService", () => {
       ];
       const outcome = await service.listEvents(submitted.data.id, userId, "staff");
       expect(outcome).toMatchObject({ ok: true, data: [{ stepKey: "generate_script", status: "succeeded" }] });
+    });
+  });
+
+  // VE2E-08: one-click Auto needs a Project + AutomationProfileVersion provisioned before
+  // submit() will accept a run - see the doc comment on setupAutoProfile() for why this
+  // can't just be a plain POST /projects call (admin-only).
+  describe("setupAutoProfile", () => {
+    const validInput = {
+      name: "Messi Auto",
+      contentAccountId: "content-acc",
+      voiceAccountId: "voice-acc",
+      voiceId: "voice-1",
+      mediaAccountId: "media-acc",
+      renderAccountId: "render-acc",
+      templateSnapshotId: "snap-1",
+    };
+
+    it("provisions a project (self-granted, not admin-gated) and a matching automation profile", async () => {
+      const outcome = await service.setupAutoProfile(userId, "staff", validInput);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(createdProjects).toHaveLength(1);
+      expect(outcome.data.projectId).toBe(createdProjects[0].id);
+      expect(grants.replaceProjectGrants).toHaveBeenCalledWith(createdProjects[0].id, [], [userId]);
+      expect(automationProfiles.create).toHaveBeenCalledWith(
+        userId,
+        "staff",
+        expect.objectContaining({
+          projectId: createdProjects[0].id,
+          contentConfig: { providerAccountId: "content-acc" },
+          voiceConfig: { providerAccountId: "voice-acc", voiceId: "voice-1" },
+          mediaConfig: { providerAccountId: "media-acc" },
+          renderConfig: { providerAccountId: "render-acc", templateSnapshotId: "snap-1" },
+        }),
+      );
+      expect(outcome.data.automationProfileId).toBe(automationProfileId);
+    });
+
+    it("rejects when any required account/voiceId/template field is missing", async () => {
+      const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, voiceId: "" });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(createdProjects).toHaveLength(0);
+    });
+
+    it("surfaces a forbidden automation-profile write as a failed setup, without silently succeeding", async () => {
+      automationProfiles.create = vi.fn(async () => "forbidden" as const);
+      const outcome = await service.setupAutoProfile(userId, "staff", validInput);
+      expect(outcome).toMatchObject({ ok: false, code: "FORBIDDEN" });
     });
   });
 });

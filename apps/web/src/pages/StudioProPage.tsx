@@ -49,6 +49,7 @@ import {
   submitDynamicRenderFromTimeline,
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
+import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
 const PANEL_STATE_KEY = "lyx-studio-panels";
 const readPanelState = (): { left: boolean; right: boolean } => {
@@ -125,6 +126,10 @@ export function StudioProPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  // VE2E-08: this route is shared by the legacy job Studio bridge (/jobs/:id/studio) and
+  // the Auto "Mở trong Studio" fork (/video-productions/:id/studio) - same page/component,
+  // different context source and "back" target, since an Auto run has no legacy job row.
+  const isVideoProduction = location.pathname.startsWith("/video-productions/");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const undoStack = useRef(new UndoStack<TimelineDraft>());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -203,7 +208,7 @@ export function StudioProPage() {
 
   useEffect(() => {
     if (!id) return;
-    void fetchStudioContext(id)
+    void (isVideoProduction ? fetchVideoProductionStudioContext(id) : fetchStudioContext(id))
       .then((ctx) => {
         setContext(ctx);
         const nextDraft = draftFromContext(ctx);
@@ -726,7 +731,7 @@ export function StudioProPage() {
     return (
       <>
         <Banner variant="warn">{t("studioPro.needScriptApproved")}</Banner>
-        <Button variant="secondary" onClick={() => navigate(`/jobs/${id}`)}>{t("studioPro.backToJob")}</Button>
+        <Button variant="secondary" onClick={() => navigate(isVideoProduction ? `/video-productions/${id}` : `/jobs/${id}`)}>{t("studioPro.backToJob")}</Button>
       </>
     );
   }
@@ -782,9 +787,11 @@ export function StudioProPage() {
               <button type="button" className="h-9 w-8 text-lyx-fg-muted disabled:opacity-30" title={t("studioPro.undo")} disabled={!undoStack.current.canUndo()} onClick={handleUndo}>↶</button>
               <button type="button" className="h-9 w-8 border-l border-lyx-border text-lyx-fg-muted disabled:opacity-30" title={t("studioPro.redo")} disabled={!undoStack.current.canRedo()} onClick={handleRedo}>↷</button>
             </span>
-            <Button variant="secondary" onClick={() => navigate(`/jobs/${id}/studio/templates`)}>
-              {template ? t("studioPro.changeTemplate") : t("studioPro.openTemplates")}
-            </Button>
+            {!isVideoProduction ? (
+              <Button variant="secondary" onClick={() => navigate(`/jobs/${id}/studio/templates`)}>
+                {template ? t("studioPro.changeTemplate") : t("studioPro.openTemplates")}
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               disabled={approving || dirty || !baseVersionId || timelineStatus === "approved"}

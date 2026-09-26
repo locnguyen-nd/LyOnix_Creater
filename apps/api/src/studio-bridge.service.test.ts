@@ -59,6 +59,7 @@ describe("StudioBridgeService", () => {
   let sceneRows: any[];
   let bridgeRows: any[];
   let timelineRows: any[];
+  let workflowRunRows: any[];
   let nextId: number;
   let currentJob: JobRecord | null;
 
@@ -70,6 +71,7 @@ describe("StudioBridgeService", () => {
     sceneRows = [];
     bridgeRows = [];
     timelineRows = [];
+    workflowRunRows = [];
     currentJob = approvedJob;
 
     jobs = { get: async () => currentJob };
@@ -86,6 +88,7 @@ describe("StudioBridgeService", () => {
           for (const s of scenes?.create ?? []) sceneRows.push({ id: `scene-${nextId++}`, scriptDraftVersionId: id, ...s });
           return row;
         },
+        findFirst: async ({ where }: any) => scriptRows.filter((r) => r.sourceVersionId === where.sourceVersionId && r.status === where.status).sort((a, b) => b.version - a.version)[0] ?? null,
       },
       sceneDraftVersion: {
         findMany: async ({ where }: any) => sceneRows.filter((r) => r.scriptDraftVersionId === where.scriptDraftVersionId).sort((a, b) => a.orderIndex - b.orderIndex),
@@ -99,8 +102,9 @@ describe("StudioBridgeService", () => {
         },
       },
       timelineVersion: { findFirst: async ({ where }: any) => timelineRows.filter((r) => r.projectId === where.projectId).sort((a, b) => b.version - a.version)[0] ?? null },
+      workflowRun: { findUnique: async ({ where }: any) => workflowRunRows.find((r) => r.id === where.id) ?? null },
     };
-    grants = { replaceProjectGrants: async () => undefined };
+    grants = { replaceProjectGrants: async () => undefined, forUser: async () => ({ teamIds: [], projectIds: ["project-auto-1"], channelIds: [] }) };
     service = new StudioBridgeService(prisma, grants, jobs as JobsService);
   });
 
@@ -151,5 +155,40 @@ describe("StudioBridgeService", () => {
     };
     const outcome = await service.ensureContext(jobId, userId, "staff");
     expect(outcome).toMatchObject({ ok: true, data: { projectId: "project-winner" } });
+  });
+
+  // VE2E-08: "Mở trong Studio" fork for an Auto video production - no legacy job/bridge
+  // involved, the WorkflowRun's own Project/SourceVersion/ScriptDraftVersion are used directly.
+  describe("contextForVideoProduction", () => {
+    const runId = "run-1";
+
+    it("returns NOT_FOUND for a run that does not exist", async () => {
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("returns NOT_FOUND (not FORBIDDEN) when the caller has no grant on the run's project - never leaks existence", async () => {
+      workflowRunRows.push({ id: runId, projectId: "someone-elses-project", sourceVersionId: "source-1" });
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("returns INVALID_STATE when the run's script has not been auto-approved yet", async () => {
+      workflowRunRows.push({ id: runId, projectId: "project-auto-1", sourceVersionId: "source-1" });
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
+    });
+
+    it("builds Studio context straight from the run's own project/source/approved script, no bridge row involved", async () => {
+      workflowRunRows.push({ id: runId, projectId: "project-auto-1", sourceVersionId: "source-1" });
+      scriptRows.push({ id: "script-auto-1", sourceVersionId: "source-1", version: 1, status: "approved" });
+      sceneRows.push({ id: "scene-auto-1", scriptDraftVersionId: "script-auto-1", sceneId: "s01", orderIndex: 0, narration: "n", screenText: "t", visualQuery: "q", durationHintMs: 5000 });
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.data).toMatchObject({ jobId: runId, projectId: "project-auto-1", sourceVersionId: "source-1", scriptDraftVersionId: "script-auto-1" });
+      expect(outcome.data.scenes).toHaveLength(1);
+      expect(bridgeRows).toHaveLength(0);
+    });
   });
 });

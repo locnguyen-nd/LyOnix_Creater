@@ -19,6 +19,7 @@
 import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
+import { canAccessProject } from "@lyonix/domain";
 import type { ErrorCode, StudioContextResponse } from "@lyonix/contracts";
 import { GrantsService } from "./grants.service.js";
 import { JobsService, type JobRecord } from "./jobs.service.js";
@@ -43,10 +44,30 @@ export class StudioBridgeService {
     }
 
     const existing = await this.prisma.studioProjectBridge.findUnique({ where: { productionRequestId: jobId } });
-    if (existing) return this.buildContext(job, existing);
+    if (existing) return this.buildContext(job.id, existing);
 
     const bridge = await this.createBridge(job, userId);
-    return this.buildContext(job, bridge);
+    return this.buildContext(job.id, bridge);
+  }
+
+  /**
+   * VE2E-08: "Mở trong Studio" fork for an Auto `WorkflowRun` (spec §7 "Auto entry" -
+   * "vẫn cho Mở trong Studio để fork một editable version"). Unlike the legacy job path,
+   * an Auto run's `Project`/`SourceVersion`/`ScriptDraftVersion` already exist for real
+   * (VE2E-00/01/03) - no bridge row to create, just the same RBAC + context-shape reuse.
+   * Only available once the run's script has actually been generated+approved (the
+   * `WorkflowRunnerService`'s own zero-human-gate auto-approve, VE2E-06) - opening Studio
+   * before that would have no scenes to show.
+   */
+  async contextForVideoProduction(runId: string, userId: string, role: "admin" | "staff"): Promise<StudioBridgeOutcome<StudioContextResponse>> {
+    const run = await this.prisma.workflowRun.findUnique({ where: { id: runId } });
+    if (!run) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy video production", status: 404 };
+    const grants = await this.grants.forUser(userId, role);
+    if (!canAccessProject(role, grants, run.projectId)) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy video production", status: 404 };
+    if (!run.sourceVersionId) return { ok: false, code: "INVALID_STATE", message: "Video production chưa có nguồn để mở Studio", status: 409 };
+    const scriptDraft = await this.prisma.scriptDraftVersion.findFirst({ where: { sourceVersionId: run.sourceVersionId, status: "approved" }, orderBy: { version: "desc" } });
+    if (!scriptDraft) return { ok: false, code: "INVALID_STATE", message: "Kịch bản chưa được duyệt — chưa có gì để mở Studio", status: 409 };
+    return this.buildContext(run.id, { projectId: run.projectId, sourceVersionId: run.sourceVersionId, scriptDraftVersionId: scriptDraft.id });
   }
 
   private async createBridge(job: JobRecord, userId: string) {
@@ -122,7 +143,7 @@ export class StudioBridgeService {
     }
   }
 
-  private async buildContext(job: JobRecord, bridge: { projectId: string; sourceVersionId: string; scriptDraftVersionId: string }): Promise<StudioBridgeOutcome<StudioContextResponse>> {
+  private async buildContext(displayId: string, bridge: { projectId: string; sourceVersionId: string; scriptDraftVersionId: string }): Promise<StudioBridgeOutcome<StudioContextResponse>> {
     const [scenes, latestTimeline] = await Promise.all([
       this.prisma.sceneDraftVersion.findMany({ where: { scriptDraftVersionId: bridge.scriptDraftVersionId }, orderBy: { orderIndex: "asc" } }),
       this.prisma.timelineVersion.findFirst({ where: { projectId: bridge.projectId }, orderBy: { version: "desc" } }),
@@ -130,7 +151,7 @@ export class StudioBridgeService {
     return {
       ok: true,
       data: {
-        jobId: job.id,
+        jobId: displayId,
         projectId: bridge.projectId,
         sourceVersionId: bridge.sourceVersionId,
         scriptDraftVersionId: bridge.scriptDraftVersionId,
