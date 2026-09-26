@@ -114,12 +114,6 @@ export class JobsController {
     requireCsrf(request, response, session);
     const job = await this.jobs.approve(id, user.id, user.role);
     if (!job) throw normalizedError("NOT_FOUND", "Không tìm thấy việc", requestId(response), 404);
-    if (job === "provider") throw normalizedError("PROVIDER_UNAVAILABLE", "Tài khoản content không dùng được", requestId(response), 502);
-    if (job === "schema") throw normalizedError("PROVIDER_SCHEMA_INVALID", "Model không tách cảnh/phụ đề đúng schema", requestId(response), 502);
-    if (typeof job === "string") {
-      const code = (job.startsWith("PROVIDER_") ? job : "PROVIDER_UNAVAILABLE") as ErrorCode;
-      throw normalizedError(code, "Nhà cung cấp từ chối hoặc hết hạn mức", requestId(response), 502);
-    }
     return success(job, requestId(response));
   }
 

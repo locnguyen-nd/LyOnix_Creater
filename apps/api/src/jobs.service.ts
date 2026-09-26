@@ -4,15 +4,12 @@ import {
   SCRIPT_DRAFT_SCHEMA_VERSION,
   SCRIPT_DRAFT_V1_JSON_SCHEMA,
   SCRIPT_PROMPT_TEMPLATE_VERSION,
-  buildCaptionPlanPrompt,
   buildScriptPromptPackage,
   captionPlanFromScript,
-  CAPTION_PLAN_V1_JSON_SCHEMA,
   generateFakeScriptDraft,
   generateLiveStructured,
   isContentLanguage,
   isLiveContentKind,
-  parseCaptionPlan,
   ProviderError,
   resolveContentModel,
   validateScriptDraftV1,
@@ -81,7 +78,7 @@ const stepForStatus = (status: string): StoredMeta["currentStep"] => {
   return "script";
 };
 
-export const noticeAfterApprove = (version: number) => `Đã duyệt kịch bản phiên bản v${version}. Đang tách cảnh và phụ đề từ model đã chọn.`;
+export const noticeAfterApprove = (version: number) => `Đã duyệt kịch bản phiên bản v${version}. Đang tách cảnh và phụ đề.`;
 export const noticeAfterHandoff = (scenes: number, relativePath: string) =>
   `Đã tách ${scenes} cảnh, ghi caption/asset và workspace handoff (${relativePath}).`;
 export const noticeAfterGenerate = (provider: string, model: string, version: number, requestId?: string | null) =>
@@ -183,7 +180,7 @@ export class JobsService {
       currentStep: "script",
       promptTemplateVersion: SCRIPT_PROMPT_TEMPLATE_VERSION,
       schemaVersion: SCRIPT_DRAFT_SCHEMA_VERSION,
-      providerConfigVersion: account.configVersion,
+      providerConfigVersion: account?.configVersion ?? job.providerConfigVersion,
       events: [{ id: randomUUID(), at: new Date().toISOString(), kind: "job_created", message: "Đã tạo việc. Đang ở bước kịch bản." }],
     });
     const row = await this.prisma.productionRequest.create({
@@ -298,39 +295,22 @@ export class JobsService {
   async approve(id: string, userId: string, role: "admin" | "staff") {
     const job = await this.get(id, userId, role);
     if (!job) return null;
+    if (job.status === "handoff_workspace_ready") return job;
     const latest = await this.prisma.scriptVersion.findFirst({
       where: { productionRequestId: id },
       orderBy: { version: "desc" },
       include: { subtitles: true, assets: true },
     });
     if (!latest) return null;
-    const account = await this.liveAccount(job.contentProviderAccountId);
-    if (!account) return "provider" as const;
-    const language = isContentLanguage(job.locale) ? job.locale : "vi";
-    const fallback = captionPlanFromScript(job.script);
-    const pkg = buildCaptionPlanPrompt(job.script);
-    let plan: CaptionPlanV1 | null = null;
-    try {
-      const first = await this.callContent(account, pkg.text, {
-        topic: job.topic,
-        language,
-        direction: "caption-plan",
-        promptSpec: job.promptSpec,
-        version: job.script.version,
-      }, CAPTION_PLAN_V1_JSON_SCHEMA, job.script);
-      plan = parseCaptionPlan(first.output, language, fallback)
-        ?? parseCaptionPlan((await this.callContent(account, pkg.repairText, {
-          topic: job.topic,
-          language,
-          direction: "caption-plan-repair",
-          promptSpec: job.promptSpec,
-          version: job.script.version + 17,
-        }, CAPTION_PLAN_V1_JSON_SCHEMA, job.script)).output, language, fallback);
-    } catch (error) {
-      if (error instanceof ProviderError) return error.code;
-      return "provider" as const;
-    }
-    if (!plan) return "schema" as const;
+    // Approve just needs to split the already-approved script into scenes/captions - a pure
+    // transform of data the script step already produced (job.script.scenes), not a new
+    // authoring task. `captionPlanFromScript` does this deterministically with no model call,
+    // so approving with nothing further to add never touches the content provider (previously
+    // every approve re-called it here, which is what burned through account quota/rate limits
+    // - see pipeline/STATUS.md 25/09-26/09 "Duyệt kịch bản" incidents). The provider account is
+    // only read (DB row, no network) for provider/model labels on the handoff manifest.
+    const account = await this.prisma.providerAccount.findUnique({ where: { id: job.contentProviderAccountId } });
+    const plan: CaptionPlanV1 = captionPlanFromScript(job.script);
     const payload = (latest.content ?? {}) as Partial<StoredContent>;
     const produced = await writeHandoffWorkspace({
       productionRequestId: id,
@@ -338,12 +318,12 @@ export class JobsService {
       scriptVersion: latest.version,
       locale: job.locale,
       topic: job.topic,
-      provider: account.provider,
-      model: account.model,
+      provider: account?.provider ?? "unknown",
+      model: account?.model ?? job.model,
       promptTemplateVersion: job.promptTemplateVersion,
       schemaVersion: job.schemaVersion,
-      providerConfigVersion: account.configVersion,
-      assetSource: account.isFake ? "fixture" : "generated",
+      providerConfigVersion: account?.configVersion ?? job.providerConfigVersion,
+      assetSource: account?.isFake ? "fixture" : "generated",
       script: job.script,
       captionPlan: plan,
     });
@@ -389,7 +369,7 @@ export class JobsService {
           relativePath: file?.relativePath ?? `visuals/${scene.sceneId}.txt`,
           mediaType: "text/plain",
           sha256: file?.sha256 ?? "",
-          source: account.isFake ? "fixture" : "generated",
+          source: account?.isFake ? "fixture" : "generated",
         };
       }),
     });
