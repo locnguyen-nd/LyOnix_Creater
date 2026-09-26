@@ -17,12 +17,28 @@ import { Prisma } from "@lyonix/db";
 import type { WorkflowRun } from "@lyonix/db";
 import { canAccessProject, canWriteProjectResource } from "@lyonix/domain";
 import type { ErrorCode, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { SourcesService } from "./sources.service.js";
 import { asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
 
 export type VideoProductionOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number };
+
+export type AutoProfileSetupInput = {
+  name: string;
+  contentAccountId: string;
+  voiceAccountId: string;
+  voiceId: string;
+  mediaAccountId: string;
+  renderAccountId: string;
+  templateSnapshotId: string;
+  locale?: string;
+  durationSec?: number;
+  sceneCount?: number;
+};
+
+export type AutoProfileSetupResponse = { projectId: string; automationProfileId: string };
 
 const notFoundProject = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy dự án", status: 404 };
 const notFoundRun = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy video production", status: 404 };
@@ -33,7 +49,45 @@ export class VideoProductionsService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(SourcesService) private readonly sources: SourcesService,
+    @Inject(AutomationProfilesService) private readonly automationProfiles: AutomationProfilesService,
   ) {}
+
+  /**
+   * VE2E-08: "one-click Auto" needs a `Project` + a fully-configured `AutomationProfileVersion`
+   * before `submit()` will accept a run, but `POST /projects` is admin-only
+   * (`ProjectsService.create`) - the same gap `StudioBridgeService.createBridge()` already
+   * documented and worked around for the legacy job path. This does the equivalent for a
+   * brand-new Auto job: a narrow, caller-owns-it project provisioning (direct Prisma write +
+   * self-grant, never exposed as a general "create any project" surface) followed by a normal
+   * `AutomationProfilesService.create()` call, which now passes its own `canWriteProjectResource`
+   * check because the grant above just made it true for this project. Caller resolves which
+   * verified provider accounts/voiceId/template snapshot to pass in - this method only wires
+   * them into a profile, it does not pick them (that's the intake form's job, spec §7
+   * "Auto entry"/preflight).
+   */
+  async setupAutoProfile(userId: string, role: "admin" | "staff", input: AutoProfileSetupInput): Promise<VideoProductionOutcome<AutoProfileSetupResponse>> {
+    if (!input.name.trim() || !input.contentAccountId.trim() || !input.voiceAccountId.trim() || !input.voiceId.trim() || !input.mediaAccountId.trim() || !input.renderAccountId.trim() || !input.templateSnapshotId.trim()) {
+      return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu tài khoản content/voice/media/render hoặc template đã pin cho Auto" };
+    }
+    const project = await this.prisma.project.create({ data: { name: input.name.trim(), createdByUserId: userId } });
+    await this.grants.replaceProjectGrants(project.id, [], [userId]);
+    const profile = await this.automationProfiles.create(userId, role, {
+      name: `${input.name.trim()} · Auto`,
+      projectId: project.id,
+      contentConfig: { providerAccountId: input.contentAccountId },
+      voiceConfig: { providerAccountId: input.voiceAccountId, voiceId: input.voiceId },
+      mediaConfig: { providerAccountId: input.mediaAccountId },
+      renderConfig: { providerAccountId: input.renderAccountId, templateSnapshotId: input.templateSnapshotId },
+      outputPreset: { aspectRatio: "9:16", width: 1080, height: 1920, fps: 30 },
+      locale: input.locale ?? "vi",
+      durationSec: input.durationSec ?? 60,
+      sceneCount: input.sceneCount ?? 10,
+      costCeiling: { amount: "5.00", currency: "USD" },
+    });
+    if (profile === "forbidden") return { ok: false, code: "FORBIDDEN", message: "Không có quyền tạo automation profile", status: 403 };
+    if (profile === "invalid") return { ok: false, code: "VALIDATION_FAILED", message: "Cấu hình automation profile không hợp lệ" };
+    return { ok: true, data: { projectId: project.id, automationProfileId: profile.id } };
+  }
 
   private async assertWriteAccess(projectId: string, userId: string, role: "admin" | "staff") {
     const project = await this.prisma.project.findUnique({ where: { id: projectId } });

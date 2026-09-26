@@ -19,4 +19,13 @@ export class StudioBridgeController {
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
     return success(outcome.data, requestId(response));
   }
+
+  /** VE2E-08: "Mở trong Studio" fork for an Auto video production - see StudioBridgeService.contextForVideoProduction. */
+  @Get("video-productions/:runId/studio-context")
+  async videoProductionContext(@Param("runId") runId: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user } = await requireUser(request, response, this.auth);
+    const outcome = await this.bridge.contextForVideoProduction(runId, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
+    return success(outcome.data, requestId(response));
+  }
 }

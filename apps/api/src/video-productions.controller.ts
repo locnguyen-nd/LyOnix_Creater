@@ -6,12 +6,49 @@ import { AuthService } from "./auth.service.js";
 import { normalizedError, success } from "./envelopes.js";
 import { VideoProductionsService } from "./video-productions.service.js";
 
+type AutoSetupBody = {
+  name?: string;
+  contentAccountId?: string;
+  voiceAccountId?: string;
+  voiceId?: string;
+  mediaAccountId?: string;
+  renderAccountId?: string;
+  templateSnapshotId?: string;
+  locale?: string;
+  durationSec?: number;
+  sceneCount?: number;
+};
+
 @Controller()
 export class VideoProductionsController {
   constructor(
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(VideoProductionsService) private readonly productions: VideoProductionsService,
   ) {}
+
+  /** VE2E-08: provisions the Project + AutomationProfileVersion a one-click Auto submit needs - see VideoProductionsService.setupAutoProfile. */
+  @Post("video-productions/auto-setup")
+  async autoSetup(@Body() body: AutoSetupBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    if (!body.name?.trim() || !body.contentAccountId?.trim() || !body.voiceAccountId?.trim() || !body.voiceId?.trim() || !body.mediaAccountId?.trim() || !body.renderAccountId?.trim() || !body.templateSnapshotId?.trim()) {
+      throw normalizedError("VALIDATION_FAILED", "Thiếu name/contentAccountId/voiceAccountId/voiceId/mediaAccountId/renderAccountId/templateSnapshotId", requestId(response));
+    }
+    const outcome = await this.productions.setupAutoProfile(user.id, user.role, {
+      name: body.name,
+      contentAccountId: body.contentAccountId,
+      voiceAccountId: body.voiceAccountId,
+      voiceId: body.voiceId,
+      mediaAccountId: body.mediaAccountId,
+      renderAccountId: body.renderAccountId,
+      templateSnapshotId: body.templateSnapshotId,
+      ...(body.locale ? { locale: body.locale } : {}),
+      ...(body.durationSec ? { durationSec: body.durationSec } : {}),
+      ...(body.sceneCount ? { sceneCount: body.sceneCount } : {}),
+    });
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
+    return success(outcome.data, requestId(response));
+  }
 
   /**
    * One 202 submit runs the whole Auto DAG in the background — never blocks on a
