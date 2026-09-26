@@ -6,6 +6,13 @@
       "runtimeExecutable": "corepack",
       "runtimeArgs": ["pnpm", "--filter", "@lyonix/web", "dev"],
       "port": 5173
+    },
+    {
+      "name": "api",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": ["pnpm", "--filter", "@lyonix/api", "dev"],
+      "port": 3000,
+      "url": "http://localhost:3000/health"
     }
   ]
 }
