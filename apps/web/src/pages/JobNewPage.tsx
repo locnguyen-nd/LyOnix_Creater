@@ -6,7 +6,7 @@ import { Button, Field, Select, TextArea } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { CreatomateTemplateSummaryResponse, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 
@@ -65,6 +65,8 @@ export function JobNewPage() {
   const [voiceId, setVoiceId] = useState("");
   const [mediaAccountId, setMediaAccountId] = useState("");
   const [renderAccountId, setRenderAccountId] = useState("");
+  const [renderTemplates, setRenderTemplates] = useState<CreatomateTemplateSummaryResponse[]>([]);
+  const [templateId, setTemplateId] = useState("");
 
   const contentAccounts = providers.filter((item) => item.role === "content" && (item.isFake || item.status === "verified"));
   const voiceAccounts = usableAccounts(providers, "tts");
@@ -75,6 +77,7 @@ export function JobNewPage() {
     { key: "voice", ok: voiceAccounts.length > 0 && Boolean(voiceId) },
     { key: "media", ok: mediaAccounts.length > 0 },
     { key: "render", ok: renderAccounts.length > 0 },
+    { key: "template", ok: Boolean(templateId) },
   ] as const;
   const preflightReady = preflight.every((row) => row.ok);
   const selected = contentAccounts.find((item) => item.id === content);
@@ -98,6 +101,24 @@ export function JobNewPage() {
       setVoiceId((current) => (rows.some((row) => row.voiceId === current) ? current : rows[0]?.voiceId ?? ""));
     }).catch(() => setVoices([]));
   }, [voiceAccountId]);
+
+  /**
+   * VE2E-23: the render template used to be auto-picked (`templates[0]`, whichever the
+   * Creatomate account happened to return first) with no compatibility check — every
+   * template pinned so far requires at least one "image" modification slot that Auto's
+   * scene media (Pexels, almost always video) can never fill, so every Auto run failed
+   * the same way at the last step. Owner decision (chat, 26/09): let the operator pick
+   * the template explicitly instead of guessing. Resetting `templateId` whenever the
+   * account changes (or the previous pick isn't in the new list) keeps this an explicit
+   * choice rather than silently falling back to a default.
+   */
+  useEffect(() => {
+    if (!renderAccountId) { setRenderTemplates([]); setTemplateId(""); return; }
+    void listCreatomateTemplates(renderAccountId).then((rows) => {
+      setRenderTemplates(rows);
+      setTemplateId((current) => (rows.some((row) => row.externalTemplateId === current) ? current : ""));
+    }).catch(() => setRenderTemplates([]));
+  }, [renderAccountId]);
 
   useEffect(() => {
     void Promise.all([api<PublicChannel[]>("/channels"), api<ApiProvider[]>("/provider-accounts")])
@@ -142,10 +163,8 @@ export function JobNewPage() {
                     autoSourceType === "raw_script" ? { type: "raw_script", rawScript: autoRawScript }
                     : autoSourceType === "article_url" ? { type: "article_url", url: autoArticleUrl }
                     : { type: "topic", topic };
-                  const templates = await listCreatomateTemplates(renderAccountId);
-                  const firstTemplate = templates[0];
-                  if (!firstTemplate) throw new ApiError("VALIDATION_FAILED", t("jobs.autoNoTemplate"));
-                  const snapshot = await pinTemplateSnapshot(renderAccountId, firstTemplate.externalTemplateId);
+                  if (!templateId) throw new ApiError("VALIDATION_FAILED", t("jobs.autoTemplateRequired"));
+                  const snapshot = await pinTemplateSnapshot(renderAccountId, templateId);
                   const setup = await setupAutoProfile({
                     name: (topic || autoArticleUrl || "Auto video").slice(0, 60),
                     contentAccountId: content,
@@ -302,7 +321,7 @@ export function JobNewPage() {
                       <span className={`inline-block h-2 w-2 rounded-full ${row.ok ? "bg-lyx-ok" : "bg-lyx-danger"}`} />
                       {t(`jobs.autoPreflight.${row.key}`)}
                     </span>
-                    {!row.ok ? <Link className="text-[11.5px] underline" to="/settings">{t("providers.title")}</Link> : null}
+                    {!row.ok && row.key !== "template" ? <Link className="text-[11.5px] underline" to="/settings">{t("providers.title")}</Link> : null}
                   </li>
                 ))}
               </ul>
@@ -310,6 +329,14 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoVoice")}>
                   <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
                     {voices.map((voice) => <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>)}
+                  </Select>
+                </Field>
+              ) : null}
+              {renderAccounts.length > 0 ? (
+                <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
+                  <Select value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
+                    <option value="">{t("jobs.autoSelectTemplatePlaceholder")}</option>
+                    {renderTemplates.map((tpl) => <option key={tpl.externalTemplateId} value={tpl.externalTemplateId}>{tpl.name}</option>)}
                   </Select>
                 </Field>
               ) : null}
