@@ -30,7 +30,7 @@ export class JobsController {
   @Get("jobs/:id")
   async get(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user } = await requireUser(request, response, this.auth);
-    const job = await this.jobs.get(id, user.id, user.role);
+    const job = await this.jobs.getForDisplay(id, user.id, user.role);
     if (!job) throw normalizedError("NOT_FOUND", "Không tìm thấy việc", requestId(response), 404);
     return success(job, requestId(response));
   }

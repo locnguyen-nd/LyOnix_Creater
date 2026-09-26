@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   PanelLeftClose,
   PanelLeftOpen,
@@ -124,6 +124,7 @@ export function StudioProPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const undoStack = useRef(new UndoStack<TimelineDraft>());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -145,7 +146,12 @@ export function StudioProPage() {
   const [approving, setApproving] = useState(false);
   const [preview, setPreview] = useState<TimelineRenderPreviewResponse | null>(null);
 
-  const [leftTab, setLeftTab] = useState<LeftTab>("media");
+  // VE2E-18: job list/detail deep-links here with `?tab=media|voice|script` when that's
+  // the job's real current step (CR-JOBS-PIPELINE-STATUS-2026-09-26).
+  const initialTabParam = searchParams.get("tab");
+  const [leftTab, setLeftTab] = useState<LeftTab>(
+    initialTabParam === "voice" || initialTabParam === "script" || initialTabParam === "media" ? initialTabParam : "media",
+  );
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [template, setTemplate] = useState<TemplateSnapshotResponse | null>(null);
 
@@ -219,6 +225,16 @@ export function StudioProPage() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  // VE2E-18: job list/detail deep-links here with `?renderJobId=` when the job's render is
+  // the current step (in-flight or completed) - loads that render's status/link on mount
+  // instead of only ever showing one submitted earlier in this same browser session.
+  useEffect(() => {
+    const renderJobId = searchParams.get("renderJobId");
+    if (!renderJobId) return;
+    void getRenderJob(renderJobId).then(setRenderJob).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // A pinned template arrives via TemplateGalleryPage's navigation state (it pins the
   // snapshot itself, then hands the id back here) rather than through localStorage.

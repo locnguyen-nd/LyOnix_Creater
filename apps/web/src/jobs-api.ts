@@ -28,6 +28,18 @@ export type ApiScript = {
 
 export type ApiJobEvent = { id: string; at: string; kind: string; message: string };
 
+/** VE2E-18: the job's real production step - see jobs.service.ts `PipelineStep` for the full contract. */
+export type ApiPipelineStep = "script" | "produce" | "review" | "media" | "voice" | "timeline" | "render" | "done";
+
+export type ApiJobRenderSummary = {
+  id: string;
+  status: string;
+  resultUrl: string | null;
+  renderDurationMs: number | null;
+  costAmount: string | null;
+  costCurrency: string | null;
+};
+
 export type ApiJob = {
   id: string;
   code: string;
@@ -55,7 +67,34 @@ export type ApiJob = {
     }>;
   } | null;
   handoff?: { status: string; relativePath: string; fingerprint: string; sceneCount: number } | null;
+  pipelineStep?: ApiPipelineStep;
+  studioProjectId?: string | null;
+  render?: ApiJobRenderSummary | null;
   createdByUserId: string;
   updatedAt: string;
   script: ApiScript;
 };
+
+/**
+ * VE2E-18: routes a job list/detail click to the page matching its real current step
+ * (CR-JOBS-PIPELINE-STATUS-2026-09-26 AC #1/#3), instead of always `/jobs/:id/script`.
+ * Falls back to the legacy script route when `pipelineStep` isn't present yet (older
+ * cached response shape, or a job never bridged into Studio).
+ */
+export const routeForJob = (job: ApiJob): string => {
+  switch (job.pipelineStep) {
+    case "media":
+      return `/jobs/${job.id}/studio?tab=media`;
+    case "voice":
+      return `/jobs/${job.id}/studio?tab=voice`;
+    case "timeline":
+      return `/jobs/${job.id}/studio`;
+    case "render":
+    case "done":
+      return job.render?.id ? `/jobs/${job.id}/studio?renderJobId=${job.render.id}` : `/jobs/${job.id}/studio`;
+    default:
+      return `/jobs/${job.id}/script`;
+  }
+};
+
+export const isJobDone = (job: ApiJob): boolean => job.pipelineStep === "done";
