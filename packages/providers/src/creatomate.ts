@@ -144,6 +144,8 @@ export type CreatomateRenderResult = {
   progress: number | null;
   errorMessage: string | null;
   renderDurationMs: number | null;
+  /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
+  snapshotUrl: string | null;
 };
 
 const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult => ({
@@ -153,6 +155,7 @@ const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult =>
   progress: typeof row.progress === "number" ? row.progress : null,
   errorMessage: typeof row.error_message === "string" ? row.error_message : null,
   renderDurationMs: typeof row.render_duration === "number" ? Math.round(row.render_duration * 1000) : null,
+  snapshotUrl: typeof row.snapshot_url === "string" ? row.snapshot_url : null,
 });
 
 export type SubmitRenderInput = {

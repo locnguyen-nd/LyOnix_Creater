@@ -42,6 +42,8 @@ export type JobRenderSummary = {
   id: string;
   status: string;
   resultUrl: string | null;
+  /** VE2E-19: Creatomate's own render-frame preview image, when the provider included one. */
+  snapshotUrl: string | null;
   renderDurationMs: number | null;
   costAmount: string | null;
   costCurrency: string | null;
@@ -557,7 +559,7 @@ export class JobsService {
       this.prisma.renderJob.findMany({
         where: { projectId: { in: projectIds } },
         orderBy: { createdAt: "desc" },
-        select: { id: true, projectId: true, status: true, resultUrl: true, renderDurationMs: true, costAmount: true, costCurrency: true },
+        select: { id: true, projectId: true, status: true, resultUrl: true, snapshotUrl: true, renderDurationMs: true, costAmount: true, costCurrency: true },
       }),
       this.prisma.timelineVersion.findMany({ where: { projectId: { in: projectIds } }, select: { projectId: true } }),
     ]);
@@ -629,6 +631,7 @@ export class JobsService {
               id: render.id,
               status: render.status,
               resultUrl: render.resultUrl,
+              snapshotUrl: render.snapshotUrl,
               renderDurationMs: render.renderDurationMs,
               costAmount: render.costAmount ? render.costAmount.toString() : null,
               costCurrency: render.costCurrency,

@@ -143,6 +143,8 @@ const vi = {
     connectedOk: "Đã kết nối kênh TikTok.",
     oauthError: "TikTok từ chối hoặc cấu hình OAuth chưa đủ.",
     oauthUnconfigured: "Chưa cấu hình TIKTOK_CLIENT_KEY và TIKTOK_CLIENT_SECRET trong .env. Thêm key từ TikTok Developer rồi restart API.",
+    videoLibraryTitle: "Video đã render",
+    videoLibraryEmpty: "Chưa có video render xong cho kênh này.",
   },
   jobs: {
     title: "Tạo Video",
@@ -801,6 +803,8 @@ const en: typeof vi = {
     metricsHint: "Followers and likes are channel totals. Views/comments come from up to 20 recent public videos. Revenue is not in Login Kit.",
     followerCount: "Followers",
     videoCount: "Public videos",
+    videoLibraryTitle: "Rendered videos",
+    videoLibraryEmpty: "No rendered videos for this channel yet.",
   },
   providers: {
     ...vi.providers,

@@ -82,7 +82,7 @@ const stableStringify = (value: unknown): string => {
 
 const toJobResponse = (row: {
   id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
-  resultUrl: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
+  resultUrl: string | null; snapshotUrl?: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
 }): RenderJobResponse => ({
   id: row.id,
@@ -92,6 +92,7 @@ const toJobResponse = (row: {
   externalJobId: row.externalJobId,
   progress: row.progress,
   resultUrl: row.resultUrl,
+  snapshotUrl: row.snapshotUrl ?? null,
   resultExpiresAt: row.resultExpiresAt?.toISOString() ?? null,
   attempts: row.attempts,
   requestFingerprint: row.requestFingerprint,
@@ -271,6 +272,7 @@ export class RenderJobsService {
           externalJobId: submitted.externalJobId,
           submittedAt: new Date(),
           ...(nextStatus ? { status: nextStatus, progress: submitted.progress } : {}),
+          ...(submitted.snapshotUrl ? { snapshotUrl: submitted.snapshotUrl } : {}),
         },
       });
     } catch (error) {
@@ -435,11 +437,13 @@ export class RenderJobsService {
   }
 
   /** Applies the monotonic status guard and persists a Creatomate-reported result. Never lets a terminal state regress. */
-  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null }) {
+  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null; snapshotUrl?: string | null }) {
     const nextStatus = nextRenderJobStatus(current, incoming.status);
     if (!nextStatus) return null; // stale/out-of-order/duplicate — no-op, current row already reflects the latest applied state.
     const data: Prisma.RenderJobUpdateInput = { status: nextStatus };
     if (incoming.progress !== undefined && incoming.progress !== null) data.progress = incoming.progress;
+    // VE2E-19: Creatomate can report a preview frame before the render is fully complete — capture it whenever present, not only at completion.
+    if (incoming.snapshotUrl) data.snapshotUrl = incoming.snapshotUrl;
     if (nextStatus === "completed") {
       data.resultUrl = incoming.url ?? null;
       data.completedAt = new Date();
@@ -467,6 +471,7 @@ export class RenderJobsService {
         progress: remote.progress,
         errorMessage: remote.errorMessage,
         renderDurationMs: remote.renderDurationMs,
+        snapshotUrl: remote.snapshotUrl,
       });
       return { ok: true, data: toJobResponse(updated ?? row) };
     } catch {
@@ -518,6 +523,7 @@ export class RenderJobsService {
             progress: typeof record.progress === "number" ? record.progress : null,
             errorMessage: typeof record.error_message === "string" ? record.error_message : null,
             renderDurationMs: typeof record.render_duration === "number" ? Math.round(record.render_duration * 1000) : null,
+            snapshotUrl: typeof record.snapshot_url === "string" ? record.snapshot_url : null,
           };
       const updated = await this.applyStatus(job.id, job.status as RenderJobStatus, outcome);
       await this.prisma.renderWebhookEvent.updateMany({ where: { renderJobId: job.id, eventFingerprint }, data: { appliedStatus: updated?.status ?? null } });

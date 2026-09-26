@@ -36,7 +36,7 @@ describe("ChannelsService.syncAllConnected", () => {
       },
       metricSnapshot: { createMany: vi.fn(async () => ({ count: 0 })) },
     };
-    service = new ChannelsService(prisma, {} as any);
+    service = new ChannelsService(prisma, {} as any, {} as any);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -89,5 +89,68 @@ describe("ChannelsService.syncAllConnected", () => {
     expect(result.total).toBe(2);
     expect(result.failed).toBe(1);
     expect(result.synced + result.invalid + result.failed).toBe(2);
+  });
+});
+
+// VE2E-19: per-channel finished-video library. Deliberately does not re-query
+// StudioProjectBridge/RenderJob itself - reuses JobsService.list()'s already-resolved
+// pipelineStep/render (VE2E-18), per the CR's own stated dependency.
+describe("ChannelsService.listVideos", () => {
+  const userId = "user-1";
+  const channelId = "channel-1";
+
+  const job = (overrides: Record<string, unknown> = {}) => ({
+    id: "job-1",
+    channelId,
+    topic: "Lionel Messi",
+    script: { caption: "#messi #goat", hook: "Ai la GOAT?" },
+    pipelineStep: "done",
+    render: { id: "render-1", status: "completed", resultUrl: "https://cdn.creatomate.com/x.mp4", snapshotUrl: "https://cdn.creatomate.com/x.jpg", renderDurationMs: 42000 },
+    updatedAt: "2026-09-26T10:00:00.000Z",
+    ...overrides,
+  });
+
+  const makeService = (jobs: unknown[], channelRowOverrides: Record<string, unknown> = {}) => {
+    const prisma: any = { channelConnection: { findUnique: vi.fn(async () => ({ id: channelId, ...channelRowOverrides })) } };
+    const grants: any = { forUser: vi.fn(async () => ({ teamIds: [], projectIds: [], channelIds: [channelId] })) };
+    const jobsService: any = { list: vi.fn(async () => jobs) };
+    return new ChannelsService(prisma, grants, jobsService);
+  };
+
+  it("returns null when the channel does not exist or is outside the caller's grants", async () => {
+    const prisma: any = { channelConnection: { findUnique: vi.fn(async () => null) } };
+    const service = new ChannelsService(prisma, { forUser: vi.fn(async () => ({ teamIds: [], projectIds: [], channelIds: [] })) } as any, {} as any);
+    expect(await service.listVideos(channelId, userId, "staff")).toBeNull();
+  });
+
+  it("only returns jobs for this channel whose pipelineStep is actually done", async () => {
+    const service = makeService([
+      job(),
+      job({ id: "job-2", channelId: "other-channel" }),
+      job({ id: "job-3", pipelineStep: "render", render: { ...job().render, status: "rendering", resultUrl: null } }),
+    ]);
+    const rows = await service.listVideos(channelId, userId, "staff");
+    expect(rows).toHaveLength(1);
+    expect(rows?.[0]).toMatchObject({ jobId: "job-1", renderJobId: "render-1", resultUrl: "https://cdn.creatomate.com/x.mp4", thumbnailUrl: "https://cdn.creatomate.com/x.jpg" });
+  });
+
+  it("falls back to null thumbnailUrl when Creatomate never reported a snapshot_url", async () => {
+    const service = makeService([job({ render: { ...job().render, snapshotUrl: null } })]);
+    const rows = await service.listVideos(channelId, userId, "staff");
+    expect(rows?.[0]?.thumbnailUrl).toBeNull();
+  });
+
+  it("uses the approved caption, falling back to hook then topic", async () => {
+    const service = makeService([job({ script: { caption: "", hook: "hook text" } })]);
+    expect((await service.listVideos(channelId, userId, "staff"))?.[0]?.caption).toBe("hook text");
+  });
+
+  it("sorts newest-completed first", async () => {
+    const service = makeService([
+      job({ id: "older", updatedAt: "2026-09-24T00:00:00.000Z" }),
+      job({ id: "newer", updatedAt: "2026-09-26T00:00:00.000Z" }),
+    ]);
+    const rows = await service.listVideos(channelId, userId, "staff");
+    expect(rows?.map((row) => row.jobId)).toEqual(["newer", "older"]);
   });
 });

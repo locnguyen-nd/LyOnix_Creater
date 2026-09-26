@@ -17,6 +17,15 @@ export class ChannelsController {
     return success(await this.channels.list(user.id, user.role), requestId(response));
   }
 
+  /** VE2E-19: per-channel finished-video library — see ChannelsService.listVideos. */
+  @Get("channels/:id/videos")
+  async videos(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user } = await requireUser(request, response, this.auth);
+    const rows = await this.channels.listVideos(id, user.id, user.role);
+    if (!rows) throw normalizedError("NOT_FOUND", "Không tìm thấy kênh", requestId(response), 404);
+    return success(rows, requestId(response));
+  }
+
   @Get("channels/:id/insights")
   async insights(@Param("id") id: string, @Query("period") period: string | undefined, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user } = await requireUser(request, response, this.auth);

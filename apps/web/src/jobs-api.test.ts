@@ -36,7 +36,7 @@ describe("routeForJob", () => {
   });
 
   it("routes 'render'/'done' to Studio with the render-result deep link when a render id exists", () => {
-    const render = { id: "render-1", status: "rendering", resultUrl: null, renderDurationMs: null, costAmount: null, costCurrency: null };
+    const render = { id: "render-1", status: "rendering", resultUrl: null, snapshotUrl: null, renderDurationMs: null, costAmount: null, costCurrency: null };
     expect(routeForJob({ ...baseJob, pipelineStep: "render", render })).toBe("/jobs/job-1/studio?renderJobId=render-1");
     expect(routeForJob({ ...baseJob, pipelineStep: "done", render: { ...render, status: "completed", resultUrl: "https://cdn.creatomate.com/x.mp4" } })).toBe(
       "/jobs/job-1/studio?renderJobId=render-1",

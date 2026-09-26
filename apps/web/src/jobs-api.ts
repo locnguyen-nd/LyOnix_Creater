@@ -35,6 +35,7 @@ export type ApiJobRenderSummary = {
   id: string;
   status: string;
   resultUrl: string | null;
+  snapshotUrl: string | null;
   renderDurationMs: number | null;
   costAmount: string | null;
   costCurrency: string | null;

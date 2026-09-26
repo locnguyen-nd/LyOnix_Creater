@@ -1,6 +1,8 @@
 import { Inject, Injectable } from "@nestjs/common";
+import type { ChannelVideoResponse } from "@lyonix/contracts";
 import { canAccessChannel } from "./grant-access.js";
 import { GrantsService } from "./grants.service.js";
+import { JobsService } from "./jobs.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 import { buildChannelInsights, parsePeriod, type PeriodKey } from "./channel-insights.js";
@@ -16,6 +18,7 @@ import {
 } from "./tiktok.js";
 
 export type ChannelAuthType = "oauth2" | "token" | "api_key" | "fixture";
+
 
 export type PublicChannel = {
   id: string;
@@ -48,6 +51,7 @@ export class ChannelsService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
+    @Inject(JobsService) private readonly jobs: JobsService,
   ) {}
 
   private async visible(id: string, userId: string, role: "admin" | "staff") {
@@ -56,6 +60,33 @@ export class ChannelsService {
     const grants = await this.grants.forUser(userId, role);
     if (!canAccessChannel(role, grants, row.id)) return null;
     return row;
+  }
+
+  /**
+   * VE2E-19: per-channel finished-video library (replaces the stale "Link Vrew, không file
+   * host" P-LIBRARY description, D08 - MP4 result is a Creatomate CDN reference, never
+   * re-hosted, per D03). Deliberately reuses `JobsService.list()` (VE2E-18) rather than
+   * re-querying StudioProjectBridge/RenderJob itself - that method already resolves each
+   * job's channelId (only ever stored in the legacy job's JSON meta, not a real column) and
+   * its latest RenderJob per bridged project, so this is a pure filter+shape over its output,
+   * not a second implementation of the same render-by-job lookup (CR-JOBS-PIPELINE-STATUS-
+   * 2026-09-26's own stated VE2E-18 dependency).
+   */
+  async listVideos(id: string, userId: string, role: "admin" | "staff"): Promise<ChannelVideoResponse[] | null> {
+    if (!(await this.visible(id, userId, role))) return null;
+    const jobs = await this.jobs.list(userId, role);
+    return jobs
+      .filter((job): job is typeof job & { render: NonNullable<typeof job.render> } => job.channelId === id && job.pipelineStep === "done" && Boolean(job.render?.resultUrl))
+      .map((job) => ({
+        jobId: job.id,
+        renderJobId: job.render.id,
+        caption: job.script.caption || job.script.hook || job.topic,
+        thumbnailUrl: job.render.snapshotUrl,
+        resultUrl: job.render.resultUrl!,
+        renderDurationMs: job.render.renderDurationMs,
+        completedAt: job.updatedAt,
+      }))
+      .sort((a, b) => b.completedAt.localeCompare(a.completedAt));
   }
 
   private async coverage(channelId: string) {

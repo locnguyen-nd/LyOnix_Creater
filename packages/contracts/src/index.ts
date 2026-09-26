@@ -389,6 +389,8 @@ export type RenderJobResponse = {
   externalJobId: string | null;
   progress: number | null;
   resultUrl: string | null;
+  /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
+  snapshotUrl: string | null;
   resultExpiresAt: string | null;
   attempts: number;
   requestFingerprint: string;
@@ -398,6 +400,17 @@ export type RenderJobResponse = {
   lastError: { code: string; message: string } | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/** VE2E-19: per-channel finished-video library entry (GET /channels/:id/videos). */
+export type ChannelVideoResponse = {
+  jobId: string;
+  renderJobId: string;
+  caption: string;
+  thumbnailUrl: string | null;
+  resultUrl: string;
+  renderDurationMs: number | null;
+  completedAt: string;
 };
 
 // --- VE2E-03: persisted ScriptDraftVersion/SceneDraftVersion + AudioVersion/SubtitleVersion ---

@@ -104,7 +104,7 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const result = await submitCreatomateRender("key", { templateId: "tpl_1", modifications: { "Text-1.text": "hello" }, webhookUrl: "https://lyonix.local/hooks/abc" });
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null, snapshotUrl: null });
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(String(call[0])).toContain("/renders");
     expect(JSON.parse(String(call[1].body))).toMatchObject({ template_id: "tpl_1", webhook_url: "https://lyonix.local/hooks/abc" });
@@ -121,9 +121,9 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
   });
 
   it("gets render status by id", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", render_duration: 4.2 }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", render_duration: 4.2, snapshot_url: "https://cdn.creatomate.com/rnd_1.jpg" }), { status: 200 })));
     const result = await getCreatomateRender("key", "rnd_1");
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200 });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg" });
   });
 });
 

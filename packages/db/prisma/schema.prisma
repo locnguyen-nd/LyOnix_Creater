@@ -711,6 +711,9 @@ model RenderJob {
   modificationsPayload Json
   progress             Int?
   resultUrl            String?
+  // VE2E-19: Creatomate's own render-frame preview image (`snapshot_url`), captured whenever the
+  // provider reports one (webhook/reconcile), for the per-channel finished-video library thumbnail.
+  snapshotUrl          String?
   resultExpiresAt      DateTime?
   attempts             Int                  @default(1)
   lastError            Json?
