@@ -1,12 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
 import type { ChannelsService } from "./channels.service.js";
+import type { SystemSettingsService } from "./system-settings.service.js";
+import type { SchedulerRegistry } from "@nestjs/schedule";
+
+function makeScheduler(syncAllConnected: ReturnType<typeof vi.fn>) {
+  const channels = { syncAllConnected } as unknown as ChannelsService;
+  const settings = {
+    load: vi.fn().mockResolvedValue({ channelSyncIntervalMinutes: 5 }),
+  } as unknown as SystemSettingsService;
+  const registry = {
+    deleteInterval: vi.fn(),
+    addInterval: vi.fn(),
+  } as unknown as SchedulerRegistry;
+  return new TiktokSyncSchedulerService(channels, settings, registry);
+}
 
 describe("TiktokSyncSchedulerService", () => {
   it("calls syncAllConnected once per tick and returns its summary", async () => {
     const syncAllConnected = vi.fn().mockResolvedValue({ total: 2, synced: 2, invalid: 0, failed: 0 });
-    const channels = { syncAllConnected } as unknown as ChannelsService;
-    const scheduler = new TiktokSyncSchedulerService(channels);
+    const scheduler = makeScheduler(syncAllConnected);
 
     const result = await scheduler.runOnce();
 
@@ -20,8 +33,7 @@ describe("TiktokSyncSchedulerService", () => {
       resolveFirst = resolve;
     });
     const syncAllConnected = vi.fn().mockReturnValueOnce(first);
-    const channels = { syncAllConnected } as unknown as ChannelsService;
-    const scheduler = new TiktokSyncSchedulerService(channels);
+    const scheduler = makeScheduler(syncAllConnected);
 
     const firstRun = scheduler.runOnce();
     const secondRun = await scheduler.runOnce();
@@ -35,8 +47,7 @@ describe("TiktokSyncSchedulerService", () => {
 
   it("clears the running guard after a failed batch so the next tick can proceed", async () => {
     const syncAllConnected = vi.fn().mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce({ total: 1, synced: 1, invalid: 0, failed: 0 });
-    const channels = { syncAllConnected } as unknown as ChannelsService;
-    const scheduler = new TiktokSyncSchedulerService(channels);
+    const scheduler = makeScheduler(syncAllConnected);
 
     await expect(scheduler.runOnce()).rejects.toThrow("boom");
     const second = await scheduler.runOnce();

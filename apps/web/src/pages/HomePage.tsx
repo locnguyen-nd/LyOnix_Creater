@@ -5,7 +5,7 @@ import { Banner, EmptyState, KpiCard, LegendDot, PageHeader, StatusPill, TrendCh
 import { DataTable } from "../components/DataTable";
 import { Button, Select } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
-import { PERIODS, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
+import { PERIODS, METRIC_COLORS, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
 import type { ApiJob } from "../jobs-api";
 import type { ApiProvider } from "../jobs-api";
 import { useMe } from "../session";
@@ -87,7 +87,20 @@ export function HomePage() {
     () => KPI_IDS.map((id) => insights?.metrics.find((item) => item.id === id)).filter(Boolean),
     [insights],
   );
-  const chart = insights?.metrics.find((item) => item.id === metric);
+  const chartSeries = useMemo(
+    () =>
+      KPI_IDS.map((id) => {
+        const item = insights?.metrics.find((m) => m.id === id);
+        if (!item?.series.length) return null;
+        return {
+          id,
+          label: t(`home.metric.${id}`),
+          color: METRIC_COLORS[id] ?? "var(--lyx-fg)",
+          points: item.series,
+        };
+      }).filter((row): row is NonNullable<typeof row> => row !== null),
+    [insights, t],
+  );
   const revenue = insights?.metrics.find((item) => item.id === "revenue_from_views");
 
   const allInsightsList = Object.values(allInsights);
@@ -206,11 +219,6 @@ export function HomePage() {
             <option key={channel.id} value={channel.id}>{channel.name}</option>
           ))}
         </Select>
-        <Select value={metric} onChange={(e) => setMetric(e.target.value as typeof metric)}>
-          {KPI_IDS.map((id) => (
-            <option key={id} value={id}>{t(`home.metric.${id}`)}</option>
-          ))}
-        </Select>
       </div>
       {insights?.granted.length ? (
         <div className="mb-4 flex flex-wrap gap-2">
@@ -245,13 +253,13 @@ export function HomePage() {
         </div>
       </div>
       <div className="mb-6 rounded-[6px] border border-lyx-border bg-lyx-bg p-4 text-lyx-fg">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-[13px] font-bold">{t("home.chart")}</span>
-            <LegendDot color="var(--lyx-fg)">{selected?.name} · {t(`home.metric.${metric}`)}</LegendDot>
-          </div>
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="text-[13px] font-bold">{t("home.chart")}</span>
+          {chartSeries.map((line) => (
+            <LegendDot key={line.id} color={line.color}>{line.label}</LegendDot>
+          ))}
         </div>
-        <TrendChart points={chart?.series ?? []} label={t("home.chart")} />
+        <TrendChart series={chartSeries} emphasisId={metric} label={t("home.chart")} />
       </div>
 
       <div className="mb-6 grid gap-4 lg:grid-cols-2">

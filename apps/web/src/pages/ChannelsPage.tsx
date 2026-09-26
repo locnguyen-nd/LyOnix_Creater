@@ -6,7 +6,7 @@ import { DataTable } from "../components/DataTable";
 import { Modal } from "../components/Modal";
 import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
 import { API_ORIGIN, api, ApiError, csrfHeaders } from "../api";
-import { PERIODS, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
+import { PERIODS, METRIC_COLORS, channelHandleLabel, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
 import { useMe } from "../session";
 
 const LIST_PERIOD: PeriodKey = "7d";
@@ -88,7 +88,15 @@ export function ChannelsPage() {
         empty={<EmptyState title={t("common.empty")} />}
         columns={[
           { key: "avatar", header: "", render: (row) => <ChannelAvatar name={row.name} src={row.avatarUrl} /> },
-          { key: "name", header: t("channels.name"), render: (row) => <div><div className="font-medium">{row.name}</div><div className="text-[11px] text-lyx-fg-muted">@{row.handle}</div></div> },
+          { key: "name", header: t("channels.name"), render: (row) => {
+            const handle = channelHandleLabel(row.handle);
+            return (
+              <div>
+                <div className="font-medium">{row.name}</div>
+                {handle ? <div className="text-[11px] text-lyx-fg-muted">{handle}</div> : null}
+              </div>
+            );
+          } },
           { key: "conn", header: t("channels.connected"), render: (row) => <StatusPill tone={row.connected ? "ok" : "danger"}>{row.connected ? t("channels.connected") : t("channels.disconnected")}</StatusPill> },
           {
             key: "followers",
@@ -176,14 +184,26 @@ export function ChannelDetailPage() {
   if (!insights && error) return <Banner variant="danger">{error}</Banner>;
   if (!insights) return <Banner variant="info">{t("common.loading")}</Banner>;
   const channel = insights.channel;
-  const chart = insights.metrics.find((item) => item.id === metric);
+  const handleLabel = channelHandleLabel(channel.handle);
+  const chartSeries = ["followers", "likes", "views", "comments", "shares", "video_count"]
+    .map((id) => {
+      const item = insights.metrics.find((row) => row.id === id);
+      if (!item?.series.length) return null;
+      return {
+        id,
+        label: t(`home.metric.${id}`),
+        color: METRIC_COLORS[id] ?? "var(--lyx-fg)",
+        points: item.series,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
   return (
     <>
       {error ? <Banner variant="danger">{error}</Banner> : null}
       {notice ? <Banner variant="info">{notice}</Banner> : null}
       <PageHeader
         title={channel.name}
-        breadcrumb={channel.handle}
+        {...(handleLabel ? { breadcrumb: handleLabel } : {})}
         actions={
           <>
             <Select value={period} onChange={(e) => setPeriod(e.target.value as PeriodKey)} aria-label={t("home.period")}>
@@ -240,7 +260,7 @@ export function ChannelDetailPage() {
         <ChannelAvatar name={channel.name} src={channel.avatarUrl} size={56} />
         <div>
           <StatusPill tone={channel.connected ? "ok" : "danger"}>{channel.connected ? t("channels.connected") : t("channels.disconnected")}</StatusPill>
-          {channel.handle ? <p className="mt-1 text-[12px] text-lyx-fg-muted">{channel.handle}</p> : null}
+          {handleLabel ? <p className="mt-1 text-[12px] text-lyx-fg-muted">{handleLabel}</p> : null}
         </div>
       </div>
       {insights.granted.length ? (
@@ -271,11 +291,13 @@ export function ChannelDetailPage() {
         })}
       </div>
       <div className="mb-4 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
-        <div className="mb-2 flex items-center gap-3">
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <span className="text-[13px] font-bold">{t("home.chart")}</span>
-          <LegendDot color="var(--lyx-fg)">{t(`home.metric.${metric}`)}</LegendDot>
+          {chartSeries.map((line) => (
+            <LegendDot key={line.id} color={line.color}>{line.label}</LegendDot>
+          ))}
         </div>
-        <TrendChart points={chart?.series ?? []} label={t("home.chart")} />
+        <TrendChart series={chartSeries} emphasisId={metric} label={t("home.chart")} />
       </div>
       <Banner variant="info">{channel.authType === "oauth2" ? t("channels.metricsHint") : t("channels.secretHint")}</Banner>
     </>

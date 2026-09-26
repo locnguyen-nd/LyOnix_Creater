@@ -12,7 +12,7 @@ Tài liệu nghiệp vụ/pipeline ở repo cha `D:\LyOnix` (xem `../../CLAUDE.m
 - `packages/contracts` — REST types + OpenAPI 3.1 base, dùng chung web/api
 - `packages/db` — Prisma schema/client, PostgreSQL
 - `packages/domain` — domain logic thuần, không phụ thuộc framework
-- `packages/providers` — adapter ports cho content/render/account provider (OpenAI/Gemini/xAI/ElevenLabs/Pexels/Creatomate/Vrew...)
+- `packages/providers` — adapter ports cho content/render/account provider (OpenAI/Gemini/xAI/ElevenLabs/Pexels/Creatomate); không tích hợp Vrew.
 - `packages/observability` — logging/tracing chung
 - `infra/compose` — PostgreSQL + RabbitMQ local
 
@@ -48,3 +48,10 @@ Local demo accounts (không phải secret production): `admin@lyonix.local` / `l
 Đọc task tương ứng trong `../../pipeline/state.json`, chỉ nhận task `status: ready`, và spec khớp
 trong `../../.docs/specs/`. Xong việc: cập nhật state thành `code_done` + note file đã đụng, không tự
 tick `done`. Chi tiết đầy đủ: `../../.agent/code.md` hoặc gọi `/lyonix-code` trong Claude Code.
+
+## Quản lý branch và commit
+
+Tuân thủ quy tắc dùng chung tại `../../.agent/README.md`: bắt đầu feature/fix branch từ `origin/dev` mới
+nhất; tích hợp chức năng vào `dev` qua PR; chỉ đưa `dev` vào `main` cho release đã duyệt. Tách commit theo
+nhóm chức năng, không làm trực tiếp trên `dev`/`main`, không force-push/rewrite lịch sử nhánh dùng chung,
+không commit secret. Nếu không xác nhận được `origin/dev`, dừng tích hợp và báo chủ dự án.
