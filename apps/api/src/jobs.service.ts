@@ -180,7 +180,7 @@ export class JobsService {
       currentStep: "script",
       promptTemplateVersion: SCRIPT_PROMPT_TEMPLATE_VERSION,
       schemaVersion: SCRIPT_DRAFT_SCHEMA_VERSION,
-      providerConfigVersion: account?.configVersion ?? job.providerConfigVersion,
+      providerConfigVersion: account.configVersion,
       events: [{ id: randomUUID(), at: new Date().toISOString(), kind: "job_created", message: "Đã tạo việc. Đang ở bước kịch bản." }],
     });
     const row = await this.prisma.productionRequest.create({
@@ -332,7 +332,7 @@ export class JobsService {
       scriptVersion: latest.version,
       promptTemplateVersion: job.promptTemplateVersion,
       schemaVersion: job.schemaVersion,
-      providerConfigVersion: account.configVersion,
+      providerConfigVersion: account?.configVersion ?? job.providerConfigVersion,
     });
     const ready = produced.manifest.status === "ready";
     const meta = this.mergeMeta(job, payload.meta, {
