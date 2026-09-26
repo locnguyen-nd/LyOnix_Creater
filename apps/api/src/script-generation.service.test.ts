@@ -35,21 +35,33 @@ const draftScenes = [
 ];
 
 describe("ScriptGenerationService.generate", () => {
-  let prisma: any;
   let sourcesService: SourcesService;
   let service: ScriptGenerationService;
 
-  let providerAccounts: { markModelUnusable: ReturnType<typeof vi.fn>; repinModel: ReturnType<typeof vi.fn> };
+  let providerAccounts: {
+    contentGenerationCandidates: ReturnType<typeof vi.fn>;
+    acquireContentRequestSlot: ReturnType<typeof vi.fn>;
+    releaseContentRequestSlot: ReturnType<typeof vi.fn>;
+    cooldownContentAccount: ReturnType<typeof vi.fn>;
+    markModelUnusable: ReturnType<typeof vi.fn>;
+    repinModel: ReturnType<typeof vi.fn>;
+  };
 
   const draftBody = (title = "Messi") => JSON.stringify({
     output_text: JSON.stringify({ schemaVersion: "script-draft.v2", language: "vi", title, hook: "Messi la ai", body: "Messi la cau thu bong da noi tieng", cta: "Theo doi", caption: "#messi", scenes: draftScenes }),
   });
 
   beforeEach(() => {
-    prisma = { providerAccount: { findFirst: async () => accountRow() } };
     sourcesService = { getRowForGeneration: async () => sourceRow() } as unknown as SourcesService;
-    providerAccounts = { markModelUnusable: vi.fn(async () => undefined), repinModel: vi.fn(async () => undefined) };
-    service = new ScriptGenerationService(prisma, sourcesService, providerAccounts as any);
+    providerAccounts = {
+      contentGenerationCandidates: vi.fn(async () => [accountRow()]),
+      acquireContentRequestSlot: vi.fn(async () => true),
+      releaseContentRequestSlot: vi.fn(async () => undefined),
+      cooldownContentAccount: vi.fn(async () => undefined),
+      markModelUnusable: vi.fn(async () => undefined),
+      repinModel: vi.fn(async () => undefined),
+    };
+    service = new ScriptGenerationService(sourcesService, providerAccounts as any);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("sk-test");
   });
 
@@ -68,20 +80,20 @@ describe("ScriptGenerationService.generate", () => {
   });
 
   it("fails fast with PROVIDER_NOT_CONFIGURED when the account is unverified", async () => {
-    prisma.providerAccount.findFirst = async () => accountRow({ status: "unverified" });
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([]);
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
   });
 
   it("fails fast with PROVIDER_NOT_CONFIGURED when the account does not exist", async () => {
-    prisma.providerAccount.findFirst = async () => null;
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([]);
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "missing" });
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
   });
 
   it("returns INVALID_STATE for an article_url source that has not been extracted yet", async () => {
     sourcesService = { getRowForGeneration: async () => sourceRow({ type: "article_url", extractedText: null, originRef: "https://example.com/a" }) } as unknown as SourcesService;
-    service = new ScriptGenerationService(prisma, sourcesService, providerAccounts as any);
+    service = new ScriptGenerationService(sourcesService, providerAccounts as any);
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
     expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
   });
@@ -92,38 +104,35 @@ describe("ScriptGenerationService.generate", () => {
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_AUTH_INVALID" });
   });
 
-  it("rotates to the next available model when the pinned model is out of quota, and re-pins the account to the model that worked", async () => {
-    prisma.providerAccount.findFirst = async () => accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] });
+  it("does not call another model on the same account after account-wide quota exhaustion", async () => {
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "You have exceeded your current quota exceeded" } }), { status: 429 }))
-      .mockResolvedValueOnce(new Response(draftBody(), { status: 200 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "You have exceeded your current quota exceeded" } }), { status: 429 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(outcome).toMatchObject({ ok: true });
-    if (outcome && outcome !== "forbidden" && outcome.ok) {
-      expect(outcome.response.providerPin.modelId).toBe("gpt-4o");
-    }
-    expect(providerAccounts.repinModel).toHaveBeenCalledWith("account-1", "gpt-4o");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_QUOTA_EXHAUSTED", status: 429 });
+    expect(providerAccounts.repinModel).not.toHaveBeenCalled();
+    expect(providerAccounts.cooldownContentAccount).toHaveBeenCalledWith("account-1", 15 * 60_000);
   });
 
   it("returns PROVIDER_QUOTA_EXHAUSTED once every available model for the account is out of quota", async () => {
-    prisma.providerAccount.findFirst = async () => accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] });
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
     const quotaResponse = () => new Response(JSON.stringify({ error: { message: "quota exceeded for this project" } }), { status: 429 });
-    const fetchMock = vi.fn().mockResolvedValueOnce(quotaResponse()).mockResolvedValueOnce(quotaResponse());
+    const fetchMock = vi.fn().mockResolvedValueOnce(quotaResponse());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_QUOTA_EXHAUSTED", status: 429 });
     expect(providerAccounts.repinModel).not.toHaveBeenCalled();
   });
 
   it("does not burn the rest of the candidate list on an account-wide auth failure", async () => {
-    prisma.providerAccount.findFirst = async () => accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] });
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -133,9 +142,46 @@ describe("ScriptGenerationService.generate", () => {
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_AUTH_INVALID" });
   });
 
+  it("may advance after an explicit model-retired error", async () => {
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "This model is no longer available" } }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(draftBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ ok: true });
+    if (outcome && outcome !== "forbidden" && outcome.ok) expect(outcome.response.providerPin.modelId).toBe("gpt-4o");
+    expect(providerAccounts.repinModel).toHaveBeenCalledWith("account-1", "gpt-4o");
+  });
+
+  it("fails over after account-wide quota and pins the account actually used", async () => {
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([
+      accountRow({ id: "account-1", availableModels: ["gpt-4o-mini", "gpt-4o"] }),
+      accountRow({ id: "account-2", provider: "openai", model: "gpt-5-mini", availableModels: ["gpt-5-mini"] }),
+    ]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "insufficient_quota" } }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(draftBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await service.generate("source-1", "user-1", "staff", {});
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(providerAccounts.cooldownContentAccount).toHaveBeenCalledWith("account-1", 15 * 60_000);
+    expect(providerAccounts.acquireContentRequestSlot).toHaveBeenNthCalledWith(1, "account-1");
+    expect(providerAccounts.acquireContentRequestSlot).toHaveBeenNthCalledWith(2, "account-2");
+    expect(outcome).toMatchObject({ ok: true });
+    if (outcome && outcome !== "forbidden" && outcome.ok) {
+      expect(outcome.response.providerPin).toMatchObject({ accountId: "account-2", selectionReason: "automatic_preference", rankingVersion: expect.any(String), usage: { costAmount: null, costCurrency: null } });
+    }
+  });
+
   it("hides an inaccessible source as not-found (forbidden)", async () => {
     sourcesService = { getRowForGeneration: async () => "forbidden" as const } as unknown as SourcesService;
-    service = new ScriptGenerationService(prisma, sourcesService, providerAccounts as any);
+    service = new ScriptGenerationService(sourcesService, providerAccounts as any);
     expect(await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" })).toBe("forbidden");
   });
 });

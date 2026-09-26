@@ -20,7 +20,13 @@ import { PrismaService } from "./prisma.service.js";
 
 export type ScriptVersionOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number };
 
-type ProviderPinInput = { accountId: string; provider: string; modelId: string; configVersion: number; promptTemplateVersion: string };
+type ProviderPinInput = {
+  accountId: string; provider: string; modelId: string; configVersion: number; promptTemplateVersion: string;
+  providerRequestId?: string | null;
+  usage?: { inputTokens: number | null; outputTokens: number | null; costAmount: string | null; costCurrency: string | null };
+  rankingVersion?: string;
+  selectionReason?: "preferred_account" | "automatic_preference";
+};
 
 const toResponse = (row: {
   id: string; sourceVersionId: string; version: number; status: string; language: string; title: string; hook: string; body: string;

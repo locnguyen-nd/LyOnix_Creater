@@ -266,6 +266,9 @@ model ProviderAccount {
   /// and never queried by field - see @lyonix/providers ContentModelSnapshotEntry.
   modelSnapshot      Json?
   encryptedSecret    String
+  /// VE2E-12: database-shared content request gate and cooldown; prevents concurrent API/worker calls from ignoring 429.
+  activeContentRequests Int                   @default(0)
+  cooldownUntil      DateTime?
   configVersion      Int                       @default(1)
   isFake             Boolean                   @default(false)
   version            Int                       @default(1)

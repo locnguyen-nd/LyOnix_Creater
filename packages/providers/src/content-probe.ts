@@ -6,7 +6,7 @@
  * with that model (billing/entitlement/region gating happens per-model on generate).
  */
 import { ProviderError, type JsonSchema } from "./index.js";
-import { CURATED_CONTENT_MODELS, normalizeModelId } from "./content-models.js";
+import { CURATED_CONTENT_MODELS, normalizeModelId, resolveContentModel } from "./content-models.js";
 import { generateContentOnce, type LiveContentKind } from "./live-content.js";
 
 export type ContentModelProbeResult = { modelId: string; verifiedAt: string };
@@ -64,24 +64,15 @@ export async function probeContentModel(kind: LiveContentKind, apiKey: string, m
   return { modelId: normalizeModelId(modelId), verifiedAt: new Date().toISOString() };
 }
 
-const statusForProbeError = (error: unknown): ContentModelStatus => {
-  if (!(error instanceof ProviderError)) return "unsupported";
-  if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE") return "retired";
-  if (error.code === "PROVIDER_RATE_LIMITED") return "temporarily_unavailable";
-  return "unsupported";
-};
-
 export type PickUsableContentModelResult = ContentModelProbeResult & {
   /** Every candidate tried before the winner, each with the real reason it was rejected - used to build an account-scoped model snapshot instead of leaving rejected models unexplained. */
   attempted: ContentModelSnapshotEntry[];
 };
 
 /**
- * Tries `preferredModelId` first, then the curated model list for `kind`, until one model
- * actually succeeds a real generate call. Auth/quota failures are account-wide — they stop
- * immediately instead of burning the rest of the candidate list. A per-model
- * capability/schema failure moves on to the next candidate. Never returns a model ID that
- * was not actually verified against the generate endpoint (no static-list fallback).
+ * Performs one bounded, low-cost generate probe. Key verification must never fan out over
+ * every discovered model; the selected model is verified and the rest stay unverified until
+ * used by a real job. This also ensures a generic 429 never triggers more calls on that key.
  */
 export async function pickUsableContentModel(
   kind: LiveContentKind,
@@ -89,32 +80,11 @@ export async function pickUsableContentModel(
   preferredModelId?: string | null,
   candidates: readonly string[] = CURATED_CONTENT_MODELS[kind],
 ): Promise<PickUsableContentModelResult> {
-  const seen = new Set<string>();
   const ordered = [preferredModelId, ...candidates]
     .filter((id): id is string => Boolean(id))
-    .map((id) => normalizeModelId(id))
-    .filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
+    .map((id) => resolveContentModel(kind, normalizeModelId(id)))
+    .filter((id, index, all) => all.indexOf(id) === index);
   if (ordered.length === 0) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", "No candidate content model configured for this provider", false);
-  const attempted: ContentModelSnapshotEntry[] = [];
-  let lastError: unknown;
-  for (const modelId of ordered) {
-    try {
-      const result = await probeContentModel(kind, apiKey, modelId);
-      return { ...result, attempted };
-    } catch (error) {
-      lastError = error;
-      if (error instanceof ProviderError && (error.code === "PROVIDER_AUTH_INVALID" || error.code === "PROVIDER_QUOTA_EXHAUSTED")) throw error;
-      // capability_unavailable / schema_invalid / rate_limited on this model -> try the next candidate,
-      // but remember why so the account snapshot can explain it instead of silently dropping it.
-      attempted.push({
-        modelId,
-        status: statusForProbeError(error),
-        checkedAt: new Date().toISOString(),
-        source: "probed",
-        reason: error instanceof ProviderError ? error.message : "Provider request failed",
-      });
-    }
-  }
-  if (lastError instanceof ProviderError) throw lastError;
-  throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", "No usable content model found for this account", false);
+  const result = await probeContentModel(kind, apiKey, ordered[0]!);
+  return { ...result, attempted: [] };
 }

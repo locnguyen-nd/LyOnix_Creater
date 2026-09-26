@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { discoveredContentModels, mergeContentModels, resolveContentModel, suggestedModelFromError } from "./content-models.js";
+import { discoveredContentModels, mergeContentModels, rankContentModels, resolveContentModel, suggestedModelFromError } from "./content-models.js";
 
 describe("content model catalog", () => {
+  it("ranks only account-discovered models in a stable provider preference order", () => {
+    expect(rankContentModels("openai", ["gpt-4o-mini", "gpt-5-mini", "gpt-4o"])).toEqual(["gpt-5-mini", "gpt-4o", "gpt-4o-mini"]);
+    expect(rankContentModels("openai", ["custom-z", "custom-a"])).toEqual(["custom-a", "custom-z"]);
+  });
   it("maps retired Gemini Pro ids to the current preview model", () => {
     expect(resolveContentModel("gemini", "models/gemini-2.5-pro")).toBe("gemini-3.1-pro-preview");
     expect(suggestedModelFromError("Please update your code to use models/gemini-3.1-pro-preview for the latest features")).toBe("gemini-3.1-pro-preview");

@@ -1,5 +1,7 @@
 export type ContentKind = "openai" | "gemini" | "xai";
 
+export const CONTENT_MODEL_RANKING_VERSION = "content-ranking-2026-09-26-v1";
+
 export const CURATED_CONTENT_MODELS: Record<ContentKind, readonly string[]> = {
   openai: [
     "gpt-5",
@@ -58,6 +60,19 @@ export const isTextContentModel = (id: string) => {
 export const resolveContentModel = (kind: ContentKind, id: string) => {
   const name = normalizeModelId(id);
   return RETIRED_CONTENT_MODELS[kind][name] ?? name;
+};
+
+/** Stable quality-preference order, constrained to model IDs discovered for one account. */
+export const rankContentModels = (kind: ContentKind, accountModels: readonly string[]) => {
+  const preference = CURATED_CONTENT_MODELS[kind];
+  return [...new Set(accountModels.map((id) => resolveContentModel(kind, id)))].sort((left, right) => {
+    const leftRank = preference.indexOf(left);
+    const rightRank = preference.indexOf(right);
+    if (leftRank >= 0 && rightRank >= 0) return leftRank - rightRank;
+    if (leftRank >= 0) return -1;
+    if (rightRank >= 0) return 1;
+    return left.localeCompare(right);
+  });
 };
 
 export const suggestedModelFromError = (detail: string) => {

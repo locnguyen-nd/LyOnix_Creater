@@ -103,7 +103,7 @@ export {
   type LiveContentInput,
   type LiveContentKind,
 } from "./live-content.js";
-export { CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, suggestedModelFromError } from "./content-models.js";
+export { CONTENT_MODEL_RANKING_VERSION, CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, rankContentModels, suggestedModelFromError } from "./content-models.js";
 export {
   probeContentModel,
   pickUsableContentModel,

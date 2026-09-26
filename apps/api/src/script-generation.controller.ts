@@ -19,9 +19,8 @@ export class ScriptGenerationController {
     const { user, session } = await requireUser(request, response, this.auth);
     requireCsrf(request, response, session);
     const providerAccountId = body.providerAccountId?.trim();
-    if (!providerAccountId) throw normalizedError("VALIDATION_FAILED", "Thiếu providerAccountId", requestId(response));
     const outcome = await this.scriptGeneration.generate(id, user.id, user.role, {
-      providerAccountId,
+      ...(providerAccountId ? { providerAccountId } : {}),
       ...(body.language ? { language: body.language } : {}),
       ...(body.direction ? { direction: body.direction } : {}),
     });

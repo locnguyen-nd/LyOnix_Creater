@@ -128,6 +128,10 @@ export type ScriptDraftV2GenerationResponse = {
     modelId: string;
     configVersion: number;
     promptTemplateVersion: string;
+    providerRequestId?: string | null;
+    usage?: { inputTokens: number | null; outputTokens: number | null; costAmount: string | null; costCurrency: string | null };
+    rankingVersion?: string;
+    selectionReason?: "preferred_account" | "automatic_preference";
   };
 };
 
@@ -547,6 +551,8 @@ export type TimelineSceneBindingInput = {
   subtitleVersionId?: string | null;
   screenTextOverride?: string | null;
   annotation?: string | null;
+  /** User-toggled "remove from render" — the scene and its authored content are kept, just skipped when building the render (dynamic composition drops it, same as a scene with no audio yet). */
+  excluded?: boolean;
 };
 
 export type TimelineSceneBindingResponse = {
@@ -557,6 +563,7 @@ export type TimelineSceneBindingResponse = {
   subtitleVersionId: string | null;
   screenTextOverride: string | null;
   annotation: string | null;
+  excluded: boolean;
 };
 
 /** Template-level modification values not tied to one scene (secondary text/color/font/volume), keyed by the pinned `TemplateSnapshot`'s modification key. */

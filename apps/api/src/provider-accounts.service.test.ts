@@ -11,6 +11,36 @@ const row = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+describe("ProviderAccountsService content admission", () => {
+  it("restricts candidates to accounts visible to the actor and honors an explicit account preference", async () => {
+    const visible = [
+      row({ id: "org", scope: "organization", ownerUserId: null }),
+      row({ id: "own", scope: "personal", ownerUserId: "staff-1" }),
+    ];
+    const findMany = vi.fn(async () => visible);
+    const service = new ProviderAccountsService({ providerAccount: { findMany } } as any);
+
+    const candidates = await service.contentGenerationCandidates("staff-1", "staff", "org");
+
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ role: "content", status: "verified", OR: expect.any(Array) }) }));
+    expect(candidates.map((candidate) => candidate.id)).toEqual(["org", "own"]);
+  });
+
+  it("uses atomic admission, decrements on release, and persists bounded retry-after cooldown", async () => {
+    const updateMany = vi.fn(async (_args?: any) => ({ count: 1 }));
+    const service = new ProviderAccountsService({ providerAccount: { updateMany } } as any);
+    const now = new Date("2026-09-26T10:00:00.000Z");
+
+    expect(await service.acquireContentRequestSlot("account-1", now, 4)).toBe(true);
+    await service.releaseContentRequestSlot("account-1");
+    const cooldown = await service.cooldownContentAccount("account-1", 5_000, now);
+
+    expect(updateMany.mock.calls[0]?.[0]).toMatchObject({ where: { activeContentRequests: { lt: 4 }, OR: expect.any(Array) }, data: { activeContentRequests: { increment: 1 } } });
+    expect(updateMany.mock.calls[1]?.[0]).toMatchObject({ data: { activeContentRequests: { decrement: 1 } } });
+    expect(cooldown).toEqual(new Date("2026-09-26T10:00:05.000Z"));
+  });
+});
+
 describe("ProviderAccountsService lifecycle", () => {
   let store: any;
   let prisma: any;
@@ -141,18 +171,19 @@ describe("ProviderAccountsService OpenAI (content) account — V00-10 model elig
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("verify() falls back to a bounded probe against curated candidates when the account's own listing is empty", async () => {
+  it("verify() does not treat a static catalog as account capability evidence", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (String(url).includes("/v1/models")) return new Response(JSON.stringify({ data: [] }), { status: 200 });
       return okResponses();
     });
     vi.stubGlobal("fetch", fetchMock);
-    const verified = await service.verify("oa-1", "user-1", "staff");
-    expect(verified).toMatchObject({ status: "verified" });
-    expect((verified as any).availableModels.length).toBeGreaterThan(0);
+    const result = await service.verify("oa-1", "user-1", "staff");
+    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(store.status).toBe("failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("verify() records a listed-but-denied model as retired in the snapshot instead of silently dropping it", async () => {
+  it("verify() makes one probe and does not scan the remaining listed models when the preference is retired", async () => {
     store = row({ id: "oa-1", model: "gpt-4o-mini", availableModels: [], modelSnapshot: null, encryptedSecret: encryptSecret("sk-test") });
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (String(url).includes("/v1/models")) return new Response(JSON.stringify({ data: [{ id: "gpt-4o-mini" }, { id: "gpt-4o" }] }), { status: 200 });
@@ -161,12 +192,10 @@ describe("ProviderAccountsService OpenAI (content) account — V00-10 model elig
       return okResponses();
     });
     vi.stubGlobal("fetch", fetchMock);
-    const verified = await service.verify("oa-1", "user-1", "staff");
-    expect(verified).toMatchObject({ status: "verified", model: "gpt-4o" });
-    expect(store.modelSnapshot).toEqual(expect.arrayContaining([
-      expect.objectContaining({ modelId: "gpt-4o", status: "usable" }),
-      expect.objectContaining({ modelId: "gpt-4o-mini", status: "retired" }),
-    ]));
+    const result = await service.verify("oa-1", "user-1", "staff");
+    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(store.status).toBe("failed");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("verify() marks the account failed (not fake-verified) on zero-credit/quota-exhausted, never picking a model", async () => {

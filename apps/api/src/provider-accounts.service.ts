@@ -10,6 +10,7 @@ import {
   probeElevenLabsAccount,
   probePexelsAccount,
   resolveContentModel,
+  rankContentModels,
   verifyContentKey,
   isFreshCheckedAt,
   findModelSnapshotEntry,
@@ -90,6 +91,53 @@ export class ProviderAccountsService {
     return rows.map(publicAccount);
   }
 
+  /** Candidates use the same account visibility rules as GET /provider-accounts; one org is the current tenant boundary. */
+  async contentGenerationCandidates(userId: string, role: "admin" | "staff", preferredAccountId?: string) {
+    const rows = await this.prisma.providerAccount.findMany({
+      where: {
+        role: "content",
+        status: "verified",
+        deletedAt: null,
+        ...(process.env.NODE_ENV === "test" ? {} : { isFake: false }),
+        ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    return preferredAccountId
+      ? [...rows.filter((row) => row.id === preferredAccountId), ...rows.filter((row) => row.id !== preferredAccountId)]
+      : rows;
+  }
+
+  /** Atomic Postgres admission gate shared by every API/worker replica. */
+  async acquireContentRequestSlot(accountId: string, now = new Date(), maxConcurrent = 4): Promise<boolean> {
+    const result = await this.prisma.providerAccount.updateMany({
+      where: {
+        id: accountId,
+        role: "content",
+        status: "verified",
+        deletedAt: null,
+        activeContentRequests: { lt: maxConcurrent },
+        OR: [{ cooldownUntil: null }, { cooldownUntil: { lte: now } }],
+      },
+      data: { activeContentRequests: { increment: 1 } },
+    } as any);
+    return result.count === 1;
+  }
+
+  async releaseContentRequestSlot(accountId: string) {
+    await this.prisma.providerAccount.updateMany({
+      where: { id: accountId, activeContentRequests: { gt: 0 } },
+      data: { activeContentRequests: { decrement: 1 } },
+    } as any);
+  }
+
+  async cooldownContentAccount(accountId: string, retryAfterMs?: number, now = new Date()): Promise<Date> {
+    const fallbackMs = retryAfterMs === undefined ? 60_000 : 0;
+    const cooldownUntil = new Date(now.getTime() + Math.min(24 * 60 * 60_000, Math.max(1_000, retryAfterMs ?? fallbackMs)));
+    await this.prisma.providerAccount.updateMany({ where: { id: accountId, deletedAt: null }, data: { cooldownUntil } } as any);
+    return cooldownUntil;
+  }
+
   private async manageable(id: string, userId: string, role: "admin" | "staff") {
     const row = await this.prisma.providerAccount.findFirst({ where: { id, deletedAt: null } });
     if (!row) return null;
@@ -161,8 +209,14 @@ export class ProviderAccountsService {
       const kind = row.provider as Parameters<typeof pickUsableContentModel>[0];
       const discovered = (await verifyContentKey(row.provider as Parameters<typeof verifyContentKey>[0], secret)).models;
       const desired = resolveContentModel(row.provider as Parameters<typeof resolveContentModel>[0], row.model);
-      const candidates = discovered.length ? discovered : [...CURATED_CONTENT_MODELS[kind]];
-      const probed = await pickUsableContentModel(kind, secret, desired, candidates);
+      if (discovered.length === 0) {
+        throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", "Provider did not return any account-scoped content models", false);
+      }
+      const ranked = rankContentModels(kind, discovered);
+      const preferred = discovered.includes(desired) ? desired : ranked[0]!;
+      // Verification has a strict one-probe budget. Discovering a model in the account's
+      // catalog is not proof of generate access; other entries remain unverified until use.
+      const probed = await pickUsableContentModel(kind, secret, preferred);
       const now = new Date().toISOString();
       const listedOnly = discovered.filter((modelId) => modelId !== probed.modelId && !probed.attempted.some((entry) => entry.modelId === modelId));
       const modelSnapshot: ContentModelSnapshotEntry[] = [
@@ -170,7 +224,7 @@ export class ProviderAccountsService {
         ...probed.attempted,
         ...listedOnly.map((modelId): ContentModelSnapshotEntry => ({ modelId, status: "unverified", checkedAt: now, source: "listed" })),
       ];
-      const availableModels = [probed.modelId, ...listedOnly];
+      const availableModels = rankContentModels(kind, [probed.modelId, ...listedOnly]);
       try {
         return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", model: probed.modelId, availableModels, modelSnapshot: modelSnapshot as unknown as object, version: { increment: 1 } } }));
       } catch {
