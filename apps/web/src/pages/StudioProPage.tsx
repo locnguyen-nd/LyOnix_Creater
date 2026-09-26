@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import {
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Pause,
+  Play,
+  Smartphone,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button, Select, TextArea } from "../components/ui";
 import { api, ApiError } from "../api";
@@ -12,10 +23,14 @@ import type {
   PexelsSearchResponse,
   RenderJobResponse,
   StudioContextResponse,
+  StudioSceneContextResponse,
+  TemplateModificationSlotResponse,
   TemplateSnapshotResponse,
   TimelineOptionValues,
   TimelineRenderPreviewResponse,
 } from "@lyonix/contracts";
+import { AUTO_FILL_CANDIDATE_POOL, pickBestPhotoCandidate, pickBestVideoCandidate } from "../studio/media-selection";
+import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import {
   approveTimelineVersion,
   fetchStudioContext,
@@ -27,12 +42,29 @@ import {
   issueMediaDeliveryToken,
   listElevenLabsVoices,
   listProjectMedia,
+  listSceneAudioVersions,
   previewTimelineVersion,
   saveTimelineVersion,
   searchPexels,
-  submitRenderFromTimeline,
+  submitDynamicRenderFromTimeline,
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
+
+const PANEL_STATE_KEY = "lyx-studio-panels";
+const readPanelState = (): { left: boolean; right: boolean } => {
+  if (typeof localStorage === "undefined") return { left: false, right: false };
+  try {
+    const raw = JSON.parse(localStorage.getItem(PANEL_STATE_KEY) ?? "{}");
+    return { left: Boolean(raw.left), right: Boolean(raw.right) };
+  } catch {
+    return { left: false, right: false };
+  }
+};
+
+const PREVIEW_ZOOM_STEPS = [180, 220, 270];
+const MEDIA_SCALE_STEPS = [0.9, 1, 1.1] as const;
+const TIMELINE_PX_PER_SECOND = [7, 11, 16];
+const LIBRARY_PREVIEW_LIMIT = 12;
 
 type LeftTab = "media" | "script" | "voice";
 
@@ -44,6 +76,8 @@ type SceneDraft = {
   subtitleVersionId: string | null;
   screenTextOverride: string | null;
   annotation: string | null;
+  /** User-removed from the render (kept, not deleted — see `toggleSceneExcluded`). */
+  excluded: boolean;
 };
 
 type TimelineDraft = {
@@ -54,20 +88,29 @@ type TimelineDraft = {
 
 const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
   const saved = context.latestTimelineVersion;
-  const byId = new Map((saved?.scenes ?? []).map((scene) => [scene.sceneId, scene]));
+  const contextIds = new Set(context.scenes.map((scene) => scene.sceneId));
+  const savedById = new Map((saved?.scenes ?? []).map((scene) => [scene.sceneId, scene]));
+  // A previously saved scene order (reordered via the timeline's move buttons) is preserved
+  // across reloads; any scene the script has that the saved timeline doesn't know about yet
+  // (freshly generated, never saved) is appended at the end in its script order.
+  const orderedSceneIds = [
+    ...(saved?.scenes ?? []).map((scene) => scene.sceneId).filter((sceneId) => contextIds.has(sceneId)),
+    ...context.scenes.map((scene) => scene.sceneId).filter((sceneId) => !savedById.has(sceneId)),
+  ];
   return {
     templateSnapshotId: saved?.templateSnapshotId ?? null,
     optionValues: saved?.optionValues ?? {},
-    scenes: context.scenes.map((scene) => {
-      const bound = byId.get(scene.sceneId);
+    scenes: orderedSceneIds.map((sceneId) => {
+      const bound = savedById.get(sceneId);
       return {
-        sceneId: scene.sceneId,
+        sceneId,
         mediaAssetVersionId: bound?.mediaAssetVersionId ?? null,
         mediaLabel: null,
         audioVersionId: bound?.audioVersionId ?? null,
         subtitleVersionId: bound?.subtitleVersionId ?? null,
         screenTextOverride: bound?.screenTextOverride ?? null,
         annotation: bound?.annotation ?? null,
+        excluded: bound?.excluded ?? false,
       };
     }),
   };
@@ -110,6 +153,7 @@ export function StudioProPage() {
   const [pexelsQuery, setPexelsQuery] = useState("");
   const [pexelsResults, setPexelsResults] = useState<PexelsSearchResponse | null>(null);
   const [pexelsSearching, setPexelsSearching] = useState(false);
+  const [autoFillBusy, setAutoFillBusy] = useState<{ done: number; total: number } | null>(null);
 
   const [voiceAccountId, setVoiceAccountId] = useState("");
   const [voices, setVoices] = useState<ElevenLabsVoiceSummaryResponse[]>([]);
@@ -117,12 +161,39 @@ export function StudioProPage() {
   const [audioBySceneId, setAudioBySceneId] = useState<Record<string, AudioVersionResponse>>({});
   const [audioBusySceneId, setAudioBusySceneId] = useState<string | null>(null);
   const [audioNotice, setAudioNotice] = useState<string | null>(null);
+  const [voiceApplyBusy, setVoiceApplyBusy] = useState<{ done: number; total: number } | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const [renderAccountId, setRenderAccountId] = useState("");
   const [renderJob, setRenderJob] = useState<RenderJobResponse | null>(null);
   const [renderSubmitting, setRenderSubmitting] = useState(false);
+  const [showReview, setShowReview] = useState(false);
+
+  // Panel visibility (spec: "ẩn Nav, các vùng tùy chọn nếu không dùng đến để mở rộng không
+  // gian") - collapsing either side panel just widens the center review/timeline column, and
+  // is remembered per-browser like the theme/nav preferences so it doesn't reset every visit.
+  const [panelState, setPanelState] = useState(readPanelState);
+  const leftCollapsed = panelState.left;
+  const rightCollapsed = panelState.right;
+  const [tiktokFrame, setTiktokFrame] = useState(false);
+  const [previewZoomIdx, setPreviewZoomIdx] = useState(1);
+  const [mediaScaleIdx, setMediaScaleIdx] = useState(1);
+  const [timelineZoomIdx, setTimelineZoomIdx] = useState(1);
+  const [playing, setPlaying] = useState(false);
+  const [libraryExpanded, setLibraryExpanded] = useState(false);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewAudioTrackRef = useRef<HTMLAudioElement | null>(null);
+  const thumbInFlight = useRef(new Set<string>());
 
   const dirty = useMemo(() => JSON.stringify(draft) !== lastSavedJson, [draft, lastSavedJson]);
+
+  const setPanel = (next: Partial<{ left: boolean; right: boolean }>) => {
+    setPanelState((prev) => {
+      const merged = { ...prev, ...next };
+      localStorage.setItem(PANEL_STATE_KEY, JSON.stringify(merged));
+      return merged;
+    });
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -215,6 +286,7 @@ export function StudioProPage() {
           subtitleVersionId: scene.subtitleVersionId,
           screenTextOverride: scene.screenTextOverride,
           annotation: scene.annotation,
+          excluded: scene.excluded,
         })),
         optionValues: draft.optionValues,
       });
@@ -256,16 +328,118 @@ export function StudioProPage() {
   const handleRedo = () => setDraft((prev) => undoStack.current.redo(prev) ?? prev);
 
   const scenes = context?.scenes ?? [];
+  const sceneById = new Map(scenes.map((scene) => [scene.sceneId, scene]));
+  // The timeline's own scene order (reorderable via the move buttons), not the fixed script
+  // order - drives the scene board, the review panel and the render's actual scene order.
+  const orderedScenes = draft.scenes.map((row) => sceneById.get(row.sceneId)).filter((scene): scene is StudioSceneContextResponse => Boolean(scene));
   const selectedScene = scenes.find((scene) => scene.sceneId === selectedSceneId) ?? scenes[0] ?? null;
   const selectedSceneDraft = draft.scenes.find((scene) => scene.sceneId === selectedSceneId) ?? null;
-  const totalSeconds = Math.round(scenes.reduce((sum, scene) => sum + scene.durationHintMs, 0) / 1000);
+  const totalSeconds = Math.round(
+    draft.scenes.reduce((sum, row) => (row.excluded ? sum : sum + (sceneById.get(row.sceneId)?.durationHintMs ?? 0)), 0) / 1000,
+  );
+  const mediaAssetById = new Map(mediaLibrary.map((asset) => [asset.id, asset]));
+  const selectedMediaAsset = selectedSceneDraft?.mediaAssetVersionId ? mediaAssetById.get(selectedSceneDraft.mediaAssetVersionId) : undefined;
+  const selectedAudio = selectedScene ? audioBySceneId[selectedScene.sceneId] : undefined;
+  const sceneOptionGroups = template ? groupTemplateOptionsByScene(template.modifications, orderedScenes.map((scene) => ({ sceneId: scene.sceneId }))) : { bySceneId: new Map(), leftover: [] };
+  const selectedSceneOptions: TemplateModificationSlotResponse[] = selectedScene ? sceneOptionGroups.bySceneId.get(selectedScene.sceneId) ?? [] : [];
+
+  // Switching scenes always stops whatever was playing - the media/audio elements below are
+  // re-pointed at the newly selected scene's own source, so a stale play state would otherwise
+  // keep an old clip's audio going under a different scene's preview.
+  useEffect(() => {
+    setPlaying(false);
+    previewVideoRef.current?.pause();
+    previewAudioTrackRef.current?.pause();
+  }, [selectedSceneId]);
+
+  // Resolves every scene's already-generated audio so the Giọng đọc track can show a real
+  // duration instead of an indefinite "···". Cheap metadata GETs; one batched setState.
+  // Do not gate on an in-flight Set that survives effect cleanup — React Strict Mode remounts
+  // cancel the first pass and would permanently skip the second if those ids stayed marked.
+  useEffect(() => {
+    const targets = draft.scenes.filter((row) => row.audioVersionId);
+    if (targets.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      targets.map(async (row) => {
+        const scene = sceneById.get(row.sceneId);
+        if (!scene || !row.audioVersionId) return null;
+        try {
+          const rows = await listSceneAudioVersions(scene.id);
+          const match = rows.find((item) => item.id === row.audioVersionId) ?? rows[0];
+          return match ? ([scene.sceneId, match] as const) : null;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      setAudioBySceneId((prev) => {
+        let changed = false;
+        const merged = { ...prev };
+        for (const item of results) {
+          if (!item || merged[item[0]]) continue;
+          merged[item[0]] = item[1];
+          changed = true;
+        }
+        return changed ? merged : prev;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.scenes]);
+
+  // Prefetch signed media URLs outside render — calling setState from `loadThumb` during
+  // paint previously queued dozens of updates on every Studio paint (library + timeline) and
+  // made the page feel stuck once a project had many assets.
+  useEffect(() => {
+    const ids = new Set<string>();
+    for (const row of draft.scenes) {
+      if (row.mediaAssetVersionId) ids.add(row.mediaAssetVersionId);
+    }
+    for (const audio of Object.values(audioBySceneId)) ids.add(audio.mediaAssetVersionId);
+    for (const asset of mediaLibrary.slice(0, libraryExpanded ? mediaLibrary.length : LIBRARY_PREVIEW_LIMIT)) {
+      ids.add(asset.id);
+    }
+    for (const id of ids) {
+      if (thumbCache[id] || thumbInFlight.current.has(id)) continue;
+      thumbInFlight.current.add(id);
+      void issueMediaDeliveryToken(id)
+        .then(({ url }) => setThumbCache((prev) => (prev[id] ? prev : { ...prev, [id]: url })))
+        .catch(() => undefined)
+        .finally(() => thumbInFlight.current.delete(id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.scenes, audioBySceneId, mediaLibrary, libraryExpanded]);
+
+  const moveScene = (sceneId: string, direction: -1 | 1) => {
+    mutate((prev) => {
+      const index = prev.scenes.findIndex((row) => row.sceneId === sceneId);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= prev.scenes.length) return prev;
+      const next = [...prev.scenes];
+      const [item] = next.splice(index, 1);
+      next.splice(target, 0, item!);
+      return { ...prev, scenes: next };
+    });
+  };
+
+  const toggleSceneExcluded = (sceneId: string) => {
+    mutate((prev) => ({ ...prev, scenes: prev.scenes.map((row) => (row.sceneId === sceneId ? { ...row, excluded: !row.excluded } : row)) }));
+  };
+
+  const assignMediaToScene = (sceneId: string, asset: { id: string; label: string }) => {
+    mutate((prev) => ({
+      ...prev,
+      scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...scene, mediaAssetVersionId: asset.id, mediaLabel: asset.label } : scene)),
+    }));
+  };
 
   const assignMediaToSelectedScene = (asset: { id: string; label: string }) => {
     if (!selectedSceneId) return;
-    mutate((prev) => ({
-      ...prev,
-      scenes: prev.scenes.map((scene) => (scene.sceneId === selectedSceneId ? { ...scene, mediaAssetVersionId: asset.id, mediaLabel: asset.label } : scene)),
-    }));
+    assignMediaToScene(selectedSceneId, asset);
   };
 
   const setOptionValue = (key: string, value: string) => {
@@ -306,39 +480,126 @@ export function StudioProPage() {
     }
   };
 
-  const generateAudioForSelectedScene = async () => {
-    if (!context || !selectedScene || !voiceAccountId || !selectedVoiceId) return;
-    setAudioBusySceneId(selectedScene.sceneId);
-    setAudioNotice(null);
-    try {
-      const accepted = await generateSceneAudio(selectedScene.id, { providerAccountId: voiceAccountId, voiceId: selectedVoiceId }, crypto.randomUUID());
-      const poll = async (operationId: string): Promise<void> => {
-        const result = await getAudioGenerationOperation(operationId);
-        if (result.status === "completed" && result.audioVersion) {
-          setAudioBySceneId((prev) => ({ ...prev, [selectedScene.sceneId]: result.audioVersion! }));
-          mutate((prev) => ({
-            ...prev,
-            scenes: prev.scenes.map((scene) =>
-              scene.sceneId === selectedScene.sceneId
-                ? { ...scene, audioVersionId: result.audioVersion!.id, subtitleVersionId: result.audioVersion!.subtitleVersion?.id ?? null }
-                : scene,
-            ),
-          }));
-          setAudioBusySceneId(null);
-          return;
+  // Auto mode: searches Pexels by each scene's own visualQuery and imports the best hit
+  // directly into that scene - same search()/import() calls the manual per-scene flow above
+  // already uses, just looped across every scene instead of requiring one click each. Which
+  // kind to search for is driven by the pinned template's own slots: a template with only
+  // `Image-N.source` elements (no `Video-N.source`) can never use a video-kind asset -
+  // `buildRenderAssignmentsFromTimeline` matches scene media to slots by kind, so a video
+  // bound to an image-only template silently never fills anything. Falls back to trying both
+  // when no template is pinned yet.
+  //
+  // "Best hit" is never just the API's first result: a pool of `AUTO_FILL_CANDIDATE_POOL`
+  // candidates is fetched per scene and `usedExternalIds` is threaded through the whole run,
+  // so a clip/photo already assigned to an earlier scene is never picked again for a later
+  // one - the same generic query (e.g. "person talking") would otherwise keep returning the
+  // same top result for every scene. A scene whose entire candidate pool is already used, or
+  // that has no hits at all, is simply left unassigned rather than failing the whole batch.
+  const autoFillAllMedia = async () => {
+    if (!context || !visualAccountId || scenes.length === 0) return;
+    const wantsVideo = !template || template.modifications.some((mod) => mod.kind === "video");
+    const wantsImage = !template || template.modifications.some((mod) => mod.kind === "image");
+    setError(null);
+    setAutoFillBusy({ done: 0, total: scenes.length });
+    const usedExternalIds = new Set<string>();
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i]!;
+      const targetDurationSeconds = scene.durationHintMs / 1000;
+      try {
+        let picked = false;
+        if (wantsVideo) {
+          const videoResults = await searchPexels(context.projectId, visualAccountId, "video", scene.visualQuery, AUTO_FILL_CANDIDATE_POOL);
+          const videoPick = pickBestVideoCandidate(videoResults.videos, usedExternalIds, targetDurationSeconds);
+          if (videoPick) {
+            const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "video", externalId: videoPick.externalId, sceneId: scene.sceneId });
+            usedExternalIds.add(videoPick.externalId);
+            setMediaLibrary((prev) => [asset, ...prev]);
+            assignMediaToScene(scene.sceneId, { id: asset.id, label: `Pexels ${videoPick.attribution.photographerName}` });
+            picked = true;
+          }
         }
-        if (result.status === "failed") {
-          setAudioNotice(t("studioPro.audioStatusFailed"));
-          setAudioBusySceneId(null);
-          return;
+        if (!picked && wantsImage) {
+          const photoResults = await searchPexels(context.projectId, visualAccountId, "photo", scene.visualQuery, AUTO_FILL_CANDIDATE_POOL);
+          const photoPick = pickBestPhotoCandidate(photoResults.photos, usedExternalIds);
+          if (photoPick) {
+            const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "photo", externalId: photoPick.externalId, sceneId: scene.sceneId });
+            usedExternalIds.add(photoPick.externalId);
+            setMediaLibrary((prev) => [asset, ...prev]);
+            assignMediaToScene(scene.sceneId, { id: asset.id, label: `Pexels ${photoPick.attribution.photographerName}` });
+          }
         }
-        setTimeout(() => void poll(operationId), 2000);
-      };
-      void poll(accepted.operationId);
-    } catch (err) {
-      setAudioBusySceneId(null);
-      setError(err instanceof ApiError ? err.message : t("common.error"));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : t("common.error"));
+      }
+      setAutoFillBusy({ done: i + 1, total: scenes.length });
     }
+    setAutoFillBusy(null);
+  };
+
+  // Resolves once that scene's audio finishes (completed or failed) so callers can await
+  // one scene before starting the next - `generateAudioForSelectedScene` below and the
+  // "apply to the whole video" bulk action both build on this single implementation.
+  const generateAudioForScene = (scene: StudioSceneContextResponse): Promise<void> => {
+    if (!context || !voiceAccountId || !selectedVoiceId) return Promise.resolve();
+    setAudioBusySceneId(scene.sceneId);
+    setAudioNotice(null);
+    return generateSceneAudio(scene.id, { providerAccountId: voiceAccountId, voiceId: selectedVoiceId }, crypto.randomUUID())
+      .then(
+        (accepted) =>
+          new Promise<void>((resolve) => {
+            const poll = async (operationId: string): Promise<void> => {
+              const result = await getAudioGenerationOperation(operationId);
+              if (result.status === "completed" && result.audioVersion) {
+                setAudioBySceneId((prev) => ({ ...prev, [scene.sceneId]: result.audioVersion! }));
+                mutate((prev) => ({
+                  ...prev,
+                  scenes: prev.scenes.map((row) =>
+                    row.sceneId === scene.sceneId
+                      ? { ...row, audioVersionId: result.audioVersion!.id, subtitleVersionId: result.audioVersion!.subtitleVersion?.id ?? null }
+                      : row,
+                  ),
+                }));
+                setAudioBusySceneId(null);
+                resolve();
+                return;
+              }
+              if (result.status === "failed") {
+                setAudioNotice(t("studioPro.audioStatusFailed"));
+                setAudioBusySceneId(null);
+                resolve();
+                return;
+              }
+              setTimeout(() => void poll(operationId), 2000);
+            };
+            void poll(accepted.operationId);
+          }),
+      )
+      .catch((err) => {
+        setAudioBusySceneId(null);
+        setError(err instanceof ApiError ? err.message : t("common.error"));
+      });
+  };
+
+  const generateAudioForSelectedScene = () => (selectedScene ? generateAudioForScene(selectedScene) : Promise.resolve());
+
+  // Auto mode: one voice pick, generated narration for every scene in order (sequential -
+  // ElevenLabs is billed per call, so no fan-out) instead of clicking "generate" per scene.
+  const applyVoiceToAllScenes = async () => {
+    if (!voiceAccountId || !selectedVoiceId || scenes.length === 0) return;
+    setVoiceApplyBusy({ done: 0, total: scenes.length });
+    for (let i = 0; i < scenes.length; i++) {
+      await generateAudioForScene(scenes[i]!);
+      setVoiceApplyBusy({ done: i + 1, total: scenes.length });
+    }
+    setVoiceApplyBusy(null);
+  };
+
+  const playVoicePreview = () => {
+    const voice = voices.find((row) => row.voiceId === selectedVoiceId);
+    if (!voice?.previewUrl) return;
+    if (!previewAudioRef.current) previewAudioRef.current = new Audio();
+    previewAudioRef.current.src = voice.previewUrl;
+    void previewAudioRef.current.play();
   };
 
   const submitApprove = async () => {
@@ -358,7 +619,7 @@ export function StudioProPage() {
     if (!context || !baseVersionId || !renderAccountId) return;
     setRenderSubmitting(true);
     try {
-      const job = await submitRenderFromTimeline(context.projectId, baseVersionId, { providerAccountId: renderAccountId });
+      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, { providerAccountId: renderAccountId });
       setRenderJob(job);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -367,9 +628,82 @@ export function StudioProPage() {
     }
   };
 
-  const loadThumb = (mediaAssetVersionId: string) => {
-    if (thumbCache[mediaAssetVersionId]) return;
-    void issueMediaDeliveryToken(mediaAssetVersionId).then(({ url }) => setThumbCache((prev) => ({ ...prev, [mediaAssetVersionId]: url }))).catch(() => undefined);
+  // Plays the selected scene's real bound media - video muted (its own audio is never the
+  // intended track, see the render-time auto-mute in timeline-render-mapping.ts) alongside its
+  // real generated narration, so "Phát" previews the actual assets rather than a static frame.
+  const togglePlay = () => {
+    const next = !playing;
+    setPlaying(next);
+    if (next) {
+      void previewVideoRef.current?.play().catch(() => undefined);
+      void previewAudioTrackRef.current?.play().catch(() => undefined);
+    } else {
+      previewVideoRef.current?.pause();
+      previewAudioTrackRef.current?.pause();
+    }
+  };
+
+  const zoomPreview = (delta: 1 | -1) => setPreviewZoomIdx((prev) => Math.min(PREVIEW_ZOOM_STEPS.length - 1, Math.max(0, prev + delta)));
+  const zoomTimeline = (delta: 1 | -1) => setTimelineZoomIdx((prev) => Math.min(TIMELINE_PX_PER_SECOND.length - 1, Math.max(0, prev + delta)));
+  const zoomMediaScale = (delta: 1 | -1) => setMediaScaleIdx((prev) => Math.min(MEDIA_SCALE_STEPS.length - 1, Math.max(0, prev + delta)));
+
+  // One rendering per modification `kind` (color/font/volume), shared by both the selected
+  // scene's own options and the rare template-level leftovers - a Creatomate modification key
+  // is whitelisted server-side (`RenderAssignmentInput`), never a free JSON/expression field.
+  const renderModField = (mod: TemplateModificationSlotResponse) => {
+    const value = draft.optionValues[mod.key] ?? "";
+    if (mod.kind === "color") {
+      return (
+        <div key={mod.key}>
+          <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
+          <div className="flex items-center gap-1.5">
+            {["#161616", "#F5F5F5", "#0A7A3E"].map((hex) => (
+              <button
+                key={hex}
+                type="button"
+                aria-label={hex}
+                onClick={() => setOptionValue(mod.key, hex)}
+                className={`h-[22px] w-[22px] rounded-[4px] border ${value === hex ? "border-lyx-fg" : "border-lyx-border"}`}
+                style={{ backgroundColor: hex }}
+              />
+            ))}
+            <input
+              value={value}
+              onChange={(event) => setOptionValue(mod.key, event.target.value)}
+              className="h-8 flex-1 rounded-[4px] border border-lyx-border bg-lyx-muted px-2 text-[11px]"
+            />
+          </div>
+        </div>
+      );
+    }
+    if (mod.kind === "font") {
+      return (
+        <div key={mod.key}>
+          <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
+          <Select className="w-full" value={value || "Inter Bold"} onChange={(event) => setOptionValue(mod.key, event.target.value)}>
+            <option>Inter Bold</option>
+            <option>Inter Medium</option>
+            <option>Noto Sans</option>
+          </Select>
+        </div>
+      );
+    }
+    return (
+      <div key={mod.key}>
+        <label className="mb-1 flex items-center justify-between font-mono text-[10px] text-lyx-fg-muted">
+          <span>{mod.key}</span>
+          <span>{value || "80"}%</span>
+        </label>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={value || "80"}
+          onChange={(event) => setOptionValue(mod.key, event.target.value)}
+          className="w-full"
+        />
+      </div>
+    );
   };
 
   if (needsApproval) {
@@ -386,24 +720,52 @@ export function StudioProPage() {
   const visualAccounts = usableAccounts(providers, "visual");
   const voiceAccounts = usableAccounts(providers, "tts");
   const renderAccounts = usableAccounts(providers, "render");
+  const workspaceGridClass = leftCollapsed && rightCollapsed
+    ? "lg:grid-cols-[36px_minmax(0,1fr)_36px]"
+    : leftCollapsed
+      ? "lg:grid-cols-[36px_minmax(0,1fr)_260px]"
+      : rightCollapsed
+        ? "lg:grid-cols-[240px_minmax(0,1fr)_36px]"
+        : "lg:grid-cols-[240px_minmax(0,1fr)_260px]";
+  const mediaScale = MEDIA_SCALE_STEPS[mediaScaleIdx]!;
+  const visibleLibrary = libraryExpanded ? mediaLibrary : mediaLibrary.slice(0, LIBRARY_PREVIEW_LIMIT);
+  const selectedSceneIndex = selectedScene ? orderedScenes.findIndex((scene) => scene.sceneId === selectedScene.sceneId) : -1;
 
   return (
-    <>
+    <div className="-m-7 flex min-h-[calc(100vh-var(--lyx-topbar))] flex-col">
+      <div className="border-b border-lyx-border bg-lyx-bg px-5 py-3">
       <PageHeader
-        title={t("jobsByChannel.title")}
+        title={t("studioPro.pageTitle")}
         breadcrumb={`${timelineStatus === "approved" ? t("studioPro.timelineApproved") : t("studioPro.timelineDraft")} · ${saving ? t("studioPro.saving") : dirty ? t("common.save") : t("studioPro.saved")}`}
         actions={
           <>
-            <span className="flex overflow-hidden rounded-[4px] border border-lyx-strong">
-              <span className="px-3 text-[12px] leading-10 text-lyx-fg-muted">{t("studioPro.autoTag")}</span>
-              <span className="bg-lyx-fg px-3 text-[12px] leading-10 text-lyx-bg">{t("studioPro.studioTag")}</span>
+            <button
+              type="button"
+              className={`lyx-btn h-9 w-9 ${leftCollapsed ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
+              title={t(leftCollapsed ? "studioPro.showMediaPanel" : "studioPro.hideMediaPanel")}
+              aria-pressed={!leftCollapsed}
+              onClick={() => setPanel({ left: !leftCollapsed })}
+            >
+              {leftCollapsed ? <PanelLeftOpen size={16} strokeWidth={1.9} /> : <PanelLeftClose size={16} strokeWidth={1.9} />}
+            </button>
+            <button
+              type="button"
+              className={`lyx-btn h-9 w-9 ${rightCollapsed ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
+              title={t(rightCollapsed ? "studioPro.showInspectorPanel" : "studioPro.hideInspectorPanel")}
+              aria-pressed={!rightCollapsed}
+              onClick={() => setPanel({ right: !rightCollapsed })}
+            >
+              {rightCollapsed ? <PanelRightOpen size={16} strokeWidth={1.9} /> : <PanelRightClose size={16} strokeWidth={1.9} />}
+            </button>
+            <span className="mx-1 h-6 w-px bg-lyx-border" aria-hidden />
+            <span className="flex overflow-hidden rounded-[7px] bg-lyx-muted p-0.5">
+              <span className="px-3 text-[11.5px] leading-8 text-lyx-fg-muted">{t("studioPro.autoTag")}</span>
+              <span className="rounded-[5px] bg-lyx-fg px-3 text-[11.5px] leading-8 text-lyx-bg">{t("studioPro.studioTag")}</span>
             </span>
-            <button type="button" className="lyx-btn lyx-btn-ghost h-10 w-10" title={t("studioPro.undo")} disabled={!undoStack.current.canUndo()} onClick={handleUndo}>
-              ↶
-            </button>
-            <button type="button" className="lyx-btn lyx-btn-ghost h-10 w-10" title={t("studioPro.redo")} disabled={!undoStack.current.canRedo()} onClick={handleRedo}>
-              ↷
-            </button>
+            <span className="flex overflow-hidden rounded-[7px] border border-lyx-border">
+              <button type="button" className="h-9 w-8 text-lyx-fg-muted disabled:opacity-30" title={t("studioPro.undo")} disabled={!undoStack.current.canUndo()} onClick={handleUndo}>↶</button>
+              <button type="button" className="h-9 w-8 border-l border-lyx-border text-lyx-fg-muted disabled:opacity-30" title={t("studioPro.redo")} disabled={!undoStack.current.canRedo()} onClick={handleRedo}>↷</button>
+            </span>
             <Button variant="secondary" onClick={() => navigate(`/jobs/${id}/studio/templates`)}>
               {template ? t("studioPro.changeTemplate") : t("studioPro.openTemplates")}
             </Button>
@@ -414,7 +776,10 @@ export function StudioProPage() {
             >
               {timelineStatus === "approved" ? t("studioPro.timelineApproved") : t("studioPro.approveTimeline")}
             </Button>
-            <Select value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0}>
+            <Button variant="secondary" onClick={() => setShowReview((prev) => !prev)}>
+              {t("studioPro.reviewBeforeRender")}
+            </Button>
+            <Select className="h-9" value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0}>
               {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate" })}</option> : null}
               {renderAccounts.map((account) => (
                 <option key={account.id} value={account.id}>{account.name}</option>
@@ -429,15 +794,15 @@ export function StudioProPage() {
           </>
         }
       />
-      <Banner variant="info">{t("studioPro.scaffoldBanner")}</Banner>
+      </div>
+      <div className="flex flex-col gap-2 px-5 pt-3">
+      {error ? <Banner variant="danger">{error}</Banner> : null}
       {conflict ? (
         <Banner variant="warn">
           {t("studioPro.conflict")} <button type="button" className="underline" onClick={reloadAfterConflict}>{t("studioPro.reload")}</button>
         </Banner>
       ) : null}
-      {error ? <Banner variant="danger">{error}</Banner> : null}
       {preview && !preview.ready ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
-      {preview?.ready ? <Banner variant="info">{t("studioPro.approxPreviewReady")}</Banner> : null}
       {renderJob ? (
         <Banner variant={renderJob.status === "failed" ? "danger" : "info"}>
           {t("studioPro.renderStatusLabel", { status: renderJob.status })}
@@ -449,9 +814,56 @@ export function StudioProPage() {
           ) : null}
         </Banner>
       ) : null}
+      </div>
 
-      <div className="grid gap-0 border border-lyx-border lg:grid-cols-[216px_1fr_250px]">
-        <div className="flex flex-col border-b border-lyx-border lg:border-b-0 lg:border-r">
+      {showReview ? (
+        <div className="mx-5 mb-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-[12px] font-medium">{t("studioPro.reviewTitle")}</p>
+            <button type="button" className="text-[11px] underline" onClick={() => setShowReview(false)}>{t("studioPro.reviewClose")}</button>
+          </div>
+          <div className="grid max-h-56 grid-cols-3 gap-2 overflow-y-auto sm:grid-cols-4 lg:grid-cols-6">
+            {orderedScenes.map((scene, index) => {
+              const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
+              const url = bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined;
+              const audio = audioBySceneId[scene.sceneId];
+              const excluded = Boolean(bound?.excluded);
+              return (
+                <button
+                  key={scene.sceneId}
+                  type="button"
+                  onClick={() => setSelectedSceneId(scene.sceneId)}
+                  className={`border border-lyx-border p-1.5 text-left text-[10px] ${excluded ? "opacity-40" : ""} ${scene.sceneId === selectedSceneId ? "border-lyx-fg" : ""}`}
+                >
+                  <div className="mb-1 flex h-16 items-center justify-center overflow-hidden rounded-[4px] bg-lyx-muted text-lyx-fg-muted">
+                    {url ? <img src={url} alt="" className="h-full w-full object-cover" /> : t("studioPro.noMedia")}
+                  </div>
+                  <p className="mb-0.5 line-clamp-2 font-medium">{index + 1}. {bound?.screenTextOverride || scene.screenText}</p>
+                  <p className="text-lyx-fg-muted">
+                    {excluded
+                      ? t("studioPro.excludedLabel")
+                      : audio
+                        ? t("studioPro.audioDuration", { seconds: Math.round(audio.durationMs / 1000) })
+                        : bound?.audioVersionId
+                          ? t("studioPro.audioStatusCompleted")
+                          : t("studioPro.reviewNoAudio")}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      <div className={`mx-5 mb-5 grid min-h-0 flex-1 gap-0 overflow-hidden rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg ${workspaceGridClass}`}>
+        {leftCollapsed ? (
+          <div className="hidden items-start justify-center border-b border-lyx-border py-2 lg:flex lg:border-b-0 lg:border-r">
+            <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={t("studioPro.showMediaPanel")} onClick={() => setPanel({ left: false })}>
+              <PanelLeftOpen size={15} strokeWidth={1.9} />
+            </button>
+          </div>
+        ) : null}
+        <div className={`${leftCollapsed ? "lg:hidden" : ""} flex max-h-[calc(100vh-var(--lyx-topbar)-88px)] flex-col border-b border-lyx-border lg:border-b-0 lg:border-r`}>
           <div className="flex gap-4 border-b border-lyx-border px-3 pt-2">
             {(["script", "voice", "media"] as LeftTab[]).map((tabKey) => (
               <button
@@ -473,6 +885,11 @@ export function StudioProPage() {
                   <option key={account.id} value={account.id}>{account.name}</option>
                 ))}
               </Select>
+              <Button disabled={!visualAccountId || !!autoFillBusy} onClick={() => void autoFillAllMedia()}>
+                {autoFillBusy ? t("studioPro.autoFillingMedia", { done: autoFillBusy.done, total: autoFillBusy.total }) : t("studioPro.autoFillMedia")}
+              </Button>
+              <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.autoFillMediaHint")}</p>
+              <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.perSceneOverrideHint")}</p>
               <div className="flex gap-1.5">
                 <input
                   value={pexelsQuery}
@@ -529,23 +946,30 @@ export function StudioProPage() {
               ) : null}
 
               <div>
-                <p className="mb-1 text-[11px] text-lyx-fg-muted">{t("studioPro.library")}</p>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {mediaLibrary.map((asset) => {
-                    loadThumb(asset.id);
+                <div className="mb-1 flex items-center justify-between">
+                  <p className="text-[11px] text-lyx-fg-muted">{t("studioPro.library")}</p>
+                  {mediaLibrary.length > LIBRARY_PREVIEW_LIMIT ? (
+                    <button type="button" className="text-[10px] underline" onClick={() => setLibraryExpanded((prev) => !prev)}>
+                      {libraryExpanded ? t("studioPro.libraryCollapse") : t("studioPro.libraryShowAll", { count: mediaLibrary.length })}
+                    </button>
+                  ) : null}
+                </div>
+                <div className="grid max-h-64 grid-cols-3 gap-1.5 overflow-y-auto">
+                  {visibleLibrary.map((asset) => {
                     const url = thumbCache[asset.id];
                     return (
                       <button
                         key={asset.id}
                         type="button"
                         onClick={() => assignMediaToSelectedScene({ id: asset.id, label: asset.originalFileName })}
-                        className="relative flex items-center justify-center overflow-hidden rounded-[4px] border border-lyx-border bg-lyx-muted text-[9px] text-lyx-fg-muted"
-                        style={{ aspectRatio: "9 / 16" }}
+                        className={`relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-[7px] border bg-lyx-muted text-[9px] text-lyx-fg-muted ${
+                          selectedSceneDraft?.mediaAssetVersionId === asset.id ? "border-2 border-lyx-fg" : "border-lyx-border"
+                        }`}
                         title={asset.originalFileName}
                       >
                         {url && asset.kind === "image" ? <img src={url} alt="" className="h-full w-full object-cover" /> : null}
                         {url && asset.kind === "video" ? <video src={url} muted className="h-full w-full object-cover" /> : null}
-                        <span className="absolute bottom-1 left-1 rounded-[3px] border border-lyx-border bg-lyx-bg px-1 text-[8px]">{asset.origin}</span>
+                        <span className="absolute bottom-1 left-1 rounded-[3px] bg-lyx-bg/90 px-1 text-[8px] font-bold">{asset.origin}</span>
                       </button>
                     );
                   })}
@@ -577,6 +1001,15 @@ export function StudioProPage() {
                   <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>
                 ))}
               </Select>
+              <Button variant="secondary" disabled={!voices.find((row) => row.voiceId === selectedVoiceId)?.previewUrl} onClick={playVoicePreview}>
+                {t("studioPro.previewVoice")}
+              </Button>
+              <Button disabled={!voiceAccountId || !selectedVoiceId || !!voiceApplyBusy} onClick={() => void applyVoiceToAllScenes()}>
+                {voiceApplyBusy ? t("studioPro.applyingVoiceAll", { done: voiceApplyBusy.done, total: voiceApplyBusy.total }) : t("studioPro.applyVoiceAll")}
+              </Button>
+              {audioNotice ? <p className="text-lyx-danger">{audioNotice}</p> : null}
+
+              <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.perSceneOverrideHint")}</p>
               <Button
                 variant="secondary"
                 disabled={!selectedScene || !voiceAccountId || !selectedVoiceId || audioBusySceneId === selectedScene?.sceneId}
@@ -584,7 +1017,6 @@ export function StudioProPage() {
               >
                 {audioBusySceneId === selectedScene?.sceneId ? t("studioPro.generatingAudio") : t("studioPro.generateAudio")}
               </Button>
-              {audioNotice ? <p className="text-lyx-danger">{audioNotice}</p> : null}
               {selectedScene && audioBySceneId[selectedScene.sceneId] ? (
                 <p className="text-lyx-fg-muted">{t("studioPro.audioStatusCompleted")} · {t("studioPro.audioDuration", { seconds: Math.round(audioBySceneId[selectedScene.sceneId]!.durationMs / 1000) })}</p>
               ) : selectedSceneDraft?.audioVersionId ? (
@@ -594,71 +1026,224 @@ export function StudioProPage() {
           ) : null}
         </div>
 
-        <div className="flex flex-col">
-          <div className="flex flex-1 items-center justify-center bg-lyx-muted p-6">
+        <div className="flex min-h-0 min-w-0 flex-col">
+          <div className="flex items-center justify-between gap-3 border-b border-lyx-border px-3 py-1.5">
+            <div className="flex items-center gap-1.5">
+              <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={playing ? t("studioPro.pause") : t("studioPro.play")} onClick={togglePlay} disabled={!selectedMediaAsset && !selectedAudio}>
+                {playing ? <Pause size={15} strokeWidth={1.9} /> : <Play size={15} strokeWidth={1.9} />}
+              </button>
+              <span className="hidden text-[11px] text-lyx-fg-muted xl:inline">{t("studioPro.previewPlaybackHint")}</span>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                className={`lyx-btn h-8 gap-1.5 px-2.5 text-[11.5px] ${tiktokFrame ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
+                aria-pressed={tiktokFrame}
+                onClick={() => setTiktokFrame((prev) => !prev)}
+                title={t("studioPro.tiktokFrameHint")}
+              >
+                <Smartphone size={14} strokeWidth={1.9} /> {t("studioPro.tiktokFrame")}
+              </button>
+              <div className="flex items-center overflow-hidden rounded-[7px] border border-lyx-border" title={t("studioPro.scaleScene")}>
+                <button type="button" className="flex h-8 w-7 items-center justify-center text-lyx-fg-muted disabled:opacity-30" disabled={mediaScaleIdx === 0} onClick={() => zoomMediaScale(-1)}>
+                  <ZoomOut size={13} strokeWidth={1.9} />
+                </button>
+                <span className="w-14 border-x border-lyx-border text-center text-[10.5px] text-lyx-fg-muted">{t("studioPro.scaleSceneShort")} {Math.round(mediaScale * 100)}%</span>
+                <button type="button" className="flex h-8 w-7 items-center justify-center text-lyx-fg-muted disabled:opacity-30" disabled={mediaScaleIdx === MEDIA_SCALE_STEPS.length - 1} onClick={() => zoomMediaScale(1)}>
+                  <ZoomIn size={13} strokeWidth={1.9} />
+                </button>
+              </div>
+              <div className="flex items-center overflow-hidden rounded-[7px] border border-lyx-border" title={t("studioPro.previewZoom")}>
+                <button type="button" className="flex h-8 w-7 items-center justify-center text-lyx-fg-muted disabled:opacity-30" disabled={previewZoomIdx === 0} onClick={() => zoomPreview(-1)}>
+                  <ZoomOut size={13} strokeWidth={1.9} />
+                </button>
+                <span className="w-10 border-x border-lyx-border text-center text-[10.5px] text-lyx-fg-muted">{Math.round((PREVIEW_ZOOM_STEPS[previewZoomIdx]! / PREVIEW_ZOOM_STEPS[1]!) * 100)}%</span>
+                <button type="button" className="flex h-8 w-7 items-center justify-center text-lyx-fg-muted disabled:opacity-30" disabled={previewZoomIdx === PREVIEW_ZOOM_STEPS.length - 1} onClick={() => zoomPreview(1)}>
+                  <ZoomIn size={13} strokeWidth={1.9} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center overflow-auto bg-lyx-muted px-4 py-5">
             <div
-              className="relative flex flex-col items-center justify-center border border-lyx-border bg-lyx-bg text-center"
-              style={{ width: 220, aspectRatio: "1080 / 1920" }}
+              className="relative overflow-hidden rounded-[14px] bg-[#161616] text-center shadow-[0_12px_28px_rgba(0,0,0,0.18)]"
+              style={{ width: PREVIEW_ZOOM_STEPS[previewZoomIdx], aspectRatio: "1080 / 1920" }}
             >
-              <span className="absolute inset-3.5 border border-dashed border-lyx-border" aria-hidden />
-              <span className="px-4 text-[11px] text-lyx-fg-subtle">{t("common.previewLabel")}</span>
+              <div className="absolute inset-0 flex items-center justify-center" style={{ transform: `scale(${mediaScale})`, transformOrigin: "center center" }}>
+                {selectedMediaAsset?.kind === "video" && thumbCache[selectedMediaAsset.id] ? (
+                  <video
+                    key={selectedMediaAsset.id}
+                    ref={previewVideoRef}
+                    src={thumbCache[selectedMediaAsset.id]}
+                    muted
+                    playsInline
+                    loop
+                    className="absolute inset-0 h-full w-full object-cover"
+                  />
+                ) : selectedMediaAsset?.kind === "image" && thumbCache[selectedMediaAsset.id] ? (
+                  <img src={thumbCache[selectedMediaAsset.id]} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                ) : (
+                  <span className="px-4 text-[11px] text-white/40">{t("common.previewLabel")}</span>
+                )}
+              </div>
+              {selectedAudio ? <audio key={selectedAudio.id} ref={previewAudioTrackRef} src={thumbCache[selectedAudio.mediaAssetVersionId]} className="hidden" /> : null}
+              {tiktokFrame ? (
+                <>
+                  <div className="absolute inset-x-0 top-0 flex h-[12%] items-center justify-center border-b border-dashed border-white/50 bg-black/10">
+                    <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneTop")}</span>
+                  </div>
+                  <div className="absolute inset-y-0 right-0 flex w-[16%] items-center justify-center border-l border-dashed border-white/50 bg-black/10">
+                    <span className="rotate-90 whitespace-nowrap rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneActions")}</span>
+                  </div>
+                  <div className="absolute inset-x-0 bottom-0 right-[16%] flex h-[20%] items-end justify-center border-t border-dashed border-white/50 bg-black/10 pb-2">
+                    <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneCaption")}</span>
+                  </div>
+                </>
+              ) : null}
               {selectedScene ? (
-                <p className="absolute inset-x-3 bottom-3 border-t border-lyx-border px-1 pt-1.5 text-[10px] text-lyx-fg-muted">
+                <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 to-transparent px-3 pb-3 pt-8 text-[12px] font-bold text-white">
                   {selectedSceneDraft?.screenTextOverride || selectedScene.screenText || "…"}
                 </p>
               ) : null}
             </div>
+            <p className="mt-2 text-center text-[10px] text-lyx-fg-subtle">{t("studioPro.scaleHint")}</p>
           </div>
 
-          <div className="border-t border-lyx-border p-3">
-            <div className="mb-1.5 flex items-center justify-between text-[11px] text-lyx-fg-muted">
-              <span>{t("studioPro.sceneBoardHint")}</span>
-              <span>{t("studioPro.totalDuration", { seconds: totalSeconds })}</span>
+          <div className="shrink-0 border-t border-lyx-border bg-lyx-bg px-3 pb-3 pt-2">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-lyx-fg-muted">
+              <div className="flex flex-wrap items-center gap-2">
+                <span>{t("studioPro.timelineSummary", { scenes: orderedScenes.length, seconds: totalSeconds })}</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf2e3] px-2 py-0.5 text-[10.5px] font-semibold text-[#b45309]">
+                  🔇 {t("studioPro.muteNote")}
+                </span>
+              </div>
+              <div className="flex items-center overflow-hidden rounded-[7px] border border-lyx-border">
+                <button type="button" className="flex h-7 w-7 items-center justify-center text-lyx-fg-muted disabled:opacity-30" disabled={timelineZoomIdx === 0} onClick={() => zoomTimeline(-1)}>
+                  <ZoomOut size={12} strokeWidth={1.9} />
+                </button>
+                <button type="button" className="flex h-7 w-7 items-center justify-center border-l border-lyx-border text-lyx-fg-muted disabled:opacity-30" disabled={timelineZoomIdx === TIMELINE_PX_PER_SECOND.length - 1} onClick={() => zoomTimeline(1)}>
+                  <ZoomIn size={12} strokeWidth={1.9} />
+                </button>
+              </div>
             </div>
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {scenes.map((scene, index) => {
-                const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
-                if (bound?.mediaAssetVersionId) loadThumb(bound.mediaAssetVersionId);
-                const url = bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined;
-                return (
-                  <button
-                    key={scene.sceneId}
-                    type="button"
-                    onClick={() => setSelectedSceneId(scene.sceneId)}
-                    className="w-16 flex-shrink-0"
-                  >
-                    <div
-                      className={`flex items-center justify-center overflow-hidden rounded-[4px] bg-lyx-muted text-[9px] text-lyx-fg-muted ${
-                        scene.sceneId === selectedScene?.sceneId ? "border-2 border-lyx-fg" : "border border-lyx-border"
-                      }`}
-                      style={{ aspectRatio: "9 / 16" }}
-                    >
-                      {url ? <img src={url} alt="" className="h-full w-full object-cover" /> : bound?.mediaAssetVersionId ? "" : t("studioPro.noMedia")}
-                    </div>
-                    <div className={`mt-1 text-center text-[9px] ${scene.sceneId === selectedScene?.sceneId ? "font-medium text-lyx-fg" : "text-lyx-fg-muted"}`}>
-                      {index + 1} · {Math.round(scene.durationHintMs / 1000)}s
-                    </div>
-                  </button>
-                );
-              })}
+
+            <div className="flex gap-2">
+              <div className="flex w-[84px] shrink-0 flex-col gap-1 text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">
+                <div className="flex h-[52px] items-center">{t("studioPro.trackVideo")}</div>
+                <div className="flex h-[30px] items-center">{t("studioPro.trackVoice")}</div>
+                <div className="flex h-4 items-center">{t("studioPro.trackMusic")}</div>
+              </div>
+              <div className="min-w-0 flex-1 overflow-x-auto">
+                <div className="flex w-max flex-col gap-1">
+                  <div className="flex gap-1">
+                    {orderedScenes.map((scene, index) => {
+                      const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
+                      const url = bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined;
+                      const asset = bound?.mediaAssetVersionId ? mediaAssetById.get(bound.mediaAssetVersionId) : undefined;
+                      const excluded = Boolean(bound?.excluded);
+                      const clipWidth = Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4));
+                      return (
+                        <button
+                          key={scene.sceneId}
+                          type="button"
+                          onClick={() => setSelectedSceneId(scene.sceneId)}
+                          title={`${index + 1} · ${Math.round(scene.durationHintMs / 1000)}s`}
+                          className={`relative h-[52px] shrink-0 overflow-hidden rounded-[6px] border text-left ${excluded ? "opacity-35" : ""} ${
+                            scene.sceneId === selectedScene?.sceneId ? "outline outline-2 outline-offset-1 outline-lyx-fg" : "border-lyx-border"
+                          }`}
+                          style={{ width: clipWidth, background: "linear-gradient(160deg,#3a3a38,#1c1c1b)" }}
+                        >
+                          {url ? (
+                            asset?.kind === "video" ? <video src={url} muted className="absolute inset-0 h-full w-full object-cover opacity-80" /> : <img src={url} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" />
+                          ) : null}
+                          {asset?.kind === "video" || (!asset && bound?.mediaAssetVersionId) ? (
+                            <span className="absolute right-1 top-1 rounded bg-black/50 px-1 text-[9px] text-white" title={t("studioPro.originalAudioMutedHint")}>🔇</span>
+                          ) : null}
+                          <span className="absolute bottom-1 left-1 rounded bg-black/35 px-1 text-[9px] font-bold text-white">
+                            {index + 1} · {Math.round(scene.durationHintMs / 1000)}s
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex gap-1">
+                    {orderedScenes.map((scene) => {
+                      const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
+                      const audio = audioBySceneId[scene.sceneId];
+                      const hasAudio = Boolean(bound?.audioVersionId);
+                      const excluded = Boolean(bound?.excluded);
+                      const clipWidth = Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4));
+                      return (
+                        <button
+                          key={scene.sceneId}
+                          type="button"
+                          title={hasAudio ? t("studioPro.audioStatusCompleted") : t("studioPro.trackVoiceEmptyHint")}
+                          onClick={() => {
+                            setSelectedSceneId(scene.sceneId);
+                            setLeftTab("voice");
+                          }}
+                          className={`flex h-[30px] shrink-0 items-center justify-center rounded-[6px] text-[9px] ${excluded ? "opacity-35" : ""} ${
+                            scene.sceneId === selectedScene?.sceneId ? "outline outline-2 outline-offset-1 outline-lyx-fg" : "border border-lyx-border"
+                          } ${hasAudio ? "bg-[repeating-linear-gradient(90deg,#dfe6e2_0,#dfe6e2_2px,#eef3f1_2px,#eef3f1_5px)]" : "border-dashed bg-lyx-muted text-lyx-fg-subtle"}`}
+                          style={{ width: clipWidth }}
+                        >
+                          {hasAudio ? (audio ? `${Math.round(audio.durationMs / 1000)}s` : "···") : t("studioPro.trackVoiceEmpty")}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div
+                    className="h-4 rounded-[5px] border border-lyx-border"
+                    style={{
+                      width: Math.max(120, orderedScenes.reduce((sum, scene) => sum + Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4)), 0) + Math.max(0, orderedScenes.length - 1)),
+                      background: "repeating-linear-gradient(90deg,#e7e0f2,#e7e0f2 3px,#f3eef9 3px,#f3eef9 7px)",
+                    }}
+                    title={t("studioPro.trackMusicHint")}
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="overflow-y-auto border-t border-lyx-border p-3 lg:border-t-0 lg:border-l">
+        {rightCollapsed ? (
+          <div className="hidden items-start justify-center border-t border-lyx-border py-2 lg:flex lg:border-t-0 lg:border-l">
+            <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={t("studioPro.showInspectorPanel")} onClick={() => setPanel({ right: false })}>
+              <PanelRightOpen size={15} strokeWidth={1.9} />
+            </button>
+          </div>
+        ) : null}
+        <div className={`${rightCollapsed ? "lg:hidden" : ""} overflow-y-auto border-t border-lyx-border p-3 lg:border-t-0 lg:border-l`}>
           {selectedScene && selectedSceneDraft ? (
             <>
-              <p className="mb-0.5 text-[12px] font-medium">
-                {t("studioPro.inspectorTitle", { index: scenes.findIndex((scene) => scene.sceneId === selectedScene.sceneId) + 1 })}
+              <p className="mb-0.5 text-[13px] font-bold">
+                {t("studioPro.inspectorTitle", { index: selectedSceneIndex + 1 })}
               </p>
-              <p className="mb-3 text-[10px] text-lyx-fg-muted">
-                {template ? `${template.name} · ${template.id}` : t("studioPro.noTemplate")}
+              <p className="mb-3 text-[11px] text-lyx-fg-muted">
+                {template ? `${t("studioPro.templateLabel")}: ${template.name}` : t("studioPro.noTemplate")}
               </p>
 
+              <div className="mb-3 flex gap-1">
+                <button type="button" title={t("studioPro.moveEarlier")} disabled={selectedSceneIndex <= 0} className="lyx-btn lyx-btn-ghost h-8 flex-1 text-[11px] disabled:opacity-30" onClick={() => moveScene(selectedScene.sceneId, -1)}>◀</button>
+                <button
+                  type="button"
+                  title={selectedSceneDraft.excluded ? t("studioPro.includeScene") : t("studioPro.excludeScene")}
+                  className="lyx-btn lyx-btn-ghost h-8 flex-1 text-[11px]"
+                  onClick={() => toggleSceneExcluded(selectedScene.sceneId)}
+                >
+                  {selectedSceneDraft.excluded ? "↩" : "🗑"}
+                </button>
+                <button type="button" title={t("studioPro.moveLater")} disabled={selectedSceneIndex < 0 || selectedSceneIndex >= orderedScenes.length - 1} className="lyx-btn lyx-btn-ghost h-8 flex-1 text-[11px] disabled:opacity-30" onClick={() => moveScene(selectedScene.sceneId, 1)}>▶</button>
+              </div>
+
               <div className="flex flex-col gap-3">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.inspectorContent")}</p>
                 <div>
                   <label className="mb-1 block text-[10px] text-lyx-fg-muted">{t("studioPro.fieldVideoSource")}</label>
-                  <p className="text-[11px]">{selectedSceneDraft.mediaLabel ?? (selectedSceneDraft.mediaAssetVersionId ? selectedSceneDraft.mediaAssetVersionId : t("studioPro.noMedia"))}</p>
+                  <p className="truncate text-[11px]" title={selectedSceneDraft.mediaLabel ?? selectedSceneDraft.mediaAssetVersionId ?? undefined}>
+                    {selectedSceneDraft.mediaLabel ?? (selectedSceneDraft.mediaAssetVersionId ? selectedSceneDraft.mediaAssetVersionId.slice(0, 8) + "…" : t("studioPro.noMedia"))}
+                  </p>
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] text-lyx-fg-muted">{t("studioPro.fieldCaption")}</label>
@@ -669,7 +1254,7 @@ export function StudioProPage() {
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-[10px] text-lyx-fg-muted">Annotation</label>
+                  <label className="mb-1 block text-[10px] text-lyx-fg-muted">{t("studioPro.fieldAnnotation")}</label>
                   <TextArea
                     className="w-full"
                     value={selectedSceneDraft.annotation ?? ""}
@@ -678,71 +1263,24 @@ export function StudioProPage() {
                 </div>
 
                 {template ? (
-                  <>
-                    <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.inspectorHint")}</p>
-                    {template.modifications
-                      .filter((mod) => mod.kind === "color" || mod.kind === "font" || mod.kind === "volume" || mod.kind === "text")
-                      .map((mod) => {
-                        const value = draft.optionValues[mod.key] ?? "";
-                        if (mod.kind === "color") {
-                          return (
-                            <div key={mod.key}>
-                              <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
-                              <div className="flex items-center gap-1.5">
-                                {["#161616", "#F5F5F5", "#0A7A3E"].map((hex) => (
-                                  <button
-                                    key={hex}
-                                    type="button"
-                                    aria-label={hex}
-                                    onClick={() => setOptionValue(mod.key, hex)}
-                                    className={`h-[22px] w-[22px] rounded-[4px] border ${value === hex ? "border-lyx-fg" : "border-lyx-border"}`}
-                                    style={{ backgroundColor: hex }}
-                                  />
-                                ))}
-                                <input
-                                  value={value}
-                                  onChange={(event) => setOptionValue(mod.key, event.target.value)}
-                                  className="h-8 flex-1 rounded-[4px] border border-lyx-border bg-lyx-muted px-2 text-[11px]"
-                                />
-                              </div>
-                            </div>
-                          );
-                        }
-                        if (mod.kind === "font") {
-                          return (
-                            <div key={mod.key}>
-                              <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
-                              <Select className="w-full" value={value || "Inter Bold"} onChange={(event) => setOptionValue(mod.key, event.target.value)}>
-                                <option>Inter Bold</option>
-                                <option>Inter Medium</option>
-                                <option>Noto Sans</option>
-                              </Select>
-                            </div>
-                          );
-                        }
-                        if (mod.kind === "volume") {
-                          return (
-                            <div key={mod.key}>
-                              <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
-                              <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                value={value || "80"}
-                                onChange={(event) => setOptionValue(mod.key, event.target.value)}
-                                className="w-full"
-                              />
-                            </div>
-                          );
-                        }
-                        return (
-                          <div key={mod.key}>
-                            <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{mod.key}</label>
-                            <TextArea className="w-full" value={value} onChange={(event) => setOptionValue(mod.key, event.target.value)} />
-                          </div>
-                        );
-                      })}
-                  </>
+                  selectedSceneOptions.length > 0 || sceneOptionGroups.leftover.length > 0 ? (
+                    <>
+                      <p className="border-t border-lyx-border pt-2 text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.inspectorTemplate")}</p>
+                      {selectedSceneOptions.length > 0 ? (
+                        selectedSceneOptions.map(renderModField)
+                      ) : (
+                        <p className="text-[11px] text-lyx-fg-muted">{t("studioPro.noSceneTemplateOptions")}</p>
+                      )}
+                      {sceneOptionGroups.leftover.length > 0 ? (
+                        <>
+                          <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.otherTemplateOptions")}</p>
+                          {sceneOptionGroups.leftover.map(renderModField)}
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-lyx-fg-muted">{t("studioPro.noSceneTemplateOptions")}</p>
+                  )
                 ) : (
                   <p className="text-[11px] text-lyx-fg-muted">{t("templates.pinNote")}</p>
                 )}
@@ -753,6 +1291,6 @@ export function StudioProPage() {
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 }

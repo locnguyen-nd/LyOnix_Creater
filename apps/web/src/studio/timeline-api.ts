@@ -47,8 +47,8 @@ export async function previewTimelineVersion(id: string): Promise<TimelineRender
   return api<TimelineRenderPreviewResponse>(`/timeline-versions/${id}/preview`);
 }
 
-export async function searchPexels(projectId: string, providerAccountId: string, type: PexelsMediaType, query: string): Promise<PexelsSearchResponse> {
-  const params = new URLSearchParams({ providerAccountId, type, query });
+export async function searchPexels(projectId: string, providerAccountId: string, type: PexelsMediaType, query: string, perPage?: number): Promise<PexelsSearchResponse> {
+  const params = new URLSearchParams({ providerAccountId, type, query, ...(perPage ? { perPage: String(perPage) } : {}) });
   return api<PexelsSearchResponse>(`/projects/${projectId}/pexels/search?${params.toString()}`);
 }
 
@@ -85,6 +85,11 @@ export async function getAudioGenerationOperation(operationId: string): Promise<
   return api<AudioGenerationAccepted>(`/audio-generation-operations/${operationId}`);
 }
 
+/** Latest-first; used to resolve a scene's already-generated audio (e.g. from an earlier session) for Studio preview playback without re-generating it. */
+export async function listSceneAudioVersions(sceneDraftVersionId: string): Promise<AudioVersionResponse[]> {
+  return api<AudioVersionResponse[]>(`/scene-versions/${sceneDraftVersionId}/audio-versions`);
+}
+
 export async function listCreatomateTemplates(providerAccountId: string): Promise<CreatomateTemplateSummaryResponse[]> {
   const params = new URLSearchParams({ providerAccountId });
   return api<CreatomateTemplateSummaryResponse[]>(`/creatomate/templates?${params.toString()}`);
@@ -113,6 +118,19 @@ export async function submitRenderFromTimeline(
   // that dedupe instead of reinforcing it - an accidental duplicate submit of the same
   // approved timeline must resolve to the existing job, not call Creatomate twice.
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/render-jobs`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Renders every scene the timeline has, not capped by the pinned template's own fixed slot count — see `RenderJobsService.submitDynamicFromTimeline`. */
+export async function submitDynamicRenderFromTimeline(
+  projectId: string,
+  timelineVersionId: string,
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+): Promise<RenderJobResponse> {
+  return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/dynamic-render-jobs`, {
     method: "POST",
     headers: await csrfHeaders(),
     body: JSON.stringify(input),

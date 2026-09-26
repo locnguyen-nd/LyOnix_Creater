@@ -44,6 +44,7 @@ export function JobNewPage() {
   const [busy, setBusy] = useState(false);
   const contentAccounts = providers.filter((item) => item.role === "content" && (item.isFake || item.status === "verified"));
   const selected = contentAccounts.find((item) => item.id === content);
+  const selectedChannel = channels.find((item) => item.id === channelId);
   const generatingLabel = selected
     ? t("jobs.generating", { provider: selected.provider, model: selected.model })
     : t("common.loading");
@@ -60,6 +61,13 @@ export function JobNewPage() {
       .catch((err) => setError(err instanceof ApiError ? err.message : t("common.error")));
   }, []);
 
+  const nextSteps = [
+    t("jobs.nextStep1"),
+    t("jobs.nextStep2"),
+    t("jobs.nextStep3"),
+    t("jobs.nextStep4"),
+  ];
+
   return (
     <>
       <PageHeader title={t("jobs.create")} />
@@ -69,13 +77,10 @@ export function JobNewPage() {
           {t("jobs.needProvider")} <Link className="underline" to="/settings">{t("providers.title")}</Link>
         </Banner>
       ) : null}
-      <div className="mb-4 flex gap-2">
-        <Button variant={mode === "topic" ? "primary" : "secondary"} onClick={() => setMode("topic")}>{t("jobs.topicMode")}</Button>
-        <Button variant={mode === "revise" ? "primary" : "secondary"} onClick={() => setMode("revise")}>{t("jobs.reviseMode")}</Button>
-      </div>
-      <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
+
+      <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
         <form
-          className="flex flex-col gap-4"
+          className="flex flex-col gap-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-5"
           onSubmit={(event) => {
             event.preventDefault();
             void (async () => {
@@ -116,16 +121,31 @@ export function JobNewPage() {
             })();
           }}
         >
-          <Field label={t("jobs.channel")}>
-            <Select value={channelId} onChange={(e) => setChannelId(e.target.value)} required>
-              {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
-            </Select>
-          </Field>
-          <Field label={t("jobs.language")}>
-            <Select value={language} onChange={(e) => setLanguage(e.target.value as UiLocale)}>
-              <option value="vi">VI</option><option value="en">EN</option><option value="ja">JA</option><option value="ko">KO</option>
-            </Select>
-          </Field>
+          <div className="inline-flex w-fit gap-0.5 rounded-[8px] bg-lyx-muted p-1">
+            <button type="button" onClick={() => setMode("topic")} className={`rounded-[6px] px-4 py-1.5 text-[12.5px] font-semibold ${mode === "topic" ? "bg-lyx-bg text-lyx-fg shadow-sm" : "text-lyx-fg-muted"}`}>
+              {t("jobs.topicMode")}
+            </button>
+            <button type="button" onClick={() => setMode("revise")} className={`rounded-[6px] px-4 py-1.5 text-[12.5px] font-semibold ${mode === "revise" ? "bg-lyx-bg text-lyx-fg shadow-sm" : "text-lyx-fg-muted"}`}>
+              {t("jobs.reviseMode")}
+            </button>
+          </div>
+
+          <div>
+            <p className="mb-2.5 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("jobs.basicsSection")}</p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label={t("jobs.channel")}>
+                <Select value={channelId} onChange={(e) => setChannelId(e.target.value)} required>
+                  {channels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
+                </Select>
+              </Field>
+              <Field label={t("jobs.language")}>
+                <Select value={language} onChange={(e) => setLanguage(e.target.value as UiLocale)}>
+                  <option value="vi">VI</option><option value="en">EN</option><option value="ja">JA</option><option value="ko">KO</option>
+                </Select>
+              </Field>
+            </div>
+          </div>
+
           <Field label={t("jobs.topic")} {...(error ? { error } : {})}>
             <TextArea value={topic} onChange={(e) => setTopic(e.target.value)} required />
           </Field>
@@ -137,32 +157,69 @@ export function JobNewPage() {
               <TextArea value={existingScript} onChange={(e) => setExistingScript(e.target.value)} required />
             </Field>
           ) : null}
-          <Field label={t("jobs.contentAccount")}>
-            <Select value={content} onChange={(e) => setContent(e.target.value)} required>
-              {contentAccounts.map((item) => (
-                <option key={item.id} value={item.id}>{item.name} · {item.provider} · {item.model}{item.status !== "verified" ? " · ?" : ""}</option>
-              ))}
-            </Select>
-          </Field>
-          <Button type="submit" disabled={busy || !content}>{busy ? generatingLabel : t("jobs.submit")}</Button>
-        </form>
-        <aside className="flex flex-col gap-4 border border-lyx-border p-4">
-          <div>
-            <h2 className="mb-2 text-[16px] font-semibold">{t("jobs.summary")}</h2>
-            <p className="text-[12px] text-lyx-fg-muted">{t("jobs.preset")}</p>
+
+          <div className="border-t border-lyx-border pt-4">
+            <Field label={t("jobs.contentAccount")}>
+              <Select value={content} onChange={(e) => setContent(e.target.value)} required>
+                {contentAccounts.map((item) => (
+                  <option key={item.id} value={item.id}>{item.name} · {item.provider} · {item.model}{item.status !== "verified" ? " · ?" : ""}</option>
+                ))}
+              </Select>
+            </Field>
           </div>
-          <Field label={t("jobs.durationTarget")}>
-            <Select value={durationTarget} onChange={(e) => setDurationTarget(e.target.value as (typeof DURATION_TARGETS)[number])}>
-              {DURATION_TARGETS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </Select>
-          </Field>
-          <Field label={t("jobs.sceneCountTarget")}>
-            <Select value={sceneCountTarget} onChange={(e) => setSceneCountTarget(e.target.value as (typeof SCENE_COUNT_TARGETS)[number])}>
-              {SCENE_COUNT_TARGETS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </Select>
-          </Field>
-          <p className="border-t border-lyx-border pt-3 text-[11px] leading-4 text-lyx-fg-muted">{t("jobs.nextStepsHint")}</p>
-        </aside>
+
+          <div className="flex items-center justify-between gap-3 border-t border-lyx-border pt-4">
+            <p className="text-[11.5px] text-lyx-fg-muted">{t("jobs.submitHint")}</p>
+            <Button type="submit" disabled={busy || !content}>{busy ? generatingLabel : t("jobs.submit")}</Button>
+          </div>
+        </form>
+
+        <div className="flex flex-col gap-4">
+          <div className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
+            <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("jobs.summary")}</p>
+            <dl className="flex flex-col">
+              <div className="flex items-center justify-between border-b border-lyx-neutral-bg py-2 text-[12.5px]">
+                <dt className="text-lyx-fg-muted">{t("jobs.channel")}</dt>
+                <dd className="font-medium">{selectedChannel?.name ?? "—"}</dd>
+              </div>
+              <div className="flex items-center justify-between border-b border-lyx-neutral-bg py-2 text-[12.5px]">
+                <dt className="text-lyx-fg-muted">{t("jobs.language")}</dt>
+                <dd className="font-medium uppercase">{language}</dd>
+              </div>
+              <div className="flex items-center justify-between py-2 text-[12.5px]">
+                <dt className="text-lyx-fg-muted">{t("jobs.durationTarget")}</dt>
+                <dd>
+                  <Select className="h-8 text-[12px]" value={durationTarget} onChange={(e) => setDurationTarget(e.target.value as (typeof DURATION_TARGETS)[number])}>
+                    {DURATION_TARGETS.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </Select>
+                </dd>
+              </div>
+              <div className="flex items-center justify-between border-t border-lyx-neutral-bg py-2 text-[12.5px]">
+                <dt className="text-lyx-fg-muted">{t("jobs.sceneCountTarget")}</dt>
+                <dd>
+                  <Select className="h-8 text-[12px]" value={sceneCountTarget} onChange={(e) => setSceneCountTarget(e.target.value as (typeof SCENE_COUNT_TARGETS)[number])}>
+                    {SCENE_COUNT_TARGETS.map((value) => <option key={value} value={value}>{value}</option>)}
+                  </Select>
+                </dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
+            <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("jobs.nextStepsTitle")}</p>
+            <ol className="flex flex-col">
+              {nextSteps.map((label, index) => (
+                <li key={label} className="flex gap-3">
+                  <div className="flex flex-col items-center">
+                    <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full bg-lyx-neutral-bg text-[11px] font-bold text-lyx-fg-muted">{index + 1}</span>
+                    {index < nextSteps.length - 1 ? <span className="w-px flex-1 bg-lyx-border" /> : null}
+                  </div>
+                  <p className="pb-4 text-[12.5px] leading-[22px]">{label}</p>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
       </div>
     </>
   );
