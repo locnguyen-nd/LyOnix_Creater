@@ -357,6 +357,11 @@ const vi = {
     opsJobsTotal: "Tổng số job",
     opsProviders: "Nhà cung cấp",
     opsStorage: "Lưu trữ & dữ liệu tạm",
+    systemSettings: "Cài đặt hệ thống",
+    channelSyncInterval: "Chu kỳ đồng bộ kênh TikTok",
+    channelSyncIntervalHint: "Job nền gọi API TikTok theo chu kỳ này (1–60 phút). Thay đổi áp dụng ngay, không cần restart API.",
+    channelSyncIntervalUnit: "phút",
+    systemSettingsSaved: "Đã lưu cài đặt hệ thống",
   },
   me: {
     title: "Tài khoản",
@@ -368,6 +373,7 @@ const vi = {
     displayName: "Tên hiển thị",
     saved: "Đã lưu",
     passwordUpdated: "Đã đổi mật khẩu",
+    passwordUpdatedRelogin: "Đã đổi mật khẩu. Vui lòng đăng nhập lại bằng mật khẩu mới.",
   },
   jobsByChannel: {
     title: "Việc theo kênh",
@@ -747,6 +753,11 @@ const en: typeof vi = {
     opsJobsTotal: "Total jobs",
     opsProviders: "Providers",
     opsStorage: "Storage & temp data",
+    systemSettings: "System settings",
+    channelSyncInterval: "TikTok channel sync interval",
+    channelSyncIntervalHint: "Background job calls the TikTok API on this interval (1–60 minutes). Changes apply immediately without restarting the API.",
+    channelSyncIntervalUnit: "minutes",
+    systemSettingsSaved: "System settings saved",
   },
   me: {
     ...vi.me,
@@ -755,6 +766,7 @@ const en: typeof vi = {
     password: "Change password",
     saved: "Saved",
     passwordUpdated: "Password updated",
+    passwordUpdatedRelogin: "Password updated. Please sign in again with your new password.",
   },
   assets: {
     ...vi.assets,

@@ -38,6 +38,7 @@ blob-report/
 .memory/worklog/
 .memory/private/
 data/media/**
+data/system-settings.json
 !data/media/.gitkeep
 pipeline/.lock
 pipeline/*.tmp

@@ -34,7 +34,7 @@ const webOrigin = () => process.env.WEB_ORIGIN ?? "http://localhost:5173";
 const publicChannel = (row: { id: string; displayName: string; externalChannelId: string; username: string | null; avatarUrl: string | null; authType: ChannelAuthType; status: string; grantedScopes: string[]; updatedAt: Date }, coverage: PublicChannel["coverage"], lastSyncAt: string | null): PublicChannel => ({
   id: row.id,
   name: row.displayName,
-  handle: row.username ? `@${row.username}` : row.externalChannelId,
+  handle: row.username ? `@${row.username}` : "",
   avatarUrl: row.avatarUrl,
   authType: row.authType,
   connected: row.status === "connected",

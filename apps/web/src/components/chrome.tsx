@@ -1,5 +1,5 @@
 import { Inbox } from "lucide-react";
-import type { ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 export function PageHeader({
   title,
@@ -88,66 +88,176 @@ export function PreviewFrame({ caption }: { caption: string }) {
   );
 }
 
+export type TrendSeries = {
+  id: string;
+  label: string;
+  color: string;
+  points: Array<{ t: number; v: number }>;
+};
+
+const DEFAULT_SERIES_COLOR = "var(--lyx-fg)";
+
 export function Sparkline({ values }: { values: number[] }) {
   return <TrendChart points={values.map((v, i) => ({ t: i, v }))} />;
 }
 
+/**
+ * Growth chart: draws every series as a continuous line (overview), with hover tooltip
+ * showing the timestamp and each metric's value at that point — not a single click-to-swap value.
+ */
 export function TrendChart({
   points,
+  series,
   label,
+  emphasisId,
+  valueFormatter = (v) => v.toLocaleString("vi-VN"),
 }: {
-  points: Array<{ t: number; v: number }>;
+  points?: Array<{ t: number; v: number }>;
+  series?: TrendSeries[];
   label?: string;
+  /** Optional thicker stroke for the focused KPI; other lines stay visible. */
+  emphasisId?: string;
+  valueFormatter?: (value: number) => string;
 }) {
-  if (points.length === 0) {
+  const lines = useMemo<TrendSeries[]>(() => {
+    if (series && series.length > 0) return series.filter((item) => item.points.length > 0);
+    if (points && points.length > 0) return [{ id: "value", label: label ?? "Giá trị", color: DEFAULT_SERIES_COLOR, points }];
+    return [];
+  }, [series, points, label]);
+
+  const [hover, setHover] = useState<{ index: number; xPct: number } | null>(null);
+
+  const timeline = useMemo(() => {
+    const stamps = new Set<number>();
+    for (const line of lines) for (const point of line.points) stamps.add(point.t);
+    return [...stamps].sort((a, b) => a - b);
+  }, [lines]);
+
+  if (lines.length === 0 || timeline.length === 0) {
     return <p className="py-10 text-center text-[12px] text-lyx-fg-muted">Không đủ mốc để vẽ biểu đồ</p>;
   }
+
   const w = 1000;
-  const h = 220;
-  const pad = { l: 0, r: 0, t: 8, b: 26 };
+  const h = 240;
+  const pad = { l: 8, r: 8, t: 12, b: 28 };
   const innerW = w - pad.l - pad.r;
   const innerH = h - pad.t - pad.b;
-  const values = points.map((p) => p.v);
-  const max = Math.max(...values);
-  const min = Math.min(...values);
+  const allValues = lines.flatMap((line) => line.points.map((p) => p.v));
+  const max = Math.max(...allValues);
+  const min = Math.min(...allValues);
   const yMin = min === max ? (min === 0 ? 0 : min * 0.95) : min;
   const yMax = min === max ? max * 1.1 || 1 : max;
   const ySpan = yMax - yMin || 1;
-  const xAt = (index: number) => pad.l + (points.length === 1 ? innerW / 2 : (index / (points.length - 1)) * innerW);
+  const xAt = (index: number) => pad.l + (timeline.length === 1 ? innerW / 2 : (index / (timeline.length - 1)) * innerW);
   const yAt = (value: number) => pad.t + innerH - ((value - yMin) / ySpan) * innerH;
-  const line = points.map((point, index) => `${index === 0 ? "M" : "L"} ${xAt(index)} ${yAt(point.v)}`).join(" ");
-  const area = `${line} L ${xAt(points.length - 1)} ${pad.t + innerH} L ${xAt(0)} ${pad.t + innerH} Z`;
-  const gridLines = 4;
+  const valueAt = (line: TrendSeries, t: number) => {
+    const exact = line.points.find((p) => p.t === t);
+    if (exact) return exact.v;
+    let best: number | null = null;
+    for (const point of line.points) {
+      if (point.t <= t) best = point.v;
+      else break;
+    }
+    return best;
+  };
+  const pathFor = (line: TrendSeries) => {
+    const coords = timeline
+      .map((t, index) => {
+        const v = valueAt(line, t);
+        return v === null ? null : { index, v };
+      })
+      .filter((item): item is { index: number; v: number } => item !== null);
+    return coords.map((item, i) => `${i === 0 ? "M" : "L"} ${xAt(item.index)} ${yAt(item.v)}`).join(" ");
+  };
   const formatTime = (ms: number) => {
     const date = new Date(ms);
-    if (Number.isNaN(date.getTime()) || (points.length <= 24 && (points.at(-1)?.t ?? 0) - (points[0]?.t ?? 0) <= 36 * 3600 * 1000)) {
-      return Number.isNaN(date.getTime()) ? String(ms) : date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+    if (Number.isNaN(date.getTime())) return String(ms);
+    const span = (timeline.at(-1) ?? 0) - (timeline[0] ?? 0);
+    if (timeline.length <= 24 && span <= 36 * 3600 * 1000) {
+      return date.toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     }
     return date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" });
   };
-  const labelCount = Math.min(points.length, 7);
-  const labelIdx = Array.from({ length: labelCount }, (_, i) => Math.round((i * (points.length - 1)) / Math.max(labelCount - 1, 1)));
+  const labelCount = Math.min(timeline.length, 7);
+  const labelIdx = Array.from({ length: labelCount }, (_, i) => Math.round((i * (timeline.length - 1)) / Math.max(labelCount - 1, 1)));
+  const hoverStamp = hover ? timeline[hover.index] : undefined;
+  const hoverRows =
+    hoverStamp === undefined
+      ? []
+      : lines
+          .map((line) => ({ line, value: valueAt(line, hoverStamp) }))
+          .filter((row): row is { line: TrendSeries; value: number } => row.value !== null);
+
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="h-[220px] w-full text-lyx-fg" role="img" aria-label={label ?? "trend"} preserveAspectRatio="none">
-      {Array.from({ length: gridLines + 1 }, (_, i) => (pad.t + innerH * i) / gridLines).map((y) => (
-        <line key={y} x1="0" x2={w} y1={y} y2={y} stroke="currentColor" strokeOpacity="0.08" />
-      ))}
-      <path d={area} fill="currentColor" fillOpacity="0.06" />
-      <path d={line} fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-      {points.map((point, index) => (
-        <circle key={`${point.t}-${index}`} cx={xAt(index)} cy={yAt(point.v)} r={points.length > 40 ? 0 : 3} fill="var(--lyx-bg)" stroke="currentColor" strokeWidth="2" />
-      ))}
-      {labelIdx.map((idx) => {
-        const point = points[idx];
-        if (!point) return null;
-        const anchor = idx === 0 ? "start" : idx === points.length - 1 ? "end" : "middle";
-        return (
-          <text key={idx} x={xAt(idx)} y={h - 6} textAnchor={anchor} fontSize="11" fill="currentColor" fillOpacity="0.5">
-            {formatTime(point.t)}
-          </text>
-        );
-      })}
-    </svg>
+    <div className="relative w-full">
+      <svg
+        viewBox={`0 0 ${w} ${h}`}
+        className="h-[240px] w-full text-lyx-fg"
+        role="img"
+        aria-label={label ?? "trend"}
+        preserveAspectRatio="none"
+        onMouseLeave={() => setHover(null)}
+        onMouseMove={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          const ratio = (event.clientX - rect.left) / Math.max(rect.width, 1);
+          const index = Math.min(timeline.length - 1, Math.max(0, Math.round(ratio * (timeline.length - 1))));
+          setHover({ index, xPct: (xAt(index) / w) * 100 });
+        }}
+      >
+        {Array.from({ length: 5 }, (_, i) => pad.t + (innerH * i) / 4).map((y) => (
+          <line key={y} x1="0" x2={w} y1={y} y2={y} stroke="currentColor" strokeOpacity="0.08" />
+        ))}
+        {lines.map((line) => (
+          <path
+            key={line.id}
+            d={pathFor(line)}
+            fill="none"
+            stroke={line.color}
+            strokeWidth={emphasisId && line.id === emphasisId ? 3 : 2}
+            strokeOpacity={emphasisId && line.id !== emphasisId ? 0.55 : 1}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        ))}
+        {hover ? (
+          <line x1={xAt(hover.index)} x2={xAt(hover.index)} y1={pad.t} y2={pad.t + innerH} stroke="currentColor" strokeOpacity="0.35" strokeDasharray="4 4" />
+        ) : null}
+        {hover && hoverStamp !== undefined
+          ? hoverRows.map(({ line, value }) => (
+              <circle key={line.id} cx={xAt(hover.index)} cy={yAt(value)} r={4} fill="var(--lyx-bg)" stroke={line.color} strokeWidth="2" />
+            ))
+          : null}
+        {labelIdx.map((idx) => {
+          const stamp = timeline[idx];
+          if (stamp === undefined) return null;
+          const anchor = idx === 0 ? "start" : idx === timeline.length - 1 ? "end" : "middle";
+          return (
+            <text key={idx} x={xAt(idx)} y={h - 6} textAnchor={anchor} fontSize="11" fill="currentColor" fillOpacity="0.5">
+              {formatTime(stamp)}
+            </text>
+          );
+        })}
+      </svg>
+      {hover && hoverStamp !== undefined && hoverRows.length > 0 ? (
+        <div
+          className="pointer-events-none absolute top-2 z-10 min-w-[160px] max-w-[240px] rounded-[8px] border border-lyx-border bg-lyx-bg px-2.5 py-2 text-[11px] shadow-sm"
+          style={{ left: `min(max(${hover.xPct}%, 8%), 92%)`, transform: "translateX(-50%)" }}
+        >
+          <p className="mb-1.5 font-semibold text-lyx-fg">{formatTime(hoverStamp)}</p>
+          <ul className="flex flex-col gap-1">
+            {hoverRows.map(({ line, value }) => (
+              <li key={line.id} className="flex items-center justify-between gap-3">
+                <span className="inline-flex items-center gap-1.5 text-lyx-fg-muted">
+                  <span className="h-2 w-2 rounded-full" style={{ background: line.color }} />
+                  {line.label}
+                </span>
+                <span className="font-semibold tabular-nums text-lyx-fg">{valueFormatter(value)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -243,9 +353,8 @@ export function ChannelAvatar({ name, src, size = 40 }: { name: string; src?: st
   }
   return (
     <span
-      className="inline-flex shrink-0 items-center justify-center rounded-full bg-lyx-fg text-[12px] font-bold text-lyx-bg"
+      className="inline-flex items-center justify-center rounded-full border border-lyx-border bg-lyx-muted text-[11px] font-bold text-lyx-fg-muted"
       style={{ width: size, height: size }}
-      aria-hidden
     >
       {label}
     </span>

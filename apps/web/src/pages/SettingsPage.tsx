@@ -2,15 +2,21 @@ import { Cog, Server, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { PageHeader, StatusPill } from "../components/chrome";
-import { Button, Field, TextInput } from "../components/ui";
+import { Banner, PageHeader, StatusPill } from "../components/chrome";
+import { Button, Field, Select, TextInput } from "../components/ui";
 import { ProvidersPage } from "./ProvidersPage";
-import { api } from "../api";
+import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import { useMe, useSession } from "../session";
 import { updateOrgSettings } from "../studio/store";
 
 type Tab = "general" | "providers" | "operations";
+
+type SystemSettings = {
+  channelSyncIntervalMinutes: number;
+};
+
+const SYNC_INTERVAL_OPTIONS = [1, 2, 5, 10, 15, 30, 60] as const;
 
 export function SettingsPage() {
   const { t } = useTranslation();
@@ -20,11 +26,24 @@ export function SettingsPage() {
   const [timezone, setTimezone] = useState(state.orgTimezone);
   const [jobs, setJobs] = useState<ApiJob[]>([]);
   const [providers, setProviders] = useState<ApiProvider[]>([]);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [syncMinutes, setSyncMinutes] = useState(5);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   useEffect(() => {
     void api<ApiJob[]>("/jobs").then(setJobs).catch(() => undefined);
-    if (me.role === "admin") void api<ApiProvider[]>("/provider-accounts").then(setProviders).catch(() => undefined);
-  }, []);
+    if (me.role === "admin") {
+      void api<ApiProvider[]>("/provider-accounts").then(setProviders).catch(() => undefined);
+      void api<SystemSettings>("/system-settings")
+        .then((data) => {
+          setSystemSettings(data);
+          setSyncMinutes(data.channelSyncIntervalMinutes);
+        })
+        .catch(() => undefined);
+    }
+  }, [me.role]);
 
   const tabs: Array<{ id: Tab; label: string; icon: LucideIcon }> = [
     { id: "general", label: t("org.settingsTabGeneral"), icon: Cog },
@@ -69,6 +88,54 @@ export function SettingsPage() {
               </Button>
             ) : null}
           </section>
+
+          {me.role === "admin" ? (
+            <section className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+              <h2 className="mb-1 text-[14px] font-semibold">{t("org.systemSettings")}</h2>
+              <p className="mb-3 text-[12px] text-lyx-fg-muted">{t("org.channelSyncIntervalHint")}</p>
+              {settingsMessage ? <Banner variant="info">{settingsMessage}</Banner> : null}
+              {settingsError ? <Banner variant="danger">{settingsError}</Banner> : null}
+              <Field label={`${t("org.channelSyncInterval")} (${t("org.channelSyncIntervalUnit")})`}>
+                <Select
+                  value={String(syncMinutes)}
+                  onChange={(e) => setSyncMinutes(Number(e.target.value))}
+                  disabled={settingsBusy || systemSettings === null}
+                >
+                  {SYNC_INTERVAL_OPTIONS.map((mins) => (
+                    <option key={mins} value={mins}>{mins}</option>
+                  ))}
+                  {!SYNC_INTERVAL_OPTIONS.includes(syncMinutes as (typeof SYNC_INTERVAL_OPTIONS)[number]) ? (
+                    <option value={syncMinutes}>{syncMinutes}</option>
+                  ) : null}
+                </Select>
+              </Field>
+              <Button
+                className="mt-3"
+                disabled={settingsBusy || systemSettings === null || syncMinutes === systemSettings.channelSyncIntervalMinutes}
+                onClick={() => void (async () => {
+                  try {
+                    setSettingsBusy(true);
+                    setSettingsError(null);
+                    const updated = await api<SystemSettings>("/system-settings", {
+                      method: "PATCH",
+                      headers: await csrfHeaders(),
+                      body: JSON.stringify({ channelSyncIntervalMinutes: syncMinutes }),
+                    });
+                    setSystemSettings(updated);
+                    setSyncMinutes(updated.channelSyncIntervalMinutes);
+                    setSettingsMessage(t("org.systemSettingsSaved"));
+                  } catch (err) {
+                    setSettingsError(err instanceof ApiError ? err.message : t("common.error"));
+                  } finally {
+                    setSettingsBusy(false);
+                  }
+                })()}
+              >
+                {settingsBusy ? t("common.loading") : t("common.save")}
+              </Button>
+            </section>
+          ) : null}
+
           {me.role === "admin" ? (
             <section className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
               <h2 className="mb-1 text-[14px] font-semibold">{t("org.people")}</h2>
@@ -113,6 +180,11 @@ export function SettingsPage() {
           <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4 md:col-span-2">
             <h3 className="mb-1 text-[14px] font-semibold">{t("org.opsStorage")}</h3>
             <p className="text-[12px] text-lyx-fg-muted">{t("org.retention")}</p>
+            {me.role === "admin" && systemSettings ? (
+              <p className="mt-2 text-[12.5px] text-lyx-fg-muted">
+                {t("org.channelSyncInterval")}: <span className="font-semibold text-lyx-fg">{systemSettings.channelSyncIntervalMinutes} {t("org.channelSyncIntervalUnit")}</span>
+              </p>
+            ) : null}
           </div>
         </div>
       ) : null}

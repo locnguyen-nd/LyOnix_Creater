@@ -5,7 +5,7 @@ import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
 import i18n, { persistLocale } from "../i18n";
 import { useMe, useSession } from "../session";
-import { changePassword, StudioError, updatePreferences, updateProfile } from "../studio/store";
+import { SESSION_KEY, updatePreferences, updateProfile } from "../studio/store";
 import { api, ApiError } from "../api";
 import { applyTheme } from "../theme";
 import type { ThemePref } from "../studio/types";
@@ -22,6 +22,7 @@ export function MePage() {
   const [next, setNext] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [passwordBusy, setPasswordBusy] = useState(false);
 
   return (
     <>
@@ -72,27 +73,39 @@ export function MePage() {
         className="flex max-w-md flex-col gap-4"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (next.trim().length < 8) {
+            setError(t("login.passwordHint"));
+            return;
+          }
           try {
-            const csrf = await api<{ csrfToken: string }>("/auth/csrf");
-            await api<void>("/me/change-password", { method: "POST", headers: { "x-csrf-token": csrf.csrfToken }, body: JSON.stringify({ currentPassword: current, newPassword: next }) });
-            updateState((prev) => changePassword(prev, me, current, next));
-            setCurrent("");
-            setNext("");
-            setMessage(t("me.passwordUpdated"));
+            setPasswordBusy(true);
             setError(null);
+            const csrf = await api<{ csrfToken: string }>("/auth/csrf");
+            await api<void>("/me/change-password", {
+              method: "POST",
+              headers: { "x-csrf-token": csrf.csrfToken },
+              body: JSON.stringify({ currentPassword: current, newPassword: next }),
+            });
+            // API revokes all sessions and clears auth cookies — hard navigate so local session state resets.
+            sessionStorage.removeItem(SESSION_KEY);
+            window.location.assign("/login");
           } catch (err) {
-            setError(err instanceof StudioError ? err.message : t("common.error"));
+            setError(err instanceof ApiError ? err.message : t("common.error"));
+          } finally {
+            setPasswordBusy(false);
           }
         }}
       >
         <h2 className="text-[16px] font-semibold">{t("me.password")}</h2>
         <Field label={t("me.current")}>
-          <PasswordInput value={current} onChange={(e) => setCurrent(e.target.value)} />
+          <PasswordInput value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
         </Field>
         <Field label={t("me.next")}>
-          <PasswordInput value={next} onChange={(e) => setNext(e.target.value)} />
+          <PasswordInput value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
         </Field>
-        <Button type="submit">{t("me.password")}</Button>
+        <Button type="submit" disabled={passwordBusy || !current || !next}>
+          {passwordBusy ? t("common.loading") : t("me.password")}
+        </Button>
       </form>
     </>
   );

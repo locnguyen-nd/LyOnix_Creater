@@ -43,6 +43,24 @@ export type ChannelInsights = {
 export const PERIODS = ["1d", "7d", "30d", "90d"] as const;
 export type PeriodKey = (typeof PERIODS)[number];
 
+export const METRIC_COLORS: Record<string, string> = {
+  followers: "#161616",
+  likes: "#e11d48",
+  views: "#2563eb",
+  comments: "#ca8a04",
+  shares: "#16a34a",
+  video_count: "#7c3aed",
+};
+
+/** Hide TikTok open_id-looking handles (e.g. `-000YG…`); only show real @usernames. */
+export function channelHandleLabel(handle: string | null | undefined): string | null {
+  if (!handle) return null;
+  const raw = handle.replace(/^@/, "").trim();
+  if (!raw || raw.startsWith("-")) return null;
+  if (!/^[a-zA-Z0-9._]{2,24}$/.test(raw)) return null;
+  return `@${raw}`;
+}
+
 export const formatCount = (value: number | null) =>
   value === null ? null : value.toLocaleString("vi-VN");
 

@@ -2,7 +2,6 @@ import type { LucideIcon } from "lucide-react";
 import {
   Clapperboard,
   Folder,
-  Globe,
   LayoutDashboard,
   LogOut,
   Moon,
@@ -100,7 +99,6 @@ export function AppShell() {
         {navCollapsed ? <div className="my-2 h-px bg-lyx-border" /> : <p className="mb-1.5 mt-4 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupSystem")}</p>}
         <Item to="/settings" icon={Settings} label={t("nav.settings")} collapsed={navCollapsed} />
         {isAdmin ? <Item to="/people" icon={Users} label={t("nav.people")} collapsed={navCollapsed} /> : null}
-        <Item to="/me" icon={Globe} label={t("nav.account")} collapsed={navCollapsed} />
         <div className="flex-1" />
         <button
           type="button"
@@ -162,10 +160,16 @@ export function AppShell() {
           >
             {theme === "light" ? <Sun {...iconProps} /> : <Moon {...iconProps} />}
           </button>
-          <div className="flex items-center gap-2 pl-1 text-[12.5px] font-medium">
+          <button
+            type="button"
+            onClick={() => navigate("/me")}
+            className="flex items-center gap-2 rounded-[var(--lyx-radius)] pl-1 pr-1.5 py-0.5 text-[12.5px] font-medium hover:bg-lyx-muted"
+            title={t("nav.account")}
+            aria-label={t("nav.account")}
+          >
             <ChannelAvatar name={me.displayName} size={28} />
             <span className="hidden sm:inline">{me.displayName}</span>
-          </div>
+          </button>
         </div>
       </header>
       <main className="ml-[var(--lyx-sidebar-current)] pt-[var(--lyx-topbar)] transition-[margin] duration-150">

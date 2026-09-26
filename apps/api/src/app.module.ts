@@ -44,6 +44,8 @@ import { AudioVersionsService } from "./audio-versions.service.js";
 import { VideoProductionsController } from "./video-productions.controller.js";
 import { VideoProductionsService } from "./video-productions.service.js";
 import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
+import { SystemSettingsController } from "./system-settings.controller.js";
+import { SystemSettingsService } from "./system-settings.service.js";
 import { StudioBridgeController } from "./studio-bridge.controller.js";
 import { StudioBridgeService } from "./studio-bridge.service.js";
 import { TimelineVersionsController } from "./timeline-versions.controller.js";
@@ -59,6 +61,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     TiktokOauthController,
     JobsController,
     OrganizationController,
+    SystemSettingsController,
     ProjectsController,
     SourcesController,
     MediaController,
@@ -99,6 +102,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptVersionsService,
     AudioVersionsService,
     VideoProductionsService,
+    SystemSettingsService,
     TiktokSyncSchedulerService,
     StudioBridgeService,
     TimelineVersionsService,
