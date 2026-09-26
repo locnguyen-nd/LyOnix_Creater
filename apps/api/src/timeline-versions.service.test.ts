@@ -27,6 +27,7 @@ describe("TimelineVersionsService", () => {
       },
       audioVersion: { findMany: async () => [] },
       subtitleVersion: { findMany: async () => [] },
+      sceneDraftVersion: { findMany: async () => [] },
       templateSnapshot: { findUnique: async ({ where }: any) => templateRows.find((r) => r.id === where.id) ?? null },
       timelineVersion: {
         findMany: async ({ where, orderBy }: any) => {

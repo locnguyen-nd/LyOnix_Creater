@@ -4,6 +4,7 @@ import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, typ
 
 const slots: TemplateModificationSlotResponse[] = [
   { key: "Video-1.source", kind: "video", label: "Video-1.source", required: true },
+  { key: "Video-1.volume", kind: "volume", label: "Video-1.volume", required: false },
   { key: "Video-2.source", kind: "video", label: "Video-2.source", required: false },
   { key: "Text-1.text", kind: "text", label: "Text-1.text", required: true },
   { key: "Text-1.fill_color", kind: "color", label: "Text-1.fill_color", required: false },
@@ -18,6 +19,7 @@ const scene = (overrides: Partial<SceneBindingForMapping>): SceneBindingForMappi
   subtitleVersionId: null,
   screenTextOverride: null,
   annotation: null,
+  excluded: false,
   mediaKind: null,
   audioMediaAssetVersionId: null,
   ...overrides,
@@ -63,6 +65,19 @@ describe("buildRenderAssignmentsFromTimeline", () => {
     expect(built.assignments).toContainEqual({ modificationKey: "Audio-1.source", kind: "audio", mediaAssetVersionId: "media-audio-1" });
   });
 
+  it("mutes a scene's own imported video by default (fetched clip audio is never the intended track)", () => {
+    const scenes: SceneBindingForMapping[] = [scene({ mediaAssetVersionId: "media-1", mediaKind: "video" })];
+    const built = buildRenderAssignmentsFromTimeline(slots, scenes, {});
+    expect(built.assignments).toContainEqual({ modificationKey: "Video-1.volume", kind: "volume", volumePercent: 0 });
+  });
+
+  it("respects an explicit volume override instead of muting", () => {
+    const scenes: SceneBindingForMapping[] = [scene({ mediaAssetVersionId: "media-1", mediaKind: "video" })];
+    const built = buildRenderAssignmentsFromTimeline(slots, scenes, { "Video-1.volume": "65" });
+    expect(built.assignments).toContainEqual({ modificationKey: "Video-1.volume", kind: "volume", volumePercent: 65 });
+    expect(built.assignments.filter((a) => a.modificationKey === "Video-1.volume")).toHaveLength(1);
+  });
+
   it("respects scene order (orderIndex), not array insertion order", () => {
     const scenes: SceneBindingForMapping[] = [
       scene({ sceneId: "second", orderIndex: 1, mediaAssetVersionId: "media-2", mediaKind: "video" }),
@@ -86,12 +101,18 @@ describe("resolveSceneBindingsForMapping", () => {
           { id: "media-other-project", kind: "video", projectId: "project-2" },
         ].filter((r) => where.id.in.includes(r.id) && r.projectId === where.projectId),
     },
+    sceneDraftVersion: {
+      findMany: async ({ where }: any) =>
+        [{ sceneId: "s1", screenText: "Script default for s1", projectId: "project-1" }]
+          .filter((r) => where.sceneId.in.includes(r.sceneId) && r.projectId === where.scriptDraftVersion.sourceVersion.projectId)
+          .map(({ sceneId, screenText }) => ({ sceneId, screenText })),
+    },
   };
 
   it("resolves each scene's media kind and its audio binding's underlying asset id", async () => {
     const scenes = [
-      { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-1", audioVersionId: "audio-1", subtitleVersionId: null, screenTextOverride: null, annotation: null },
-      { sceneId: "s2", orderIndex: 1, mediaAssetVersionId: "media-2", audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null },
+      { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-1", audioVersionId: "audio-1", subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false },
+      { sceneId: "s2", orderIndex: 1, mediaAssetVersionId: "media-2", audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false },
     ];
     const resolved = await resolveSceneBindingsForMapping(prisma, "project-1", scenes);
     expect(resolved[0]).toMatchObject({ mediaKind: "video", audioMediaAssetVersionId: "media-audio-1" });
@@ -99,8 +120,18 @@ describe("resolveSceneBindingsForMapping", () => {
   });
 
   it("treats a media id from another project as unbound (defense in depth)", async () => {
-    const scenes = [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-other-project", audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null }];
+    const scenes = [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-other-project", audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false }];
     const resolved = await resolveSceneBindingsForMapping(prisma, "project-1", scenes);
     expect(resolved[0]!.mediaKind).toBeNull();
+  });
+
+  it("resolves the scene's own script text as fallbackScreenText when no override is stored", async () => {
+    const scenes = [
+      { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: null, audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false },
+      { sceneId: "s2", orderIndex: 1, mediaAssetVersionId: null, audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false },
+    ];
+    const resolved = await resolveSceneBindingsForMapping(prisma, "project-1", scenes);
+    expect(resolved[0]!.fallbackScreenText).toBe("Script default for s1");
+    expect(resolved[1]!.fallbackScreenText).toBeNull();
   });
 });

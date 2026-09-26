@@ -38,7 +38,8 @@ export const toTimelineVersionResponse = (row: {
   version: row.version,
   status: row.status as TimelineVersionResponse["status"],
   templateSnapshotId: row.templateSnapshotId,
-  scenes: (Array.isArray(row.scenes) ? row.scenes : []) as TimelineSceneBindingResponse[],
+  // `excluded` defaults to false for any TimelineVersion row persisted before that field existed.
+  scenes: ((Array.isArray(row.scenes) ? row.scenes : []) as TimelineSceneBindingResponse[]).map((scene) => ({ ...scene, excluded: Boolean(scene.excluded) })),
   optionValues: (row.optionValues && typeof row.optionValues === "object" ? row.optionValues : {}) as TimelineOptionValues,
   supersedesId: row.supersedesId,
   createdAt: row.createdAt.toISOString(),
@@ -131,6 +132,7 @@ export class TimelineVersionsService {
         subtitleVersionId: scene.subtitleVersionId ?? null,
         screenTextOverride: scene.screenTextOverride?.trim() || null,
         annotation: scene.annotation?.trim() || null,
+        excluded: Boolean(scene.excluded),
       })),
     };
   }

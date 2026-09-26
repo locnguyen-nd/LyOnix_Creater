@@ -190,6 +190,7 @@ export {
   getCreatomateTemplate,
   deriveTemplateModifications,
   submitCreatomateRender,
+  submitCreatomateSourceRender,
   getCreatomateRender,
   normalizeCreatomateStatus,
   type CreatomateTemplateSummary,
@@ -199,7 +200,16 @@ export {
   type CreatomateRenderStatus,
   type CreatomateRenderResult,
   type SubmitRenderInput,
+  type SubmitSourceRenderInput,
 } from "./creatomate.js";
+export {
+  extractDynamicStyleFromTemplate,
+  buildDynamicComposition,
+  DEFAULT_DYNAMIC_SCENE_STYLE,
+  type DynamicSceneInput,
+  type DynamicSceneStyle,
+  type DynamicImageAnimation,
+} from "./creatomate-dynamic.js";
 export {
   CAPTION_PLAN_SCHEMA_VERSION,
   CAPTION_PLAN_V1_JSON_SCHEMA,

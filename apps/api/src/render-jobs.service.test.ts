@@ -51,7 +51,8 @@ describe("RenderJobsService", () => {
             { id: "asset-audio", projectId, kind: "audio" },
           ].filter((r) => where.id.in.includes(r.id) && r.projectId === where.projectId),
       },
-      audioVersion: { findMany: async ({ where }: any) => [{ id: "audio-1", mediaAssetVersionId: "asset-audio" }].filter((r) => where.id.in.includes(r.id)) },
+      audioVersion: { findMany: async ({ where }: any) => [{ id: "audio-1", mediaAssetVersionId: "asset-audio", durationMs: 4000 }].filter((r) => where.id.in.includes(r.id)) },
+      sceneDraftVersion: { findMany: async () => [] },
       timelineVersion: { findUnique: vi.fn(async ({ where }: any) => timelineRows.get(where.id) ?? null) },
       renderJob: {
         create: vi.fn(async ({ data }: any) => {
@@ -355,6 +356,101 @@ describe("RenderJobsService", () => {
       timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId: "other-project", status: "approved", templateSnapshotId, scenes: [], optionValues: {} });
       const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
       expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+  });
+
+  describe("submitDynamicFromTimeline", () => {
+    const timelineVersionId = "timeline-dyn-1";
+    const sceneRow = (overrides: Record<string, unknown>) => ({
+      sceneId: "s1",
+      orderIndex: 0,
+      mediaAssetVersionId: "asset-1",
+      audioVersionId: "audio-1",
+      subtitleVersionId: null,
+      screenTextOverride: "Xin chào",
+      annotation: null,
+      excluded: false,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      prisma.templateSnapshot.findUnique = async ({ where }: any) => (where.id === templateSnapshotId ? { ...snapshotRow, rawTemplate: null } : null);
+    });
+
+    it("builds one composition per renderable scene sized to that scene's own audio duration, never the template's fixed slot count", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" }), sceneRow({ sceneId: "s2", orderIndex: 1, screenTextOverride: "Cảnh hai" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected ok");
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.source.width).toBe(1080);
+      expect(submittedBody.source.height).toBe(1920);
+      expect(submittedBody.source.elements).toHaveLength(2);
+      expect(submittedBody.source.elements[0].duration).toBe(4);
+      expect(submittedBody.source.elements[0].elements[1].text).toBe("Xin chào");
+      expect(submittedBody.source.elements[1].elements[1].text).toBe("Cảnh hai");
+    });
+
+    it("skips a scene the user excluded from the timeline instead of blocking the render", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" }), sceneRow({ sceneId: "s2", orderIndex: 1, excluded: true })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.source.elements).toHaveLength(1);
+    });
+
+    it("skips a scene still missing narration audio rather than blocking the whole render (per owner decision)", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" }), sceneRow({ sceneId: "s2", orderIndex: 1, audioVersionId: null })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.source.elements).toHaveLength(1);
+    });
+
+    it("rejects when no scene has both audio and media ready yet, instead of sending Creatomate an empty video", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", audioVersionId: null })],
+        optionValues: {},
+      });
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("rejects submitting a draft (not yet approved) timeline", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [], optionValues: {} });
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
     });
   });
 });

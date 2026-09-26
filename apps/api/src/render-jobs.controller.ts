@@ -60,6 +60,32 @@ export class RenderJobsController {
     return success(outcome.data, requestId(response));
   }
 
+  /**
+   * Renders every scene the Studio timeline actually has (not capped by however many
+   * `Image-N`/`Voiceover-N` slots the pinned template's own author drew) — see
+   * `RenderJobsService.submitDynamicFromTimeline`. The pinned template still supplies
+   * caption/image visual style, just not the scene count.
+   */
+  @Post("projects/:projectId/timeline-versions/:timelineVersionId/dynamic-render-jobs")
+  async submitDynamicFromTimeline(
+    @Param("projectId") projectId: string,
+    @Param("timelineVersionId") timelineVersionId: string,
+    @Body() body: SubmitBody,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    if (!body.providerAccountId?.trim()) throw normalizedError("VALIDATION_FAILED", "Thiếu providerAccountId để submit render", requestId(response));
+    const outcome = await this.renders.submitDynamicFromTimeline(projectId, timelineVersionId, user.id, user.role, {
+      providerAccountId: body.providerAccountId,
+      ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
+      ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+    });
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    return success(outcome.data, requestId(response));
+  }
+
   @Get("render-jobs/:id")
   async get(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user } = await requireUser(request, response, this.auth);

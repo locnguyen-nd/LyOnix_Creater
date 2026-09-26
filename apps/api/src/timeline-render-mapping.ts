@@ -50,6 +50,7 @@ export function buildRenderAssignmentsFromTimeline(
   const imageSlots = byKind(slots, "image");
   const audioSlots = byKind(slots, "audio");
   const textSlots = byKind(slots, "text");
+  const volumeSlotByKey = new Map(byKind(slots, "volume").map((slot) => [slot.key, slot]));
 
   const assignments: RenderAssignmentInput[] = [];
   const claimed = new Set<string>();
@@ -64,6 +65,17 @@ export function buildRenderAssignmentsFromTimeline(
         const slot = videoSlots[videoCursor++]!;
         assignments.push({ modificationKey: slot.key, kind: "video", mediaAssetVersionId: scene.mediaAssetVersionId });
         claimed.add(slot.key);
+        // A scene's video is always an imported/fetched clip (Pexels or project library) whose
+        // own audio track is never the intended sound - the real voiceover lives on the audio
+        // track above. Creatomate names an element's volume slot `<name>.volume` alongside its
+        // `<name>.source` slot (see deriveTemplateModifications), so mute it by default unless
+        // the user explicitly set a value for that exact key in optionValues.
+        const volumeKey = slot.key.replace(/\.source$/, ".volume");
+        const volumeSlot = volumeSlotByKey.get(volumeKey);
+        if (volumeSlot && !claimed.has(volumeKey) && optionValues[volumeKey] === undefined) {
+          assignments.push({ modificationKey: volumeKey, kind: "volume", volumePercent: 0 });
+          claimed.add(volumeKey);
+        }
       } else if (scene.mediaKind === "image" && imageCursor < imageSlots.length) {
         const slot = imageSlots[imageCursor++]!;
         assignments.push({ modificationKey: slot.key, kind: "image", mediaAssetVersionId: scene.mediaAssetVersionId });
@@ -101,12 +113,17 @@ export function buildRenderAssignmentsFromTimeline(
 
 /**
  * Resolves each scene binding's underlying media kind (video/image, from
- * `MediaAssetVersion.kind`) and its bound audio's own `mediaAssetVersionId` (from
- * `AudioVersion.mediaAssetVersionId`), so `buildRenderAssignmentsFromTimeline` never has
- * to touch Prisma itself. Re-scopes every resolved media id to `projectId` (defense in
- * depth - `mediaAssetVersionId`/`audioVersionId` on a `TimelineVersion` are plain opaque
- * columns with no FK, see schema comment) - an id that does not actually belong to this
- * project is silently treated as unbound rather than trusted.
+ * `MediaAssetVersion.kind`), its bound audio's own `mediaAssetVersionId` (from
+ * `AudioVersion.mediaAssetVersionId`), and its pinned script's own scene text (from
+ * `SceneDraftVersion.screenText`, via `scriptDraftVersion.sourceVersion.projectId`) as
+ * `fallbackScreenText` - so `buildRenderAssignmentsFromTimeline` never has to touch Prisma
+ * itself, and a scene the user never typed a `screenTextOverride` for still fills its
+ * template text slot from the approved script instead of being reported missing. Re-scopes
+ * every resolved media id to `projectId` (defense in depth - `mediaAssetVersionId`/
+ * `audioVersionId` on a `TimelineVersion` are plain opaque columns with no FK, see schema
+ * comment) - an id that does not actually belong to this project is silently treated as
+ * unbound rather than trusted. When the same `sceneId` exists across multiple script draft
+ * versions for the project, the highest `version` wins.
  */
 export async function resolveSceneBindingsForMapping(
   prisma: PrismaService,
@@ -130,6 +147,19 @@ export async function resolveSceneBindingsForMapping(
     : [];
   const mediaKindById = new Map(mediaRows.map((row) => [row.id, row.kind]));
 
+  const sceneIds = [...new Set(scenes.map((scene) => scene.sceneId))];
+  const sceneDraftRows = sceneIds.length
+    ? await prisma.sceneDraftVersion.findMany({
+        where: { sceneId: { in: sceneIds }, scriptDraftVersion: { sourceVersion: { projectId } } },
+        select: { sceneId: true, screenText: true },
+        orderBy: { scriptDraftVersion: { version: "desc" } },
+      })
+    : [];
+  const screenTextBySceneId = new Map<string, string>();
+  for (const row of sceneDraftRows) {
+    if (!screenTextBySceneId.has(row.sceneId)) screenTextBySceneId.set(row.sceneId, row.screenText);
+  }
+
   return scenes.map((scene): SceneBindingForMapping => {
     const kind = scene.mediaAssetVersionId ? mediaKindById.get(scene.mediaAssetVersionId) : undefined;
     const audioAssetId = scene.audioVersionId ? audioAssetById.get(scene.audioVersionId) ?? null : null;
@@ -138,6 +168,7 @@ export async function resolveSceneBindingsForMapping(
       ...scene,
       mediaKind: kind === "video" ? "video" : kind === "image" ? "image" : null,
       audioMediaAssetVersionId: audioBelongsToProject ? audioAssetId : null,
+      fallbackScreenText: screenTextBySceneId.get(scene.sceneId) ?? null,
     };
   });
 }

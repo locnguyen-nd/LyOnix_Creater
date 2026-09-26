@@ -12,7 +12,17 @@ import { createHash, randomBytes } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
-import { ProviderError, getCreatomateRender, normalizeCreatomateStatus, submitCreatomateRender } from "@lyonix/providers";
+import {
+  ProviderError,
+  buildDynamicComposition,
+  extractDynamicStyleFromTemplate,
+  getCreatomateRender,
+  normalizeCreatomateStatus,
+  submitCreatomateRender,
+  submitCreatomateSourceRender,
+  type CreatomateRenderResult,
+  type DynamicSceneInput,
+} from "@lyonix/providers";
 import type {
   ErrorCode,
   RenderAssignmentInput,
@@ -38,6 +48,9 @@ const HEX_COLOR_RE = /^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{4}$|^#[0-9a-fA-F]{6}$|^#[0
 const FONT_RE = /^[A-Za-z0-9 _-]+$/;
 /** Signed media-delivery token TTL for a render submission — long enough for Creatomate to fetch under load. */
 const DELIVERY_TOKEN_TTL_SEC = 3600;
+/** Portrait short-form canvas — matches the project's target output shape (1080×1920) regardless of the pinned template's own preview scale. */
+const DYNAMIC_RENDER_WIDTH = 1080;
+const DYNAMIC_RENDER_HEIGHT = 1920;
 
 const providerErrorMessage: Record<string, string> = {
   PROVIDER_AUTH_INVALID: "Khóa Creatomate bị từ chối. Verify lại tài khoản.",
@@ -190,24 +203,50 @@ export class RenderJobsService {
       .update(stableStringify({ projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, assignments: input.assignments }))
       .digest("hex");
 
+    return this.createAndSubmitRenderJob(
+      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId },
+      (webhookUrl) =>
+        submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
+          templateId: snapshot.externalTemplateId,
+          modifications,
+          webhookUrl,
+          ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
+        }),
+    );
+  }
+
+  /**
+   * Shared plumbing for both the template-modifications path (`submit`) and the dynamic
+   * per-scene composition path (`submitDynamicFromTimeline`): create the `RenderJob` row
+   * (idempotent on `requestFingerprint` — a P2002 race returns the winner's row instead of
+   * erroring), then call Creatomate exactly once and apply its response through the same
+   * monotonic status guard the webhook path uses, so a late webhook can never be regressed
+   * by this response (see `submit`'s original comment for why that race matters). `payload`
+   * is only ever the *stable* description of what will be sent, stored for audit/debug —
+   * never the actual request if that would embed a volatile signed media-delivery URL.
+   */
+  private async createAndSubmitRenderJob(
+    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined },
+    callProvider: (webhookUrl: string) => Promise<CreatomateRenderResult>,
+  ): Promise<RenderOutcome<RenderJobResponse>> {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
     try {
       job = await this.prisma.renderJob.create({
         data: {
-          projectId,
-          templateSnapshotId: input.templateSnapshotId,
-          providerAccountId: input.providerAccountId,
-          requestFingerprint: fingerprint,
+          projectId: params.projectId,
+          templateSnapshotId: params.templateSnapshotId,
+          providerAccountId: params.providerAccountId,
+          requestFingerprint: params.fingerprint,
           webhookToken: randomBytes(24).toString("base64url"),
           status: "accepted",
-          modificationsPayload: modifications as unknown as Prisma.InputJsonValue,
-          createdByUserId: userId,
-          ...(workflowRunId ? { workflowRunId } : {}),
+          modificationsPayload: params.payload as unknown as Prisma.InputJsonValue,
+          createdByUserId: params.userId,
+          ...(params.workflowRunId ? { workflowRunId: params.workflowRunId } : {}),
         },
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
+        const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: params.fingerprint } });
         if (existing) return { ok: true, data: toJobResponse(existing) };
       }
       throw error;
@@ -217,12 +256,7 @@ export class RenderJobsService {
     const base = process.env.PUBLIC_BASE_URL!.replace(/\/$/, "");
     const webhookUrl = `${base}/api/v1/render-webhooks/creatomate/${job.webhookToken}`;
     try {
-      const submitted = await submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
-        templateId: snapshot.externalTemplateId,
-        modifications,
-        webhookUrl,
-        ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
-      });
+      const submitted = await callProvider(webhookUrl);
       const reportedStatus = normalizeCreatomateStatus(submitted.status);
       // The webhook can arrive and complete this job WHILE this submit call is still in
       // flight (Creatomate may call back before the HTTP response reaches us). Re-read the
@@ -286,6 +320,107 @@ export class RenderJobsService {
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
     });
+  }
+
+  /**
+   * Renders every scene the script/Studio actually produced instead of only however many
+   * `Image-N`/`Subtitles-N`/`Voiceover-N` slots the pinned template's own author happened to
+   * draw (`submitFromTimelineVersion`'s hard limit). Builds a fully dynamic Creatomate
+   * `source` document (`buildDynamicComposition`) whose scene count and per-scene duration
+   * come entirely from this project's own data; the pinned `TemplateSnapshot` is only read
+   * for its visual style (`extractDynamicStyleFromTemplate`), never for its element count.
+   *
+   * A scene the user marked `excluded`, or one still missing narration audio or an assigned
+   * image/video, is dropped from the render rather than blocking it — per-scene voice/media
+   * generation in Studio is inherently incremental, and requiring every single scene to be
+   * ready before any render could be attempted would make the "render what's ready now"
+   * workflow this endpoint exists for impossible. If nothing is renderable yet, the whole
+   * submission is rejected instead of sending Creatomate an empty video.
+   */
+  async submitDynamicFromTimeline(
+    projectId: string,
+    timelineVersionId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: RenderSubmitFromTimelineRequest,
+  ): Promise<RenderOutcome<RenderJobResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const account = await this.templates.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+
+    const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
+    if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
+    if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
+    if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template (dùng để lấy style hiển thị)" };
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
+    if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
+
+    const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const audioVersionIds = [...new Set(resolved.map((scene) => scene.audioVersionId).filter((sceneId): sceneId is string => Boolean(sceneId)))];
+    const audioRows = audioVersionIds.length
+      ? await this.prisma.audioVersion.findMany({ where: { id: { in: audioVersionIds } }, select: { id: true, durationMs: true } })
+      : [];
+    const audioDurationById = new Map(audioRows.map((row) => [row.id, row.durationMs]));
+
+    const renderable = [...resolved]
+      .sort((a, b) => a.orderIndex - b.orderIndex)
+      .filter((scene) => !scene.excluded && scene.audioVersionId && scene.audioMediaAssetVersionId && scene.mediaAssetVersionId && scene.mediaKind)
+      .filter((scene) => (audioDurationById.get(scene.audioVersionId!) ?? 0) > 0);
+    if (renderable.length === 0) {
+      return { ok: false, code: "VALIDATION_FAILED", message: "Chưa có cảnh nào đủ audio + media để render — tạo voice/gán media rồi thử lại" };
+    }
+
+    const dynamicScenes: DynamicSceneInput[] = [];
+    for (const scene of renderable) {
+      const mediaIssued = await this.mediaDelivery.issueToken(scene.mediaAssetVersionId!, userId, role, DELIVERY_TOKEN_TTL_SEC);
+      if (mediaIssued === "not_configured") return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+      if (!mediaIssued || mediaIssued === "forbidden") continue;
+      const audioIssued = await this.mediaDelivery.issueToken(scene.audioMediaAssetVersionId!, userId, role, DELIVERY_TOKEN_TTL_SEC);
+      if (audioIssued === "not_configured") return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+      if (!audioIssued || audioIssued === "forbidden") continue;
+      dynamicScenes.push({
+        sceneId: scene.sceneId,
+        mediaUrl: mediaIssued.url,
+        mediaKind: scene.mediaKind === "video" ? "video" : "image",
+        text: (scene.screenTextOverride ?? scene.fallbackScreenText ?? "").trim(),
+        audioUrl: audioIssued.url,
+        audioDurationMs: audioDurationById.get(scene.audioVersionId!) ?? 0,
+      });
+    }
+    if (dynamicScenes.length === 0) {
+      return { ok: false, code: "VALIDATION_FAILED", message: "Không cấp được delivery URL cho cảnh nào — kiểm tra lại media/audio" };
+    }
+
+    const style = extractDynamicStyleFromTemplate(snapshot.rawTemplate);
+    const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat: input.outputFormat });
+
+    // Fingerprint from each included scene's stable identifiers (never the resolved signed
+    // delivery URLs, which mint a fresh random token every call — see `submit`'s own comment
+    // for the VE2E-05 bug this pattern already fixed once for the template-based path).
+    const fingerprint = createHash("sha256")
+      .update(
+        stableStringify({
+          mode: "dynamic",
+          projectId,
+          timelineVersionId,
+          providerAccountId: input.providerAccountId,
+          outputFormat: input.outputFormat ?? null,
+          scenes: renderable.map((scene) => ({
+            sceneId: scene.sceneId,
+            mediaAssetVersionId: scene.mediaAssetVersionId,
+            audioVersionId: scene.audioVersionId,
+            text: (scene.screenTextOverride ?? scene.fallbackScreenText ?? "").trim(),
+          })),
+        }),
+      )
+      .digest("hex");
+
+    return this.createAndSubmitRenderJob(
+      { projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source },
+      (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
+    );
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {
