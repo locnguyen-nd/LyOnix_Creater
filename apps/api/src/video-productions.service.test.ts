@@ -50,7 +50,7 @@ describe("VideoProductionsService", () => {
       automationProfileVersion: { findUnique: async ({ where }: any) => (where.id === automationProfileId ? completeProfile() : null) },
       sourceVersion: { findUnique: async ({ where }: any) => (where.id === sourceId ? { id: sourceId, projectId } : null) },
       scriptDraftVersion: { findFirst: async () => null },
-      renderJob: { findFirst: async () => null },
+      renderJob: { findFirst: async () => null, findMany: async () => [] as any[] },
       stepRun: { findMany: async () => [] },
       workflowRun: {
         create: vi.fn(async ({ data }: any) => {
@@ -63,6 +63,13 @@ describe("VideoProductionsService", () => {
           if (where.id) return workflowRuns.find((row) => row.id === where.id) ?? null;
           if (where.requestFingerprint) return workflowRuns.find((row) => row.requestFingerprint === where.requestFingerprint) ?? null;
           return null;
+        }),
+        findMany: vi.fn(async ({ where }: any) => {
+          return workflowRuns
+            .filter((row) => row.mode === where.mode)
+            .filter((row) => (where.projectId ? row.projectId === where.projectId : true))
+            .filter((row) => (where.createdByUserId ? row.createdByUserId === where.createdByUserId : true))
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
         }),
       },
     };
@@ -158,6 +165,52 @@ describe("VideoProductionsService", () => {
       ];
       const outcome = await service.listEvents(submitted.data.id, userId, "staff");
       expect(outcome).toMatchObject({ ok: true, data: [{ stepKey: "generate_script", status: "succeeded" }] });
+    });
+  });
+
+  describe("list", () => {
+    it("without projectId, returns only the caller's own runs across all of their self-provisioned projects, never another user's", async () => {
+      prisma.project.findUnique = async ({ where }: any) => (where.id === projectId || where.id === "project-2" ? { id: where.id } : null);
+      prisma.sourceVersion.findUnique = async ({ where }: any) => {
+        if (where.id === sourceId) return { id: sourceId, projectId };
+        if (where.id === "source-2") return { id: "source-2", projectId: "project-2" };
+        if (where.id === "source-3") return { id: "source-3", projectId };
+        return null;
+      };
+      prisma.automationProfileVersion.findUnique = async ({ where }: any) =>
+        where.id === "profile-2" ? completeProfile({ projectId: "project-2", id: "profile-2" }) : completeProfile();
+
+      const mine1 = await service.submit(userId, "admin", { mode: "auto", projectId, automationProfileId, sourceId });
+      const mine2 = await service.submit(userId, "admin", { mode: "auto", projectId: "project-2", automationProfileId: "profile-2", sourceId: "source-2" });
+      const notMine = await service.submit("other-user", "admin", { mode: "auto", projectId, automationProfileId, sourceId: "source-3" });
+      if (!mine1.ok || !mine2.ok || !notMine.ok) throw new Error("expected all three submits to succeed");
+
+      const outcome = await service.list(userId, "staff");
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      const ids = outcome.data.map((row) => row.id);
+      expect(ids.sort()).toEqual([mine1.data.id, mine2.data.id].sort());
+      expect(ids).not.toContain(notMine.data.id);
+    });
+
+    it("with projectId, scopes to that project and enforces the same read-access check as get()", async () => {
+      await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      grants.forUser.mockResolvedValue({ projectIds: [] });
+      expect(await service.list(userId, "staff", projectId)).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("attaches the latest linked RenderJob's resultUrl/cost/duration onto each run", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      prisma.renderJob.findMany = async () => [
+        { workflowRunId: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", costAmount: { toString: () => "0.42" }, renderDurationMs: 12345 },
+      ];
+      const outcome = await service.list(userId, "staff");
+      expect(outcome).toMatchObject({ ok: true, data: [{ id: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", costAmount: "0.42", renderDurationMs: 12345 }] });
+    });
+
+    it("returns an empty list rather than erroring when the caller has no runs yet", async () => {
+      expect(await service.list(userId, "staff")).toMatchObject({ ok: true, data: [] });
     });
   });
 
