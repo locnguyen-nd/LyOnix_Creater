@@ -1445,6 +1445,61 @@ export function StudioProPage() {
                 ) : (
                   <p className="text-[11px] text-lyx-fg-muted">{t("templates.pinNote")}</p>
                 )}
+
+                {/* VE2E-26: whole-video style overrides for the dynamic render path Studio
+                    actually submits through (submitDynamicRenderFromTimeline) - schema-backed
+                    against the same fixed key/value whitelist the server validates on save
+                    and applies identically in both the SDK preview and the final render
+                    payload (`applyDynamicStyleOverrides` in @lyonix/providers). Unlike the
+                    per-scene template modification fields above, these apply to every scene
+                    at once (they override the template-derived caption/animation style, not
+                    a specific Creatomate element), so they are not scene-dependent. */}
+                {template ? (
+                  <div className="flex flex-col gap-2 border-t border-lyx-border pt-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.dynamicStyleOverrides")}</p>
+                    <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.dynamicStyleOverridesHint")}</p>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionFont")}</label>
+                      <Select
+                        className="w-full"
+                        value={draft.optionValues["dynamicStyle.captionFontFamily"] ?? ""}
+                        onChange={(event) => setOptionValue("dynamicStyle.captionFontFamily", event.target.value)}
+                      >
+                        <option value="">{t("studioPro.overrideUseTemplateDefault")}</option>
+                        <option>Inter Bold</option>
+                        <option>Inter Medium</option>
+                        <option>Noto Sans</option>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionColor")}</label>
+                      <div className="flex items-center gap-1.5">
+                        {["", "#ffffff", "#f5f5f5", "#facc15"].map((hex) => (
+                          <button
+                            key={hex || "default"}
+                            type="button"
+                            aria-label={hex || t("studioPro.overrideUseTemplateDefault")}
+                            onClick={() => setOptionValue("dynamicStyle.captionFillColor", hex)}
+                            className={`h-[22px] w-[22px] rounded-[4px] border ${(draft.optionValues["dynamicStyle.captionFillColor"] ?? "") === hex ? "border-lyx-fg" : "border-lyx-border"}`}
+                            style={hex ? { backgroundColor: hex } : { background: "repeating-linear-gradient(45deg,#ccc,#ccc 2px,#fff 2px,#fff 4px)" }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideImageAnimation")}</label>
+                      <Select
+                        className="w-full"
+                        value={draft.optionValues["dynamicStyle.imageAnimation"] ?? ""}
+                        onChange={(event) => setOptionValue("dynamicStyle.imageAnimation", event.target.value)}
+                      >
+                        <option value="">{t("studioPro.overrideUseTemplateDefault")}</option>
+                        <option value="pan">{t("studioPro.overrideAnimationPan")}</option>
+                        <option value="none">{t("studioPro.overrideAnimationNone")}</option>
+                      </Select>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </>
           ) : (

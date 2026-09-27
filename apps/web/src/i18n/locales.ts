@@ -594,6 +594,14 @@ const vi = {
     renderPlaybackUnsupported: "Trình duyệt này không hỗ trợ phát video — dùng nút mở/tải bên dưới.",
     renderPlaybackError: "Không phát được video này trong trình duyệt — dùng nút mở/tải bên dưới.",
     downloadResult: "Tải video",
+    dynamicStyleOverrides: "Ghi đè hiển thị/hoạt ảnh (áp dụng toàn video)",
+    dynamicStyleOverridesHint: "Áp dụng cho toàn bộ video, không riêng cảnh đang chọn. Không đổi thì giữ nguyên mặc định của template.",
+    overrideCaptionFont: "Font chữ caption",
+    overrideCaptionColor: "Màu chữ caption",
+    overrideImageAnimation: "Hiệu ứng ảnh/video nền",
+    overrideUseTemplateDefault: "Mặc định của template",
+    overrideAnimationPan: "Pan/Zoom (Ken Burns)",
+    overrideAnimationNone: "Tắt hiệu ứng",
   },
 };
 
@@ -1077,6 +1085,14 @@ const en: typeof vi = {
     renderPlaybackUnsupported: "This browser does not support inline video playback — use the open/download buttons below.",
     renderPlaybackError: "Could not play this video in the browser — use the open/download buttons below.",
     downloadResult: "Download video",
+    dynamicStyleOverrides: "Display/animation overrides (whole video)",
+    dynamicStyleOverridesHint: "Applies to the whole video, not just the selected scene. Leave unset to keep the template's own default.",
+    overrideCaptionFont: "Caption font",
+    overrideCaptionColor: "Caption color",
+    overrideImageAnimation: "Background image/video effect",
+    overrideUseTemplateDefault: "Template default",
+    overrideAnimationPan: "Pan/Zoom (Ken Burns)",
+    overrideAnimationNone: "No effect",
   },
 };
 
@@ -1258,6 +1274,14 @@ const ja: typeof vi = {
     renderPlaybackUnsupported: "このブラウザはインライン動画再生に対応していません — 下の開く/ダウンロードボタンを使用してください。",
     renderPlaybackError: "この動画をブラウザで再生できませんでした — 下の開く/ダウンロードボタンを使用してください。",
     downloadResult: "動画をダウンロード",
+    dynamicStyleOverrides: "表示/アニメーションの上書き（動画全体に適用）",
+    dynamicStyleOverridesHint: "選択中のシーンだけでなく動画全体に適用されます。変更しなければテンプレートの初期設定のままです。",
+    overrideCaptionFont: "キャプションのフォント",
+    overrideCaptionColor: "キャプションの色",
+    overrideImageAnimation: "背景画像/動画のエフェクト",
+    overrideUseTemplateDefault: "テンプレートの初期設定",
+    overrideAnimationPan: "パン/ズーム（Ken Burns）",
+    overrideAnimationNone: "エフェクトなし",
   },
 };
 
@@ -1439,6 +1463,14 @@ const ko: typeof vi = {
     renderPlaybackUnsupported: "이 브라우저는 인라인 영상 재생을 지원하지 않습니다 — 아래 열기/다운로드 버튼을 사용하세요.",
     renderPlaybackError: "이 영상을 브라우저에서 재생할 수 없습니다 — 아래 열기/다운로드 버튼을 사용하세요.",
     downloadResult: "영상 다운로드",
+    dynamicStyleOverrides: "표시/애니메이션 재정의(전체 영상에 적용)",
+    dynamicStyleOverridesHint: "선택한 장면뿐 아니라 전체 영상에 적용됩니다. 변경하지 않으면 템플릿 기본값을 유지합니다.",
+    overrideCaptionFont: "자막 폰트",
+    overrideCaptionColor: "자막 색상",
+    overrideImageAnimation: "배경 이미지/영상 효과",
+    overrideUseTemplateDefault: "템플릿 기본값",
+    overrideAnimationPan: "팬/줌(Ken Burns)",
+    overrideAnimationNone: "효과 없음",
   },
 };
 

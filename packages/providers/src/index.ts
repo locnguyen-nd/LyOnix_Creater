@@ -205,7 +205,11 @@ export {
 export {
   extractDynamicStyleFromTemplate,
   buildDynamicComposition,
+  applyDynamicStyleOverrides,
+  isDynamicStyleOptionKey,
+  isValidDynamicStyleOptionValue,
   DEFAULT_DYNAMIC_SCENE_STYLE,
+  DYNAMIC_STYLE_OPTION_KEYS,
   type DynamicSceneInput,
   type DynamicSceneStyle,
   type DynamicImageAnimation,

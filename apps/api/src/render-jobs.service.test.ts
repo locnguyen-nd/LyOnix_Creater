@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@lyonix/db";
+import { DYNAMIC_STYLE_OPTION_KEYS } from "@lyonix/providers";
 import { RenderJobsService } from "./render-jobs.service.js";
 import type { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import type { MediaDeliveryService } from "./media-delivery.service.js";
@@ -465,6 +466,47 @@ describe("RenderJobsService", () => {
       const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
       expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
     });
+
+    it("VE2E-26: applies a saved Studio style override (caption font) to the submitted composition", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans" },
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.source.elements[0].elements[1].font_family).toBe("Noto Sans");
+    });
+
+    it("VE2E-26: an identical resubmit after only changing the style override is not deduped as the same fingerprint (style-only change is a real new render)", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const first = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(first.ok).toBe(true);
+
+      timelineRows.set(timelineVersionId, {
+        ...timelineRows.get(timelineVersionId),
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFillColor]: "#ff0000" },
+      });
+      const second = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(second.ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      if (first.ok && second.ok) expect(second.data.id).not.toBe(first.data.id);
+    });
   });
 
   describe("previewDynamicComposition (VE2E-13)", () => {
@@ -511,6 +553,23 @@ describe("RenderJobsService", () => {
       timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [sceneRow({ sceneId: "s1" })], optionValues: {} });
       const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
       expect(outcome).toMatchObject({ ok: true, data: { ready: true } });
+    });
+
+    it("VE2E-26: reflects the same saved Studio style override the preview would show, identical to what a submit would send", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "draft",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans", [DYNAMIC_STYLE_OPTION_KEYS.imageAnimation]: "none" },
+      });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected ok");
+      const source = outcome.data.source as any;
+      expect(source.elements[0].elements[1].font_family).toBe("Noto Sans");
+      expect(source.elements[0].elements[0].animations).toBeUndefined();
     });
 
     it("reports ready:false with a reason instead of an error when no scene is renderable yet", async () => {

@@ -75,19 +75,50 @@ const asString = (value: unknown): string | undefined => (typeof value === "stri
 type RawNode = Record<string, unknown>;
 
 /**
+ * A template's real pan/zoom (Ken Burns) animation entry always carries these four scale/
+ * position fields — an entry that merely has *some* `type` string but lacks this shape is a
+ * different animation kind entirely (e.g. a fade/wipe/spin effect with no scale/position
+ * concept at all). VE2E-26 root cause #1: the previous version accepted the first entry with
+ * any `type` string, regardless of shape, and paired that foreign `type` with our own
+ * default-filled scale/position fields — a hybrid animation object Creatomate never actually
+ * authored, producing a visibly wrong (or provider-rejected) result. Only accept an entry
+ * that actually has the fields this code goes on to read.
+ */
+const looksLikePanZoomAnimation = (node: RawNode): boolean =>
+  typeof node.type === "string" && asString(node.start_scale) !== undefined && asString(node.end_scale) !== undefined && asString(node.start_x) !== undefined && asString(node.end_x) !== undefined;
+
+/**
+ * VE2E-26 root cause #2: a template's element tree can contain other text/image/video nodes
+ * that are not the actual per-scene subtitle/media element the Auto/Studio pipeline cares
+ * about (logo, watermark, title card, background layer, decorative shape...). A plain
+ * depth-first "first element of this type found" walk can silently lift style from the wrong
+ * one if such a node appears earlier in the tree. LyOnix's own template-authoring convention
+ * already names the real elements predictably (`deriveTemplateModifications` in creatomate.ts
+ * assumes `Text-N`/`Subtitles-N`/`Image-N`/`Video-N`/`Scene-N`-style names, and real accounts
+ * observed in this project include e.g. "News-Image") — so prefer a conventionally-named
+ * element when one exists, and only fall back to "first found of this type" (the prior
+ * behavior, still correct for a template with no matching name) when none does.
+ */
+const TEXT_NAME_HINT = /subtitle|caption|text/i;
+const IMAGE_NAME_HINT = /image|video|photo|scene|background/i;
+
+/**
  * Best-effort style lift from a pinned template's raw element tree: the first `text`
  * element found supplies caption styling, the first `image`/`video` element found supplies
- * the background pan/zoom + overlay. Falls back to `DEFAULT_DYNAMIC_SCENE_STYLE` for
- * whichever half is missing (or when no template was pinned at all).
+ * the background pan/zoom + overlay — preferring a conventionally-named element over an
+ * arbitrary first match (see `TEXT_NAME_HINT`/`IMAGE_NAME_HINT` above). Falls back to
+ * `DEFAULT_DYNAMIC_SCENE_STYLE` for whichever half is missing (or when no template was
+ * pinned at all).
  */
 export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSceneStyle {
   let text = { ...DEFAULT_DYNAMIC_SCENE_STYLE.text };
   let image = { ...DEFAULT_DYNAMIC_SCENE_STYLE.image };
-  let foundText = false;
-  let foundImage = false;
+  let textSource: RawNode | undefined;
+  let textNamedMatch = false;
+  let imageSource: RawNode | undefined;
+  let imageNamedMatch = false;
 
   const walk = (node: unknown) => {
-    if (foundText && foundImage) return;
     if (Array.isArray(node)) {
       for (const item of node) walk(item);
       return;
@@ -95,49 +126,61 @@ export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSc
     if (!node || typeof node !== "object") return;
     const el = node as RawNode;
     const type = typeof el.type === "string" ? el.type.toLowerCase() : "";
+    const name = asString(el.name) ?? "";
+    const named = (hint: RegExp) => hint.test(name);
 
-    if (!foundText && type === "text") {
-      foundText = true;
-      text = {
-        fontFamily: asString(el.font_family) ?? text.fontFamily,
-        fontSize: asString(el.font_size) ?? text.fontSize,
-        fillColor: asString(el.fill_color) ?? text.fillColor,
-        fontWeight: asString(el.font_weight) ?? text.fontWeight,
-        xAlignment: asString(el.x_alignment) ?? text.xAlignment,
-        yAlignment: asString(el.y_alignment) ?? text.yAlignment,
-        strokeColor: asString(el.stroke_color) ?? text.strokeColor,
-        strokeWidth: asString(el.stroke_width) ?? text.strokeWidth,
-        width: asString(el.width) ?? text.width,
-        height: asString(el.height) ?? text.height,
-        backgroundColor: asString(el.background_color),
-        backgroundXPadding: asString(el.background_x_padding),
-        backgroundYPadding: asString(el.background_y_padding),
-        backgroundBorderRadius: asString(el.background_border_radius),
-      };
+    if (type === "text" && (!textSource || (!textNamedMatch && named(TEXT_NAME_HINT)))) {
+      textSource = el;
+      textNamedMatch = named(TEXT_NAME_HINT);
     }
-
-    if (!foundImage && (type === "image" || type === "video")) {
-      foundImage = true;
-      const animations = Array.isArray(el.animations) ? (el.animations as RawNode[]) : [];
-      const pan = animations.find((a) => asString(a.type));
-      image = {
-        colorOverlay: asString(el.color_overlay) ?? image.colorOverlay,
-        animation: pan
-          ? {
-              type: asString(pan.type)!,
-              startScale: asString(pan.start_scale) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.startScale,
-              endScale: asString(pan.end_scale) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.endScale,
-              startX: asString(pan.start_x) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.startX,
-              endX: asString(pan.end_x) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.endX,
-              easing: asString(pan.easing) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.easing,
-            }
-          : image.animation,
-      };
+    if ((type === "image" || type === "video") && (!imageSource || (!imageNamedMatch && named(IMAGE_NAME_HINT)))) {
+      imageSource = el;
+      imageNamedMatch = named(IMAGE_NAME_HINT);
     }
 
     for (const value of Object.values(el)) walk(value);
   };
   walk(rawTemplate);
+
+  if (textSource) {
+    const el = textSource;
+    text = {
+      fontFamily: asString(el.font_family) ?? text.fontFamily,
+      fontSize: asString(el.font_size) ?? text.fontSize,
+      fillColor: asString(el.fill_color) ?? text.fillColor,
+      fontWeight: asString(el.font_weight) ?? text.fontWeight,
+      xAlignment: asString(el.x_alignment) ?? text.xAlignment,
+      yAlignment: asString(el.y_alignment) ?? text.yAlignment,
+      strokeColor: asString(el.stroke_color) ?? text.strokeColor,
+      strokeWidth: asString(el.stroke_width) ?? text.strokeWidth,
+      width: asString(el.width) ?? text.width,
+      height: asString(el.height) ?? text.height,
+      backgroundColor: asString(el.background_color),
+      backgroundXPadding: asString(el.background_x_padding),
+      backgroundYPadding: asString(el.background_y_padding),
+      backgroundBorderRadius: asString(el.background_border_radius),
+    };
+  }
+
+  if (imageSource) {
+    const el = imageSource;
+    const animations = Array.isArray(el.animations) ? (el.animations as RawNode[]) : [];
+    const pan = animations.find(looksLikePanZoomAnimation);
+    image = {
+      colorOverlay: asString(el.color_overlay) ?? image.colorOverlay,
+      animation: pan
+        ? {
+            type: asString(pan.type)!,
+            startScale: asString(pan.start_scale)!,
+            endScale: asString(pan.end_scale)!,
+            startX: asString(pan.start_x)!,
+            endX: asString(pan.end_x)!,
+            easing: asString(pan.easing) ?? DEFAULT_DYNAMIC_SCENE_STYLE.image.animation!.easing,
+          }
+        : image.animation,
+    };
+  }
+
   return { text, image };
 }
 
@@ -231,5 +274,75 @@ export function buildDynamicComposition(
     width: options.width,
     height: options.height,
     elements,
+  };
+}
+
+// --- VE2E-26: schema-backed, server-validated Studio overrides on top of the template-derived style ---
+
+const OVERRIDE_FONT_RE = /^[A-Za-z0-9 _-]+$/;
+const OVERRIDE_MAX_FONT_LENGTH = 60;
+const OVERRIDE_HEX_COLOR_RE = /^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+const IMAGE_ANIMATION_OPTION_VALUES = new Set(["pan", "none"]);
+
+/**
+ * Fixed, whitelisted set of dynamic-composition style fields Studio may explicitly
+ * override on top of the pinned template's own derived style (`extractDynamicStyleFromTemplate`)
+ * — never a free-form modification string, matching the same server-owned-mapping principle
+ * `render-jobs.service.ts` already enforces for template-slot modifications. Persisted in the
+ * same `TimelineVersion.optionValues` JSON bag the legacy template-slot path already uses
+ * (see `timeline-versions.service.ts`), under a `dynamicStyle.` prefix that can never collide
+ * with a real Creatomate modification key (those always look like `<ElementName>.<property>`,
+ * never literally start with `dynamicStyle`) — so the override inherits that same
+ * version/`supersedesId` audit trail for free, no new persistence needed.
+ */
+export const DYNAMIC_STYLE_OPTION_KEYS = {
+  captionFontFamily: "dynamicStyle.captionFontFamily",
+  captionFillColor: "dynamicStyle.captionFillColor",
+  imageAnimation: "dynamicStyle.imageAnimation",
+} as const;
+
+const DYNAMIC_STYLE_OPTION_KEY_SET: ReadonlySet<string> = new Set(Object.values(DYNAMIC_STYLE_OPTION_KEYS));
+
+export function isDynamicStyleOptionKey(key: string): boolean {
+  return DYNAMIC_STYLE_OPTION_KEY_SET.has(key);
+}
+
+/**
+ * Server-side validation for one dynamic-style override value — the same rule both save-time
+ * (`TimelineVersionsService`) and apply-time (`applyDynamicStyleOverrides`) trust, so an
+ * invalid value can never be persisted in the first place. An empty string is always valid
+ * for any of these keys — it is Studio's explicit "use the template's own default" choice
+ * (see the Inspector's "use template default" option), not a malformed value; `applyDynamicStyleOverrides`
+ * already treats it as absent.
+ */
+export function isValidDynamicStyleOptionValue(key: string, value: string): boolean {
+  if (value === "") return isDynamicStyleOptionKey(key);
+  if (key === DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily) return value.trim().length > 0 && value.length <= OVERRIDE_MAX_FONT_LENGTH && OVERRIDE_FONT_RE.test(value);
+  if (key === DYNAMIC_STYLE_OPTION_KEYS.captionFillColor) return OVERRIDE_HEX_COLOR_RE.test(value);
+  if (key === DYNAMIC_STYLE_OPTION_KEYS.imageAnimation) return IMAGE_ANIMATION_OPTION_VALUES.has(value);
+  return false;
+}
+
+/**
+ * Applies whitelisted Studio overrides on top of a template-derived base style. Any field the
+ * user did not explicitly (and validly) override keeps the template's own default — spec:
+ * "Preserve template defaults for any field the user doesn't explicitly override". An
+ * already-invalid stored value (should not happen given save-time validation, but defense in
+ * depth) is treated the same as absent rather than applied.
+ */
+export function applyDynamicStyleOverrides(base: DynamicSceneStyle, optionValues: Record<string, string>): DynamicSceneStyle {
+  const fontFamily = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily];
+  const fillColor = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFillColor];
+  const imageAnimation = optionValues[DYNAMIC_STYLE_OPTION_KEYS.imageAnimation];
+  return {
+    text: {
+      ...base.text,
+      ...(fontFamily && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily) ? { fontFamily } : {}),
+      ...(fillColor && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFillColor, fillColor) ? { fillColor } : {}),
+    },
+    image: {
+      ...base.image,
+      ...(imageAnimation === "none" ? { animation: undefined } : {}),
+    },
   };
 }

@@ -14,6 +14,7 @@ import { Prisma } from "@lyonix/db";
 import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
 import {
   ProviderError,
+  applyDynamicStyleOverrides,
   buildDynamicComposition,
   extractDynamicStyleFromTemplate,
   getCreatomateRender,
@@ -353,6 +354,7 @@ export class RenderJobsService {
     RenderOutcome<{
       templateSnapshotId: string;
       source: Record<string, unknown>;
+      style: ReturnType<typeof applyDynamicStyleOverrides>;
       renderable: Awaited<ReturnType<typeof resolveSceneBindingsForMapping>>;
       totalSceneCount: number;
     }>
@@ -400,9 +402,15 @@ export class RenderJobsService {
       return { ok: false, code: "VALIDATION_FAILED", message: "Không cấp được delivery URL cho cảnh nào — kiểm tra lại media/audio" };
     }
 
-    const style = extractDynamicStyleFromTemplate(snapshot.rawTemplate);
+    // VE2E-26: schema-backed, server-validated Studio overrides (font/color/animation-on-off)
+    // layered on top of the template-derived base style — persisted in this same
+    // TimelineVersion's own `optionValues` (already validated at save time by
+    // `TimelineVersionsService`), so preview and the final render always agree because both
+    // call this exact same method with the exact same saved timeline row.
+    const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? (timeline.optionValues as Record<string, string>) : {});
+    const style = applyDynamicStyleOverrides(extractDynamicStyleFromTemplate(snapshot.rawTemplate), optionValues);
     const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat });
-    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source, renderable, totalSceneCount: scenes.length } };
+    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source, style, renderable, totalSceneCount: scenes.length } };
   }
 
   /**
@@ -429,11 +437,16 @@ export class RenderJobsService {
 
     const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
     if (!resolvedComposition.ok) return resolvedComposition;
-    const { templateSnapshotId, source, renderable } = resolvedComposition.data;
+    const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
 
     // Fingerprint from each included scene's stable identifiers (never the resolved signed
     // delivery URLs, which mint a fresh random token every call — see `submit`'s own comment
-    // for the VE2E-05 bug this pattern already fixed once for the template-based path).
+    // for the VE2E-05 bug this pattern already fixed once for the template-based path) plus
+    // the resolved (template + Studio override) `style` object — VE2E-26: `style` has no
+    // volatile fields (unlike `source`, whose media/audio `source` URLs are signed and mint
+    // fresh every call, so hashing `source` itself would reintroduce that same VE2E-05 bug),
+    // so a style-only change (e.g. changing the caption font) still produces a distinct
+    // fingerprint and a genuinely new submit, instead of silently replaying the previous job.
     const fingerprint = createHash("sha256")
       .update(
         stableStringify({
@@ -442,6 +455,7 @@ export class RenderJobsService {
           timelineVersionId,
           providerAccountId: input.providerAccountId,
           outputFormat: input.outputFormat ?? null,
+          style,
           scenes: renderable.map((scene) => ({
             sceneId: scene.sceneId,
             mediaAssetVersionId: scene.mediaAssetVersionId,
