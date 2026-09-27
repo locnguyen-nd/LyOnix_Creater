@@ -38,6 +38,7 @@ describe("PexelsService", () => {
   let prisma: any;
   let grants: any;
   let media: Partial<MediaService>;
+  let providerAccounts: any;
   let service: PexelsService;
 
   beforeEach(async () => {
@@ -50,7 +51,13 @@ describe("PexelsService", () => {
     };
     grants = { forUser: async () => ({ projectIds: [projectId] }) };
     media = { registerAsset: vi.fn(async () => fakeAsset) };
-    service = new PexelsService(prisma, grants, media as MediaService);
+    // Permissive by default (slot always granted, cooldown/release are no-ops) - VE2E-15a fan-out/cooldown behavior is covered by its own dedicated tests below.
+    providerAccounts = {
+      acquireContentRequestSlot: vi.fn(async () => true),
+      releaseContentRequestSlot: vi.fn(async () => undefined),
+      cooldownContentAccount: vi.fn(async () => new Date()),
+    };
+    service = new PexelsService(prisma, grants, media as MediaService, providerAccounts);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("px-test");
   });
 
@@ -87,7 +94,7 @@ describe("PexelsService", () => {
 
     it("hides an inaccessible project as not-found", async () => {
       grants = { forUser: async () => ({ projectIds: [] }) };
-      service = new PexelsService(prisma, grants, media as MediaService);
+      service = new PexelsService(prisma, grants, media as MediaService, providerAccounts);
       const outcome = await service.search(projectId, "user-1", "staff", { providerAccountId: "account-1", type: "photo", query: "sunset" });
       expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
@@ -190,6 +197,69 @@ describe("PexelsService", () => {
       const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-3", query: "nonexistent query xyz" });
       expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
       expect(media.registerAsset).not.toHaveBeenCalled();
+    });
+
+    it("VE2E-15a: ranks a bounded pool and imports the best-fit candidate, not the API's first result", async () => {
+      const shortLandscape = { ...videoDetail, id: 1, width: 1920, height: 1080, duration: 1, video_files: [{ quality: "sd", width: 640, height: 360, file_type: "video/mp4", link: "https://videos.pexels.com/1-sd.mp4" }] };
+      const goodPortrait = { ...videoDetail, id: 2, width: 1080, height: 1920, duration: 6, video_files: [{ quality: "hd", width: 1080, height: 1920, file_type: "video/mp4", link: "https://videos.pexels.com/2-hd.mp4" }] };
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [shortLandscape, goodPortrait] }), { status: 200 });
+        if (url.includes("/videos/videos/2")) return new Response(JSON.stringify(goodPortrait), { status: 200 });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: true, buffer: Buffer.from([0, 0, 0, 0x18]), mimeType: "video/mp4", finalUrl: "https://videos.pexels.com/2-hd.mp4" });
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-5", query: "person walking outside" });
+      expect(outcome).toMatchObject({ ok: true, data: { asset: { id: "asset-1" } } });
+      // Only the ranked winner (id 2) is ever re-fetched by import() - a call to `/videos/videos/1` would have thrown above.
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/videos/videos/1"))).toBe(false);
+    });
+
+    it("VE2E-15a: skips an externalId already used by another scene in the same run (continuity)", async () => {
+      const used = { ...videoDetail, id: 1, video_files: [{ quality: "hd", width: 1080, height: 1920, file_type: "video/mp4", link: "https://videos.pexels.com/1-hd.mp4" }] };
+      const fresh = { ...videoDetail, id: 2, video_files: [{ quality: "hd", width: 1080, height: 1920, file_type: "video/mp4", link: "https://videos.pexels.com/2-hd.mp4" }] };
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [used, fresh] }), { status: 200 });
+        if (url.includes("/videos/videos/2")) return new Response(JSON.stringify(fresh), { status: 200 });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: true, buffer: Buffer.from([0, 0, 0, 0x18]), mimeType: "video/mp4", finalUrl: "https://videos.pexels.com/2-hd.mp4" });
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-8", query: "person outside", usedExternalIds: ["1"] });
+      expect(outcome).toMatchObject({ ok: true });
+    });
+
+    it("VE2E-15a: routes an exclusion-matching (effectively zero-relevance) top candidate to MEDIA_RELEVANCE_BELOW_THRESHOLD instead of silently importing it", async () => {
+      const carPhoto = { ...photoDetail, alt: "a busy street full of cars honking" };
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
+        if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [carPhoto] }), { status: 200 });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-4", query: "city street, no cars" });
+      expect(outcome).toMatchObject({ ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" });
+      expect(media.registerAsset).not.toHaveBeenCalled();
+    });
+
+    it("VE2E-15a: a live 429 stops fan-out and opens a cooldown on the shared 'visual' provider-account gate", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "retry-after": "30" } })));
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-6", query: "busy market" });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
+      expect(providerAccounts.cooldownContentAccount).toHaveBeenCalledWith("account-1", 30_000, expect.any(Date), "visual");
+      expect(media.registerAsset).not.toHaveBeenCalled();
+    });
+
+    it("VE2E-15a: a denied shared account slot stops fan-out before calling Pexels at all", async () => {
+      providerAccounts.acquireContentRequestSlot = vi.fn(async () => false);
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-7", query: "anything" });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });

@@ -4,6 +4,8 @@ import {
   getPexelsPhoto,
   getPexelsVideo,
   isPexelsCdnUrl,
+  pexelsPhotoToMediaCandidate,
+  pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
   probePexelsAccount,
   searchPexelsPhotos,
@@ -76,9 +78,16 @@ describe("searchPexelsPhotos", () => {
       thumbnailUrl: "https://images.pexels.com/photos/42/small.jpg",
       previewUrl: "https://images.pexels.com/photos/42/large.jpg",
       downloadUrl: "https://images.pexels.com/photos/42/original.jpg",
+      altText: "",
     }]);
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(String(call[0])).toContain("orientation=portrait");
+  });
+
+  it("captures Pexels' own alt text when present (VE2E-15a metadata semantic signal)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ photos: [{ ...photoRow, alt: "A person walking on the beach at sunrise" }] }), { status: 200 })));
+    const results = await searchPexelsPhotos("key", "sunset");
+    expect(results[0]!.altText).toBe("A person walking on the beach at sunrise");
   });
 });
 
@@ -126,6 +135,43 @@ describe("pickPexelsVideoFile", () => {
 
   it("returns null when there is no usable mp4 file", () => {
     expect(pickPexelsVideoFile([{ quality: "hls", width: 0, height: 0, fileType: "video/mp4", link: "" }])).toBeNull();
+  });
+});
+
+describe("pexelsPhotoToMediaCandidate / pexelsVideoToMediaCandidate (VE2E-15a MediaCandidate mapping)", () => {
+  const ctx = { query: "sunset", providerAccountId: "acc-1", queriedAt: "2026-09-27T00:00:00.000Z" };
+
+  it("maps a photo result to a cleared, auto-eligible MediaCandidate carrying alt text as descriptorText", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ photos: [{ ...photoRow, alt: "A sunset over the ocean" }] }), { status: 200 })));
+    const [photo] = await searchPexelsPhotos("key", "sunset");
+    const candidate = pexelsPhotoToMediaCandidate(photo!, ctx);
+    expect(candidate).toMatchObject({
+      candidateId: "pexels:photo:42",
+      source: "pexels",
+      mediaType: "photo",
+      accessMethod: "api_download",
+      importUrl: "https://images.pexels.com/photos/42/original.jpg",
+      rightsStatus: "cleared",
+      descriptorText: "A sunset over the ocean",
+      moderationDecision: null,
+      eligibility: { autoEligible: true },
+    });
+  });
+
+  it("marks a video candidate ineligible when no compatible mp4 file exists, without fabricating an importUrl", () => {
+    const candidate = pexelsVideoToMediaCandidate({ externalId: "9", width: 0, height: 0, durationSeconds: 5, attribution: { photographerName: "X", photographerUrl: "", pexelsPageUrl: "" }, thumbnailUrl: "", fileOptions: [] }, ctx);
+    expect(candidate.importUrl).toBeNull();
+    expect(candidate.eligibility).toEqual({ autoEligible: false, reason: "no_compatible_video_file" });
+    expect(candidate.descriptorText).toBeNull();
+  });
+
+  it("maps a video result's picked mp4 file to importUrl/dimensions", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ videos: [videoRow] }), { status: 200 })));
+    const [video] = await searchPexelsVideos("key", "city");
+    const candidate = pexelsVideoToMediaCandidate(video!, ctx);
+    expect(candidate.candidateId).toBe("pexels:video:7");
+    expect(candidate.importUrl).toBe("https://videos.pexels.com/video-files/7/7-hd.mp4");
+    expect(candidate.eligibility).toEqual({ autoEligible: true });
   });
 });
 

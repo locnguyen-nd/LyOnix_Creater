@@ -14,11 +14,22 @@ import {
   ProviderError,
   getPexelsPhoto,
   getPexelsVideo,
+  pexelsPhotoToMediaCandidate,
+  pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
   searchPexelsPhotos,
   searchPexelsVideos,
 } from "@lyonix/providers";
-import { canAccessProject } from "@lyonix/domain";
+import {
+  buildBoundedQueryVariants,
+  canAccessProject,
+  decideMediaSelection,
+  deriveSceneBrief,
+  detectScriptLanguageHeuristic,
+  rankMediaCandidates,
+  type MediaCandidate,
+  type SceneBrief,
+} from "@lyonix/domain";
 import type {
   ErrorCode,
   MediaAssetKind,
@@ -29,6 +40,7 @@ import type {
 import { GrantsService } from "./grants.service.js";
 import { MediaService } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
@@ -38,12 +50,26 @@ export type PexelsOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorC
 /** Generic sanity ceiling for a single Pexels photo/video download (well above typical portrait-short assets). */
 const MAX_PEXELS_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
+/** Bounded per-variant candidate pool size for the auto-fill ranking flow (VE2E-15a) - same order of magnitude as `AUTO_FILL_CANDIDATE_POOL` in `apps/web/src/studio/media-selection.ts` so a real pool exists to rank, not just whatever the API returned first. */
+const MEDIA_SEARCH_POOL_SIZE = 10;
+
 const providerErrorMessage: Record<string, string> = {
   PROVIDER_AUTH_INVALID: "Khóa Pexels bị từ chối. Verify lại tài khoản.",
   PROVIDER_RATE_LIMITED: "Pexels giới hạn tốc độ, thử lại sau.",
   PROVIDER_CAPABILITY_UNAVAILABLE: "Pexels từ chối yêu cầu này (quyền/entitlement).",
   PROVIDER_TIMEOUT: "Yêu cầu Pexels hết thời gian chờ.",
   PROVIDER_SCHEMA_INVALID: "Pexels trả về dữ liệu không hợp lệ.",
+};
+
+/** VE2E-15a abstention reasons that reach here always come from a non-empty candidate pool (an empty pool short-circuits earlier to `PROVIDER_CAPABILITY_UNAVAILABLE`, matching the pre-existing "no results" contract), so `no_candidates` is unreachable at this call site. */
+const abstentionOutcome = (reason: "below_relevance_threshold" | "rights_unresolved" | "not_auto_eligible" | "rejected_by_moderation"): { code: ErrorCode; message: string; status: number } => {
+  if (reason === "below_relevance_threshold") {
+    return { code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Không tìm thấy media đủ liên quan cho scene (dưới ngưỡng), cần chọn thủ công trong Studio.", status: 422 };
+  }
+  if (reason === "rights_unresolved") {
+    return { code: "MEDIA_RIGHTS_UNRESOLVED", message: "Media phù hợp nhất cho scene có quyền sử dụng chưa rõ, cần Studio xác nhận thủ công.", status: 422 };
+  }
+  return { code: "VALIDATION_FAILED", message: "Media tốt nhất cho scene không thể tự động áp dụng (chưa qua kiểm duyệt/không đủ điều kiện), cần Studio xác nhận thủ công.", status: 422 };
 };
 
 const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
@@ -56,6 +82,16 @@ const mapProviderError = (error: unknown): { code: ErrorCode; message: string; s
 
 export type SearchInput = { providerAccountId: string; type: PexelsMediaType; query: string; page?: number; perPage?: number };
 export type ImportInput = { providerAccountId: string; type: PexelsMediaType; externalId: string; folderId?: string | null; reusable?: boolean; sceneId?: string | null };
+export type AutoImportForSceneInput = {
+  providerAccountId: string;
+  sceneId: string;
+  query: string;
+  folderId?: string | null;
+  /** VE2E-15a: real narrative-beat scene brief. When omitted, a minimal single-phrase brief is synthesized from `query` alone so older callers keep working unchanged. */
+  sceneBrief?: SceneBrief;
+  /** External ids already assigned to another scene in the same run - continuity gate, same contract as `usedExternalIds` in `apps/web/src/studio/media-selection.ts`. */
+  usedExternalIds?: readonly string[];
+};
 
 @Injectable()
 export class PexelsService {
@@ -63,6 +99,7 @@ export class PexelsService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(MediaService) private readonly media: MediaService,
+    @Inject(ProviderAccountsService) private readonly providerAccounts: ProviderAccountsService,
   ) {}
 
   private async assertProjectAccess(projectId: string, userId: string, role: "admin" | "staff") {
@@ -207,46 +244,106 @@ export class PexelsService {
   }
 
   /**
-   * VE2E-06 Auto media-preparing step: search Pexels for `query` and import the first
-   * result, tagged with `sceneId`. Tries portrait video first (short-form default),
-   * then falls back to photo when the video search has no hits — never fabricates a
-   * placeholder asset when both come back empty. Only used by the trusted background
-   * `WorkflowRunnerService`, not exposed as its own HTTP endpoint (callers needing
-   * manual pick-from-results control should keep using `search()` + `import()`).
+   * VE2E-15a: fetches a bounded candidate pool for one query variant/media type through the
+   * shared Postgres-backed concurrency+cooldown gate (mirrors the VE2E-12 content-account
+   * pattern in `provider-accounts.service.ts`, reused here for the `"visual"` role instead of a
+   * second mechanism). A denied slot (concurrency ceiling or an active cooldown from a prior
+   * 429) stops fan-out immediately rather than queueing more calls; a live 429 opens a new
+   * cooldown and stops the remaining variants in this call too.
    */
-  async autoImportForScene(
-    projectId: string,
-    userId: string,
-    role: "admin" | "staff",
-    input: { providerAccountId: string; sceneId: string; query: string; folderId?: string | null },
-  ): Promise<PexelsOutcome<PexelsImportResponse>> {
+  private async collectCandidatePool(
+    apiKey: string,
+    accountId: string,
+    variants: readonly string[],
+    type: PexelsMediaType,
+    queriedAt: string,
+  ): Promise<{ ok: true; candidates: MediaCandidate[] } | { ok: false; error: unknown }> {
+    const candidates: MediaCandidate[] = [];
+    for (const variant of variants) {
+      const acquired = await this.providerAccounts.acquireContentRequestSlot(accountId, new Date(), 4, "visual");
+      if (!acquired) break;
+      try {
+        if (type === "video") {
+          const videos = await searchPexelsVideos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
+          candidates.push(...videos.map((v) => pexelsVideoToMediaCandidate(v, { query: variant, providerAccountId: accountId, queriedAt })));
+        } else {
+          const photos = await searchPexelsPhotos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
+          candidates.push(...photos.map((p) => pexelsPhotoToMediaCandidate(p, { query: variant, providerAccountId: accountId, queriedAt })));
+        }
+      } catch (error) {
+        await this.providerAccounts.releaseContentRequestSlot(accountId, "visual").catch(() => undefined);
+        if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") {
+          await this.providerAccounts.cooldownContentAccount(accountId, error.retryAfterMs, new Date(), "visual").catch(() => undefined);
+        }
+        return { ok: false, error };
+      }
+      await this.providerAccounts.releaseContentRequestSlot(accountId, "visual").catch(() => undefined);
+    }
+    const seen = new Set<string>();
+    return { ok: true, candidates: candidates.filter((c) => (seen.has(c.candidateId) ? false : (seen.add(c.candidateId), true))) };
+  }
+
+  /**
+   * VE2E-06/VE2E-15a Auto media-preparing step. Fetches a bounded, ranked candidate pool
+   * (portrait video first - short-form default - falling back to photo only when the video
+   * pool is entirely empty, same type preference as before) instead of blindly importing the
+   * API's first result, and only imports the top-ranked candidate when `decideMediaSelection`
+   * says `auto_select`; a weak-relevance or rights-unresolved top result routes to a distinct
+   * `needs_input`-classified error instead of silently importing a poor match (spec §5). Never
+   * fabricates a placeholder asset when the provider pool comes back empty. Only used by the
+   * trusted background `WorkflowRunnerService`, not exposed as its own HTTP endpoint (callers
+   * needing manual pick-from-results control should keep using `search()` + `import()`).
+   */
+  async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string }>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
-    if (!input.query.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu từ khóa tìm kiếm cho scene" };
+    const trimmedQuery = input.query.trim();
+    if (!trimmedQuery && !input.sceneBrief) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu từ khóa tìm kiếm cho scene" };
     const apiKey = decryptSecret(account.data.encryptedSecret);
-    let firstVideoId: string | null = null;
-    let firstPhotoId: string | null = null;
-    try {
-      const videos = await searchPexelsVideos(apiKey, input.query, { perPage: 1 });
-      firstVideoId = videos[0]?.externalId ?? null;
-      if (!firstVideoId) {
-        const photos = await searchPexelsPhotos(apiKey, input.query, { perPage: 1 });
-        firstPhotoId = photos[0]?.externalId ?? null;
+    const accountId = account.data.id;
+
+    // Real narrative-beat brief when the caller has one (WorkflowRunnerService, from the approved ScriptDraftV2); otherwise a minimal single-phrase brief synthesized from `query` alone, so older/manual callers keep the original one-query behavior.
+    const brief: SceneBrief = input.sceneBrief ?? deriveSceneBrief(
+      { language: detectScriptLanguageHeuristic(trimmedQuery), scenes: [{ sceneId: input.sceneId, narration: "", screenText: "", visualQuery: trimmedQuery, durationHintMs: 5000 }] },
+      0,
+    );
+    const variants = buildBoundedQueryVariants(brief);
+    const queriedAt = new Date().toISOString();
+    const usedExternalIds = new Set(input.usedExternalIds ?? []);
+
+    const videoPool = await this.collectCandidatePool(apiKey, accountId, variants, "video", queriedAt);
+    if (!videoPool.ok) return { ok: false, ...mapProviderError(videoPool.error) };
+    let pool = videoPool.candidates;
+    if (pool.length === 0) {
+      const photoPool = await this.collectCandidatePool(apiKey, accountId, variants, "photo", queriedAt);
+      if (!photoPool.ok) return { ok: false, ...mapProviderError(photoPool.error) };
+      pool = photoPool.candidates;
+    }
+    if (pool.length === 0) {
+      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: `Pexels không có kết quả nào cho scene (query: "${trimmedQuery || brief.phrases[0] || ""}")`, status: 502 };
+    }
+
+    const ranked = rankMediaCandidates(pool, brief, { usedExternalIds });
+    const decision = decideMediaSelection(ranked);
+    if (decision.decision === "needs_input") {
+      if (decision.reason === "no_candidates") {
+        // Unreachable in practice (guarded by the `pool.length === 0` check above) - kept only so this switch stays exhaustive if the guard above is ever refactored away.
+        return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: `Pexels không có kết quả nào cho scene (query: "${trimmedQuery}")`, status: 502 };
       }
-    } catch (error) {
-      return { ok: false, ...mapProviderError(error) };
+      return { ok: false, ...abstentionOutcome(decision.reason) };
     }
-    if (!firstVideoId && !firstPhotoId) {
-      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: `Pexels không có kết quả nào cho scene (query: "${input.query}")`, status: 502 };
-    }
-    return this.import(projectId, userId, role, {
+
+    const imported = await this.import(projectId, userId, role, {
       providerAccountId: input.providerAccountId,
-      type: firstVideoId ? "video" : "photo",
-      externalId: (firstVideoId ?? firstPhotoId)!,
+      type: decision.chosen.mediaType,
+      externalId: decision.chosen.externalId,
       sceneId: input.sceneId,
       reusable: true,
       ...(input.folderId ? { folderId: input.folderId } : {}),
     });
+    if (!imported.ok) return imported;
+    // `externalId` is internal-only (this method is never exposed as its own HTTP endpoint) - lets `WorkflowRunnerService` track cross-scene continuity without re-deriving it from the registered asset (which is identified by checksum, not the provider's external id).
+    return { ok: true, data: { asset: imported.data.asset, externalId: decision.chosen.externalId } };
   }
 }

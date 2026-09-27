@@ -108,12 +108,18 @@ export class ProviderAccountsService {
       : rows;
   }
 
-  /** Atomic Postgres admission gate shared by every API/worker replica. */
-  async acquireContentRequestSlot(accountId: string, now = new Date(), maxConcurrent = 4): Promise<boolean> {
+  /**
+   * Atomic Postgres admission gate shared by every API/worker replica. `role` defaults to
+   * `"content"` for full backward compatibility with the original VE2E-12 content-generation
+   * call sites; VE2E-15a reuses the same DB-shared `activeContentRequests`/`cooldownUntil`
+   * fields (they live on every `ProviderAccount` row regardless of role) for the `"visual"`
+   * media-search fan-out gate instead of inventing a second mechanism.
+   */
+  async acquireContentRequestSlot(accountId: string, now = new Date(), maxConcurrent = 4, role: ProviderRole = "content"): Promise<boolean> {
     const result = await this.prisma.providerAccount.updateMany({
       where: {
         id: accountId,
-        role: "content",
+        role,
         status: "verified",
         deletedAt: null,
         activeContentRequests: { lt: maxConcurrent },
@@ -124,14 +130,14 @@ export class ProviderAccountsService {
     return result.count === 1;
   }
 
-  async releaseContentRequestSlot(accountId: string) {
+  async releaseContentRequestSlot(accountId: string, _role: ProviderRole = "content") {
     await this.prisma.providerAccount.updateMany({
       where: { id: accountId, activeContentRequests: { gt: 0 } },
       data: { activeContentRequests: { decrement: 1 } },
     } as any);
   }
 
-  async cooldownContentAccount(accountId: string, retryAfterMs?: number, now = new Date()): Promise<Date> {
+  async cooldownContentAccount(accountId: string, retryAfterMs?: number, now = new Date(), _role: ProviderRole = "content"): Promise<Date> {
     const fallbackMs = retryAfterMs === undefined ? 60_000 : 0;
     const cooldownUntil = new Date(now.getTime() + Math.min(24 * 60 * 60_000, Math.max(1_000, retryAfterMs ?? fallbackMs)));
     await this.prisma.providerAccount.updateMany({ where: { id: accountId, deletedAt: null }, data: { cooldownUntil } } as any);

@@ -47,7 +47,12 @@ export type ErrorCode =
   | "UNSUPPORTED_MEDIA"
   | "SSRF_BLOCKED"
   | "REVENUE_UNAVAILABLE"
-  | "WEBHOOK_INVALID";
+  | "WEBHOOK_INVALID"
+  // VE2E-15a: scene-beat media ranking abstained rather than importing a weak/unresolved-rights
+  // candidate - both route the workflow run to `needs_input` (see `NEEDS_INPUT_CODES` in
+  // apps/api/src/workflow-runner.service.ts), never an implicit accept.
+  | "MEDIA_RELEVANCE_BELOW_THRESHOLD"
+  | "MEDIA_RIGHTS_UNRESOLVED";
 
 export type ErrorEnvelope = {
   error: {

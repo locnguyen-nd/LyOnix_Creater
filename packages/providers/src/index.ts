@@ -178,11 +178,14 @@ export {
   getPexelsVideo,
   pickPexelsVideoFile,
   isPexelsCdnUrl,
+  pexelsPhotoToMediaCandidate,
+  pexelsVideoToMediaCandidate,
   type PexelsAttribution,
   type PexelsPhotoResult,
   type PexelsVideoFileOption,
   type PexelsVideoResult,
   type PexelsSearchOptions,
+  type PexelsCandidateContext,
 } from "./pexels.js";
 export {
   probeCreatomateAccount,

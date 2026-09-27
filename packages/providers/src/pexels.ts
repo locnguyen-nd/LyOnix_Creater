@@ -6,7 +6,7 @@
  * function here makes a real HTTP call and normalizes failures to `ProviderError`.
  * Tests inject `fetch` via `vi.stubGlobal` (same pattern as `elevenlabs.ts`).
  */
-import { validateSourceUrl } from "@lyonix/domain";
+import { validateSourceUrl, type MediaCandidate } from "@lyonix/domain";
 import { ProviderError } from "./index.js";
 
 const API_BASE = "https://api.pexels.com";
@@ -65,6 +65,8 @@ export type PexelsPhotoResult = {
   thumbnailUrl: string;
   previewUrl: string;
   downloadUrl: string;
+  /** Pexels' own photographer-authored alt text, when present - the only descriptive text signal this provider exposes (its video search endpoint has none). Used for VE2E-15a metadata-only semantic ranking. */
+  altText: string;
 };
 export type PexelsVideoFileOption = { quality: string; width: number; height: number; fileType: string; link: string };
 export type PexelsVideoResult = {
@@ -93,6 +95,7 @@ const toPhotoResult = (row: Record<string, unknown>): PexelsPhotoResult => {
     thumbnailUrl: typeof src.small === "string" ? src.small : "",
     previewUrl: typeof src.large === "string" ? src.large : typeof src.medium === "string" ? src.medium : "",
     downloadUrl: typeof src.original === "string" ? src.original : "",
+    altText: typeof row.alt === "string" ? row.alt : "",
   };
 };
 
@@ -165,6 +168,73 @@ export const pickPexelsVideoFile = (files: readonly PexelsVideoFileOption[]): Pe
   const targetMinHeight = 1280;
   return sorted.find((f) => f.height >= targetMinHeight) ?? sorted[sorted.length - 1]!;
 };
+
+// --- VE2E-15a: normalized MediaCandidate mapping ---
+
+export type PexelsCandidateContext = { query: string; providerAccountId: string; queriedAt?: string; catalogVersion?: string };
+
+const pexelsAttributionToMedia = (a: PexelsAttribution) => ({
+  name: a.photographerName || "Pexels",
+  profileUrl: a.photographerUrl || null,
+  sourcePageUrl: a.pexelsPageUrl || null,
+});
+
+/**
+ * Pexels License (https://www.pexels.com/license/) grants free use with attribution for every
+ * returned photo/video - `rightsStatus: "cleared"` reflects existing product behavior already
+ * relied on by `PexelsService.import`, not a new claim made here.
+ */
+export function pexelsPhotoToMediaCandidate(photo: PexelsPhotoResult, ctx: PexelsCandidateContext): MediaCandidate {
+  return {
+    candidateId: `pexels:photo:${photo.externalId}`,
+    source: "pexels",
+    externalId: photo.externalId,
+    mediaType: "photo",
+    accessMethod: "api_download",
+    previewUrl: photo.previewUrl || photo.thumbnailUrl,
+    importUrl: photo.downloadUrl || null,
+    durationSeconds: null,
+    widthPx: photo.width || null,
+    heightPx: photo.height || null,
+    attribution: pexelsAttributionToMedia(photo.attribution),
+    provenance: { query: ctx.query, providerAccountId: ctx.providerAccountId, queriedAt: ctx.queriedAt ?? new Date().toISOString(), ...(ctx.catalogVersion ? { catalogVersion: ctx.catalogVersion } : {}) },
+    rightsStatus: "cleared",
+    capabilityEvidence: null,
+    metadataScore: 0,
+    descriptorText: photo.altText || null,
+    visionFindings: null,
+    relevanceScore: 0,
+    moderationDecision: null,
+    eligibility: photo.downloadUrl ? { autoEligible: true } : { autoEligible: false, reason: "missing_download_url" },
+  };
+}
+
+/** Same rights reasoning as `pexelsPhotoToMediaCandidate`. Pexels' video search endpoint returns no alt/description/tags field, so `descriptorText` stays `null` (no fabricated signal). */
+export function pexelsVideoToMediaCandidate(video: PexelsVideoResult, ctx: PexelsCandidateContext): MediaCandidate {
+  const file = pickPexelsVideoFile(video.fileOptions);
+  return {
+    candidateId: `pexels:video:${video.externalId}`,
+    source: "pexels",
+    externalId: video.externalId,
+    mediaType: "video",
+    accessMethod: "api_download",
+    previewUrl: video.thumbnailUrl,
+    importUrl: file?.link ?? null,
+    durationSeconds: video.durationSeconds || null,
+    widthPx: file?.width || video.width || null,
+    heightPx: file?.height || video.height || null,
+    attribution: pexelsAttributionToMedia(video.attribution),
+    provenance: { query: ctx.query, providerAccountId: ctx.providerAccountId, queriedAt: ctx.queriedAt ?? new Date().toISOString(), ...(ctx.catalogVersion ? { catalogVersion: ctx.catalogVersion } : {}) },
+    rightsStatus: "cleared",
+    capabilityEvidence: null,
+    metadataScore: 0,
+    descriptorText: null,
+    visionFindings: null,
+    relevanceScore: 0,
+    moderationDecision: null,
+    eligibility: file ? { autoEligible: true } : { autoEligible: false, reason: "no_compatible_video_file" },
+  };
+}
 
 // --- safe download ---
 

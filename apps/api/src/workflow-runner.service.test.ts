@@ -162,7 +162,7 @@ describe("WorkflowRunnerService", () => {
       generateForWorkflowRun: vi.fn(async (sceneDraftVersionId: string) => ({ ok: true as const, data: { id: `audio-${sceneDraftVersionId}`, mediaAssetVersionId: `audio-asset-${sceneDraftVersionId}` } as any })),
     };
     pexels = {
-      autoImportForScene: vi.fn(async (_projectId: string, _userId: string, _role: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video" } as any } })),
+      autoImportForScene: vi.fn(async (_projectId: string, _userId: string, _role: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video" } as any, externalId: `ext-${input.sceneId}` } })),
     };
     renderJobs = {
       submit: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
