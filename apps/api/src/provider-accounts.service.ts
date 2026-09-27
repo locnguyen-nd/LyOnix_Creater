@@ -245,7 +245,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 
@@ -303,8 +304,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 
@@ -320,8 +321,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 
@@ -339,8 +340,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 
@@ -361,8 +362,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 
@@ -378,8 +379,8 @@ export class ProviderAccountsService {
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
       const publicRow = publicAccount(failed);
-      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
-      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
     }
   }
 

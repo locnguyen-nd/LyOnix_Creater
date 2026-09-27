@@ -124,7 +124,7 @@ describe("ProviderAccountsService ElevenLabs (tts) account", () => {
     await service.create({ name: "Studio voice", provider: "elevenlabs", role: "tts", scope: "personal", model: "eleven_multilingual_v2", secret: "bad" }, "user-1", "staff");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: { status: "invalid_api_key" } }), { status: 401 })));
     const result = await service.verify("el-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_AUTH_INVALID" });
     expect(store.status).toBe("failed");
   });
 });
@@ -178,7 +178,7 @@ describe("ProviderAccountsService OpenAI (content) account — V00-10 model elig
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await service.verify("oa-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
     expect(store.status).toBe("failed");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -193,7 +193,7 @@ describe("ProviderAccountsService OpenAI (content) account — V00-10 model elig
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await service.verify("oa-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
     expect(store.status).toBe("failed");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -205,7 +205,7 @@ describe("ProviderAccountsService OpenAI (content) account — V00-10 model elig
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await service.verify("oa-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" });
     expect(store.status).toBe("failed");
   });
 
@@ -298,7 +298,7 @@ describe("ProviderAccountsService Pexels (visual) account", () => {
     await service.create({ name: "Stock media", provider: "pexels", role: "visual", scope: "personal", model: "default", secret: "bad" }, "user-1", "staff");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 })));
     const result = await service.verify("px-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_AUTH_INVALID" });
     expect(store.status).toBe("failed");
   });
 });
@@ -344,7 +344,7 @@ describe("ProviderAccountsService YouTube (visual, discovery/embed-only) account
     await service.create({ name: "YouTube discovery", provider: "youtube", role: "visual", scope: "personal", model: "default", secret: "bad" }, "user-1", "staff");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "API key invalid" } }), { status: 401 })));
     const result = await service.verify("yt-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_AUTH_INVALID" });
     expect(store.status).toBe("failed");
   });
 });
@@ -390,7 +390,7 @@ describe("ProviderAccountsService Pinterest (visual, manual-review-only) account
     await service.create({ name: "Pinterest search", provider: "pinterest", role: "visual", scope: "personal", model: "default", secret: "bad" }, "user-1", "staff");
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Permission denied" }), { status: 403 })));
     const result = await service.verify("pin-1", "user-1", "staff");
-    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(result).toMatchObject({ code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
     expect(store.status).toBe("failed");
   });
 });
