@@ -213,6 +213,62 @@ export async function generateContentOnce<T>(kind: LiveContentKind, apiKey: stri
   }
 }
 
+// --- VE2E-24: vision (image/video-frame) input structured generate ---
+
+/** One inline media part (base64-encoded) to attach alongside the text prompt. `mimeType` must be an image type accepted by the target provider (e.g. `image/jpeg`, `image/png`) - a sampled video frame is sent as a still image, never raw video bytes. */
+export type VisionInputPart = { mimeType: string; base64: string };
+
+const geminiInlinePart = (part: VisionInputPart) => ({ inlineData: { mimeType: part.mimeType, data: part.base64 } });
+const openAiImagePart = (part: VisionInputPart) => ({ type: "image_url" as const, image_url: { url: `data:${part.mimeType};base64,${part.base64}` } });
+
+/**
+ * Single attempt, exact-endpoint vision dispatch - mirrors `generateContentOnce` but attaches
+ * one or more inline image parts to the same real generate endpoint (Gemini `generateContent`
+ * inline_data, OpenAI/xAI chat-completions `image_url` data URI). Used by
+ * `vision-probe.ts`/`vision-moderation.ts` so capability verification and the real moderation
+ * call go through the identical request shape - never a separate "probe-only" payload that
+ * could pass while the real moderation call shape silently fails.
+ */
+export async function generateVisionStructuredOnce<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, media: readonly VisionInputPart[], schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+  const model = normalizeModelId(modelId);
+  try {
+    if (kind === "gemini") {
+      const response = await timedFetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }, ...media.map(geminiInlinePart)] }], generationConfig: geminiConfig(schema) }),
+      });
+      const body = await json(response);
+      const text = chatText(body);
+      if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return structured text", false);
+      try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+      catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return valid JSON", false); }
+    }
+    const url = kind === "openai" ? "https://api.openai.com/v1/chat/completions" : "https://api.x.ai/v1/chat/completions";
+    const response = await timedFetch(url, {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        response_format: chatFormat(schema),
+        messages: [
+          { role: "system", content: "You are a vision content classifier. Reply with a single JSON object only, matching the requested schema exactly. No other text, no markdown." },
+          { role: "user", content: [{ type: "text", text: prompt }, ...media.map(openAiImagePart)] },
+        ],
+      }),
+    });
+    const body = await json(response);
+    const text = chatText(body);
+    if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return structured text", false);
+    try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+    catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return valid JSON", false); }
+  } catch (error) {
+    if (error instanceof ProviderError) throw error;
+    throw new ProviderError("PROVIDER_TIMEOUT", "Provider vision generate timed out or network failed", true);
+  }
+}
+
 /**
  * VE2E-01: resilient structured generate on the exact live endpoint (Responses API for
  * openai/xai, `generateContent` for gemini) — schema-invalid retries once without the

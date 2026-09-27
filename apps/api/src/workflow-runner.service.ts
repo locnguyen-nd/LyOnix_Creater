@@ -25,7 +25,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import { buildAutoRenderAssignments, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
+import { buildAutoRenderAssignments, deriveSceneBrief, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
 import type { RenderAssignmentInput } from "@lyonix/contracts";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { PexelsService } from "./pexels.service.js";
@@ -88,7 +88,7 @@ export class WorkflowStepFailure extends Error {
 }
 
 const BLOCKED_CODES = new Set(["PROVIDER_NOT_CONFIGURED", "PROVIDER_CAPABILITY_UNAVAILABLE", "PROVIDER_AUTH_INVALID", "SSRF_BLOCKED"]);
-const NEEDS_INPUT_CODES = new Set(["VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN"]);
+const NEEDS_INPUT_CODES = new Set(["VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN", "MEDIA_RELEVANCE_BELOW_THRESHOLD", "MEDIA_RIGHTS_UNRESOLVED"]);
 /** Everything else (PROVIDER_RATE_LIMITED/PROVIDER_QUOTA_EXHAUSTED/PROVIDER_TIMEOUT/PROVIDER_UNAVAILABLE/PROVIDER_SUBMIT_UNKNOWN, and any unexpected thrown error) is treated as transient and bounded-retried — never an infinite loop since `attempts` is capped. */
 const classify = (code: string): "blocked_provider" | "needs_input" | "retry" => {
   if (BLOCKED_CODES.has(code)) return "blocked_provider";
@@ -290,7 +290,10 @@ export class WorkflowRunnerService {
     // --- 5. media: project library first, Pexels fallback per scene ---
     await this.setStatus(run.id, "media_preparing");
     const mediaByScene = new Map<string, { id: string; kind: "video" | "image" }>();
-    for (const scene of approved.scenes) {
+    // VE2E-15a continuity: an external id already imported earlier in this same run is never picked again for a later scene (mirrors `usedExternalIds` in `apps/web/src/studio/media-selection.ts`).
+    const usedExternalIds = new Set<string>();
+    const scriptForBrief = { language: approved.language, scenes: approved.scenes.map((s) => ({ sceneId: s.sceneId, narration: s.narration, screenText: s.screenText, visualQuery: s.visualQuery, durationHintMs: s.durationHintMs })) };
+    for (const [sceneIndex, scene] of approved.scenes.entries()) {
       const existing = await this.prisma.mediaAssetVersion.findFirst({
         where: { projectId: run.projectId, sceneId: scene.sceneId, deletedAt: null },
         orderBy: { createdAt: "desc" },
@@ -299,6 +302,7 @@ export class WorkflowRunnerService {
         mediaByScene.set(scene.sceneId, { id: existing.id, kind: existing.kind });
         continue;
       }
+      const sceneBrief = deriveSceneBrief(scriptForBrief, sceneIndex);
       const imported = await this.recordStep(
         run,
         `import_media_${scene.sceneId}`,
@@ -308,13 +312,16 @@ export class WorkflowRunnerService {
             providerAccountId: mediaConfig.providerAccountId,
             sceneId: scene.sceneId,
             query: scene.visualQuery.trim() || scene.narration,
+            sceneBrief,
+            usedExternalIds: [...usedExternalIds],
           });
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-          return outcome.data.asset;
+          return outcome.data;
         },
       );
-      if (imported.kind !== "video" && imported.kind !== "image") throw new WorkflowStepFailure("PROVIDER_SCHEMA_INVALID", `Asset Pexels vừa import có kind không hỗ trợ: ${imported.kind}`);
-      mediaByScene.set(scene.sceneId, { id: imported.id, kind: imported.kind });
+      if (imported.asset.kind !== "video" && imported.asset.kind !== "image") throw new WorkflowStepFailure("PROVIDER_SCHEMA_INVALID", `Asset Pexels vừa import có kind không hỗ trợ: ${imported.asset.kind}`);
+      mediaByScene.set(scene.sceneId, { id: imported.asset.id, kind: imported.asset.kind });
+      usedExternalIds.add(imported.externalId);
     }
 
     // --- 6. build timeline assignments (positional best-effort mapping, no human timeline editor in Auto) ---

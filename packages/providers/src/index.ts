@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "creatomate", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "creatomate", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -97,11 +97,13 @@ export {
   generateContentOnce,
   generateContentStructuredV2,
   generateLiveStructured,
+  generateVisionStructuredOnce,
   isLiveContentKind,
   liveContentKinds,
   verifyContentKey,
   type LiveContentInput,
   type LiveContentKind,
+  type VisionInputPart,
 } from "./live-content.js";
 export { CONTENT_MODEL_RANKING_VERSION, CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, rankContentModels, suggestedModelFromError } from "./content-models.js";
 export {
@@ -178,11 +180,14 @@ export {
   getPexelsVideo,
   pickPexelsVideoFile,
   isPexelsCdnUrl,
+  pexelsPhotoToMediaCandidate,
+  pexelsVideoToMediaCandidate,
   type PexelsAttribution,
   type PexelsPhotoResult,
   type PexelsVideoFileOption,
   type PexelsVideoResult,
   type PexelsSearchOptions,
+  type PexelsCandidateContext,
 } from "./pexels.js";
 export {
   probeCreatomateAccount,
@@ -210,6 +215,44 @@ export {
   type DynamicSceneStyle,
   type DynamicImageAnimation,
 } from "./creatomate-dynamic.js";
+export {
+  probeYouTubeAccount,
+  searchYouTubeVideos,
+  isYouTubeUrl,
+  youtubeVideoToMediaCandidate,
+  type YouTubeVideoResult,
+  type YouTubeSearchOptions,
+  type YouTubeCandidateContext,
+} from "./youtube.js";
+export {
+  probePinterestAccount,
+  searchPinterestPins,
+  pinterestPinToMediaCandidate,
+  type PinterestMediaType,
+  type PinterestPinResult,
+  type PinterestSearchOptions,
+  type PinterestCandidateContext,
+} from "./pinterest.js";
+export {
+  probeVisionCapability,
+  tryProbeVisionCapability,
+  visionInputKinds,
+  type VisionInputKind,
+  type VisionCapabilityProbeResult,
+} from "./vision-probe.js";
+export {
+  moderateMediaWithVision,
+  moderateSceneCandidate,
+  MAX_MODERATION_FRAMES,
+  type VisionModerationOperation,
+  type VisionModerationSceneContext,
+  type VisionModerationFrame,
+  type VisionModerationCallInput,
+  type VisionModerationCallResult,
+  type VisionModerationRawResult as VisionModerationProviderRawResult,
+  type SceneModerationInput,
+  type SceneModerationOutcome,
+} from "./vision-moderation.js";
 export {
   CAPTION_PLAN_SCHEMA_VERSION,
   CAPTION_PLAN_V1_JSON_SCHEMA,
