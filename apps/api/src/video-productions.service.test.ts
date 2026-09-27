@@ -199,14 +199,24 @@ describe("VideoProductionsService", () => {
       expect(await service.list(userId, "staff", projectId)).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
 
-    it("attaches the latest linked RenderJob's resultUrl/cost/duration onto each run", async () => {
+    it("attaches the latest linked RenderJob's resultUrl/snapshotUrl/cost/duration onto each run", async () => {
       const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
       if (!submitted.ok) throw new Error("expected ok");
       prisma.renderJob.findMany = async () => [
-        { workflowRunId: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", costAmount: { toString: () => "0.42" }, renderDurationMs: 12345 },
+        { workflowRunId: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", snapshotUrl: "https://cdn.example/video.jpg", costAmount: { toString: () => "0.42" }, renderDurationMs: 12345 },
       ];
       const outcome = await service.list(userId, "staff");
-      expect(outcome).toMatchObject({ ok: true, data: [{ id: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", costAmount: "0.42", renderDurationMs: 12345 }] });
+      expect(outcome).toMatchObject({
+        ok: true,
+        data: [{ id: submitted.data.id, resultUrl: "https://cdn.example/video.mp4", snapshotUrl: "https://cdn.example/video.jpg", costAmount: "0.42", renderDurationMs: 12345 }],
+      });
+    });
+
+    it("VE2E-22: reports snapshotUrl:null (not undefined/missing) before any render has reported one", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      const outcome = await service.list(userId, "staff");
+      expect(outcome).toMatchObject({ ok: true, data: [{ id: submitted.data.id, snapshotUrl: null }] });
     });
 
     it("returns an empty list rather than erroring when the caller has no runs yet", async () => {

@@ -557,6 +557,8 @@ export type VideoProductionListItemResponse = {
   status: WorkflowRunStatus;
   sourceVersionId: string | null;
   resultUrl: string | null;
+  /** VE2E-22: Creatomate's own render-frame preview image (`RenderJob.snapshotUrl`, VE2E-19), when the provider has reported one - so the list can show a thumbnail without playing/re-hosting the video itself. */
+  snapshotUrl: string | null;
   costAmount: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string; stepKey?: string } | null;

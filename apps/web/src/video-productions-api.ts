@@ -4,7 +4,14 @@
  * `POST /video-productions` DAG and polls its live status/events.
  */
 import { api, csrfHeaders } from "./api";
-import type { StudioContextResponse, VideoProductionResponse, VideoProductionSourceInput, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type {
+  StudioContextResponse,
+  VideoProductionListItemResponse,
+  VideoProductionResponse,
+  VideoProductionSourceInput,
+  VideoProductionSubmitResponse,
+  WorkflowStepEventResponse,
+} from "@lyonix/contracts";
 
 export type AutoProfileSetupRequest = {
   name: string;
@@ -39,6 +46,18 @@ export async function submitVideoProduction(projectId: string, automationProfile
 
 export async function getVideoProduction(id: string): Promise<VideoProductionResponse> {
   return api<VideoProductionResponse>(`/video-productions/${id}`);
+}
+
+/**
+ * VE2E-22: every Auto run the caller themselves created (across all of their
+ * self-provisioned projects) — `apps/api`'s `GET /video-productions` (already merged to
+ * `dev` outside this pipeline, `VideoProductionsService.list()`) is the fix for a run
+ * otherwise having no way to be found again after navigating away from its one-time submit
+ * URL. `projectId` stays supported for a caller that already knows which project it wants,
+ * but is intentionally omitted here.
+ */
+export async function listVideoProductions(): Promise<VideoProductionListItemResponse[]> {
+  return api<VideoProductionListItemResponse[]>("/video-productions");
 }
 
 export async function listVideoProductionEvents(id: string): Promise<WorkflowStepEventResponse[]> {
