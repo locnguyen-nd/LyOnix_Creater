@@ -9,6 +9,7 @@ import {
   probeCreatomateAccount,
   probeElevenLabsAccount,
   probePexelsAccount,
+  probeYouTubeAccount,
   resolveContentModel,
   rankContentModels,
   verifyContentKey,
@@ -21,8 +22,8 @@ import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 
 /** `elevenlabs`/`tts` is the only supported non-content provider account today (VE2E-02). Omni remains B08-blocked. */
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
-/** `pexels`/`visual` (VE2E-04) — media search/import provider account. */
-const isSupportedVisualAccount = (provider: string, role: ProviderRole) => provider === "pexels" && role === "visual";
+/** `pexels`/`youtube` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest/Google are evaluated but not implemented (VE2E-15b) and stay unsupported here. */
+const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube");
 /** `creatomate`/`render` (VE2E-05) — render provider account. */
 const isSupportedRenderAccount = (provider: string, role: ProviderRole) => provider === "creatomate" && role === "render";
 const isSupportedAccount = (provider: string, role: ProviderRole) =>
@@ -189,7 +190,7 @@ export class ProviderAccountsService {
     const row = await this.manageable(id, userId, role);
     if (!row || row === "forbidden") return row;
     if (isSupportedTtsAccount(row.provider, row.role as ProviderRole)) return this.verifyElevenLabs(row);
-    if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) return this.verifyPexels(row);
+    if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) return row.provider === "youtube" ? this.verifyYouTube(row) : this.verifyPexels(row);
     if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row);
     if (!isLiveContentKind(row.provider)) {
       const failed = await this.prisma.providerAccount.update({ where: { id }, data: { status: "failed", version: { increment: 1 } } });
@@ -310,6 +311,25 @@ export class ProviderAccountsService {
   private async verifyPexels(row: { id: string; model: string; encryptedSecret: string }) {
     try {
       await probePexelsAccount(decryptSecret(row.encryptedSecret));
+      return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
+    } catch (error) {
+      const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
+      const publicRow = publicAccount(failed);
+      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+    }
+  }
+
+  /**
+   * YouTube Data API v3 account preflight (VE2E-15b): `probeYouTubeAccount` is the cheapest real
+   * call that proves the key works (`videos.list?chart=mostPopular`, 1 quota unit vs 100 for
+   * `search.list`) — same "real-endpoint, minimal cost" principle as `verifyPexels`. This
+   * account can only ever be used for discovery/embed candidates (see
+   * `packages/providers/src/youtube.ts`), never import.
+   */
+  private async verifyYouTube(row: { id: string; model: string; encryptedSecret: string }) {
+    try {
+      await probeYouTubeAccount(decryptSecret(row.encryptedSecret));
       return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });

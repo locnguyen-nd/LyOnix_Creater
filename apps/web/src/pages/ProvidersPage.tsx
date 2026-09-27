@@ -8,16 +8,17 @@ import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
-type AddableKind = "openai" | "gemini" | "xai" | "elevenlabs" | "pexels" | "creatomate";
+type AddableKind = "openai" | "gemini" | "xai" | "elevenlabs" | "pexels" | "youtube" | "creatomate";
 type CatalogItem = { provider: string; role: string; implementationStatus: string; models: string[] };
 
-/** Every provider kind the "Add account" form can create today, mapped to the role it fills in the video pipeline. */
+/** Every provider kind the "Add account" form can create today, mapped to the role it fills in the video pipeline. Pinterest/Google are intentionally absent (evaluated, not implemented - VE2E-15b). YouTube (VE2E-15b) is discovery/embed-only: it can be added/verified here, but no candidate it returns can be Auto-applied yet (see `packages/providers/src/youtube.ts`). */
 const PROVIDER_ROLE: Record<AddableKind, ProviderRole> = {
   openai: "content",
   gemini: "content",
   xai: "content",
   elevenlabs: "tts",
   pexels: "visual",
+  youtube: "visual",
   creatomate: "render",
 };
 const ADDABLE_PROVIDERS = Object.keys(PROVIDER_ROLE) as AddableKind[];
@@ -32,6 +33,7 @@ const PROVIDER_BADGE: Record<string, { label: string; bg: string; fg: string }> 
   xai: { label: "X", bg: "#0f0f0f", fg: "#fff" },
   elevenlabs: { label: "11", bg: "#6b4bff", fg: "#fff" },
   pexels: { label: "Px", bg: "#05a081", fg: "#fff" },
+  youtube: { label: "Yt", bg: "#ff0000", fg: "#fff" },
   creatomate: { label: "Cm", bg: "#ff5a1f", fg: "#fff" },
   vrew: { label: "Vr", bg: "#6b7280", fg: "#fff" },
 };
@@ -140,7 +142,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const rowsByRole = (role: ProviderRole) => rows.filter((row) => row.role === role);
-  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "creatomate";
+  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "creatomate";
 
   return (
     <>

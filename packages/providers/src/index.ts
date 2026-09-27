@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "creatomate", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "creatomate", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -213,6 +213,20 @@ export {
   type DynamicSceneStyle,
   type DynamicImageAnimation,
 } from "./creatomate-dynamic.js";
+export {
+  probeYouTubeAccount,
+  searchYouTubeVideos,
+  isYouTubeUrl,
+  youtubeVideoToMediaCandidate,
+  type YouTubeVideoResult,
+  type YouTubeSearchOptions,
+  type YouTubeCandidateContext,
+} from "./youtube.js";
+export {
+  pinterestAdapterStatus,
+  PINTEREST_BLOCKED_REASON,
+  type PinterestAdapterStatus,
+} from "./pinterest.js";
 export {
   CAPTION_PLAN_SCHEMA_VERSION,
   CAPTION_PLAN_V1_JSON_SCHEMA,

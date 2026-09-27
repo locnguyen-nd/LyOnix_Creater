@@ -302,3 +302,49 @@ describe("ProviderAccountsService Pexels (visual) account", () => {
     expect(store.status).toBe("failed");
   });
 });
+
+describe("ProviderAccountsService YouTube (visual, discovery/embed-only) account — VE2E-15b", () => {
+  let store: any;
+  let prisma: any;
+  let service: ProviderAccountsService;
+
+  beforeEach(() => {
+    process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    store = null;
+    prisma = {
+      providerAccount: {
+        create: async ({ data }: any) => { store = { id: "yt-1", version: 1, configVersion: 1, isFake: false, deletedAt: null, ownerUserId: "user-1", ...data }; return store; },
+        findFirst: async ({ where }: any) => (store && where.id === store.id && store.deletedAt === null ? store : null),
+        update: async ({ data }: any) => { Object.assign(store, data); if (data.version?.increment) store.version += data.version.increment; return store; },
+      },
+    };
+    service = new ProviderAccountsService(prisma);
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); process.env.PERSISTENCE_ENCRYPTION_KEY = originalEncryptionKey; });
+
+  it("creates a youtube/visual account, rejects youtube with a different role", async () => {
+    const created = await service.create({ name: "YouTube discovery", provider: "youtube", role: "visual", scope: "personal", model: "default", secret: "yt_test" }, "user-1", "staff");
+    expect(created).toMatchObject({ provider: "youtube", role: "visual", status: "unverified" });
+    expect(await service.create({ name: "YouTube as content", provider: "youtube", role: "content", scope: "personal", model: "x", secret: "y" }, "user-1", "staff")).toBe("unsupported");
+  });
+
+  it("verifies a real YouTube key via the cheap videos.list(chart=mostPopular) probe, not the 100-unit search endpoint", async () => {
+    await service.create({ name: "YouTube discovery", provider: "youtube", role: "visual", scope: "personal", model: "default", secret: "yt_test" }, "user-1", "staff");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ items: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const verified = await service.verify("yt-1", "user-1", "staff");
+    expect(verified).toMatchObject({ status: "verified" });
+    const calledUrl = String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[0]);
+    expect(calledUrl).toContain("/videos?part=id&chart=mostPopular");
+    expect(calledUrl).not.toContain("/search");
+  });
+
+  it("marks the account failed (not silently fake) when the YouTube key is rejected", async () => {
+    await service.create({ name: "YouTube discovery", provider: "youtube", role: "visual", scope: "personal", model: "default", secret: "bad" }, "user-1", "staff");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "API key invalid" } }), { status: 401 })));
+    const result = await service.verify("yt-1", "user-1", "staff");
+    expect(result).toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+    expect(store.status).toBe("failed");
+  });
+});
