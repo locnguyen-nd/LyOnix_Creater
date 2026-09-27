@@ -641,6 +641,27 @@ export type RenderSubmitFromTimelineRequest = {
   idempotencyKey?: string;
 };
 
+/**
+ * VE2E-13: the exact fully-dynamic Creatomate `source` JSON a `POST
+ * .../dynamic-render-jobs` submit would send right now, without calling Creatomate or
+ * creating a `RenderJob` — what the Studio Preview SDK loads via `setSource()`. `ready:
+ * false` (with `missingReason`) is an expected, non-error editing state (e.g. no scene has
+ * both audio and media yet), not a failure.
+ */
+export type TimelineDynamicPreviewResponse = {
+  ready: boolean;
+  source: Record<string, unknown> | null;
+  renderableSceneCount: number;
+  totalSceneCount: number;
+  missingReason: string | null;
+};
+
+/** VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured server-side (B10/B11-gated) - never the render API secret. */
+export type CreatomatePreviewConfigResponse = {
+  configured: boolean;
+  publicToken: string | null;
+};
+
 // --- VE2E-07: legacy-job -> Project/SourceVersion/ScriptDraftVersion Studio bridge ---
 
 export type StudioSceneContextResponse = {

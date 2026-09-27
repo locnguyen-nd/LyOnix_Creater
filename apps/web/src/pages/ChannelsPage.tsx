@@ -176,6 +176,7 @@ export function ChannelsPage() {
 export function ChannelDetailPage() {
   const { t } = useTranslation();
   const { id } = useParams();
+  const navigate = useNavigate();
   const me = useMe();
   const [period, setPeriod] = useState<PeriodKey>("7d");
   const [metric, setMetric] = useState<"followers" | "likes" | "views" | "comments" | "shares" | "video_count">("followers");
@@ -321,11 +322,13 @@ export function ChannelDetailPage() {
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             {videos.map((video) => (
-              <a
+              // VE2E-13: resultUrl plays only inside Studio, never as direct autoplay/open
+              // from a list like this one — route into the same job's Studio, deep-linked to
+              // this render (StudioProPage already reads `?renderJobId=` on mount, VE2E-18).
+              <button
                 key={video.renderJobId}
-                href={video.resultUrl}
-                target="_blank"
-                rel="noreferrer"
+                type="button"
+                onClick={() => navigate(`/jobs/${video.jobId}/studio?renderJobId=${video.renderJobId}`)}
                 className="overflow-hidden rounded-[6px] border border-lyx-border text-left"
               >
                 <div className="relative flex items-center justify-center bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
@@ -341,7 +344,7 @@ export function ChannelDetailPage() {
                 <div className="p-2">
                   <div className="line-clamp-2 text-[12px]">{video.caption}</div>
                 </div>
-              </a>
+              </button>
             ))}
           </div>
         )}

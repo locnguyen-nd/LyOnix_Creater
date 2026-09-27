@@ -325,35 +325,40 @@ export class RenderJobsService {
   }
 
   /**
-   * Renders every scene the script/Studio actually produced instead of only however many
-   * `Image-N`/`Subtitles-N`/`Voiceover-N` slots the pinned template's own author happened to
-   * draw (`submitFromTimelineVersion`'s hard limit). Builds a fully dynamic Creatomate
-   * `source` document (`buildDynamicComposition`) whose scene count and per-scene duration
-   * come entirely from this project's own data; the pinned `TemplateSnapshot` is only read
-   * for its visual style (`extractDynamicStyleFromTemplate`), never for its element count.
+   * Shared by `submitDynamicFromTimeline` (submits to Creatomate) and `previewDynamicComposition`
+   * (VE2E-13, read-only Studio preview — never calls Creatomate, never creates a `RenderJob`):
+   * resolves a timeline's own scenes into the same fully dynamic Creatomate `source` document
+   * whose scene count and per-scene duration come entirely from this project's own data; the
+   * pinned `TemplateSnapshot` is only read for its visual style
+   * (`extractDynamicStyleFromTemplate`), never for its element count. Building this JSON never
+   * calls Creatomate itself (`buildDynamicComposition` is pure local logic) — the only side
+   * effect is minting short-lived signed `/media-delivery/:token` URLs (free, not a provider
+   * call) so the returned `source` is directly usable by the browser Preview SDK or the real
+   * render submit, whichever the caller does next.
    *
    * A scene the user marked `excluded`, or one still missing narration audio or an assigned
-   * image/video, is dropped from the render rather than blocking it — per-scene voice/media
+   * image/video, is dropped rather than blocking the whole result — per-scene voice/media
    * generation in Studio is inherently incremental, and requiring every single scene to be
-   * ready before any render could be attempted would make the "render what's ready now"
-   * workflow this endpoint exists for impossible. If nothing is renderable yet, the whole
-   * submission is rejected instead of sending Creatomate an empty video.
+   * ready before even a preview could render would defeat the "see it as you go" point of a
+   * live editor preview. If nothing is renderable yet, the whole call is rejected instead of
+   * building an empty video/composition.
    */
-  async submitDynamicFromTimeline(
+  private async resolveDynamicComposition(
     projectId: string,
     timelineVersionId: string,
     userId: string,
     role: "admin" | "staff",
-    input: RenderSubmitFromTimelineRequest,
-  ): Promise<RenderOutcome<RenderJobResponse>> {
-    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
-    const account = await this.templates.usableAccount(input.providerAccountId);
-    if (!account.ok) return account;
-    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
-
+    outputFormat?: "mp4" | "mov" | "gif",
+  ): Promise<
+    RenderOutcome<{
+      templateSnapshotId: string;
+      source: Record<string, unknown>;
+      renderable: Awaited<ReturnType<typeof resolveSceneBindingsForMapping>>;
+      totalSceneCount: number;
+    }>
+  > {
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
-    if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
     if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template (dùng để lấy style hiển thị)" };
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
@@ -396,7 +401,35 @@ export class RenderJobsService {
     }
 
     const style = extractDynamicStyleFromTemplate(snapshot.rawTemplate);
-    const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat: input.outputFormat });
+    const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat });
+    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source, renderable, totalSceneCount: scenes.length } };
+  }
+
+  /**
+   * Renders every scene the script/Studio actually produced instead of only however many
+   * `Image-N`/`Subtitles-N`/`Voiceover-N` slots the pinned template's own author happened to
+   * draw (`submitFromTimelineVersion`'s hard limit) — see `resolveDynamicComposition` for how
+   * the `source` document itself is built.
+   */
+  async submitDynamicFromTimeline(
+    projectId: string,
+    timelineVersionId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: RenderSubmitFromTimelineRequest,
+  ): Promise<RenderOutcome<RenderJobResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const account = await this.templates.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+
+    const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
+    if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
+    if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
+
+    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
+    if (!resolvedComposition.ok) return resolvedComposition;
+    const { templateSnapshotId, source, renderable } = resolvedComposition.data;
 
     // Fingerprint from each included scene's stable identifiers (never the resolved signed
     // delivery URLs, which mint a fresh random token every call — see `submit`'s own comment
@@ -420,9 +453,47 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source },
+      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source },
       (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
     );
+  }
+
+  /**
+   * VE2E-13: read-only Studio preview of the exact `source` JSON a dynamic render would
+   * submit right now — no Creatomate call, no `RenderJob` row, works on a draft (not yet
+   * approved) timeline unlike `submitDynamicFromTimeline`, since the whole point is to let
+   * the Creatomate Preview SDK show live edits before anything is billable. Never requires a
+   * render provider account: composing the JSON is pure LyOnix logic (`resolveDynamicComposition`),
+   * and the browser SDK itself only needs a separate preview public token (see
+   * `creatomate-preview.config.ts`), never the server-held render API secret.
+   */
+  async previewDynamicComposition(
+    projectId: string,
+    timelineVersionId: string,
+    userId: string,
+    role: "admin" | "staff",
+  ): Promise<RenderOutcome<{ ready: boolean; source: Record<string, unknown> | null; renderableSceneCount: number; totalSceneCount: number; missingReason: string | null }>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const resolved = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role);
+    if (!resolved.ok) {
+      // A "not ready yet" preview (no renderable scene, no template pinned) is not an error the
+      // Studio UI should surface as a banner — it is the expected state while a user is still
+      // assigning media/voice. Only a real lookup failure (timeline/project not found) is a hard error.
+      if (resolved.code === "VALIDATION_FAILED") {
+        return { ok: true, data: { ready: false, source: null, renderableSceneCount: 0, totalSceneCount: 0, missingReason: resolved.message } };
+      }
+      return resolved;
+    }
+    return {
+      ok: true,
+      data: {
+        ready: true,
+        source: resolved.data.source,
+        renderableSceneCount: resolved.data.renderable.length,
+        totalSceneCount: resolved.data.totalSceneCount,
+        missingReason: null,
+      },
+    };
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {

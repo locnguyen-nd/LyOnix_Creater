@@ -6,6 +6,7 @@
 import { api, csrfHeaders } from "../api";
 import type {
   AudioVersionResponse,
+  CreatomatePreviewConfigResponse,
   CreatomateTemplateSummaryResponse,
   ElevenLabsVoiceSummaryResponse,
   MediaAssetVersionSummary,
@@ -16,6 +17,7 @@ import type {
   SaveTimelineVersionRequest,
   StudioContextResponse,
   TemplateSnapshotResponse,
+  TimelineDynamicPreviewResponse,
   TimelineRenderPreviewResponse,
   TimelineVersionResponse,
 } from "@lyonix/contracts";
@@ -139,4 +141,14 @@ export async function submitDynamicRenderFromTimeline(
 
 export async function getRenderJob(id: string): Promise<RenderJobResponse> {
   return api<RenderJobResponse>(`/render-jobs/${id}`);
+}
+
+/** VE2E-13: the exact dynamic render `source` JSON right now, for the Studio Preview SDK — no Creatomate call, no render job. */
+export async function fetchTimelineDynamicPreviewSource(projectId: string, timelineVersionId: string): Promise<TimelineDynamicPreviewResponse> {
+  return api<TimelineDynamicPreviewResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/dynamic-preview-source`);
+}
+
+/** VE2E-13: whether the Creatomate Preview SDK browser public token is configured server-side (B10/B11-gated). */
+export async function fetchCreatomatePreviewConfig(): Promise<CreatomatePreviewConfigResponse> {
+  return api<CreatomatePreviewConfigResponse>("/creatomate/preview-config");
 }

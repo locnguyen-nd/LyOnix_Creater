@@ -1,8 +1,9 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
-import type { RenderAssignmentInput } from "@lyonix/contracts";
+import type { CreatomatePreviewConfigResponse, RenderAssignmentInput } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
+import { creatomatePreviewConfigured, creatomatePreviewPublicToken } from "./creatomate-preview.config.js";
 import { normalizedError, success } from "./envelopes.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 
@@ -84,6 +85,36 @@ export class RenderJobsController {
     });
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     return success(outcome.data, requestId(response));
+  }
+
+  /**
+   * VE2E-13: read-only Studio preview of the dynamic render `source` JSON — no Creatomate
+   * call, no `RenderJob` row. Works on a draft timeline, unlike the submit endpoints above.
+   */
+  @Get("projects/:projectId/timeline-versions/:timelineVersionId/dynamic-preview-source")
+  async dynamicPreviewSource(
+    @Param("projectId") projectId: string,
+    @Param("timelineVersionId") timelineVersionId: string,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { user } = await requireUser(request, response, this.auth);
+    const outcome = await this.renders.previewDynamicComposition(projectId, timelineVersionId, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    return success(outcome.data, requestId(response));
+  }
+
+  /**
+   * VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured
+   * (B10/B11-gated, see `creatomate-preview.config.ts`) — never the render API secret, which
+   * never leaves the server. Auth-gated even though the token itself is not sensitive by
+   * Creatomate's own design, consistent with every other config-exposure endpoint here.
+   */
+  @Get("creatomate/preview-config")
+  async previewConfig(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    await requireUser(request, response, this.auth);
+    const body: CreatomatePreviewConfigResponse = { configured: creatomatePreviewConfigured(), publicToken: creatomatePreviewPublicToken() };
+    return success(body, requestId(response));
   }
 
   @Get("render-jobs/:id")
