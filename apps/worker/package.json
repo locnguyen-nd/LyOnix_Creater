@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "corepack pnpm --filter @lyonix/api worker:audio",
+    "dev": "tsx src/run-workers.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "start": "corepack pnpm --filter @lyonix/api worker:audio",
+    "start": "tsx src/run-workers.ts",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
