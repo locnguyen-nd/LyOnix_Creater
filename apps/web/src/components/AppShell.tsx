@@ -12,6 +12,7 @@ import {
   Sun,
   Tv,
   Users,
+  Video,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -95,6 +96,8 @@ export function AppShell() {
         <Item to="/" icon={LayoutDashboard} label={t("nav.dashboard")} collapsed={navCollapsed} />
         <Item to="/channels" icon={Tv} label={t("nav.channels")} collapsed={navCollapsed} />
         <Item to="/jobs" icon={Clapperboard} label={t("nav.jobs")} collapsed={navCollapsed} />
+        {/* VE2E-22: an Auto submit provisions its own throwaway Project (no ProductionRequest row), so it never appears in /jobs above - without this entry a submitted run had no way to be found again after navigating away. */}
+        <Item to="/video-productions" icon={Video} label={t("nav.videoProductions")} collapsed={navCollapsed} />
         <Item to="/assets" icon={Folder} label={t("nav.assets")} collapsed={navCollapsed} />
         {navCollapsed ? <div className="my-2 h-px bg-lyx-border" /> : <p className="mb-1.5 mt-4 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupSystem")}</p>}
         <Item to="/settings" icon={Settings} label={t("nav.settings")} collapsed={navCollapsed} />

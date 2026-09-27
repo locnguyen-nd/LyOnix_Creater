@@ -31,9 +31,12 @@ import type {
 } from "@lyonix/contracts";
 import { AUTO_FILL_CANDIDATE_POOL, pickBestPhotoCandidate, pickBestVideoCandidate } from "../studio/media-selection";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
+import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
   approveTimelineVersion,
+  fetchCreatomatePreviewConfig,
   fetchStudioContext,
+  fetchTimelineDynamicPreviewSource,
   generateSceneAudio,
   getAudioGenerationOperation,
   getRenderJob,
@@ -50,6 +53,9 @@ import {
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
+
+/** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
+type SdkPreviewState = "off" | "unsupported" | "not_configured" | "loading" | "ready" | "error" | "empty";
 
 const PANEL_STATE_KEY = "lyx-studio-panels";
 const readPanelState = (): { left: boolean; right: boolean } => {
@@ -179,6 +185,19 @@ export function StudioProPage() {
   const [renderJob, setRenderJob] = useState<RenderJobResponse | null>(null);
   const [renderSubmitting, setRenderSubmitting] = useState(false);
   const [showReview, setShowReview] = useState(false);
+  const [renderPlaybackError, setRenderPlaybackError] = useState(false);
+
+  // VE2E-13: Creatomate JavaScript Preview SDK — off by default (mounting it loads a real
+  // third-party iframe from creatomate.com, so it stays an explicit user action, never
+  // eager/silent). `sdkConfigured` reflects the server-side public-token config check
+  // (B10/B11-gated) fetched once on mount; the SDK toggle itself is only ever enabled when
+  // that is true and the browser passes `isCreatomatePreviewSupported()`.
+  const [sdkConfigured, setSdkConfigured] = useState<boolean | null>(null);
+  const [sdkPublicToken, setSdkPublicToken] = useState<string | null>(null);
+  const [sdkState, setSdkState] = useState<SdkPreviewState>("off");
+  const sdkContainerRef = useRef<HTMLDivElement | null>(null);
+  const sdkHandleRef = useRef<CreatomatePreviewHandle | null>(null);
+  const sdkPushedVersionRef = useRef<string | null>(null);
 
   // Panel visibility (spec: "ẩn Nav, các vùng tùy chọn nếu không dùng đến để mở rộng không
   // gian") - collapsing either side panel just widens the center review/timeline column, and
@@ -282,6 +301,10 @@ export function StudioProPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, context, conflict]);
 
+  // Resets the inline player's error state whenever a different render job is shown - an
+  // earlier failed playback attempt must not stick around and mask a newer, valid resultUrl.
+  useEffect(() => { setRenderPlaybackError(false); }, [renderJob?.id]);
+
   useEffect(() => {
     if (!renderJob || renderJob.status === "completed" || renderJob.status === "failed" || renderJob.status === "cancelled") {
       if (pollTimer.current) clearInterval(pollTimer.current);
@@ -292,6 +315,65 @@ export function StudioProPage() {
     }, 4000);
     return () => { if (pollTimer.current) clearInterval(pollTimer.current); };
   }, [renderJob]);
+
+  // VE2E-13: fetch once whether the server has a Creatomate Preview SDK public token
+  // configured (B10/B11-gated) - never the render API secret, which never leaves the server.
+  useEffect(() => {
+    void fetchCreatomatePreviewConfig()
+      .then((config) => {
+        setSdkConfigured(config.configured);
+        setSdkPublicToken(config.publicToken);
+      })
+      .catch(() => setSdkConfigured(false));
+  }, []);
+
+  // Mounts/disposes the real Creatomate SDK iframe only while the user has explicitly
+  // toggled it on - never eagerly, since this loads a real third-party embed.
+  useEffect(() => {
+    if (sdkState !== "loading" || !sdkContainerRef.current || !sdkPublicToken) return;
+    let cancelled = false;
+    mountCreatomatePreview(sdkContainerRef.current, sdkPublicToken)
+      .then((handle) => {
+        if (cancelled) { handle.dispose(); return; }
+        sdkHandleRef.current = handle;
+        setSdkState("empty");
+      })
+      .catch(() => { if (!cancelled) setSdkState("error"); });
+    return () => { cancelled = true; };
+  }, [sdkState, sdkPublicToken]);
+
+  // Pushes the current timeline's real dynamic composition JSON into the mounted SDK
+  // whenever a save actually lands (`baseVersionId` changes) - the SDK always previews the
+  // exact same source a submit would send, never a client-approximated JSON (spec §3).
+  // `sdkPushedVersionRef` guards against re-pushing the same already-applied version when
+  // this effect re-runs after `setSdkState("ready")` changes its own `sdkState` dependency.
+  useEffect(() => {
+    if (sdkState !== "empty" && sdkState !== "ready") return;
+    if (!sdkHandleRef.current || !context || !baseVersionId) return;
+    if (sdkState === "ready" && sdkPushedVersionRef.current === baseVersionId) return;
+    const handle = sdkHandleRef.current;
+    void fetchTimelineDynamicPreviewSource(context.projectId, baseVersionId)
+      .then((preview) => {
+        if (!preview.ready || !preview.source) { setSdkState("empty"); return; }
+        sdkPushedVersionRef.current = baseVersionId;
+        void handle.setSource(preview.source).then(() => setSdkState("ready")).catch(() => setSdkState("error"));
+      })
+      .catch(() => setSdkState("error"));
+  }, [baseVersionId, sdkState, context]);
+
+  useEffect(() => () => sdkHandleRef.current?.dispose(), []);
+
+  const toggleSdkPreview = () => {
+    if (sdkState !== "off") {
+      sdkHandleRef.current?.dispose();
+      sdkHandleRef.current = null;
+      setSdkState("off");
+      return;
+    }
+    if (!isCreatomatePreviewSupported()) { setSdkState("unsupported"); return; }
+    if (!sdkConfigured || !sdkPublicToken) { setSdkState("not_configured"); return; }
+    setSdkState("loading");
+  };
 
   const persist = async () => {
     if (!context) return;
@@ -829,15 +911,40 @@ export function StudioProPage() {
       {renderJob ? (
         <Banner variant={renderJob.status === "failed" ? "danger" : "info"}>
           {t("studioPro.renderStatusLabel", { status: renderJob.status })}
-          {renderJob.status === "completed" && renderJob.resultUrl ? (
-            <>
-              {" "}
-              <a className="underline" href={renderJob.resultUrl} target="_blank" rel="noreferrer">{t("studioPro.openResult")}</a>
-            </>
-          ) : null}
         </Banner>
       ) : null}
       </div>
+
+      {/* VE2E-13: resultUrl plays only here, inside Studio - never as direct autoplay from a
+          channel/job list (see ChannelsPage.tsx's video grid, which now routes here instead of
+          opening resultUrl directly). Explicit loading/error/unsupported-browser states replace
+          the previous plain "open in a new tab" link, which some browsers/CDN response headers
+          made effectively unviewable (download instead of inline playback, or a silent failure
+          with no feedback at all). */}
+      {renderJob?.status === "completed" && renderJob.resultUrl ? (
+        <div className="mx-5 mb-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
+          <p className="mb-2 text-[12px] font-medium">{t("studioPro.renderResultTitle")}</p>
+          {typeof HTMLVideoElement === "undefined" ? (
+            <Banner variant="warn">{t("studioPro.renderPlaybackUnsupported")}</Banner>
+          ) : renderPlaybackError ? (
+            <Banner variant="danger">{t("studioPro.renderPlaybackError")}</Banner>
+          ) : (
+            <video
+              key={renderJob.resultUrl}
+              className="mb-2 max-h-[360px] w-full rounded-[6px] bg-black"
+              src={renderJob.resultUrl}
+              controls
+              onError={() => setRenderPlaybackError(true)}
+            />
+          )}
+          <div className="flex gap-3 text-[11.5px]">
+            <a className="underline" href={renderJob.resultUrl} target="_blank" rel="noreferrer">{t("studioPro.openResult")}</a>
+            <a className="underline" href={renderJob.resultUrl} download>{t("studioPro.downloadResult")}</a>
+          </div>
+        </div>
+      ) : renderJob && renderJob.status !== "failed" && renderJob.status !== "cancelled" ? (
+        <div className="mx-5 mb-2 text-[11.5px] text-lyx-fg-muted">{t("studioPro.renderResultLoading")}</div>
+      ) : null}
 
       {showReview ? (
         <div className="mx-5 mb-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
@@ -1060,6 +1167,15 @@ export function StudioProPage() {
             <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
+                className={`lyx-btn h-8 gap-1.5 px-2.5 text-[11.5px] ${sdkState !== "off" ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
+                aria-pressed={sdkState !== "off"}
+                onClick={toggleSdkPreview}
+                title={t("studioPro.sdkPreviewToggleHint")}
+              >
+                {t("studioPro.sdkPreviewToggle")}
+              </button>
+              <button
+                type="button"
                 className={`lyx-btn h-8 gap-1.5 px-2.5 text-[11.5px] ${tiktokFrame ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
                 aria-pressed={tiktokFrame}
                 onClick={() => setTiktokFrame((prev) => !prev)}
@@ -1093,44 +1209,66 @@ export function StudioProPage() {
               className="relative overflow-hidden rounded-[14px] bg-[#161616] text-center shadow-[0_12px_28px_rgba(0,0,0,0.18)]"
               style={{ width: PREVIEW_ZOOM_STEPS[previewZoomIdx], aspectRatio: "1080 / 1920" }}
             >
-              <div className="absolute inset-0 flex items-center justify-center" style={{ transform: `scale(${mediaScale})`, transformOrigin: "center center" }}>
-                {selectedMediaAsset?.kind === "video" && thumbCache[selectedMediaAsset.id] ? (
-                  <video
-                    key={selectedMediaAsset.id}
-                    ref={previewVideoRef}
-                    src={thumbCache[selectedMediaAsset.id]}
-                    muted
-                    playsInline
-                    loop
-                    className="absolute inset-0 h-full w-full object-cover"
-                  />
-                ) : selectedMediaAsset?.kind === "image" && thumbCache[selectedMediaAsset.id] ? (
-                  <img src={thumbCache[selectedMediaAsset.id]} alt="" className="absolute inset-0 h-full w-full object-cover" />
-                ) : (
-                  <span className="px-4 text-[11px] text-white/40">{t("common.previewLabel")}</span>
-                )}
-              </div>
-              {selectedAudio ? <audio key={selectedAudio.id} ref={previewAudioTrackRef} src={thumbCache[selectedAudio.mediaAssetVersionId]} className="hidden" /> : null}
-              {tiktokFrame ? (
+              {/* VE2E-13: always mounted (never conditionally unmounted) once the user opts in, so
+                  the underlying Creatomate iframe/state survives toggling other preview controls -
+                  only `display` changes with `sdkState`. */}
+              <div
+                ref={sdkContainerRef}
+                className="absolute inset-0"
+                style={{ display: sdkState === "loading" || sdkState === "empty" || sdkState === "ready" ? "block" : "none" }}
+              />
+              {sdkState === "loading" || sdkState === "empty" ? (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/55 text-[11px] text-white/80">
+                  {sdkState === "loading" ? t("studioPro.sdkLoading") : t("studioPro.sdkEmpty")}
+                </div>
+              ) : null}
+              {sdkState !== "ready" ? (
                 <>
-                  <div className="absolute inset-x-0 top-0 flex h-[12%] items-center justify-center border-b border-dashed border-white/50 bg-black/10">
-                    <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneTop")}</span>
+                  <div className="absolute inset-0 flex items-center justify-center" style={{ transform: `scale(${mediaScale})`, transformOrigin: "center center" }}>
+                    {selectedMediaAsset?.kind === "video" && thumbCache[selectedMediaAsset.id] ? (
+                      <video
+                        key={selectedMediaAsset.id}
+                        ref={previewVideoRef}
+                        src={thumbCache[selectedMediaAsset.id]}
+                        muted
+                        playsInline
+                        loop
+                        className="absolute inset-0 h-full w-full object-cover"
+                      />
+                    ) : selectedMediaAsset?.kind === "image" && thumbCache[selectedMediaAsset.id] ? (
+                      <img src={thumbCache[selectedMediaAsset.id]} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                    ) : (
+                      <span className="px-4 text-[11px] text-white/40">{t("common.previewLabel")}</span>
+                    )}
                   </div>
-                  <div className="absolute inset-y-0 right-0 flex w-[16%] items-center justify-center border-l border-dashed border-white/50 bg-black/10">
-                    <span className="rotate-90 whitespace-nowrap rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneActions")}</span>
-                  </div>
-                  <div className="absolute inset-x-0 bottom-0 right-[16%] flex h-[20%] items-end justify-center border-t border-dashed border-white/50 bg-black/10 pb-2">
-                    <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneCaption")}</span>
-                  </div>
+                  {selectedAudio ? <audio key={selectedAudio.id} ref={previewAudioTrackRef} src={thumbCache[selectedAudio.mediaAssetVersionId]} className="hidden" /> : null}
+                  {tiktokFrame ? (
+                    <>
+                      <div className="absolute inset-x-0 top-0 flex h-[12%] items-center justify-center border-b border-dashed border-white/50 bg-black/10">
+                        <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneTop")}</span>
+                      </div>
+                      <div className="absolute inset-y-0 right-0 flex w-[16%] items-center justify-center border-l border-dashed border-white/50 bg-black/10">
+                        <span className="rotate-90 whitespace-nowrap rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneActions")}</span>
+                      </div>
+                      <div className="absolute inset-x-0 bottom-0 right-[16%] flex h-[20%] items-end justify-center border-t border-dashed border-white/50 bg-black/10 pb-2">
+                        <span className="rounded bg-black/45 px-1.5 py-0.5 text-[8px] text-white">{t("studioPro.tiktokZoneCaption")}</span>
+                      </div>
+                    </>
+                  ) : null}
+                  {selectedScene ? (
+                    <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 to-transparent px-3 pb-3 pt-8 text-[12px] font-bold text-white">
+                      {selectedSceneDraft?.screenTextOverride || selectedScene.screenText || "…"}
+                    </p>
+                  ) : null}
                 </>
               ) : null}
-              {selectedScene ? (
-                <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 to-transparent px-3 pb-3 pt-8 text-[12px] font-bold text-white">
-                  {selectedSceneDraft?.screenTextOverride || selectedScene.screenText || "…"}
-                </p>
-              ) : null}
             </div>
-            <p className="mt-2 text-center text-[10px] text-lyx-fg-subtle">{t("studioPro.scaleHint")}</p>
+            <p className="mt-2 text-center text-[10px] text-lyx-fg-subtle">
+              {sdkState === "ready" ? t("studioPro.sdkReadyHint") : t("studioPro.scaleHint")}
+            </p>
+            {sdkState === "unsupported" ? <p className="text-center text-[10px] text-lyx-warn">{t("studioPro.sdkUnsupported")}</p> : null}
+            {sdkState === "not_configured" ? <p className="text-center text-[10px] text-lyx-warn">{t("studioPro.sdkNotConfigured")}</p> : null}
+            {sdkState === "error" ? <p className="text-center text-[10px] text-lyx-danger">{t("studioPro.sdkError")}</p> : null}
           </div>
 
           <div className="shrink-0 border-t border-lyx-border bg-lyx-bg px-3 pb-3 pt-2">
@@ -1307,6 +1445,61 @@ export function StudioProPage() {
                 ) : (
                   <p className="text-[11px] text-lyx-fg-muted">{t("templates.pinNote")}</p>
                 )}
+
+                {/* VE2E-26: whole-video style overrides for the dynamic render path Studio
+                    actually submits through (submitDynamicRenderFromTimeline) - schema-backed
+                    against the same fixed key/value whitelist the server validates on save
+                    and applies identically in both the SDK preview and the final render
+                    payload (`applyDynamicStyleOverrides` in @lyonix/providers). Unlike the
+                    per-scene template modification fields above, these apply to every scene
+                    at once (they override the template-derived caption/animation style, not
+                    a specific Creatomate element), so they are not scene-dependent. */}
+                {template ? (
+                  <div className="flex flex-col gap-2 border-t border-lyx-border pt-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.dynamicStyleOverrides")}</p>
+                    <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.dynamicStyleOverridesHint")}</p>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionFont")}</label>
+                      <Select
+                        className="w-full"
+                        value={draft.optionValues["dynamicStyle.captionFontFamily"] ?? ""}
+                        onChange={(event) => setOptionValue("dynamicStyle.captionFontFamily", event.target.value)}
+                      >
+                        <option value="">{t("studioPro.overrideUseTemplateDefault")}</option>
+                        <option>Inter Bold</option>
+                        <option>Inter Medium</option>
+                        <option>Noto Sans</option>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionColor")}</label>
+                      <div className="flex items-center gap-1.5">
+                        {["", "#ffffff", "#f5f5f5", "#facc15"].map((hex) => (
+                          <button
+                            key={hex || "default"}
+                            type="button"
+                            aria-label={hex || t("studioPro.overrideUseTemplateDefault")}
+                            onClick={() => setOptionValue("dynamicStyle.captionFillColor", hex)}
+                            className={`h-[22px] w-[22px] rounded-[4px] border ${(draft.optionValues["dynamicStyle.captionFillColor"] ?? "") === hex ? "border-lyx-fg" : "border-lyx-border"}`}
+                            style={hex ? { backgroundColor: hex } : { background: "repeating-linear-gradient(45deg,#ccc,#ccc 2px,#fff 2px,#fff 4px)" }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideImageAnimation")}</label>
+                      <Select
+                        className="w-full"
+                        value={draft.optionValues["dynamicStyle.imageAnimation"] ?? ""}
+                        onChange={(event) => setOptionValue("dynamicStyle.imageAnimation", event.target.value)}
+                      >
+                        <option value="">{t("studioPro.overrideUseTemplateDefault")}</option>
+                        <option value="pan">{t("studioPro.overrideAnimationPan")}</option>
+                        <option value="none">{t("studioPro.overrideAnimationNone")}</option>
+                      </Select>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </>
           ) : (

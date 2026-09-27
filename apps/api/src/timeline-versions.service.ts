@@ -8,6 +8,7 @@
  */
 import { Inject, Injectable } from "@nestjs/common";
 import { canAccessProject } from "@lyonix/domain";
+import { isDynamicStyleOptionKey, isValidDynamicStyleOptionValue } from "@lyonix/providers";
 import type {
   ErrorCode,
   SaveTimelineVersionRequest,
@@ -148,8 +149,13 @@ export class TimelineVersionsService {
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
     const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
     const keys = new Set(slots.map((slot) => slot.key));
-    const unknownKey = entries.find(([key]) => !keys.has(key));
-    if (unknownKey) return { ok: false, code: "VALIDATION_FAILED", message: `Option value không thuộc template: ${unknownKey[0]}` };
+    // VE2E-26: `dynamicStyle.*` keys are a separate, fixed whitelist of Studio style
+    // overrides for the dynamic-composition render path (see `applyDynamicStyleOverrides` in
+    // @lyonix/providers) - never a real template modification key (those always look like
+    // `<ElementName>.<property>`), so they are validated against their own value rules
+    // instead of the template's modification-slot key set.
+    const invalidEntry = entries.find(([key, value]) => (isDynamicStyleOptionKey(key) ? !isValidDynamicStyleOptionValue(key, value) : !keys.has(key)));
+    if (invalidEntry) return { ok: false, code: "VALIDATION_FAILED", message: `Option value không hợp lệ: ${invalidEntry[0]}` };
     return { ok: true, data: Object.fromEntries(entries) };
   }
 

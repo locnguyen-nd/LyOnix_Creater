@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@creatomate/preview": "^1.6.1",
     "@lyonix/contracts": "workspace:^",
     "@lyonix/domain": "workspace:^",
     "@vitejs/plugin-react": "^5.0.4",

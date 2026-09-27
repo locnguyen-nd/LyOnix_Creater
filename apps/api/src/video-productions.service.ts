@@ -206,7 +206,7 @@ export class VideoProductionsService {
     const renderRows = await this.prisma.renderJob.findMany({
       where: { workflowRunId: { in: runs.map((run) => run.id) } },
       orderBy: { createdAt: "desc" },
-      select: { workflowRunId: true, resultUrl: true, costAmount: true, renderDurationMs: true },
+      select: { workflowRunId: true, resultUrl: true, snapshotUrl: true, costAmount: true, renderDurationMs: true },
     });
     const latestRenderByRun = new Map<string, (typeof renderRows)[number]>();
     for (const row of renderRows) {
@@ -222,6 +222,7 @@ export class VideoProductionsService {
           status: run.status,
           sourceVersionId: run.sourceVersionId,
           resultUrl: render?.resultUrl ?? null,
+          snapshotUrl: render?.snapshotUrl ?? null,
           costAmount: render?.costAmount ? render.costAmount.toString() : null,
           renderDurationMs: render?.renderDurationMs ?? null,
           lastError: (run.lastError as VideoProductionListItemResponse["lastError"]) ?? null,

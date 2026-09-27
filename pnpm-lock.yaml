@@ -80,6 +80,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@creatomate/preview':
+        specifier: ^1.6.1
+        version: 1.6.1
       '@lyonix/contracts':
         specifier: workspace:^
         version: link:../../packages/contracts
@@ -289,6 +292,9 @@ packages:
 
   '@borewit/text-codec@0.2.2':
     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+
+  '@creatomate/preview@1.6.1':
+    resolution: {integrity: sha512-LGq0o+9YMMOEksjreQBw/w6p8yXUFCOeJsdQDWMX6uRdcx1BspzNz4XUqrlLW5t69z7NA/j1f1n+/1lzq0DUFQ==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -1909,6 +1915,8 @@ snapshots:
       '@babel/helper-validator-identifier': 7.29.7
 
   '@borewit/text-codec@0.2.2': {}
+
+  '@creatomate/preview@1.6.1': {}
 
   '@esbuild/aix-ppc64@0.28.2':
     optional: true

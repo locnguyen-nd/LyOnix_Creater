@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { DYNAMIC_STYLE_OPTION_KEYS } from "@lyonix/providers";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
 
 const projectId = "project-1";
@@ -106,6 +107,26 @@ describe("TimelineVersionsService", () => {
         optionValues: { "Text-1.fill_color": "#ffffff" },
       });
       expect(outcome).toMatchObject({ ok: true, data: { optionValues: { "Text-1.fill_color": "#ffffff" } } });
+    });
+
+    it("VE2E-26: accepts a valid dynamicStyle.* Studio override key even though it is not a real template modification key", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        templateSnapshotId: "template-1",
+        scenes: [{ sceneId: "s1" }],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans" },
+      });
+      expect(outcome).toMatchObject({ ok: true, data: { optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans" } } });
+    });
+
+    it("VE2E-26: rejects a dynamicStyle.* value that fails its own field validation (not just any string)", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        templateSnapshotId: "template-1",
+        scenes: [{ sceneId: "s1" }],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFillColor]: "not-a-hex-color" },
+      });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
     });
 
     it("returns NOT_FOUND for a project outside the caller's grants", async () => {

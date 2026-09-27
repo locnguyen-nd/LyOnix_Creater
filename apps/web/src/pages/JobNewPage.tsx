@@ -334,10 +334,24 @@ export function JobNewPage() {
               ) : null}
               {renderAccounts.length > 0 ? (
                 <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
-                  <Select value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
-                    <option value="">{t("jobs.autoSelectTemplatePlaceholder")}</option>
-                    {renderTemplates.map((tpl) => <option key={tpl.externalTemplateId} value={tpl.externalTemplateId}>{tpl.name}</option>)}
-                  </Select>
+                  {/* VE2E-13: real Creatomate template preview images at Auto intake (previously a
+                      plain name-only <Select>, no visual demo of what would actually render). */}
+                  <div className="grid grid-cols-3 gap-2">
+                    {renderTemplates.map((tpl) => (
+                      <button
+                        key={tpl.externalTemplateId}
+                        type="button"
+                        onClick={() => setTemplateId(tpl.externalTemplateId)}
+                        title={tpl.name}
+                        className={`overflow-hidden rounded-[6px] border text-left ${templateId === tpl.externalTemplateId ? "border-2 border-lyx-fg" : "border-lyx-border"}`}
+                      >
+                        <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[9px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
+                          {tpl.previewUrl ? <img src={tpl.previewUrl} alt={tpl.name} className="h-full w-full object-cover" /> : t("templates.preview")}
+                        </div>
+                        <div className="truncate p-1 text-[10px]">{tpl.name}</div>
+                      </button>
+                    ))}
+                  </div>
                 </Field>
               ) : null}
             </div>

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@lyonix/db";
+import { DYNAMIC_STYLE_OPTION_KEYS } from "@lyonix/providers";
 import { RenderJobsService } from "./render-jobs.service.js";
 import type { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import type { MediaDeliveryService } from "./media-delivery.service.js";
@@ -464,6 +465,139 @@ describe("RenderJobsService", () => {
       timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [], optionValues: {} });
       const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
       expect(outcome).toMatchObject({ ok: false, code: "INVALID_STATE" });
+    });
+
+    it("VE2E-26: applies a saved Studio style override (caption font) to the submitted composition", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans" },
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(submittedBody.source.elements[0].elements[1].font_family).toBe("Noto Sans");
+    });
+
+    it("VE2E-26: an identical resubmit after only changing the style override is not deduped as the same fingerprint (style-only change is a real new render)", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const first = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(first.ok).toBe(true);
+
+      timelineRows.set(timelineVersionId, {
+        ...timelineRows.get(timelineVersionId),
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFillColor]: "#ff0000" },
+      });
+      const second = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(second.ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      if (first.ok && second.ok) expect(second.data.id).not.toBe(first.data.id);
+    });
+  });
+
+  describe("previewDynamicComposition (VE2E-13)", () => {
+    const timelineVersionId = "timeline-preview-1";
+    const sceneRow = (overrides: Record<string, unknown>) => ({
+      sceneId: "s1",
+      orderIndex: 0,
+      mediaAssetVersionId: "asset-1",
+      audioVersionId: "audio-1",
+      subtitleVersionId: null,
+      screenTextOverride: "Xin chào",
+      annotation: null,
+      excluded: false,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      prisma.templateSnapshot.findUnique = async ({ where }: any) => (where.id === templateSnapshotId ? { ...snapshotRow, rawTemplate: null } : null);
+    });
+
+    it("returns the same source JSON a submit would send, without calling Creatomate or creating a render job", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "draft",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected ok");
+      expect(outcome.data.ready).toBe(true);
+      expect(outcome.data.renderableSceneCount).toBe(1);
+      expect(outcome.data.source).toMatchObject({ width: 1080, height: 1920 });
+      expect((outcome.data.source as any).elements[0].elements[1].text).toBe("Xin chào");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(prisma.renderJob.create).not.toHaveBeenCalled();
+    });
+
+    it("works on a draft (not yet approved) timeline, unlike submitDynamicFromTimeline", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [sceneRow({ sceneId: "s1" })], optionValues: {} });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome).toMatchObject({ ok: true, data: { ready: true } });
+    });
+
+    it("VE2E-26: reflects the same saved Studio style override the preview would show, identical to what a submit would send", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "draft",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1" })],
+        optionValues: { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Noto Sans", [DYNAMIC_STYLE_OPTION_KEYS.imageAnimation]: "none" },
+      });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) throw new Error("expected ok");
+      const source = outcome.data.source as any;
+      expect(source.elements[0].elements[1].font_family).toBe("Noto Sans");
+      expect(source.elements[0].elements[0].animations).toBeUndefined();
+    });
+
+    it("reports ready:false with a reason instead of an error when no scene is renderable yet", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "draft",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", audioVersionId: null })],
+        optionValues: {},
+      });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome).toMatchObject({ ok: true, data: { ready: false, source: null, renderableSceneCount: 0 } });
+      if (outcome.ok) expect(outcome.data.missingReason).toBeTruthy();
+    });
+
+    it("returns NOT_FOUND for a timeline version belonging to a different project", async () => {
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId: "other-project", status: "draft", templateSnapshotId, scenes: [], optionValues: {} });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("hides a timeline outside the caller's project grants as not-found", async () => {
+      grants = { forUser: async () => ({ projectIds: [] }) };
+      service = new RenderJobsService(prisma, grants, templates as CreatomateTemplatesService, mediaDelivery as MediaDeliveryService);
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "draft", templateSnapshotId, scenes: [sceneRow({ sceneId: "s1" })], optionValues: {} });
+      const outcome = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
   });
 });

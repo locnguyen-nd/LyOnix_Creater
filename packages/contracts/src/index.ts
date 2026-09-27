@@ -562,6 +562,8 @@ export type VideoProductionListItemResponse = {
   status: WorkflowRunStatus;
   sourceVersionId: string | null;
   resultUrl: string | null;
+  /** VE2E-22: Creatomate's own render-frame preview image (`RenderJob.snapshotUrl`, VE2E-19), when the provider has reported one - so the list can show a thumbnail without playing/re-hosting the video itself. */
+  snapshotUrl: string | null;
   costAmount: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
@@ -644,6 +646,27 @@ export type RenderSubmitFromTimelineRequest = {
   providerAccountId: string;
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
+};
+
+/**
+ * VE2E-13: the exact fully-dynamic Creatomate `source` JSON a `POST
+ * .../dynamic-render-jobs` submit would send right now, without calling Creatomate or
+ * creating a `RenderJob` — what the Studio Preview SDK loads via `setSource()`. `ready:
+ * false` (with `missingReason`) is an expected, non-error editing state (e.g. no scene has
+ * both audio and media yet), not a failure.
+ */
+export type TimelineDynamicPreviewResponse = {
+  ready: boolean;
+  source: Record<string, unknown> | null;
+  renderableSceneCount: number;
+  totalSceneCount: number;
+  missingReason: string | null;
+};
+
+/** VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured server-side (B10/B11-gated) - never the render API secret. */
+export type CreatomatePreviewConfigResponse = {
+  configured: boolean;
+  publicToken: string | null;
 };
 
 // --- VE2E-07: legacy-job -> Project/SourceVersion/ScriptDraftVersion Studio bridge ---
