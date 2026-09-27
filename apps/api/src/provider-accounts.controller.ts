@@ -72,7 +72,7 @@ export class ProviderAccountsController {
     if (!result) throw normalizedError("NOT_FOUND", "Không tìm thấy tài khoản provider", requestId(response), 404);
     if (result === "forbidden") throw normalizedError("FORBIDDEN", "Không có quyền sửa tài khoản provider này", requestId(response), 403);
     const account = "account" in result ? result.account : result;
-    if ("code" in result) throw normalizedError("PROVIDER_UNAVAILABLE", "Khóa provider không hợp lệ hoặc nhà cung cấp từ chối", requestId(response), 502);
+    if ("code" in result) throw normalizedError(result.code, result.message ?? "Khóa provider không hợp lệ hoặc nhà cung cấp từ chối", requestId(response), 502);
     return success(account, requestId(response));
   }
 
