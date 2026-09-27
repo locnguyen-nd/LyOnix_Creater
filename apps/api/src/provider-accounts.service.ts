@@ -9,6 +9,7 @@ import {
   probeCreatomateAccount,
   probeElevenLabsAccount,
   probePexelsAccount,
+  probePinterestAccount,
   probeYouTubeAccount,
   resolveContentModel,
   rankContentModels,
@@ -22,8 +23,8 @@ import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 
 /** `elevenlabs`/`tts` is the only supported non-content provider account today (VE2E-02). Omni remains B08-blocked. */
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
-/** `pexels`/`youtube` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest/Google are evaluated but not implemented (VE2E-15b) and stay unsupported here. */
-const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube");
+/** `pexels`/`youtube`/`pinterest` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest is a manual-review-only candidate source with no reliable rights signal (see `packages/providers/src/pinterest.ts`). Google is still evaluated but not implemented (VE2E-15b) and stays unsupported here. */
+const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest");
 /** `creatomate`/`render` (VE2E-05) — render provider account. */
 const isSupportedRenderAccount = (provider: string, role: ProviderRole) => provider === "creatomate" && role === "render";
 const isSupportedAccount = (provider: string, role: ProviderRole) =>
@@ -190,7 +191,11 @@ export class ProviderAccountsService {
     const row = await this.manageable(id, userId, role);
     if (!row || row === "forbidden") return row;
     if (isSupportedTtsAccount(row.provider, row.role as ProviderRole)) return this.verifyElevenLabs(row);
-    if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) return row.provider === "youtube" ? this.verifyYouTube(row) : this.verifyPexels(row);
+    if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) {
+      if (row.provider === "youtube") return this.verifyYouTube(row);
+      if (row.provider === "pinterest") return this.verifyPinterest(row);
+      return this.verifyPexels(row);
+    }
     if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row);
     if (!isLiveContentKind(row.provider)) {
       const failed = await this.prisma.providerAccount.update({ where: { id }, data: { status: "failed", version: { increment: 1 } } });
@@ -330,6 +335,28 @@ export class ProviderAccountsService {
   private async verifyYouTube(row: { id: string; model: string; encryptedSecret: string }) {
     try {
       await probeYouTubeAccount(decryptSecret(row.encryptedSecret));
+      return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
+    } catch (error) {
+      const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
+      const publicRow = publicAccount(failed);
+      if (error instanceof ProviderError) return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const };
+    }
+  }
+
+  /**
+   * Pinterest account preflight (VE2E-15b): `probePinterestAccount` reuses the one confirmed-real
+   * endpoint (`search/partner/pins`, `limit=1`) — see `packages/providers/src/pinterest.ts` for
+   * why no separate "who am I" endpoint is assumed. This single call proves both a valid token
+   * AND partner-search scope access; a token that is valid but lacks that scope still fails here
+   * (`PROVIDER_CAPABILITY_UNAVAILABLE`) rather than reporting a false "verified". Pinterest
+   * candidates never carry a reliable rights signal (see `pinterestPinToMediaCandidate`), so a
+   * verified account here only ever produces manual-Studio-review candidates, never Auto-applied
+   * ones.
+   */
+  private async verifyPinterest(row: { id: string; model: string; encryptedSecret: string }) {
+    try {
+      await probePinterestAccount(decryptSecret(row.encryptedSecret));
       return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });

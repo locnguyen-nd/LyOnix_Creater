@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "creatomate", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "creatomate", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -225,9 +225,13 @@ export {
   type YouTubeCandidateContext,
 } from "./youtube.js";
 export {
-  pinterestAdapterStatus,
-  PINTEREST_BLOCKED_REASON,
-  type PinterestAdapterStatus,
+  probePinterestAccount,
+  searchPinterestPins,
+  pinterestPinToMediaCandidate,
+  type PinterestMediaType,
+  type PinterestPinResult,
+  type PinterestSearchOptions,
+  type PinterestCandidateContext,
 } from "./pinterest.js";
 export {
   probeVisionCapability,

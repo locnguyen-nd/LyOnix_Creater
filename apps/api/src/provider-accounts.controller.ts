@@ -28,8 +28,8 @@ export class ProviderAccountsController {
       { provider: "pexels", role: "visual", implementationStatus: "available", models: [] },
       // VE2E-15b: discovery/embed-only (see packages/providers/src/youtube.ts) - never a download/import path, and never Auto-eligible today (no embed-source render slot exists yet).
       { provider: "youtube", role: "visual", implementationStatus: "available", models: [] },
-      // VE2E-15b: evaluated, not implemented - Pinterest requires an approved app + a verified current access token/discovery endpoint this sandbox could not confirm (see packages/providers/src/pinterest.ts).
-      { provider: "pinterest", role: "visual", implementationStatus: "blocked", models: [] },
+      // VE2E-15b: real search/partner/pins adapter (see packages/providers/src/pinterest.ts) - Pinterest carries no reliable rights signal, so every candidate is rights-unclear/never Auto-eligible; manual Studio review/import only.
+      { provider: "pinterest", role: "visual", implementationStatus: "available", models: [] },
       // VE2E-15b: evaluated, not implemented - Google Custom Search JSON API is closed to new customers (existing customers only, until 2027-01-01); no other currently-available Google product fits a stock-media search role, so it is skipped rather than forced.
       { provider: "google", role: "visual", implementationStatus: "blocked", models: [] },
       { provider: "creatomate", role: "render", implementationStatus: "available", models: [] },
@@ -52,7 +52,7 @@ export class ProviderAccountsController {
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube (visual) hoặc Creatomate (render)", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest (visual) hoặc Creatomate (render)", requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {
