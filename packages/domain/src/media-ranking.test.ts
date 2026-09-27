@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { MediaCandidate } from "./media-candidate.js";
+import type { MediaCandidate, VisionFindings } from "./media-candidate.js";
 import {
+  applyVisionFindings,
   buildBoundedQueryVariants,
   buildMediaCandidateCacheKey,
   canAutoApplyMediaCandidate,
@@ -211,6 +212,45 @@ describe("canAutoApplyMediaCandidate", () => {
     expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "unclear" }))).toBe(false);
     expect(canAutoApplyMediaCandidate(candidate({ eligibility: { autoEligible: false, reason: "discovery_only_no_import_capability" } }))).toBe(false);
     expect(canAutoApplyMediaCandidate(candidate({ moderationDecision: "accepted" }))).toBe(true);
+  });
+});
+
+describe("applyVisionFindings (VE2E-24 integration)", () => {
+  const findings = (overrides: Partial<VisionFindings> = {}): VisionFindings => ({
+    decision: "accepted",
+    confidence: 0.9,
+    reasonCodes: ["safety_clear_high_confidence"],
+    sceneBeatRelevance: 0.8,
+    safetyFindings: [],
+    provider: "gemini",
+    model: "gemini-2.5-flash",
+    operation: "image_moderation",
+    version: "vision-moderation-policy.v1",
+    evidenceRefs: ["req-1"],
+    decidedAt: "2026-09-27T00:00:00.000Z",
+    ...overrides,
+  });
+
+  it("a rejected finding forces eligibility.autoEligible to false, overriding an adapter that had marked it eligible", () => {
+    const eligible = candidate({ eligibility: { autoEligible: true } });
+    const result = applyVisionFindings(eligible, findings({ decision: "rejected" }));
+    expect(result.moderationDecision).toBe("rejected");
+    expect(result.eligibility).toEqual({ autoEligible: false, reason: "rejected_by_vision_moderation" });
+    expect(canAutoApplyMediaCandidate(result)).toBe(false);
+  });
+
+  it("an accepted finding never flips an already-ineligible candidate (e.g. discovery-only) to eligible", () => {
+    const ineligible = candidate({ eligibility: { autoEligible: false, reason: "discovery_and_embed_only_no_import_capability" } });
+    const result = applyVisionFindings(ineligible, findings({ decision: "accepted" }));
+    expect(result.moderationDecision).toBe("accepted");
+    expect(result.eligibility).toEqual({ autoEligible: false, reason: "discovery_and_embed_only_no_import_capability" });
+  });
+
+  it("attaches visionFindings and moderationDecision without mutating the original candidate", () => {
+    const original = candidate({ eligibility: { autoEligible: true } });
+    const result = applyVisionFindings(original, findings());
+    expect(original.visionFindings).toBeNull();
+    expect(result.visionFindings).toEqual(findings());
   });
 });
 

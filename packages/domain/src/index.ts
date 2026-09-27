@@ -119,6 +119,7 @@ export {
   rankMediaCandidates,
   decideMediaSelection,
   canAutoApplyMediaCandidate,
+  applyVisionFindings,
   normalizeSceneBriefForCache,
   buildMediaCandidateCacheKey,
   MAX_QUERY_VARIANTS,
@@ -136,3 +137,12 @@ export {
   type MediaSelectionDecision,
   type MediaSelectionOptions,
 } from "./media-ranking.js";
+export {
+  decideVisionModeration,
+  buildModerationAuditEntry,
+  VISION_MODERATION_POLICY_VERSION,
+  VISION_HIGH_CONFIDENCE_THRESHOLD,
+  type VisionModerationRawResult,
+  type VisionModerationPolicyInput,
+  type ModerationAuditEntry,
+} from "./vision-moderation-policy.js";

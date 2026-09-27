@@ -25,6 +25,7 @@
 import type {
   MediaCandidate,
   MediaCandidateType,
+  VisionFindings,
   VisionModerationDecision,
 } from "./media-candidate.js";
 
@@ -477,6 +478,21 @@ export function canAutoApplyMediaCandidate(candidate: MediaCandidate): boolean {
   if (candidate.rightsStatus !== "cleared") return false;
   if (!candidate.eligibility.autoEligible) return false;
   return true;
+}
+
+/**
+ * VE2E-24 integration point: attaches a `VisionFindings` result (from
+ * `packages/domain/src/vision-moderation-policy.ts`'s `decideVisionModeration`) to a candidate
+ * produced by `rankMediaCandidates`/an adapter. A `rejected` finding forces
+ * `eligibility.autoEligible` to `false` (rejected candidates can never be applied, regardless of
+ * what the adapter originally set); `accepted`/`manual_review` never flips an already-`false`
+ * eligibility to `true` - moderation can only take eligibility away, never grant it (rights/
+ * import-capability gates from `pexelsPhotoToMediaCandidate`/`youtubeVideoToMediaCandidate` etc.
+ * remain independently authoritative).
+ */
+export function applyVisionFindings(candidate: MediaCandidate, findings: VisionFindings): MediaCandidate {
+  const eligibility = findings.decision === "rejected" ? { autoEligible: false as const, reason: "rejected_by_vision_moderation" } : candidate.eligibility;
+  return { ...candidate, visionFindings: findings, moderationDecision: findings.decision, eligibility };
 }
 
 export type { MediaCandidate, MediaCandidateType, VisionModerationDecision };
