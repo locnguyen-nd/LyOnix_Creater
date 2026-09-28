@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
-import { Clock3, Play, Trash2, Wallet } from "lucide-react";
+import { Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
 import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome";
+import { Button } from "../components/ui";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { ApiError } from "../api";
 import type { VideoProductionListItemResponse, WorkflowRunStatus } from "@lyonix/contracts";
-import { deleteVideoProduction, listVideoProductions } from "../video-productions-api";
+import { deleteVideoProduction, listVideoProductions, retryVideoProduction } from "../video-productions-api";
 
 const filters = ["all", "completed", "active", "attention"] as const;
 type Filter = (typeof filters)[number];
@@ -26,6 +27,9 @@ function formatDuration(ms: number | null) {
 }
 
 const needsAttention = (status: WorkflowRunStatus) => ["failed", "cancelled", "blocked_provider", "needs_input"].includes(status);
+// "cancelled" is deliberately excluded — matches the server's own retriableStatuses in
+// video-productions.service.ts: a user-stopped run isn't offered a one-click retry here.
+const isRetriable = (status: WorkflowRunStatus) => ["failed", "blocked_provider", "needs_input"].includes(status);
 
 export function VideoProductionsPage() {
   const { t } = useTranslation();
@@ -36,6 +40,7 @@ export function VideoProductionsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [shown, setShown] = useState(PAGE_SIZE);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null);
   const [playing, setPlaying] = useState<VideoProductionListItemResponse | null>(null);
 
   useEffect(() => {
@@ -72,9 +77,29 @@ export function VideoProductionsPage() {
     }
   };
 
+  // No confirm dialog — unlike delete, retrying is non-destructive and reversible (the run just
+  // goes back into the worker queue). This page doesn't poll, so optimistically reflect the new
+  // "draft" status locally; the worker will move it forward on its own.
+  const retry = async (row: VideoProductionListItemResponse) => {
+    setRetrying(row.id);
+    setError(null);
+    try {
+      await retryVideoProduction(row.id);
+      setRows((current) => current.map((item) => (item.id === row.id ? { ...item, status: "draft", lastError: null } : item)));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t("common.error"));
+    } finally {
+      setRetrying(null);
+    }
+  };
+
   return (
     <>
-      <PageHeader title={t("videoProductions.title")} breadcrumb={t("videoProductions.subtitle")} />
+      <PageHeader
+        title={t("videoProductions.title")}
+        breadcrumb={t("videoProductions.subtitle")}
+        actions={<Button onClick={() => navigate("/jobs/new?entry=auto")}>{t("videoProductions.createNew")}</Button>}
+      />
       {error ? <Banner variant="danger">{error}</Banner> : null}
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {filters.map((item) => (
@@ -109,7 +134,10 @@ export function VideoProductionsPage() {
                     {formatDuration(row.renderDurationMs) ? <span className="inline-flex items-center gap-1"><Clock3 size={12} />{formatDuration(row.renderDurationMs)}</span> : null}
                     {row.costAmount ? <span className="inline-flex items-center gap-1"><Wallet size={12} />{row.costAmount} {row.costCurrency}</span> : null}
                     <span>{new Date(row.createdAt).toLocaleDateString()}</span>
-                    <button type="button" onClick={() => void remove(row)} disabled={deleting === row.id || !needsAttention(row.status) && row.status !== "completed"} title={row.status === "completed" || needsAttention(row.status) ? t("videoProductions.delete") : t("videoProductions.deleteRunning")} aria-label={`${t("videoProductions.delete")}: ${title}`} className="ml-auto rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35"><Trash2 size={14} /></button>
+                    {isRetriable(row.status) ? (
+                      <button type="button" onClick={() => void retry(row)} disabled={retrying === row.id} title={t("videoProductions.retry")} aria-label={`${t("videoProductions.retry")}: ${title}`} className="ml-auto rounded p-1 hover:bg-lyx-muted hover:text-lyx-fg disabled:opacity-35"><RotateCw size={14} className={retrying === row.id ? "animate-spin" : undefined} /></button>
+                    ) : null}
+                    <button type="button" onClick={() => void remove(row)} disabled={deleting === row.id || !needsAttention(row.status) && row.status !== "completed"} title={row.status === "completed" || needsAttention(row.status) ? t("videoProductions.delete") : t("videoProductions.deleteRunning")} aria-label={`${t("videoProductions.delete")}: ${title}`} className={`rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35 ${isRetriable(row.status) ? "" : "ml-auto"}`}><Trash2 size={14} /></button>
                   </div>
                   {row.lastError?.message && needsAttention(row.status) ? <p className="line-clamp-2 text-[11px] text-lyx-warn">{row.lastError.message}</p> : null}
                 </div>

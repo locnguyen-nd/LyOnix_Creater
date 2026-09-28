@@ -234,40 +234,66 @@ export class WorkflowRunnerService {
       });
     }
 
-    // --- 2. script generation (real content provider call) ---
-    await this.setStatus(run.id, "scripting");
-    const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
-    const generation = await this.recordStep(
-      run,
-      "generate_script",
-      { role: "content", operation: "generate_script", providerAccountId: contentConfig.providerAccountId },
-      async () => {
-        const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, { providerAccountId: contentConfig.providerAccountId, language: profile.locale, direction });
-        if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
-        if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
-        if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-        return outcome.response;
-      },
-    );
+    // --- 2. script generation (real content provider call) — reused on retry ---
+    // A retried run (status reset back to `draft` after `needs_input`/`blocked_provider`/`failed`,
+    // manual or automatic) re-enters this pipeline from step 1 every time - see this file's own
+    // header comment on why it does not resume mid-pipeline. Without this check, retrying a run
+    // that already failed at a LATER step (voice/media/render) would regenerate an entirely new
+    // script with different `sceneId`s, which would (a) pay for a redundant LLM call and (b) defeat
+    // the media step's own existing-asset check below and the voice check just after it, since both
+    // key off the specific `SceneDraftVersion` ids this approved script fixes.
+    const existingApproved = await this.recordStep(run, "reuse_or_generate_script", null, async () => {
+      const outcome = await this.scriptVersions.getApprovedForSource(sourceVersionId, userId, role);
+      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+      return outcome.data;
+    });
+    let approved = existingApproved;
+    if (!approved) {
+      await this.setStatus(run.id, "scripting");
+      const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
+      const generation = await this.recordStep(
+        run,
+        "generate_script",
+        { role: "content", operation: "generate_script", providerAccountId: contentConfig.providerAccountId },
+        async () => {
+          const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, { providerAccountId: contentConfig.providerAccountId, language: profile.locale, direction });
+          if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
+          if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
+          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+          return outcome.response;
+        },
+      );
 
-    // --- 3. persist + zero-human-gate auto-approve (§4: "Auto mode không dùng awaiting_* làm human gate") ---
-    await this.setStatus(run.id, "awaiting_script_approval");
-    const persisted = await this.recordStep(run, "persist_script_version", null, async () => {
-      const outcome = await this.scriptVersions.create(sourceVersionId, userId, role, { draft: generation.draft, providerPin: generation.providerPin });
-      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-      return outcome.data;
-    });
-    const approved = await this.recordStep(run, "approve_script_version", null, async () => {
-      const outcome = await this.scriptVersions.approve(persisted.id, userId, role);
-      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-      return outcome.data;
-    });
+      // --- 3. persist + zero-human-gate auto-approve (§4: "Auto mode không dùng awaiting_* làm human gate") ---
+      await this.setStatus(run.id, "awaiting_script_approval");
+      const persisted = await this.recordStep(run, "persist_script_version", null, async () => {
+        const outcome = await this.scriptVersions.create(sourceVersionId, userId, role, { draft: generation.draft, providerPin: generation.providerPin });
+        if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+        return outcome.data;
+      });
+      approved = await this.recordStep(run, "approve_script_version", null, async () => {
+        const outcome = await this.scriptVersions.approve(persisted.id, userId, role);
+        if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+        return outcome.data;
+      });
+    }
     if (approved.scenes.length === 0) throw new WorkflowStepFailure("VALIDATION_FAILED", "Script được duyệt không có scene nào");
 
-    // --- 4. voice generation + alignment/subtitle per scene ---
+    // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
     const audioByScene = new Map<string, { mediaAssetVersionId: string }>();
     for (const scene of approved.scenes) {
+      // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion
+      // already tied to this exact SceneDraftVersion id reflects a real, already-paid-for prior
+      // success, safe to reuse without a real ElevenLabs call.
+      const existingAudio = await this.prisma.audioVersion.findFirst({
+        where: { sceneDraftVersionId: scene.id, status: "current" },
+        orderBy: { version: "desc" },
+      });
+      if (existingAudio) {
+        audioByScene.set(scene.sceneId, { mediaAssetVersionId: existingAudio.mediaAssetVersionId });
+        continue;
+      }
       const audio = await this.recordStep(
         run,
         `generate_audio_${scene.sceneId}`,

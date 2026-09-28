@@ -111,6 +111,9 @@ describe("WorkflowRunnerService", () => {
       mediaAssetVersion: {
         findFirst: vi.fn(async ({ where }: any) => mediaAssets.find((a) => a.projectId === where.projectId && a.sceneId === where.sceneId) ?? null),
       },
+      // Retry idempotency check (workflow-runner.service.ts): no prior "current" audio for this
+      // scene id by default, so the normal generate-a-fresh-voice path below is still exercised.
+      audioVersion: { findFirst: vi.fn(async () => null) },
       renderJob: { findFirst: vi.fn(async () => null) },
       workflowRun: {
         findFirst: vi.fn(async ({ where }: any) => {
@@ -155,6 +158,9 @@ describe("WorkflowRunnerService", () => {
     sources = { extractArticle: vi.fn() };
     scriptGeneration = { generate: vi.fn(async () => ({ ok: true as const, response: { sourceId: "source-1", draft: { schemaVersion: "script-draft.v2", language: "vi", title: "t", hook: "h", body: "b", cta: "c", caption: "cap", scenes: [] } as any, providerPin: approvedScript.providerPin } })) };
     scriptVersions = {
+      // Retry idempotency check: no already-approved script for this source by default, so the
+      // normal generate→persist→approve path below is still exercised.
+      getApprovedForSource: vi.fn(async () => ({ ok: true as const, data: null })),
       create: vi.fn(async () => ({ ok: true as const, data: draftScript as any })),
       approve: vi.fn(async () => ({ ok: true as const, data: approvedScript as any })),
     };
@@ -213,6 +219,26 @@ describe("WorkflowRunnerService", () => {
     expect(pexels.autoImportForScene).toHaveBeenCalledWith(projectId, userId, "staff", expect.objectContaining({ sceneId: "scene-2" }));
     const submittedAssignments = (renderJobs.submit as ReturnType<typeof vi.fn>).mock.calls[0]![3].assignments;
     expect(submittedAssignments).toContainEqual({ modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "library-asset-1" });
+  });
+
+  it("retry: reuses an already-approved script instead of generating a new one (stable sceneIds so media/voice idempotency below still works)", async () => {
+    (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: approvedScript });
+    await service.processNext();
+    expect(scriptGeneration.generate).not.toHaveBeenCalled();
+    expect(scriptVersions.create).not.toHaveBeenCalled();
+    expect(scriptVersions.approve).not.toHaveBeenCalled();
+    expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("retry: reuses an existing current AudioVersion for a scene instead of calling ElevenLabs again", async () => {
+    prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) =>
+      where.sceneDraftVersionId === "scene-db-1" ? { sceneDraftVersionId: "scene-db-1", status: "current", mediaAssetVersionId: "audio-asset-reused" } : null,
+    );
+    await service.processNext();
+    expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(1);
+    expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledWith("scene-db-2", userId, "staff", { providerAccountId: "voice-acc", voiceId: "voice-1" });
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
   });
 
   it("does not start when the profile is missing mediaConfig/renderConfig (blocked_provider, zero provider calls)", async () => {

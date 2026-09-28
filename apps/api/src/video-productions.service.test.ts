@@ -67,7 +67,10 @@ describe("VideoProductionsService", () => {
         updateMany: vi.fn(async ({ where, data }: any) => {
           const row = workflowRuns.find((item) => item.id === where.id && item.status === where.status && !item.deletedAt);
           if (!row) return { count: 0 };
-          row.deletedAt = data.deletedAt;
+          // Prisma.JsonNull is a write-time sentinel for a nullable Json column - a real
+          // round-trip through Postgres reads it back as plain JS `null`, so normalize the
+          // same way here rather than leaking the sentinel object into in-memory test state.
+          Object.assign(row, data.lastError === Prisma.JsonNull ? { ...data, lastError: null } : data);
           return { count: 1 };
         }),
         findMany: vi.fn(async ({ where }: any) => {
@@ -200,6 +203,32 @@ describe("VideoProductionsService", () => {
       expect(await service.remove(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
       workflowRuns[0].status = "failed";
       expect(await service.remove(submitted.data.id, "other-user", "admin")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(prisma.workflowRun.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("retry", () => {
+    it("re-queues a failed/blocked/needs_input run to draft with a fresh attempts count and clears lastError", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      workflowRuns[0].status = "needs_input";
+      workflowRuns[0].attempts = 2;
+      workflowRuns[0].lastError = { code: "MEDIA_RELEVANCE_UNVERIFIED", message: "no relevant media" };
+      expect(await service.retry(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { retried: true } });
+      expect(workflowRuns[0]).toMatchObject({ status: "draft", attempts: 1, lastError: null });
+      expect(prisma.workflowRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: submitted.data.id, status: "needs_input", deletedAt: null }) }));
+    });
+
+    it("rejects a run that is not in a retriable status, a cancelled run, and another user's run", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      expect(await service.retry(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
+      workflowRuns[0].status = "completed";
+      expect(await service.retry(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
+      workflowRuns[0].status = "cancelled";
+      expect(await service.retry(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
+      workflowRuns[0].status = "failed";
+      expect(await service.retry(submitted.data.id, "other-user", "admin")).toMatchObject({ ok: false, code: "NOT_FOUND" });
       expect(prisma.workflowRun.updateMany).not.toHaveBeenCalled();
     });
   });
