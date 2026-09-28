@@ -757,7 +757,12 @@ export function StudioProPage() {
   };
 
   const submitRender = async () => {
-    if (!context || !baseVersionId || !renderAccountId) return;
+    // Same freshness guard as submitApprove: `dirty` means the just-generated/edited narration
+    // (or any other scene edit) hasn't finished autosaving into a real TimelineVersion yet -
+    // submitting against the stale `baseVersionId` would render the OLD version, silently
+    // dropping a scene whose audio was only just attached (resolveDynamicComposition requires
+    // audioVersionId+audioMediaAssetVersionId to include a scene at all).
+    if (!context || !baseVersionId || !renderAccountId || dirty) return;
     setRenderSubmitting(true);
     try {
       const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, { providerAccountId: renderAccountId });
@@ -929,7 +934,8 @@ export function StudioProPage() {
               ))}
             </Select>
             <Button
-              disabled={renderSubmitting || timelineStatus !== "approved" || !renderAccountId || (preview ? !preview.ready : false)}
+              disabled={renderSubmitting || dirty || timelineStatus !== "approved" || !renderAccountId || (preview ? !preview.ready : false)}
+              title={dirty ? t("studioPro.submitRenderDirtyHint") : undefined}
               onClick={() => void submitRender()}
             >
               {t("studioPro.submitRender")}
