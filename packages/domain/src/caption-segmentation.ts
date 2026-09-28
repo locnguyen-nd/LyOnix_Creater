@@ -25,6 +25,25 @@ export type CaptionSegmentationOptions = {
 const DEFAULT_MAX_CHARS = 42;
 const DEFAULT_MAX_DURATION_MS = 4200;
 
+/** A word ending in sentence-terminal punctuation (optionally followed by a closing quote/bracket) always ends its caption segment there, even when under the char/duration caps - a caption should read as a complete sentence/clause, not an arbitrary word-count chunk that happens to cut mid-sentence. */
+const SENTENCE_END_RE = /[.!?…]+["'”’)\]]*$/;
+const SENTENCE_SPLIT_RE = /(?<=[.!?…])\s+/;
+
+/**
+ * Splits a block of text into full sentences on `.`/`!`/`?`/`…` boundaries - the same
+ * sentence-terminal punctuation `buildCaptionSegmentsFromAlignment` closes a caption segment
+ * on above, exposed here so a caller that needs to reason about sentence boundaries *before*
+ * any real TTS alignment exists (e.g. deciding whether a script scene's narration packs more
+ * than one sentence) uses the exact same definition of "sentence" instead of a second,
+ * possibly-drifting regex. Never invents/merges anything - a string with no terminal
+ * punctuation at all comes back as a single one-item array (itself, trimmed).
+ */
+export function splitIntoSentences(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  return trimmed.split(SENTENCE_SPLIT_RE).map((s) => s.trim()).filter(Boolean);
+}
+
 const isAlignmentUsable = (alignment: CharacterAlignment): boolean =>
   alignment.characters.length > 0 &&
   alignment.characters.length === alignment.characterStartTimesSeconds.length &&
@@ -62,7 +81,11 @@ const buildWordSpans = (alignment: CharacterAlignment): WordSpan[] => {
  * Packs word spans into caption segments bounded by `maxCharsPerSegment`/`maxDurationMs`.
  * A segment's start/end is always the first/last word's real alignment timestamp inside
  * it — never interpolated or invented. A single word that alone exceeds the caps still
- * becomes its own segment (words are never split mid-character).
+ * becomes its own segment (words are never split mid-character). Sentence-terminal
+ * punctuation (`.`/`!`/`?`/`…`) always closes a segment too, so a caption reads as a full
+ * sentence/clause whenever the underlying narration fits one within the caps; the
+ * char/duration caps remain the fallback break for a single sentence that runs long on
+ * its own (never split further - see this module's own scope note in the file header).
  */
 export function buildCaptionSegmentsFromAlignment(
   alignment: CharacterAlignment,
@@ -87,18 +110,13 @@ export function buildCaptionSegmentsFromAlignment(
   };
 
   for (const word of words) {
-    if (bucket.length === 0) {
-      bucket.push(word);
-      continue;
+    if (bucket.length > 0) {
+      const candidateText = `${bucket.map((w) => w.text).join(" ")} ${word.text}`;
+      const candidateDurationMs = Math.round((word.endSec - bucket[0]!.startSec) * 1000);
+      if (candidateText.length > maxChars || candidateDurationMs > maxDurationMs) flushBucket();
     }
-    const candidateText = `${bucket.map((w) => w.text).join(" ")} ${word.text}`;
-    const candidateDurationMs = Math.round((word.endSec - bucket[0]!.startSec) * 1000);
-    if (candidateText.length > maxChars || candidateDurationMs > maxDurationMs) {
-      flushBucket();
-      bucket.push(word);
-    } else {
-      bucket.push(word);
-    }
+    bucket.push(word);
+    if (SENTENCE_END_RE.test(word.text)) flushBucket();
   }
   flushBucket();
   return segments;

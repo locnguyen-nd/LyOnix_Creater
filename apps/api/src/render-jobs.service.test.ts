@@ -53,6 +53,8 @@ describe("RenderJobsService", () => {
           ].filter((r) => where.id.in.includes(r.id) && r.projectId === where.projectId),
       },
       audioVersion: { findMany: async ({ where }: any) => [{ id: "audio-1", mediaAssetVersionId: "asset-audio", durationMs: 4000 }].filter((r) => where.id.in.includes(r.id)) },
+      // VE2E-32: no real caption segments by default - existing dynamic-composition tests below keep exercising the static-text fallback unchanged. Tests exercising the new segment wiring override this.
+      subtitleVersion: { findMany: vi.fn(async () => []) },
       sceneDraftVersion: { findMany: async () => [] },
       timelineVersion: { findUnique: vi.fn(async ({ where }: any) => timelineRows.get(where.id) ?? null) },
       renderJob: {
@@ -412,6 +414,53 @@ describe("RenderJobsService", () => {
       expect(submittedBody.source.elements[0].duration).toBe(4);
       expect(submittedBody.source.elements[0].elements[1].text).toBe("Xin chào");
       expect(submittedBody.source.elements[1].elements[1].text).toBe("Cảnh hai");
+    });
+
+    it("VE2E-32: uses the scene's real voice-timed caption segments when no Studio override is set", async () => {
+      prisma.subtitleVersion.findMany = vi.fn(async ({ where }: any) =>
+        where.audioVersionId.in.includes("audio-1")
+          ? [{ audioVersionId: "audio-1", segments: [{ text: "Messi is a football player.", startMs: 0, endMs: 1800 }, { text: "He plays for Inter Miami now.", startMs: 1800, endMs: 3600 }] }]
+          : [],
+      );
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", screenTextOverride: null })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
+      expect(textNodes).toHaveLength(2);
+      expect(textNodes[0]).toMatchObject({ text: "Messi is a football player.", time: 0, duration: 1.8 });
+      expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+    });
+
+    it("VE2E-32: a Studio screenTextOverride always stays one static block, even when real caption segments exist", async () => {
+      prisma.subtitleVersion.findMany = vi.fn(async () => [
+        { audioVersionId: "audio-1", segments: [{ text: "Messi is a football player.", startMs: 0, endMs: 1800 }, { text: "He plays for Inter Miami now.", startMs: 1800, endMs: 3600 }] },
+      ]);
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", screenTextOverride: "Custom override" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
+      expect(textNodes).toHaveLength(1);
+      expect(textNodes[0]).toMatchObject({ text: "Custom override", time: 0, duration: 4 });
     });
 
     it("skips a scene the user excluded from the timeline instead of blocking the render", async () => {

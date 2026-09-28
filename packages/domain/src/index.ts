@@ -84,6 +84,7 @@ export {
 } from "./render-status.js";
 export {
   buildCaptionSegmentsFromAlignment,
+  splitIntoSentences,
   type CharacterAlignment,
   type CaptionSegment,
   type CaptionSegmentationOptions,

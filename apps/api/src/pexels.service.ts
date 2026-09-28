@@ -14,16 +14,23 @@ import {
   ProviderError,
   getPexelsPhoto,
   getPexelsVideo,
+  isLiveContentKind,
+  moderateSceneCandidate,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
   searchPexelsPhotos,
   searchPexelsVideos,
+  type LiveContentKind,
+  type VisionModerationFrame,
+  type VisionModerationSceneContext,
 } from "@lyonix/providers";
 import {
+  applyVisionFindings,
   buildBoundedQueryVariants,
   canAccessProject,
   decideMediaSelection,
+  decideVisionModeration,
   deriveSceneBrief,
   detectScriptLanguageHeuristic,
   rankMediaCandidates,
@@ -52,6 +59,19 @@ const MAX_PEXELS_DOWNLOAD_BYTES = 200 * 1024 * 1024;
 
 /** Bounded per-variant candidate pool size for the auto-fill ranking flow (VE2E-15a) - same order of magnitude as `AUTO_FILL_CANDIDATE_POOL` in `apps/web/src/studio/media-selection.ts` so a real pool exists to rank, not just whatever the API returned first. */
 const MEDIA_SEARCH_POOL_SIZE = 10;
+
+/**
+ * VE2E-29: hard ceiling on how many photo candidates get a real vision-moderation call per scene,
+ * independent of how large the deduped candidate pool is (up to `MEDIA_SEARCH_POOL_SIZE *
+ * MAX_QUERY_VARIANTS`). `AutomationProfileVersion.costCeiling` cannot enforce this today - no
+ * adapter in this codebase reports real per-call cost/usage yet (see
+ * `workflow-runner.service.ts`'s own header comment) - so this fixed, documented, auditable bound
+ * is the real guard against unbounded vision spend per scene.
+ */
+const MAX_VISION_CANDIDATES_PER_SCENE = 5;
+
+/** Generous headroom over a compressed Pexels preview JPEG, comfortably under `vision-moderation.ts`'s own per-frame base64 egress cutoff after encoding. */
+const MAX_VISION_PREVIEW_DOWNLOAD_BYTES = 4 * 1024 * 1024;
 
 const providerErrorMessage: Record<string, string> = {
   PROVIDER_AUTH_INVALID: "Khóa Pexels bị từ chối. Verify lại tài khoản.",
@@ -287,6 +307,43 @@ export class PexelsService {
   }
 
   /**
+   * VE2E-29: bounded per-scene vision pass for the photo fallback pool only - video candidates
+   * stay exempt (no frame source until VE2E-30's media-worker FFmpeg extraction lands; see
+   * `requireVerifiedSemanticSignal`'s own doc comment in `media-ranking.ts` for why). Metadata-
+   * ranks the pool first so vision spend concentrates on the candidates most likely to actually
+   * win, then checks at most `MAX_VISION_CANDIDATES_PER_SCENE` of them - never the whole pool.
+   * A candidate whose preview can't be fetched, or whose account has no usable vision-capable
+   * "content" provider account at all, is left exactly as it was (metadata-only score) - this
+   * must only ever strengthen Auto's relevance evidence, never block/replace the existing
+   * abstention gate when vision isn't available.
+   */
+  private async applyVisionModerationToPhotoPool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>): Promise<MediaCandidate[]> {
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
+    const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
+    if (!account) return pool;
+
+    const apiKey = decryptSecret(account.encryptedSecret);
+    const kind = account.provider as LiveContentKind;
+    const modelId = account.model;
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+
+    const priorityOrder = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SCENE).map((r) => r.candidate.candidateId);
+    const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
+
+    for (const candidateId of priorityOrder) {
+      const candidate = byId.get(candidateId);
+      if (!candidate) continue;
+      const downloaded = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_DOWNLOAD_BYTES, allowedHostSuffix: ".pexels.com" });
+      if (!downloaded.ok) continue;
+      const frame: VisionModerationFrame = { mimeType: downloaded.mimeType || "image/jpeg", base64: downloaded.buffer.toString("base64") };
+      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId, operation: "image_moderation", sceneContext, frames: [frame] });
+      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: modelId, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
+      byId.set(candidateId, applyVisionFindings(candidate, findings));
+    }
+    return pool.map((c) => byId.get(c.candidateId) ?? c);
+  }
+
+  /**
    * VE2E-06/VE2E-15a Auto media-preparing step. Fetches a bounded, ranked candidate pool
    * (portrait video first - short-form default - falling back to photo only when the video
    * pool is entirely empty, same type preference as before) instead of blindly importing the
@@ -318,13 +375,20 @@ export class PexelsService {
     const videoPool = await this.collectCandidatePool(apiKey, accountId, variants, "video", queriedAt);
     if (!videoPool.ok) return { ok: false, ...mapProviderError(videoPool.error) };
     let pool = videoPool.candidates;
+    let isPhotoPool = false;
     if (pool.length === 0) {
       const photoPool = await this.collectCandidatePool(apiKey, accountId, variants, "photo", queriedAt);
       if (!photoPool.ok) return { ok: false, ...mapProviderError(photoPool.error) };
       pool = photoPool.candidates;
+      isPhotoPool = true;
     }
     if (pool.length === 0) {
       return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: `Pexels không có kết quả nào cho scene (query: "${trimmedQuery || brief.phrases[0] || ""}")`, status: 502 };
+    }
+
+    // VE2E-29: attach real vision-verified relevance/eligibility to the photo pool BEFORE ranking/decideMediaSelection, so an accepted photo carries actual evidence instead of the blind metadata-only neutral score. Video stays exempt (see the method's own doc comment).
+    if (isPhotoPool) {
+      pool = await this.applyVisionModerationToPhotoPool(pool, brief, userId, role, usedExternalIds);
     }
 
     const ranked = rankMediaCandidates(pool, brief, { usedExternalIds });
