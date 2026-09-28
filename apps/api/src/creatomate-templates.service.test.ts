@@ -74,7 +74,7 @@ describe("CreatomateTemplatesService", () => {
         id: "tpl_1",
         name: "Bold caption",
         preview_image_url: "https://cdn.creatomate.com/tpl_1.jpg",
-        source: { elements: [{ name: "Text-1", type: "text" }, { name: "Video-1", type: "video" }] },
+        source: { elements: [{ name: "Text-1", type: "text", dynamic: true }, { name: "Video-1", type: "video", dynamic: true }] },
       }), { status: 200 })));
       const outcome = await service.snapshot("account-1", "tpl_1", "user-1");
       expect(outcome.ok).toBe(true);
