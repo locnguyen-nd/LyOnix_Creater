@@ -333,7 +333,9 @@ export class WorkflowRunnerService {
     const sceneMedia: AutoSceneMedia[] = approved.scenes.map((scene) => ({
       sceneId: scene.sceneId,
       orderIndex: scene.orderIndex,
-      screenText: scene.screenText,
+      // narration (not the separately LLM-authored screenText) - see AutoSceneMedia.displayText's
+      // own doc comment: the on-screen caption must be exactly what the voice says, word for word.
+      displayText: scene.narration,
       visualMediaAssetVersionId: mediaByScene.get(scene.sceneId)?.id ?? null,
       visualKind: mediaByScene.get(scene.sceneId)?.kind ?? null,
       audioMediaAssetVersionId: audioByScene.get(scene.sceneId)?.mediaAssetVersionId ?? null,

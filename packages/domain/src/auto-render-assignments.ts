@@ -27,7 +27,15 @@ export type AutoTemplateSlot = {
 export type AutoSceneMedia = {
   sceneId: string;
   orderIndex: number;
-  screenText: string;
+  /**
+   * The exact text this scene's caption/subtitle slot renders. The caller must pass the
+   * scene's own `narration` here, not the separately LLM-authored `screenText` field on
+   * `ScriptDraftSceneV2` - Auto has no human review step, so the only way to guarantee the
+   * on-screen caption fully matches what the voice actually says (owner requirement: "hiển
+   * thị đầy đủ theo voice") is to render the exact string that was fed to TTS, not a second,
+   * independently-written copy of it that could diverge (paraphrase, drop words, reformat).
+   */
+  displayText: string;
   visualMediaAssetVersionId: string | null;
   visualKind: "video" | "image" | null;
   audioMediaAssetVersionId: string | null;
@@ -44,7 +52,7 @@ export type AutoRenderAssignmentsResult =
 
 /**
  * `extraText` (e.g. script title/caption) fills any leftover required text slots once
- * every scene's own `screenText` has been consumed — some templates have more text
+ * every scene's own `displayText` has been consumed — some templates have more text
  * elements (e.g. a title card) than there are scenes.
  */
 export function buildAutoRenderAssignments(
@@ -79,10 +87,10 @@ export function buildAutoRenderAssignments(
       const slot = audioQueue.shift();
       assign(slot, slot ? { modificationKey: slot.key, kind: "audio", mediaAssetVersionId: scene.audioMediaAssetVersionId } : null);
     }
-    const screenText = scene.screenText.trim();
-    if (screenText) {
+    const displayText = scene.displayText.trim();
+    if (displayText) {
       const slot = textQueue.shift();
-      assign(slot, slot ? { modificationKey: slot.key, kind: "text", text: screenText } : null);
+      assign(slot, slot ? { modificationKey: slot.key, kind: "text", text: displayText } : null);
     }
   }
 
