@@ -56,6 +56,9 @@ describe("PexelsService", () => {
       acquireContentRequestSlot: vi.fn(async () => true),
       releaseContentRequestSlot: vi.fn(async () => undefined),
       cooldownContentAccount: vi.fn(async () => new Date()),
+      // VE2E-29: no vision-capable "content" account by default - every pre-existing test below keeps
+      // exercising the metadata-only path unchanged. Tests exercising the new vision wiring override this.
+      contentGenerationCandidates: vi.fn(async () => []),
     };
     service = new PexelsService(prisma, grants, media as MediaService, providerAccounts);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("px-test");
@@ -264,6 +267,127 @@ describe("PexelsService", () => {
       const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-7", query: "anything" });
       expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE" });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    describe("VE2E-29: vision-wired photo relevance", () => {
+      const visionAccount = (overrides: Record<string, unknown> = {}) => ({
+        id: "content-1",
+        provider: "openai",
+        role: "content",
+        status: "verified",
+        model: "gpt-4o-mini",
+        encryptedSecret: "encrypted",
+        isFake: false,
+        ...overrides,
+      });
+      const visionResponse = (body: Record<string, unknown>) =>
+        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(body) } }] }), { status: 200 });
+
+      it("auto-selects a photo with no alt text once vision moderation accepts it", async () => {
+        providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
+        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
+          if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
+          if (url.includes("/v1/photos/")) return new Response(JSON.stringify(photoDetail), { status: 200 });
+          if (url.includes("api.openai.com/v1/chat/completions")) {
+            return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "matches beat" });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({
+          ok: true,
+          buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+          mimeType: "image/jpeg",
+          finalUrl: photoDetail.src.original,
+        });
+        // No `alt` text on `photoDetail` - pre-VE2E-29, this would abstain to MEDIA_RELEVANCE_UNVERIFIED.
+        const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-9", query: "person talking outside" });
+        expect(outcome).toMatchObject({ ok: true, data: { asset: { id: "asset-1" } } });
+      });
+
+      it("routes a vision-rejected top photo to the existing rejected_by_moderation abstention instead of importing it", async () => {
+        providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
+        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
+          if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
+          if (url.includes("api.openai.com/v1/chat/completions")) {
+            return visionResponse({ safety_flag: true, safety_categories: ["violence"], scene_beat_relevance: 0.8, confidence: 0.95, notes: "unsafe content" });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({
+          ok: true,
+          buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+          mimeType: "image/jpeg",
+          finalUrl: photoDetail.src.original,
+        });
+        const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-10", query: "person outside" });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+        expect(media.registerAsset).not.toHaveBeenCalled();
+      });
+
+      it("falls back to the existing MEDIA_RELEVANCE_UNVERIFIED abstention when the vision call returns an unusable response (fail-closed)", async () => {
+        providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
+        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
+          if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
+          // Malformed content: fails JSON.parse inside `generateVisionStructuredOnce`, so the capability probe itself throws and `moderateSceneCandidate` fails closed to `raw: null` - the real moderation call is never even attempted.
+          if (url.includes("api.openai.com/v1/chat/completions")) return new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), { status: 200 });
+          throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({
+          ok: true,
+          buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+          mimeType: "image/jpeg",
+          finalUrl: photoDetail.src.original,
+        });
+        const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-11", query: "person outside" });
+        expect(outcome).toMatchObject({ ok: false, code: "MEDIA_RELEVANCE_UNVERIFIED" });
+        expect(media.registerAsset).not.toHaveBeenCalled();
+      });
+
+      it("never fans out vision calls beyond MAX_VISION_CANDIDATES_PER_SCENE, no matter how large the candidate pool is", async () => {
+        providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
+        // 7 candidates, strictly decreasing quality (heightPx) so pre-vision metadata ranking is deterministic: id "1" is always the best-fit winner.
+        const photos = Array.from({ length: 7 }, (_, i) => ({
+          ...photoDetail,
+          id: i + 1,
+          width: 600,
+          height: 1080 - i * 110,
+          src: { ...photoDetail.src },
+        }));
+        let visionCallCount = 0;
+        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+          const url = String(input);
+          if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
+          if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos }), { status: 200 });
+          if (url.includes("/v1/photos/1")) return new Response(JSON.stringify(photos[0]), { status: 200 });
+          if (url.includes("api.openai.com/v1/chat/completions")) {
+            visionCallCount += 1;
+            return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "ok" });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({
+          ok: true,
+          buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+          mimeType: "image/jpeg",
+          finalUrl: photoDetail.src.original,
+        });
+        const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-12", query: "person outside" });
+        expect(outcome).toMatchObject({ ok: true });
+        // Each vision-checked candidate makes 2 calls (capability probe + real moderation) - capped at 5 candidates, never all 7.
+        expect(visionCallCount).toBe(5 * 2);
+        expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/v1/photos/6"))).toBe(false);
+        expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/v1/photos/7"))).toBe(false);
+      });
     });
   });
 });
