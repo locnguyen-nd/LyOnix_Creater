@@ -60,6 +60,10 @@ export async function listVideoProductions(): Promise<VideoProductionListItemRes
   return api<VideoProductionListItemResponse[]>("/video-productions");
 }
 
+export async function deleteVideoProduction(id: string): Promise<void> {
+  await api(`/video-productions/${id}`, { method: "DELETE", headers: await csrfHeaders() });
+}
+
 export async function listVideoProductionEvents(id: string): Promise<WorkflowStepEventResponse[]> {
   return api<WorkflowStepEventResponse[]>(`/video-productions/${id}/events`);
 }

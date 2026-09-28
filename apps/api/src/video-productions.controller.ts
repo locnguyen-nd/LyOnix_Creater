@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
 import type { VideoProductionSubmitRequest } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
@@ -80,6 +80,15 @@ export class VideoProductionsController {
   async get(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user } = await requireUser(request, response, this.auth);
     const outcome = await this.productions.get(id, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
+    return success(outcome.data, requestId(response));
+  }
+
+  @Delete("video-productions/:id")
+  async remove(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const outcome = await this.productions.remove(id, user.id, user.role);
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
     return success(outcome.data, requestId(response));
   }

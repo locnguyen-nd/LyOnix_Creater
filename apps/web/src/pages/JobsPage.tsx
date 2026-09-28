@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Play, Trash2 } from "lucide-react";
 import { Banner, ChannelAvatar, EmptyState, PageHeader, StatusPill } from "../components/chrome";
-import { DataTable } from "../components/DataTable";
+import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { Button, Select, TextInput } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { PublicChannel } from "../channel-api";
@@ -11,6 +12,7 @@ import { isJobDone, routeForJob, type ApiJob } from "../jobs-api";
 const tabs = ["all", "running", "review", "blocked", "done", "error"] as const;
 const RUNNING_STATUSES = new Set(["accepted", "validating", "transcribing", "scripting", "producing", "editing", "rendering_vrew", "verifying"]);
 const BLOCKED_STATUSES = new Set(["blocked_provider", "needs_attention", "failed"]);
+const PAGE_SIZE = 12;
 // VE2E-18: "in progress" now spans Studio's own steps too (CR-JOBS-PIPELINE-STATUS-2026-09-26) -
 // a bridged job sitting in media/voice/timeline/render is still running, not merely "scripting".
 const RUNNING_PIPELINE_STEPS = new Set(["media", "voice", "timeline", "render"]);
@@ -49,6 +51,40 @@ function formatCost(job: ApiJob) {
   return job.render.costCurrency ? `${job.render.costAmount} ${job.render.costCurrency}` : job.render.costAmount;
 }
 
+function JobVideoCard({ job, channel, open, play, remove }: {
+  job: ApiJob;
+  channel?: PublicChannel | undefined;
+  open: () => void;
+  play: () => void;
+  remove?: () => void;
+}) {
+  const { t } = useTranslation();
+  const playable = isJobDone(job) && Boolean(job.render?.resultUrl);
+  return (
+    <article className="group min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm transition-shadow hover:shadow-md">
+      <div className="relative">
+        <button type="button" onClick={open} aria-label={`${t("videoGallery.openDetails")}: ${job.topic}`} className="block w-full text-left">
+          <VideoThumbnail snapshotUrl={job.render?.snapshotUrl} resultUrl={playable ? job.render?.resultUrl : null} className="aspect-[3/2] w-full" />
+        </button>
+        <span className="absolute left-2 top-2"><StatusPill tone={tone(job)}>{pipelineLabel(job, t)}</StatusPill></span>
+        {playable ? <button type="button" onClick={play} aria-label={`${t("videoGallery.play")}: ${job.topic}`} className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full bg-black/85 text-white shadow-md hover:bg-black"><Play size={18} fill="currentColor" /></button> : null}
+      </div>
+      <div className="space-y-1.5 p-2.5">
+        <button type="button" onClick={open} className="block w-full truncate text-left text-[13px] font-semibold leading-5 hover:underline">{job.topic}</button>
+        {job.script.caption ? <p className="truncate text-[11px] leading-4 text-lyx-fg-muted">{job.script.caption}</p> : null}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-lyx-fg-muted">
+          {channel ? <span>{channel.name}</span> : null}
+          {job.createdByName ? <span>· {t("jobs.creator")}: {job.createdByName}</span> : null}
+        </div>
+        <div className="flex items-center justify-between border-t border-lyx-border pt-2 text-[11px] text-lyx-fg-muted">
+          <span>{isJobDone(job) ? `${formatDuration(job.render?.renderDurationMs)} · ${formatCost(job)}` : new Date(job.updatedAt).toLocaleDateString()}</span>
+          {remove ? <button type="button" onClick={remove} title={t("jobs.delete")} aria-label={`${t("jobs.delete")}: ${job.topic}`} className="rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger"><Trash2 size={14} /></button> : null}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 export function JobsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -61,6 +97,9 @@ export function JobsPage() {
   const [jobs, setJobs] = useState<ApiJob[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<ApiJob | null>(null);
+  const [shown, setShown] = useState(PAGE_SIZE);
+  const [shownByChannel, setShownByChannel] = useState<Record<string, number>>({});
 
   const reload = () => {
     void Promise.all([api<ApiJob[]>("/jobs"), api<PublicChannel[]>("/channels")])
@@ -82,9 +121,22 @@ export function JobsPage() {
   }), [jobs, q, tab, channelId]);
 
   const byChannel = useMemo(
-    () => channels.map((channel) => ({ channel, jobs: jobs.filter((job) => job.channelId === channel.id) })),
-    [channels, jobs],
+    () => channels.map((channel) => ({ channel, jobs: rows.filter((job) => job.channelId === channel.id) })),
+    [channels, rows],
   );
+
+  const removeJob = (job: ApiJob) => {
+    void (async () => {
+      try {
+        setError(null);
+        await api(`/jobs/${job.id}`, { method: "DELETE", headers: await csrfHeaders() });
+        setJobs((current) => current.filter((item) => item.id !== job.id));
+        setNotice(t("jobs.delete"));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : t("common.error"));
+      }
+    })();
+  };
 
   return (
     <>
@@ -130,40 +182,12 @@ export function JobsPage() {
               <Button key={item} variant={tab === item ? "primary" : "secondary" } onClick={() => setTab(item)}>{t(item === "all" ? "jobs.all" : `jobs.${item}`)}</Button>
             ))}
           </div>
-          <DataTable
-            rows={rows}
-            rowKey={(row) => row.id}
-            onRowClick={(row) => navigate(routeForJob(row))}
-            empty={<EmptyState title={t("common.empty")} />}
-            columns={[
-              { key: "code", header: t("jobs.code"), render: (row) => row.code },
-              { key: "topic", header: t("jobs.topic"), render: (row) => row.topic },
-              { key: "channel", header: t("jobs.channel"), render: (row) => channels.find((item) => item.id === row.channelId)?.name ?? row.channelId },
-              { key: "status", header: t("jobs.status"), render: (row) => <StatusPill tone={tone(row)}>{pipelineLabel(row, t)}</StatusPill> },
-              { key: "duration", header: t("jobs.duration"), render: (row) => (isJobDone(row) ? formatDuration(row.render?.renderDurationMs) : "—") },
-              { key: "cost", header: t("jobs.cost"), render: (row) => (isJobDone(row) ? formatCost(row) : "—") },
-              { key: "model", header: t("providers.model"), render: (row) => row.model },
-              {
-                key: "delete",
-                header: t("jobs.delete"),
-                render: (row) => (
-                  <Button variant="secondary" onClick={(event) => {
-                    event.stopPropagation();
-                    void (async () => {
-                      try {
-                        setError(null);
-                        await api(`/jobs/${row.id}`, { method: "DELETE", headers: await csrfHeaders() });
-                        setJobs((current) => current.filter((job) => job.id !== row.id));
-                        setNotice(t("jobs.delete"));
-                      } catch (err) {
-                        setError(err instanceof ApiError ? err.message : t("common.error"));
-                      }
-                    })();
-                  }}>{t("jobs.delete")}</Button>
-                ),
-              },
-            ]}
-          />
+          {rows.length === 0 ? <EmptyState title={t("common.empty")} /> : (
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+              {rows.slice(0, shown).map((job) => <JobVideoCard key={job.id} job={job} channel={channels.find((item) => item.id === job.channelId)} open={() => navigate(routeForJob(job))} play={() => setPlaying(job)} remove={() => removeJob(job)} />)}
+            </div>
+          )}
+          {shown < rows.length ? <div className="mt-5 text-center"><Button variant="secondary" onClick={() => setShown((count) => count + PAGE_SIZE)}>{t("videoProductions.showMore", { count: rows.length - shown })}</Button></div> : null}
         </>
       ) : (
         <div className="flex flex-col gap-6">
@@ -180,43 +204,26 @@ export function JobsPage() {
                 <StatusPill tone="warn">{t("jobsByChannel.statusRunning")}: {channelJobs.filter((job) => (job.pipelineStep ? RUNNING_PIPELINE_STEPS.has(job.pipelineStep) : RUNNING_STATUSES.has(job.status))).length}</StatusPill>
                 <StatusPill tone="danger">{t("jobsByChannel.statusBlocked")}: {channelJobs.filter((job) => BLOCKED_STATUSES.has(job.status) || job.render?.status === "failed").length}</StatusPill>
               </div>
-              <div className="flex gap-3 overflow-x-auto pb-1">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
                 {channelJobs.length === 0 ? (
                   <p className="text-[12px] text-lyx-fg-muted">{t("jobsByChannel.emptyChannel")}</p>
                 ) : null}
-                {channelJobs.map((job) => (
-                  <button
-                    key={job.id}
-                    type="button"
-                    onClick={() => navigate(routeForJob(job))}
-                    className="w-[150px] flex-shrink-0 overflow-hidden rounded-[6px] border border-lyx-border text-left"
-                  >
-                    <div className="relative flex items-center justify-center bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
-                      <span className="text-[10px] text-lyx-fg-subtle">9:16</span>
-                      <span className="absolute left-1.5 top-1.5">
-                        <StatusPill tone={tone(job)}>{pipelineLabel(job, t)}</StatusPill>
-                      </span>
-                    </div>
-                    <div className="p-2">
-                      <div className="truncate text-[12px] font-medium">{job.topic}</div>
-                      <div className="mt-0.5 truncate text-[11px] text-lyx-fg-muted">{job.code}</div>
-                    </div>
-                  </button>
-                ))}
+                {channelJobs.slice(0, shownByChannel[channel.id] ?? PAGE_SIZE).map((job) => <JobVideoCard key={job.id} job={job} open={() => navigate(routeForJob(job))} play={() => setPlaying(job)} />)}
                 <button
                   type="button"
                   onClick={() => navigate(`/jobs/new?channelId=${channel.id}`)}
-                  className="flex w-[150px] flex-shrink-0 flex-col items-center justify-center gap-1 rounded-[6px] border border-dashed border-lyx-strong text-[12px] text-lyx-fg-muted"
-                  style={{ height: "calc(150px * 16 / 9 + 34px)" }}
+                  className="flex min-h-36 flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-lyx-strong text-[12px] text-lyx-fg-muted hover:bg-lyx-muted"
                 >
                   <span className="text-[18px]">+</span>
                   {t("jobsByChannel.createNew")}
                 </button>
               </div>
+              {(shownByChannel[channel.id] ?? PAGE_SIZE) < channelJobs.length ? <div className="mt-3 text-center"><Button variant="secondary" onClick={() => setShownByChannel((current) => ({ ...current, [channel.id]: (current[channel.id] ?? PAGE_SIZE) + PAGE_SIZE }))}>{t("videoProductions.showMore", { count: channelJobs.length - (shownByChannel[channel.id] ?? PAGE_SIZE) })}</Button></div> : null}
             </div>
           ))}
         </div>
       )}
+      {playing?.render?.resultUrl ? <VideoPlayerDialog title={playing.topic} caption={playing.script.caption} url={playing.render.resultUrl} onClose={() => setPlaying(null)} /> : null}
     </>
   );
 }

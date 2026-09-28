@@ -561,6 +561,8 @@ model WorkflowRun {
   /// as `RenderJob.lastError` - surfaced by `GET /video-productions/:id` without re-deriving it
   /// from the latest failed `StepRun` row on every read.
   lastError                  Json?
+  /// Hides one Auto production without deleting provider/render audit records or other runs in the project.
+  deletedAt                  DateTime?
   createdByUserId            String                    @db.Uuid
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt

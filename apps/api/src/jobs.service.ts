@@ -65,6 +65,7 @@ export type JobRecord = {
   schemaVersion: string;
   providerConfigVersion: number;
   createdByUserId: string;
+  createdByName?: string | null;
   updatedAt: string;
   events: JobEvent[];
   lastNotice: string | null;
@@ -147,7 +148,12 @@ export class JobsService {
       orderBy: { updatedAt: "desc" },
     });
     const jobs = rows.map((row) => this.toJob(row)).filter((job) => canReviewJob(role, grants, { ownerUserId: job.createdByUserId, channelId: job.channelId }, userId));
-    return this.attachPipelineState(jobs);
+    const [withPipeline, creators] = await Promise.all([
+      this.attachPipelineState(jobs),
+      jobs.length ? this.prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.createdByUserId))] } }, select: { id: true, displayName: true } }) : Promise.resolve([]),
+    ]);
+    const nameById = new Map(creators.map((creator) => [creator.id, creator.displayName]));
+    return withPipeline.map((job) => ({ ...job, createdByName: nameById.get(job.createdByUserId) ?? null }));
   }
 
   /** VE2E-18: `GET /jobs/:id` display path - internal `get()` callers (approve/generate/...) don't need pipeline state. */

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Banner, ChannelAvatar, EmptyState, KpiCard, LegendDot, MiniSpark, PageHeader, StatusPill, TrendChart } from "../components/chrome";
+import { Play } from "lucide-react";
+import { Banner, ChannelAvatar, EmptyState, KpiCard, MiniSpark, PageHeader, StatusPill } from "../components/chrome";
+import { ChannelGrowthChart } from "../components/ChannelGrowthChart";
+import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { DataTable } from "../components/DataTable";
 import { Modal } from "../components/Modal";
 import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
@@ -182,6 +185,7 @@ export function ChannelDetailPage() {
   const [metric, setMetric] = useState<"followers" | "likes" | "views" | "comments" | "shares" | "video_count">("followers");
   const [insights, setInsights] = useState<ChannelInsights | null>(null);
   const [videos, setVideos] = useState<ChannelVideoResponse[]>([]);
+  const [playing, setPlaying] = useState<ChannelVideoResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<"sync" | "disable" | null>(null);
@@ -199,18 +203,6 @@ export function ChannelDetailPage() {
   if (!insights) return <Banner variant="info">{t("common.loading")}</Banner>;
   const channel = insights.channel;
   const handleLabel = channelHandleLabel(channel.handle);
-  const chartSeries = ["followers", "likes", "views", "comments", "shares", "video_count"]
-    .map((id) => {
-      const item = insights.metrics.find((row) => row.id === id);
-      if (!item?.series.length) return null;
-      return {
-        id,
-        label: t(`home.metric.${id}`),
-        color: METRIC_COLORS[id] ?? "var(--lyx-fg)",
-        points: item.series,
-      };
-    })
-    .filter((row): row is NonNullable<typeof row> => row !== null);
   return (
     <>
       {error ? <Banner variant="danger">{error}</Banner> : null}
@@ -304,14 +296,8 @@ export function ChannelDetailPage() {
           );
         })}
       </div>
-      <div className="mb-4 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="text-[13px] font-bold">{t("home.chart")}</span>
-          {chartSeries.map((line) => (
-            <LegendDot key={line.id} color={line.color}>{line.label}</LegendDot>
-          ))}
-        </div>
-        <TrendChart series={chartSeries} emphasisId={metric} label={t("home.chart")} />
+      <div className="mb-4">
+        <ChannelGrowthChart metric={insights.metrics.find((row) => row.id === metric)} label={t(`home.metric.${metric}`)} color={METRIC_COLORS[metric] ?? "#2563eb"} />
       </div>
       <Banner variant="info">{channel.authType === "oauth2" ? t("channels.metricsHint") : t("channels.secretHint")}</Banner>
 
@@ -320,35 +306,25 @@ export function ChannelDetailPage() {
         {videos.length === 0 ? (
           <EmptyState title={t("channels.videoLibraryEmpty")} />
         ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
             {videos.map((video) => (
-              // VE2E-13: resultUrl plays only inside Studio, never as direct autoplay/open
-              // from a list like this one — route into the same job's Studio, deep-linked to
-              // this render (StudioProPage already reads `?renderJobId=` on mount, VE2E-18).
-              <button
-                key={video.renderJobId}
-                type="button"
-                onClick={() => navigate(`/jobs/${video.jobId}/studio?renderJobId=${video.renderJobId}`)}
-                className="overflow-hidden rounded-[6px] border border-lyx-border text-left"
-              >
-                <div className="relative flex items-center justify-center bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
-                  {video.thumbnailUrl ? (
-                    <img src={video.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <span className="text-[10px] text-lyx-fg-subtle">9:16</span>
-                  )}
-                  <span className="absolute bottom-1.5 right-1.5 rounded-[4px] bg-lyx-bg/80 px-1.5 py-0.5 text-[10px] font-medium">
-                    {formatVideoDuration(video.renderDurationMs)}
-                  </span>
+              <article key={video.renderJobId} className="overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
+                <div className="relative">
+                  <VideoThumbnail snapshotUrl={video.thumbnailUrl} resultUrl={video.resultUrl} className="aspect-[3/2] w-full" />
+                  <button type="button" onClick={() => setPlaying(video)} aria-label={`${t("videoGallery.play")}: ${video.title}`} className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full bg-black/85 text-white"><Play size={18} fill="currentColor" /></button>
                 </div>
-                <div className="p-2">
-                  <div className="line-clamp-2 text-[12px]">{video.caption}</div>
+                <div className="space-y-1.5 p-2.5">
+                  <p className="truncate text-[13px] font-semibold">{video.title}</p>
+                  {video.caption !== video.title ? <p className="truncate text-[11px] text-lyx-fg-muted">{video.caption}</p> : null}
+                  {video.createdByName ? <p className="text-[11px] text-lyx-fg-muted">{t("jobs.creator")}: {video.createdByName}</p> : null}
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted"><span>{formatVideoDuration(video.renderDurationMs)}</span><button type="button" onClick={() => navigate(`/jobs/${video.jobId}/studio?renderJobId=${video.renderJobId}`)} className="underline">{t("videoProduction.openStudio")}</button></div>
                 </div>
-              </button>
+              </article>
             ))}
           </div>
         )}
       </div>
+      {playing ? <VideoPlayerDialog title={playing.title} caption={playing.caption} url={playing.resultUrl} onClose={() => setPlaying(null)} /> : null}
     </>
   );
 }

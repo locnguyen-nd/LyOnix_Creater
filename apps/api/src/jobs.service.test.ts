@@ -88,6 +88,7 @@ describe("pipeline step resolution (VE2E-18)", () => {
     rows = [makeRow()];
 
     const prisma: any = {
+      user: { findMany: async () => [{ id: userId, displayName: "Test creator" }] },
       productionRequest: {
         findMany: async () => rows,
         findUnique: async ({ where }: any) => rows.find((row) => row.id === where.id) ?? null,
