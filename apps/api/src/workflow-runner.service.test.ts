@@ -196,9 +196,11 @@ describe("WorkflowRunnerService", () => {
       "run-1",
     );
     const submittedAssignments = (renderJobs.submit as ReturnType<typeof vi.fn>).mock.calls[0]![3].assignments;
+    // The rendered caption is the scene's narration, not its separately-authored screenText -
+    // guarantees the on-screen text matches word-for-word what the voice actually says.
     expect(submittedAssignments).toEqual([
       { modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "pexels-scene-1" },
-      { modificationKey: "Text-1.text", kind: "text", text: "Screen 1" },
+      { modificationKey: "Text-1.text", kind: "text", text: "Narration 1" },
       { modificationKey: "Video-2.source", kind: "video", mediaAssetVersionId: "pexels-scene-2" },
     ]);
     expect(runs[0]).toMatchObject({ status: "render_queued" });

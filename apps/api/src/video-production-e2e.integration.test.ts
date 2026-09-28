@@ -479,7 +479,10 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     const submittedBody = JSON.parse(submitCall!.body!) as { modifications: Record<string, string> };
     expect(submittedBody.modifications["Video-1.source"]).toContain("/media-delivery/");
     expect(submittedBody.modifications["Video-2.source"]).toContain("/media-delivery/");
-    expect(submittedBody.modifications["Text-1.text"]).toBe("Messi");
+    // The rendered caption is the scene's narration, not its separately-authored (and here
+    // deliberately shorter) screenText - guarantees the on-screen text fully matches what the
+    // voice actually says, word for word.
+    expect(submittedBody.modifications["Text-1.text"]).toBe("Messi la mot cau thu bong da noi tieng the gioi.");
   });
 
   it("fails closed to blocked_provider through the real wiring when the content account is not verified - zero provider calls, never a runtime fake fallback", async () => {

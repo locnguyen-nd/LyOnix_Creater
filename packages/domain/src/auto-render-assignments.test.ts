@@ -4,7 +4,7 @@ import { buildAutoRenderAssignments, type AutoSceneMedia, type AutoTemplateSlot 
 const scene = (overrides: Partial<AutoSceneMedia>): AutoSceneMedia => ({
   sceneId: "scene-1",
   orderIndex: 0,
-  screenText: "",
+  displayText: "",
   visualMediaAssetVersionId: null,
   visualKind: null,
   audioMediaAssetVersionId: null,
@@ -25,8 +25,8 @@ describe("buildAutoRenderAssignments", () => {
       { key: "Audio-1.source", kind: "audio", required: false },
     ];
     const scenes: AutoSceneMedia[] = [
-      scene({ sceneId: "s2", orderIndex: 1, screenText: "Cảnh hai", visualMediaAssetVersionId: "asset-2", visualKind: "video" }),
-      scene({ sceneId: "s1", orderIndex: 0, screenText: "Cảnh một", visualMediaAssetVersionId: "asset-1", visualKind: "video", audioMediaAssetVersionId: "audio-1" }),
+      scene({ sceneId: "s2", orderIndex: 1, displayText: "Cảnh hai", visualMediaAssetVersionId: "asset-2", visualKind: "video" }),
+      scene({ sceneId: "s1", orderIndex: 0, displayText: "Cảnh một", visualMediaAssetVersionId: "asset-1", visualKind: "video", audioMediaAssetVersionId: "audio-1" }),
     ];
     const result = buildAutoRenderAssignments(slots, scenes);
     expect(result.ok).toBe(true);
@@ -65,7 +65,7 @@ describe("buildAutoRenderAssignments", () => {
       { key: "Text-1.text", kind: "text", required: true },
       { key: "Text-2.text", kind: "text", required: true },
     ];
-    const scenes: AutoSceneMedia[] = [scene({ orderIndex: 0, screenText: "Nội dung" })];
+    const scenes: AutoSceneMedia[] = [scene({ orderIndex: 0, displayText: "Nội dung" })];
     const result = buildAutoRenderAssignments(slots, scenes, { title: "Tiêu đề", caption: "Caption" });
     expect(result).toEqual({
       ok: true,
