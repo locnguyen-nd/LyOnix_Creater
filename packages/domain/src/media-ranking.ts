@@ -254,6 +254,8 @@ export type MediaRankingOptions = {
 export type RankedMediaCandidate = {
   candidate: MediaCandidate;
   semanticScore: number;
+  /** False when `semanticScore` is only the blind `NEUTRAL_SEMANTIC_SCORE` default (no descriptor text, no vision findings) - i.e. we have literally no evidence the candidate matches the scene, as opposed to having checked and found a middling match. `decideMediaSelection` must never auto-select on this alone (spec §5: "do not label them as visually verified or let Auto silently accept a weak match"). */
+  hasVerifiedSemanticSignal: boolean;
   continuityScore: number;
   qualityScore: number;
   costScore: number;
@@ -293,6 +295,10 @@ const computeSemanticScore = (candidate: MediaCandidate, brief: SceneBrief): num
   }
   return metadataSemantic;
 };
+
+/** True only when the semantic score above is backed by real evidence (candidate metadata text, or a real vision inspection) rather than the blind neutral default. */
+const hasVerifiedSemanticSignal = (candidate: MediaCandidate): boolean =>
+  Boolean(candidate.descriptorText?.trim()) || (candidate.visionFindings != null && candidate.visionFindings.sceneBeatRelevance !== null);
 
 /** A candidate whose own descriptive text matches an explicit scene exclusion is a hard filter, not just a low score - only checkable when the source provides descriptive text at all. */
 const matchesExclusion = (candidate: MediaCandidate, brief: SceneBrief): boolean => {
@@ -359,6 +365,7 @@ export function rankMediaCandidates(
       return {
         candidate,
         semanticScore,
+        hasVerifiedSemanticSignal: hasVerifiedSemanticSignal(candidate),
         continuityScore,
         qualityScore,
         costScore,
@@ -374,6 +381,7 @@ export function rankMediaCandidates(
 export type MediaSelectionAbstentionReason =
   | "no_candidates"
   | "below_relevance_threshold"
+  | "unverified_relevance"
   | "rights_unresolved"
   | "not_auto_eligible"
   | "rejected_by_moderation";
@@ -382,26 +390,56 @@ export type MediaSelectionDecision =
   | { decision: "auto_select"; chosen: MediaCandidate; ranked: RankedMediaCandidate[] }
   | { decision: "needs_input"; reason: MediaSelectionAbstentionReason; ranked: RankedMediaCandidate[] };
 
-export type MediaSelectionOptions = { relevanceThreshold?: number };
+export type MediaSelectionOptions = {
+  relevanceThreshold?: number;
+  /**
+   * When true, a non-video candidate whose semantic score is only the blind neutral default (no
+   * descriptor text, no vision findings) can never be `auto_select`ed, regardless of how well it
+   * scores on continuity/quality/cost - this is the spec §5 "no vision-capable account configured"
+   * guard, meant for a fully unattended caller (Auto's `autoImportForScene`) where nothing else
+   * stands between this pick and the final render. Left `false` (default) for a human-supervised
+   * picker (e.g. Studio's "auto-fill" convenience helper, `apps/web/src/studio/media-selection.ts`)
+   * where the operator reviews and can replace the pick before anything renders - unchanged prior
+   * behavior there.
+   *
+   * Deliberately scoped to non-video candidates only: Pexels' video search returns no alt/tag text
+   * at all (`pexelsVideoToMediaCandidate` always sets `descriptorText: null` - a real provider
+   * limitation, not a bug), and real per-frame vision verification needs frame extraction that only
+   * `apps/media-worker` can run (FFmpeg never runs in an HTTP request) - infrastructure that does
+   * not exist yet. Gating video the same way as images here would make Auto abstain to
+   * `needs_input` on nearly every video-based scene, defeating its "no human gate" purpose for its
+   * primary media type. Photo candidates DO carry real Pexels alt text, so gating them is a real,
+   * immediately-available accuracy improvement. Video-specific relevance verification remains a
+   * known gap for a follow-up task once vision+frame-extraction wiring exists.
+   */
+  requireVerifiedSemanticSignal?: boolean;
+};
 
 /**
  * Walks the ranked list (already sorted best-first) looking for the first candidate that is
  * simultaneously: not rejected by vision moderation, at/above the relevance threshold, rights
- * `cleared`, and `eligibility.autoEligible`. A merely-rejected or rights-unclear top candidate
- * does not abort the whole scene if a lower-ranked candidate is fully usable - but Auto never
- * silently falls back to a candidate below the relevance threshold, no matter its rank.
+ * `cleared`, and `eligibility.autoEligible` - plus, when `requireVerifiedSemanticSignal` is set, a
+ * non-video candidate must also be backed by a real (non-blind) relevance signal (see that option's
+ * own doc comment for why video is exempted). A merely-rejected, unverified, or rights-unclear top
+ * candidate does not abort the whole scene if a lower-ranked candidate is fully usable - but Auto
+ * never silently falls back to a candidate below the relevance threshold, no matter its rank.
  */
 export function decideMediaSelection(ranked: readonly RankedMediaCandidate[], options: MediaSelectionOptions = {}): MediaSelectionDecision {
   const threshold = options.relevanceThreshold ?? MEDIA_RELEVANCE_THRESHOLD;
   const list = [...ranked];
   if (list.length === 0) return { decision: "needs_input", reason: "no_candidates", ranked: list };
   let sawBelowThreshold = false;
+  let sawUnverified = false;
   let sawRightsUnresolved = false;
   let sawIneligible = false;
   let sawRejected = false;
   for (const entry of list) {
     if (entry.candidate.moderationDecision === "rejected") {
       sawRejected = true;
+      continue;
+    }
+    if (options.requireVerifiedSemanticSignal && entry.candidate.mediaType !== "video" && !entry.hasVerifiedSemanticSignal) {
+      sawUnverified = true;
       continue;
     }
     if (entry.combinedScore < threshold) {
@@ -422,9 +460,11 @@ export function decideMediaSelection(ranked: readonly RankedMediaCandidate[], op
     ? "rights_unresolved"
     : sawIneligible
       ? "not_auto_eligible"
-      : sawRejected && !sawBelowThreshold
+      : sawRejected && !sawBelowThreshold && !sawUnverified
         ? "rejected_by_moderation"
-        : "below_relevance_threshold";
+        : sawUnverified && !sawBelowThreshold
+          ? "unverified_relevance"
+          : "below_relevance_threshold";
   return { decision: "needs_input", reason, ranked: list };
 }
 

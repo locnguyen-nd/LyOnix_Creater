@@ -203,6 +203,59 @@ describe("decideMediaSelection", () => {
     const decision = decideMediaSelection(ranked);
     expect(decision).toMatchObject({ decision: "needs_input", reason: "rejected_by_moderation" });
   });
+
+  const photoCandidate = (overrides: Partial<MediaCandidate> = {}) =>
+    candidate({ mediaType: "photo", candidateId: "pexels:photo:1", ...overrides });
+
+  it("without requireVerifiedSemanticSignal, still auto-selects a candidate with no descriptor/vision evidence (unchanged Studio auto-fill behavior)", () => {
+    const noEvidence = candidate(); // descriptorText/visionFindings both null by default
+    const ranked = rankMediaCandidates([noEvidence], brief);
+    const decision = decideMediaSelection(ranked);
+    expect(decision.decision).toBe("auto_select");
+  });
+
+  it("with requireVerifiedSemanticSignal, a video candidate with no descriptor/vision evidence is still auto-selected (Pexels video search returns no alt/tag text at all - gating it would make Auto abstain on nearly every video scene; real per-frame verification needs media-worker frame extraction that does not exist yet, tracked as a separate follow-up)", () => {
+    const noEvidenceVideo = candidate({ mediaType: "video" });
+    const ranked = rankMediaCandidates([noEvidenceVideo], brief);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    expect(decision.decision).toBe("auto_select");
+  });
+
+  it("with requireVerifiedSemanticSignal, abstains on a PHOTO candidate with no descriptor/vision evidence instead of trusting continuity/quality/cost alone (Auto's guard against the JOB-1007-class bug for the media type where real Pexels alt text is actually available)", () => {
+    const noEvidencePhoto = photoCandidate();
+    const ranked = rankMediaCandidates([noEvidencePhoto], brief);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    expect(decision).toMatchObject({ decision: "needs_input", reason: "unverified_relevance" });
+  });
+
+  it("with requireVerifiedSemanticSignal, still auto-selects a photo once real evidence (descriptor/alt text) is present", () => {
+    const verified = photoCandidate({ descriptorText: "a person walking along the beach at sunrise" });
+    const ranked = rankMediaCandidates([verified], brief);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    expect(decision.decision).toBe("auto_select");
+  });
+
+  it("with requireVerifiedSemanticSignal, real vision findings alone (no descriptor text) also count as verified for a photo", () => {
+    const visionOnly = photoCandidate({
+      visionFindings: {
+        decision: "accepted", confidence: 0.9, reasonCodes: ["safety_clear_high_confidence"], sceneBeatRelevance: 0.85, safetyFindings: [],
+        provider: "gemini", model: "gemini-2.5-flash", operation: "image_moderation", version: "vision-moderation-policy.v1",
+        evidenceRefs: [], decidedAt: "2026-09-28T00:00:00.000Z",
+      },
+    });
+    const ranked = rankMediaCandidates([visionOnly], brief);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    expect(decision.decision).toBe("auto_select");
+  });
+
+  it("with requireVerifiedSemanticSignal, skips an unverified top photo and falls through to a verified lower-ranked one", () => {
+    const unverified = photoCandidate({ externalId: "unverified" });
+    const verified = photoCandidate({ externalId: "verified", candidateId: "pexels:photo:verified", descriptorText: "a person walking near the beach" });
+    const ranked = rankMediaCandidates([unverified, verified], brief);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    expect(decision.decision).toBe("auto_select");
+    if (decision.decision === "auto_select") expect(decision.chosen.externalId).toBe("verified");
+  });
 });
 
 describe("canAutoApplyMediaCandidate", () => {

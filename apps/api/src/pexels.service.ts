@@ -62,9 +62,12 @@ const providerErrorMessage: Record<string, string> = {
 };
 
 /** VE2E-15a abstention reasons that reach here always come from a non-empty candidate pool (an empty pool short-circuits earlier to `PROVIDER_CAPABILITY_UNAVAILABLE`, matching the pre-existing "no results" contract), so `no_candidates` is unreachable at this call site. */
-const abstentionOutcome = (reason: "below_relevance_threshold" | "rights_unresolved" | "not_auto_eligible" | "rejected_by_moderation"): { code: ErrorCode; message: string; status: number } => {
+const abstentionOutcome = (reason: "below_relevance_threshold" | "unverified_relevance" | "rights_unresolved" | "not_auto_eligible" | "rejected_by_moderation"): { code: ErrorCode; message: string; status: number } => {
   if (reason === "below_relevance_threshold") {
     return { code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Không tìm thấy media đủ liên quan cho scene (dưới ngưỡng), cần chọn thủ công trong Studio.", status: 422 };
+  }
+  if (reason === "unverified_relevance") {
+    return { code: "MEDIA_RELEVANCE_UNVERIFIED", message: "Không có mô tả/kiểm duyệt hình ảnh để xác nhận media khớp chủ đề scene — cần chọn thủ công trong Studio.", status: 422 };
   }
   if (reason === "rights_unresolved") {
     return { code: "MEDIA_RIGHTS_UNRESOLVED", message: "Media phù hợp nhất cho scene có quyền sử dụng chưa rõ, cần Studio xác nhận thủ công.", status: 422 };
@@ -325,7 +328,13 @@ export class PexelsService {
     }
 
     const ranked = rankMediaCandidates(pool, brief, { usedExternalIds });
-    const decision = decideMediaSelection(ranked);
+    // Auto is fully unattended (no human reviews the pick before render), so a photo candidate with
+    // no real relevance evidence at all (no alt text, no vision findings) must never be
+    // auto-selected on continuity/quality/cost alone. Video is exempted from this guard - Pexels'
+    // video search returns no descriptive text at all, and real per-frame verification needs
+    // media-worker frame extraction that does not exist yet (see requireVerifiedSemanticSignal's
+    // own doc comment in media-ranking.ts) - so it keeps its prior (pre-VE2E-15a-hardening) behavior.
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
     if (decision.decision === "needs_input") {
       if (decision.reason === "no_candidates") {
         // Unreachable in practice (guarded by the `pool.length === 0` check above) - kept only so this switch stays exhaustive if the guard above is ever refactored away.

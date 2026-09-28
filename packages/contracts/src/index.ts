@@ -52,6 +52,7 @@ export type ErrorCode =
   // candidate - both route the workflow run to `needs_input` (see `NEEDS_INPUT_CODES` in
   // apps/api/src/workflow-runner.service.ts), never an implicit accept.
   | "MEDIA_RELEVANCE_BELOW_THRESHOLD"
+  | "MEDIA_RELEVANCE_UNVERIFIED"
   | "MEDIA_RIGHTS_UNRESOLVED";
 
 export type ErrorEnvelope = {
