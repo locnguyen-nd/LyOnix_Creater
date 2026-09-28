@@ -5,9 +5,12 @@ import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button } from "../components/ui";
 import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
-import { getVideoProduction, listVideoProductionEvents } from "../video-productions-api";
+import { getVideoProduction, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
+// Matches video-productions.service.ts's own retriableStatuses — "cancelled" is deliberately
+// not offered a one-click retry here.
+const RETRIABLE_STATUSES = new Set<WorkflowRunStatus>(["failed", "blocked_provider", "needs_input"]);
 const POLL_MS = 2500;
 
 function statusTone(status: WorkflowRunStatus) {
@@ -24,6 +27,11 @@ export function VideoProductionPage() {
   const [run, setRun] = useState<VideoProductionResponse | null>(null);
   const [events, setEvents] = useState<WorkflowStepEventResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  // Bumped after a successful retry to re-run the polling effect below - the poll loop stops
+  // its interval once it observes a TERMINAL_STATUSES status, so restarting it after the run
+  // goes back to "draft" needs a fresh effect run, not just a state update inside the old one.
+  const [refreshKey, setRefreshKey] = useState(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -49,7 +57,22 @@ export function VideoProductionPage() {
       if (pollTimer.current) clearInterval(pollTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [id, refreshKey]);
+
+  const retry = async () => {
+    if (!run) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      await retryVideoProduction(run.id);
+      setRun((prev) => (prev ? { ...prev, status: "draft", lastError: null } : prev));
+      setRefreshKey((key) => key + 1);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t("common.error"));
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   if (error) return <Banner variant="danger">{error}</Banner>;
   if (!run) return <Banner variant="info">{t("common.loading")}</Banner>;
@@ -63,9 +86,16 @@ export function VideoProductionPage() {
         title={t("videoProduction.title")}
         breadcrumb={run.id}
         actions={
-          <Button variant="secondary" disabled={!canOpenStudio} onClick={() => navigate(`/video-productions/${run.id}/studio`)}>
-            {t("videoProduction.openStudio")}
-          </Button>
+          <>
+            {RETRIABLE_STATUSES.has(run.status) ? (
+              <Button variant="secondary" disabled={retrying} onClick={() => void retry()}>
+                {retrying ? t("videoProduction.retrying") : t("videoProduction.retry")}
+              </Button>
+            ) : null}
+            <Button variant="secondary" disabled={!canOpenStudio} onClick={() => navigate(`/video-productions/${run.id}/studio`)}>
+              {t("videoProduction.openStudio")}
+            </Button>
+          </>
         }
       />
       <div className="mb-4 flex items-center gap-3">

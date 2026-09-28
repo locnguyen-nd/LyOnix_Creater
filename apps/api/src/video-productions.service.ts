@@ -43,6 +43,7 @@ export type AutoProfileSetupResponse = { projectId: string; automationProfileId:
 const notFoundProject = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy dự án", status: 404 };
 const notFoundRun = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy video production", status: 404 };
 const removableStatuses = ["completed", "failed", "cancelled", "blocked_provider", "needs_input"] as const;
+const retriableStatuses = ["failed", "blocked_provider", "needs_input"] as const;
 
 @Injectable()
 export class VideoProductionsService {
@@ -264,6 +265,32 @@ export class VideoProductionsService {
     const updated = await this.prisma.workflowRun.updateMany({ where: { id, status: run.status, deletedAt: null }, data: { deletedAt: new Date() } });
     if (updated.count === 0) return { ok: false, code: "INVALID_STATE", message: "Trạng thái video vừa thay đổi. Hãy tải lại rồi thử xóa.", status: 409 };
     return { ok: true, data: { deleted: true } };
+  }
+
+  /**
+   * Re-queues one stuck Auto run for the background worker to pick up again
+   * (`WorkflowRunnerService.processOneDraft()` only claims `status: "draft"` rows). This is a
+   * user-initiated action, so it always resets `attempts` back to 1 regardless of how many
+   * automatic transient-failure retries already happened - a manual retry the user explicitly
+   * asked for should get its own fresh allowance, not immediately re-block because the automatic
+   * counter was already at `AutomationProfileVersion.retryPolicy.maxAttempts`. The pipeline itself
+   * (`WorkflowRunnerService.runPipeline`) re-enters from its first step, but reuses an already-
+   * approved script and any scene's already-generated (`current`) audio instead of regenerating
+   * them, so a run that failed at e.g. the media step does not re-pay for script/voice again.
+   */
+  async retry(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<{ retried: true }>> {
+    const run = await this.prisma.workflowRun.findUnique({ where: { id }, select: { id: true, mode: true, projectId: true, createdByUserId: true, status: true, deletedAt: true } });
+    if (!run || run.mode !== "auto" || run.deletedAt || run.createdByUserId !== userId) return notFoundRun;
+    if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
+    if (!retriableStatuses.includes(run.status as (typeof retriableStatuses)[number])) {
+      return { ok: false, code: "INVALID_STATE", message: "Chỉ có thể làm lại video đã thất bại, bị chặn, hoặc cần xử lý thủ công.", status: 409 };
+    }
+    const updated = await this.prisma.workflowRun.updateMany({
+      where: { id, status: run.status, deletedAt: null },
+      data: { status: "draft", attempts: 1, lastError: Prisma.JsonNull },
+    });
+    if (updated.count === 0) return { ok: false, code: "INVALID_STATE", message: "Trạng thái video vừa thay đổi. Hãy tải lại rồi thử lại.", status: 409 };
+    return { ok: true, data: { retried: true } };
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<VideoProductionResponse>> {

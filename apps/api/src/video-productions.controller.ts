@@ -93,6 +93,15 @@ export class VideoProductionsController {
     return success(outcome.data, requestId(response));
   }
 
+  @Post("video-productions/:id/retry")
+  async retry(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const outcome = await this.productions.retry(id, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
+    return success(outcome.data, requestId(response));
+  }
+
   /** Poll-based progress feed (§5 allows SSE hoặc poll — poll here, matching every other VE2E-06..08 status endpoint in this codebase so far). */
   @Get("video-productions/:id/events")
   async events(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {

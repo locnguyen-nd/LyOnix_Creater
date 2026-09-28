@@ -56,7 +56,9 @@ export function JobNewPage() {
   const [busy, setBusy] = useState(false);
 
   // VE2E-08: Auto entry (spec §7) - toggle Auto|Studio, single CTA, preflight must be all-green.
-  const [entryMode, setEntryMode] = useState<"manual" | "auto">("manual");
+  // `entry` (not `mode` - that name is already taken above by the topic/revise toggle) lets a
+  // caller like the "Video Auto" list page's "create new" button deep-link straight into Auto.
+  const [entryMode, setEntryMode] = useState<"manual" | "auto">(params.get("entry") === "auto" ? "auto" : "manual");
   const [autoSourceType, setAutoSourceType] = useState<(typeof AUTO_SOURCE_TYPES)[number]>("topic");
   const [autoRawScript, setAutoRawScript] = useState("");
   const [autoArticleUrl, setAutoArticleUrl] = useState("");

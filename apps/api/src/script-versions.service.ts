@@ -96,6 +96,21 @@ export class ScriptVersionsService {
   }
 
   /**
+   * Retry support (Auto): the already-approved script for this source, if one exists, so a
+   * retried `WorkflowRun` can reuse it instead of generating (and paying for) a brand new one
+   * with different `sceneId`s — which would also defeat the media/voice idempotency checks
+   * downstream, since those key off the stable scene ids this approved version already fixed.
+   * Returns `data: null` (not an error) when no approved version exists yet.
+   */
+  async getApprovedForSource(sourceVersionId: string, userId: string, role: "admin" | "staff"): Promise<ScriptVersionOutcome<ScriptDraftVersionResponse | null>> {
+    const source = await this.assertSourceAccess(sourceVersionId, userId, role);
+    if (!source) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy nguồn", status: 404 };
+    if (source === "forbidden") return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy nguồn", status: 404 };
+    const row = await this.prisma.scriptDraftVersion.findFirst({ where: { sourceVersionId, status: "approved" }, orderBy: { version: "desc" }, include: { scenes: true } });
+    return { ok: true, data: row ? toResponse(row) : null };
+  }
+
+  /**
    * Persists a `ScriptDraftV2` (already generated via `POST /sources/:id/script-drafts`,
    * VE2E-01) as a new draft `ScriptDraftVersion` + its scenes. Does not call any
    * provider — this is a pure persistence step, callers pass the draft + providerPin
