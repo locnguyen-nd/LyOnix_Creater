@@ -111,7 +111,15 @@ export function deriveTemplateModifications(source: unknown): TemplateModificati
     const name = typeof record.name === "string" ? record.name.trim() : "";
     const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
     const kind = ELEMENT_KIND[type];
-    if (name && kind) {
+    // Creatomate itself only treats an element as automation-fillable when the template author
+    // marked it `dynamic` (true or a property array) — see "No-code handoffs": "Only what is
+    // marked Dynamic appears as a field". A named text/media element without that flag is a
+    // fixed, author-authored part of the design (a rank badge, a persistent logo, static copy)
+    // and must never enter the same per-scene fill queue as the real content slots — otherwise
+    // Auto's positional mapper (buildAutoRenderAssignments) shifts scene narration onto it and
+    // starves/misaligns the real slots, which is exactly the bug this guard fixes.
+    const isDynamic = record.dynamic === true || (Array.isArray(record.dynamic) && record.dynamic.length > 0);
+    if (name && kind && isDynamic) {
       if (kind === "text") {
         push(`${name}.text`, "text", true);
         push(`${name}.font_family`, "font", false);

@@ -59,15 +59,15 @@ describe("listCreatomateTemplates / getCreatomateTemplate", () => {
 });
 
 describe("deriveTemplateModifications", () => {
-  it("derives text/video/image modification keys from a named element tree", () => {
+  it("derives text/video/image modification keys from a named, dynamic element tree", () => {
     const source = {
       elements: [
-        { name: "Video-1", type: "video" },
-        { name: "Text-1", type: "text" },
-        { name: "Image-1", type: "image" },
-        { name: "Audio-1", type: "audio" },
-        { name: "Unnamed", type: "shape" },
-        { type: "text" }, // no name -> ignored
+        { name: "Video-1", type: "video", dynamic: true },
+        { name: "Text-1", type: "text", dynamic: true },
+        { name: "Image-1", type: "image", dynamic: true },
+        { name: "Audio-1", type: "audio", dynamic: true },
+        { name: "Unnamed", type: "shape", dynamic: true },
+        { type: "text", dynamic: true }, // no name -> ignored
       ],
     };
     const slots = deriveTemplateModifications(source);
@@ -87,8 +87,28 @@ describe("deriveTemplateModifications", () => {
     expect(slots.find((s) => s.key === "Audio-1.source")).toMatchObject({ kind: "audio", required: false });
   });
 
+  it("skips a named text/media element that is not marked dynamic (fixed authored content, e.g. a rank badge or a persistent logo)", () => {
+    const source = {
+      elements: [
+        { name: "Subtitles-1", type: "text", dynamic: true },
+        { name: "RankBadge-1", type: "text", text: "第5位" }, // no `dynamic` -> must stay out of the fillable-text queue
+        { name: "Logo-Top5", type: "text", text: "TOP5" }, // same
+        { name: "Video-1", type: "video", dynamic: true },
+      ],
+    };
+    const slots = deriveTemplateModifications(source);
+    const keys = slots.map((s) => s.key).sort();
+    expect(keys).toEqual(["Subtitles-1.fill_color", "Subtitles-1.font_family", "Subtitles-1.text", "Video-1.source", "Video-1.volume"]);
+  });
+
+  it("treats a `dynamic` property array the same as `dynamic: true` (still exposes the element)", () => {
+    const source = { elements: [{ name: "Title-1", type: "text", dynamic: ["fill_color"] }] };
+    const slots = deriveTemplateModifications(source);
+    expect(slots.map((s) => s.key)).toContain("Title-1.text");
+  });
+
   it("walks nested composition/track structures", () => {
-    const source = { elements: [{ type: "composition", elements: [{ name: "Nested-Text", type: "text" }] }] };
+    const source = { elements: [{ type: "composition", elements: [{ name: "Nested-Text", type: "text", dynamic: true }] }] };
     const slots = deriveTemplateModifications(source);
     expect(slots.map((s) => s.key)).toContain("Nested-Text.text");
   });
