@@ -42,6 +42,7 @@ export type AutoProfileSetupResponse = { projectId: string; automationProfileId:
 
 const notFoundProject = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy dự án", status: 404 };
 const notFoundRun = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy video production", status: 404 };
+const removableStatuses = ["completed", "failed", "cancelled", "blocked_provider", "needs_input"] as const;
 
 @Injectable()
 export class VideoProductionsService {
@@ -198,15 +199,24 @@ export class VideoProductionsService {
       if (!(await this.assertReadAccess(projectId, userId, role))) return notFoundProject;
     }
     const runs = await this.prisma.workflowRun.findMany({
-      where: { mode: "auto", ...(projectId ? { projectId } : { createdByUserId: userId }) },
+      where: { mode: "auto", deletedAt: null, ...(projectId ? { projectId } : { createdByUserId: userId }) },
       orderBy: { createdAt: "desc" },
-      select: { id: true, projectId: true, status: true, sourceVersionId: true, lastError: true, createdAt: true, updatedAt: true },
+      select: {
+        id: true, projectId: true, status: true, sourceVersionId: true, lastError: true, createdAt: true, updatedAt: true,
+        createdBy: { select: { displayName: true } },
+        sourceVersion: {
+          select: {
+            type: true, rawText: true, originRef: true,
+            scriptDraftVersions: { orderBy: { version: "desc" }, take: 1, select: { title: true, caption: true } },
+          },
+        },
+      },
     });
     if (runs.length === 0) return { ok: true, data: [] };
     const renderRows = await this.prisma.renderJob.findMany({
       where: { workflowRunId: { in: runs.map((run) => run.id) } },
       orderBy: { createdAt: "desc" },
-      select: { workflowRunId: true, resultUrl: true, snapshotUrl: true, costAmount: true, renderDurationMs: true },
+      select: { workflowRunId: true, resultUrl: true, snapshotUrl: true, costAmount: true, costCurrency: true, renderDurationMs: true },
     });
     const latestRenderByRun = new Map<string, (typeof renderRows)[number]>();
     for (const row of renderRows) {
@@ -216,14 +226,24 @@ export class VideoProductionsService {
       ok: true,
       data: runs.map((run) => {
         const render = latestRenderByRun.get(run.id) ?? null;
+        const source = run.sourceVersion;
+        const script = source?.scriptDraftVersions[0];
+        const sourceTitle = source?.type === "article_url"
+          ? source.originRef
+          : source?.rawText?.trim().split(/\r?\n/)[0];
         return {
           id: run.id,
           projectId: run.projectId,
           status: run.status,
           sourceVersionId: run.sourceVersionId,
+          title: (script?.title?.trim() || sourceTitle?.trim() || null)?.slice(0, 160) ?? null,
+          caption: script?.caption?.trim() || null,
+          sourceType: source?.type ?? null,
+          createdByName: run.createdBy?.displayName ?? null,
           resultUrl: render?.resultUrl ?? null,
           snapshotUrl: render?.snapshotUrl ?? null,
           costAmount: render?.costAmount ? render.costAmount.toString() : null,
+          costCurrency: render?.costCurrency ?? null,
           renderDurationMs: render?.renderDurationMs ?? null,
           lastError: (run.lastError as VideoProductionListItemResponse["lastError"]) ?? null,
           createdAt: run.createdAt.toISOString(),
@@ -233,9 +253,22 @@ export class VideoProductionsService {
     };
   }
 
+  /** Hide one finished/stopped Auto run while retaining its render and provider audit records. */
+  async remove(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<{ deleted: true }>> {
+    const run = await this.prisma.workflowRun.findUnique({ where: { id }, select: { id: true, mode: true, projectId: true, createdByUserId: true, status: true, deletedAt: true } });
+    if (!run || run.mode !== "auto" || run.deletedAt || run.createdByUserId !== userId) return notFoundRun;
+    if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
+    if (!removableStatuses.includes(run.status as (typeof removableStatuses)[number])) {
+      return { ok: false, code: "INVALID_STATE", message: "Video đang xử lý; chỉ có thể xóa khi đã hoàn tất hoặc dừng.", status: 409 };
+    }
+    const updated = await this.prisma.workflowRun.updateMany({ where: { id, status: run.status, deletedAt: null }, data: { deletedAt: new Date() } });
+    if (updated.count === 0) return { ok: false, code: "INVALID_STATE", message: "Trạng thái video vừa thay đổi. Hãy tải lại rồi thử xóa.", status: 409 };
+    return { ok: true, data: { deleted: true } };
+  }
+
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<VideoProductionResponse>> {
     const run = await this.prisma.workflowRun.findUnique({ where: { id } });
-    if (!run) return notFoundRun;
+    if (!run || run.deletedAt) return notFoundRun;
     if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
     let scriptDraftVersionId: string | null = null;
     if (run.sourceVersionId) {
@@ -265,7 +298,7 @@ export class VideoProductionsService {
   /** Poll-based progress feed (§5 allows SSE hoặc poll) — every `StepRun` this run has recorded, oldest first. */
   async listEvents(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<WorkflowStepEventResponse[]>> {
     const run = await this.prisma.workflowRun.findUnique({ where: { id } });
-    if (!run) return notFoundRun;
+    if (!run || run.deletedAt) return notFoundRun;
     if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
     const steps = await this.prisma.stepRun.findMany({ where: { workflowRunId: id }, orderBy: [{ createdAt: "asc" }] });
     return {

@@ -72,6 +72,7 @@ export type ApiJob = {
   studioProjectId?: string | null;
   render?: ApiJobRenderSummary | null;
   createdByUserId: string;
+  createdByName?: string | null;
   updatedAt: string;
   script: ApiScript;
 };

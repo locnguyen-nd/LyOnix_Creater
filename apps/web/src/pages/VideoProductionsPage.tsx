@@ -1,20 +1,16 @@
-/**
- * VE2E-22: lists every Auto ("one-click") video-production run the caller themselves
- * created, across all of their self-provisioned projects — `POST /video-productions` (VE2E-08)
- * provisions a brand-new throwaway `Project` per submit and never writes a legacy
- * `ProductionRequest` row, so a run had no way to be found again anywhere in the UI once its
- * one-time submit response/URL was gone. `GET /video-productions` itself (VideoProductionsService.list())
- * already exists on `dev` (merged 2026-09-26, PR#6) — this page is purely the missing UI/nav
- * entry point, read-only, no new paid provider calls.
- */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
+import { Clock3, Play, Trash2, Wallet } from "lucide-react";
 import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome";
-import { DataTable } from "../components/DataTable";
+import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { ApiError } from "../api";
 import type { VideoProductionListItemResponse, WorkflowRunStatus } from "@lyonix/contracts";
-import { listVideoProductions } from "../video-productions-api";
+import { deleteVideoProduction, listVideoProductions } from "../video-productions-api";
+
+const filters = ["all", "completed", "active", "attention"] as const;
+type Filter = (typeof filters)[number];
+const PAGE_SIZE = 12;
 
 function statusTone(status: WorkflowRunStatus) {
   if (status === "completed") return "ok" as const;
@@ -24,14 +20,12 @@ function statusTone(status: WorkflowRunStatus) {
 }
 
 function formatDuration(ms: number | null) {
-  if (!ms) return "—";
+  if (!ms) return null;
   const totalSeconds = Math.round(ms / 1000);
   return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
 }
 
-function formatCost(row: VideoProductionListItemResponse) {
-  return row.costAmount ?? "—";
-}
+const needsAttention = (status: WorkflowRunStatus) => ["failed", "cancelled", "blocked_provider", "needs_input"].includes(status);
 
 export function VideoProductionsPage() {
   const { t } = useTranslation();
@@ -39,6 +33,10 @@ export function VideoProductionsPage() {
   const [rows, setRows] = useState<VideoProductionListItemResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [shown, setShown] = useState(PAGE_SIZE);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<VideoProductionListItemResponse | null>(null);
 
   useEffect(() => {
     void listVideoProductions()
@@ -47,35 +45,81 @@ export function VideoProductionsPage() {
       .finally(() => setLoading(false));
   }, [t]);
 
+  const visible = useMemo(() => rows.filter((row) =>
+    filter === "all" || (filter === "completed" && row.status === "completed") ||
+    (filter === "attention" && needsAttention(row.status)) ||
+    (filter === "active" && row.status !== "completed" && !needsAttention(row.status)),
+  ), [rows, filter]);
+  const counts: Record<Filter, number> = {
+    all: rows.length,
+    completed: rows.filter((row) => row.status === "completed").length,
+    active: rows.filter((row) => row.status !== "completed" && !needsAttention(row.status)).length,
+    attention: rows.filter((row) => needsAttention(row.status)).length,
+  };
+
+  const remove = async (row: VideoProductionListItemResponse) => {
+    const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
+    if (!window.confirm(t("videoProductions.deleteConfirm", { title }))) return;
+    setDeleting(row.id);
+    setError(null);
+    try {
+      await deleteVideoProduction(row.id);
+      setRows((current) => current.filter((item) => item.id !== row.id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t("common.error"));
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   return (
     <>
       <PageHeader title={t("videoProductions.title")} breadcrumb={t("videoProductions.subtitle")} />
       {error ? <Banner variant="danger">{error}</Banner> : null}
+      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {filters.map((item) => (
+          <button key={item} type="button" onClick={() => { setFilter(item); setShown(PAGE_SIZE); }} aria-pressed={filter === item}
+            className={`rounded-xl border p-3 text-left transition-colors ${filter === item ? "border-lyx-fg bg-lyx-muted" : "border-lyx-border bg-lyx-bg hover:bg-lyx-muted"}`}>
+            <span className="block text-[11px] text-lyx-fg-muted">{t(`videoProductions.filter.${item}`)}</span>
+            <strong className="mt-1 block text-2xl tabular-nums">{counts[item]}</strong>
+          </button>
+        ))}
+      </div>
       {loading ? <p className="text-[12px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
-      {!loading ? (
-        <DataTable
-          rows={rows}
-          rowKey={(row) => row.id}
-          onRowClick={(row) => navigate(`/video-productions/${row.id}`)}
-          empty={<EmptyState title={t("videoProductions.empty")} />}
-          columns={[
-            {
-              key: "thumbnail",
-              header: t("videoProductions.thumbnail"),
-              render: (row) => (
-                <div className="flex h-14 w-9 items-center justify-center overflow-hidden rounded-[4px] bg-lyx-muted text-[8px] text-lyx-fg-subtle">
-                  {row.snapshotUrl ? <img src={row.snapshotUrl} alt="" className="h-full w-full object-cover" /> : "9:16"}
+      {!loading && visible.length === 0 ? <EmptyState title={t("videoProductions.empty")} /> : null}
+      {!loading && visible.length > 0 ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+          {visible.slice(0, shown).map((row) => {
+            const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
+            const playable = row.status === "completed" && Boolean(row.resultUrl);
+            return (
+              <article key={row.id} className="min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm transition-shadow hover:shadow-md">
+                <div className="relative">
+                  <button type="button" onClick={() => navigate(`/video-productions/${row.id}`)} aria-label={`${t("videoGallery.openDetails")}: ${title}`} className="block w-full text-left">
+                    <VideoThumbnail snapshotUrl={row.snapshotUrl} resultUrl={playable ? row.resultUrl : null} className="aspect-[3/2] w-full" />
+                  </button>
+                  <span className="absolute left-2 top-2"><StatusPill tone={statusTone(row.status)}>{t(`videoProduction.status.${row.status}`)}</StatusPill></span>
+                  {playable ? <button type="button" onClick={() => setPlaying(row)} aria-label={`${t("videoGallery.play")}: ${title}`} className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full bg-black/85 text-white shadow-md hover:bg-black"><Play size={18} fill="currentColor" /></button> : null}
                 </div>
-              ),
-            },
-            { key: "id", header: t("videoProductions.id"), render: (row) => <span className="font-mono text-[11px]">{row.id.slice(0, 8)}…</span> },
-            { key: "status", header: t("videoProductions.status"), render: (row) => <StatusPill tone={statusTone(row.status)}>{t(`videoProduction.status.${row.status}`)}</StatusPill> },
-            { key: "duration", header: t("videoProductions.duration"), render: (row) => (row.status === "completed" ? formatDuration(row.renderDurationMs) : "—") },
-            { key: "cost", header: t("videoProductions.cost"), render: (row) => (row.status === "completed" ? formatCost(row) : "—") },
-            { key: "createdAt", header: t("videoProductions.createdAt"), render: (row) => new Date(row.createdAt).toLocaleString() },
-          ]}
-        />
+                <div className="space-y-1.5 p-2.5">
+                  <button type="button" onClick={() => navigate(`/video-productions/${row.id}`)} className="block w-full truncate text-left text-[13px] font-semibold leading-5 hover:underline">{title}</button>
+                  {row.caption ? <p className="truncate text-[11px] leading-4 text-lyx-fg-muted">{row.caption}</p> : null}
+                  {row.createdByName ? <p className="text-[11px] text-lyx-fg-muted">{t("jobs.creator")}: {row.createdByName}</p> : null}
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-lyx-border pt-2 text-[11px] text-lyx-fg-muted">
+                    {formatDuration(row.renderDurationMs) ? <span className="inline-flex items-center gap-1"><Clock3 size={12} />{formatDuration(row.renderDurationMs)}</span> : null}
+                    {row.costAmount ? <span className="inline-flex items-center gap-1"><Wallet size={12} />{row.costAmount} {row.costCurrency}</span> : null}
+                    <span>{new Date(row.createdAt).toLocaleDateString()}</span>
+                    <button type="button" onClick={() => void remove(row)} disabled={deleting === row.id || !needsAttention(row.status) && row.status !== "completed"} title={row.status === "completed" || needsAttention(row.status) ? t("videoProductions.delete") : t("videoProductions.deleteRunning")} aria-label={`${t("videoProductions.delete")}: ${title}`} className="ml-auto rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35"><Trash2 size={14} /></button>
+                  </div>
+                  {row.lastError?.message && needsAttention(row.status) ? <p className="line-clamp-2 text-[11px] text-lyx-warn">{row.lastError.message}</p> : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
       ) : null}
+      {!loading && shown < visible.length ? <div className="mt-5 text-center"><button type="button" onClick={() => setShown((count) => count + PAGE_SIZE)} className="rounded-lg border border-lyx-border bg-lyx-bg px-5 py-2 text-sm font-medium hover:bg-lyx-muted">{t("videoProductions.showMore", { count: visible.length - shown })}</button></div> : null}
+      {playing?.resultUrl ? <VideoPlayerDialog title={playing.title || t("videoProductions.title")} caption={playing.caption} url={playing.resultUrl} onClose={() => setPlaying(null)} /> : null}
     </>
   );
 }

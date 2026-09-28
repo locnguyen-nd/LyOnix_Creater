@@ -64,9 +64,16 @@ describe("VideoProductionsService", () => {
           if (where.requestFingerprint) return workflowRuns.find((row) => row.requestFingerprint === where.requestFingerprint) ?? null;
           return null;
         }),
+        updateMany: vi.fn(async ({ where, data }: any) => {
+          const row = workflowRuns.find((item) => item.id === where.id && item.status === where.status && !item.deletedAt);
+          if (!row) return { count: 0 };
+          row.deletedAt = data.deletedAt;
+          return { count: 1 };
+        }),
         findMany: vi.fn(async ({ where }: any) => {
           return workflowRuns
             .filter((row) => row.mode === where.mode)
+            .filter((row) => (where.deletedAt === null ? !row.deletedAt : true))
             .filter((row) => (where.projectId ? row.projectId === where.projectId : true))
             .filter((row) => (where.createdByUserId ? row.createdByUserId === where.createdByUserId : true))
             .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
@@ -165,6 +172,35 @@ describe("VideoProductionsService", () => {
       ];
       const outcome = await service.listEvents(submitted.data.id, userId, "staff");
       expect(outcome).toMatchObject({ ok: true, data: [{ stepKey: "generate_script", status: "succeeded" }] });
+    });
+  });
+
+  describe("remove", () => {
+    it("soft deletes only the selected completed run, retaining its project and audit rows", async () => {
+      const first = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      prisma.sourceVersion.findUnique = async () => ({ id: "source-2", projectId });
+      const second = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId: "source-2" });
+      if (!first.ok || !second.ok) throw new Error("expected two runs");
+      workflowRuns[0].status = "completed";
+      workflowRuns[1].status = "completed";
+      expect(await service.remove(first.data.id, userId, "staff")).toMatchObject({ ok: true, data: { deleted: true } });
+      expect(workflowRuns).toHaveLength(2);
+      expect(workflowRuns[0].deletedAt).toBeInstanceOf(Date);
+      expect(workflowRuns[1].deletedAt).toBeUndefined();
+      const visible = await service.list(userId, "staff");
+      expect(visible).toMatchObject({ ok: true, data: [{ id: second.data.id }] });
+      expect(prisma.workflowRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: first.data.id, deletedAt: null }) }));
+      expect(await service.get(first.data.id, userId, "staff")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(await service.listEvents(first.data.id, userId, "staff")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+
+    it("rejects active and other-user runs", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      expect(await service.remove(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
+      workflowRuns[0].status = "failed";
+      expect(await service.remove(submitted.data.id, "other-user", "admin")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(prisma.workflowRun.updateMany).not.toHaveBeenCalled();
     });
   });
 

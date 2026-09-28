@@ -411,7 +411,9 @@ export type RenderJobResponse = {
 export type ChannelVideoResponse = {
   jobId: string;
   renderJobId: string;
+  title: string;
   caption: string;
+  createdByName: string | null;
   thumbnailUrl: string | null;
   resultUrl: string;
   renderDurationMs: number | null;
@@ -561,10 +563,15 @@ export type VideoProductionListItemResponse = {
   projectId: string;
   status: WorkflowRunStatus;
   sourceVersionId: string | null;
+  title: string | null;
+  caption: string | null;
+  sourceType: SourceType | null;
+  createdByName: string | null;
   resultUrl: string | null;
   /** VE2E-22: Creatomate's own render-frame preview image (`RenderJob.snapshotUrl`, VE2E-19), when the provider has reported one - so the list can show a thumbnail without playing/re-hosting the video itself. */
   snapshotUrl: string | null;
   costAmount: string | null;
+  costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
   createdAt: string;

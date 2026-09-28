@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
-import { Banner, EmptyState, KpiCard, LegendDot, PageHeader, StatusPill, TrendChart } from "../components/chrome";
+import { Banner, EmptyState, KpiCard, PageHeader, StatusPill } from "../components/chrome";
+import { ChannelGrowthChart } from "../components/ChannelGrowthChart";
 import { DataTable } from "../components/DataTable";
 import { Button, Select } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
@@ -86,20 +87,6 @@ export function HomePage() {
   const kpis = useMemo(
     () => KPI_IDS.map((id) => insights?.metrics.find((item) => item.id === id)).filter(Boolean),
     [insights],
-  );
-  const chartSeries = useMemo(
-    () =>
-      KPI_IDS.map((id) => {
-        const item = insights?.metrics.find((m) => m.id === id);
-        if (!item?.series.length) return null;
-        return {
-          id,
-          label: t(`home.metric.${id}`),
-          color: METRIC_COLORS[id] ?? "var(--lyx-fg)",
-          points: item.series,
-        };
-      }).filter((row): row is NonNullable<typeof row> => row !== null),
-    [insights, t],
   );
   const revenue = insights?.metrics.find((item) => item.id === "revenue_from_views");
 
@@ -252,14 +239,8 @@ export function HomePage() {
           <p className="mt-2 text-[12px] text-lyx-fg-muted">{revenue?.reasonCode ?? "TIKTOK_SCOPE_NOT_GRANTED"}</p>
         </div>
       </div>
-      <div className="mb-6 rounded-[6px] border border-lyx-border bg-lyx-bg p-4 text-lyx-fg">
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="text-[13px] font-bold">{t("home.chart")}</span>
-          {chartSeries.map((line) => (
-            <LegendDot key={line.id} color={line.color}>{line.label}</LegendDot>
-          ))}
-        </div>
-        <TrendChart series={chartSeries} emphasisId={metric} label={t("home.chart")} />
+      <div className="mb-6">
+        <ChannelGrowthChart metric={insights?.metrics.find((item) => item.id === metric)} label={t(`home.metric.${metric}`)} color={METRIC_COLORS[metric] ?? "#2563eb"} />
       </div>
 
       <div className="mb-6 grid gap-4 lg:grid-cols-2">

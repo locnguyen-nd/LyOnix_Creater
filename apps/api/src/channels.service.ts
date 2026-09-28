@@ -80,7 +80,9 @@ export class ChannelsService {
       .map((job) => ({
         jobId: job.id,
         renderJobId: job.render.id,
+        title: job.topic,
         caption: job.script.caption || job.script.hook || job.topic,
+        createdByName: job.createdByName ?? null,
         thumbnailUrl: job.render.snapshotUrl,
         resultUrl: job.render.resultUrl!,
         renderDurationMs: job.render.renderDurationMs,

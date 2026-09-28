@@ -29,6 +29,7 @@ export type InsightMetric = {
   pct: number | null;
   missingBaseline: boolean;
   series: Array<{ t: number; v: number }>;
+  observations: Array<{ t: number; v: number }>;
 };
 
 export type ChannelInsights = {

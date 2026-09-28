@@ -103,6 +103,9 @@ export const buildChannelInsights = (input: {
       reasonCode: latest?.reasonCode ?? (metric === "revenue_from_views" ? "TIKTOK_SCOPE_NOT_GRANTED" : null),
       ...growth,
       series: bucketSeries(points, from, now, input.period),
+      // Real samples only: the bucketed series above carries the last value forward,
+      // which can draw a misleading flat trend when TikTok supplied just one sample.
+      observations: points.filter((point) => point.t >= from && point.t <= now),
     };
   });
   return { period: input.period, from: new Date(from).toISOString(), to: new Date(now).toISOString(), granted, metrics };
