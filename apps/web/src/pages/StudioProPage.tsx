@@ -13,6 +13,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
+import { LazyThumb } from "../components/LazyThumb";
 import { Button, Select, TextArea } from "../components/ui";
 import { api, ApiError } from "../api";
 import type { ApiProvider } from "../jobs-api";
@@ -72,6 +73,10 @@ const PREVIEW_ZOOM_STEPS = [180, 220, 270];
 const MEDIA_SCALE_STEPS = [0.9, 1, 1.1] as const;
 const TIMELINE_PX_PER_SECOND = [7, 11, 16];
 const LIBRARY_PREVIEW_LIMIT = 12;
+/** A signed media-delivery URL is refetched once cached this long - kept comfortably under the server's own token TTL (600s default, `media-delivery.service.ts`) so a thumbnail/player never silently 403s mid-session. */
+const THUMB_CACHE_REFRESH_MS = 8 * 60_000;
+/** Hard cap on how many signed delivery URLs `thumbCache` holds at once - a long Studio session that imports/regenerates many assets must not grow this without bound. */
+const THUMB_CACHE_MAX_ENTRIES = 120;
 
 type LeftTab = "media" | "script" | "voice";
 
@@ -140,6 +145,11 @@ export function StudioProPage() {
   const undoStack = useRef(new UndoStack<TimelineDraft>());
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Flips false on unmount so a still-running recursive poll (e.g. `generateAudioForScene`'s
+  // audio-generation poll, which has no interval/effect of its own to clear) stops rescheduling
+  // itself and stops calling setState instead of leaking a `setTimeout` chain forever.
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const [context, setContext] = useState<StudioContextResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -214,6 +224,12 @@ export function StudioProPage() {
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioTrackRef = useRef<HTMLAudioElement | null>(null);
   const thumbInFlight = useRef(new Set<string>());
+  // Insertion-ordered `id -> cachedAt` for every `thumbCache` entry - drives the bounded FIFO
+  // eviction and the TTL-based refresh below (a signed delivery URL expires server-side after
+  // `MEDIA_DELIVERY_TOKEN_TTL_SEC`, default 600s - see `media-delivery.service.ts`). A `Map`
+  // (not the `thumbCache` state itself) so read call sites elsewhere in this component are
+  // untouched; this is purely the prefetch effect's own bookkeeping.
+  const thumbCacheMeta = useRef(new Map<string, number>());
 
   const dirty = useMemo(() => JSON.stringify(draft) !== lastSavedJson, [draft, lastSavedJson]);
 
@@ -507,10 +523,27 @@ export function StudioProPage() {
       ids.add(asset.id);
     }
     for (const id of ids) {
-      if (thumbCache[id] || thumbInFlight.current.has(id)) continue;
+      const cachedAt = thumbCacheMeta.current.get(id);
+      const fresh = cachedAt !== undefined && Date.now() - cachedAt < THUMB_CACHE_REFRESH_MS;
+      if ((thumbCache[id] && fresh) || thumbInFlight.current.has(id)) continue;
       thumbInFlight.current.add(id);
       void issueMediaDeliveryToken(id)
-        .then(({ url }) => setThumbCache((prev) => (prev[id] ? prev : { ...prev, [id]: url })))
+        .then(({ url }) => {
+          thumbCacheMeta.current.delete(id); // re-insert at the end so it reads as most-recently-fetched for FIFO eviction below.
+          thumbCacheMeta.current.set(id, Date.now());
+          const evicted: string[] = [];
+          while (thumbCacheMeta.current.size > THUMB_CACHE_MAX_ENTRIES) {
+            const oldest = thumbCacheMeta.current.keys().next().value;
+            if (oldest === undefined) break;
+            thumbCacheMeta.current.delete(oldest);
+            evicted.push(oldest);
+          }
+          setThumbCache((prev) => {
+            const next = { ...prev, [id]: url };
+            for (const staleId of evicted) delete next[staleId];
+            return next;
+          });
+        })
         .catch(() => undefined)
         .finally(() => thumbInFlight.current.delete(id));
     }
@@ -651,7 +684,12 @@ export function StudioProPage() {
         (accepted) =>
           new Promise<void>((resolve) => {
             const poll = async (operationId: string): Promise<void> => {
+              // The component may have unmounted (navigated away) or this generation may have
+              // been superseded while a poll was in flight - never reschedule and never touch
+              // state on a gone component; just let the promise settle quietly.
+              if (!mountedRef.current) { resolve(); return; }
               const result = await getAudioGenerationOperation(operationId);
+              if (!mountedRef.current) { resolve(); return; }
               if (result.status === "completed" && result.audioVersion) {
                 setAudioBySceneId((prev) => ({ ...prev, [scene.sceneId]: result.audioVersion! }));
                 mutate((prev) => ({
@@ -1097,8 +1135,7 @@ export function StudioProPage() {
                         }`}
                         title={asset.originalFileName}
                       >
-                        {url && asset.kind === "image" ? <img src={url} alt="" className="h-full w-full object-cover" /> : null}
-                        {url && asset.kind === "video" ? <video src={url} muted className="h-full w-full object-cover" /> : null}
+                        {url && (asset.kind === "image" || asset.kind === "video") ? <LazyThumb kind={asset.kind} url={url} className="h-full w-full" /> : null}
                         <span className="absolute bottom-1 left-1 rounded-[3px] bg-lyx-bg/90 px-1 text-[8px] font-bold">{asset.origin}</span>
                       </button>
                     );
@@ -1316,7 +1353,7 @@ export function StudioProPage() {
                           style={{ width: clipWidth, background: "linear-gradient(160deg,#3a3a38,#1c1c1b)" }}
                         >
                           {url ? (
-                            asset?.kind === "video" ? <video src={url} muted className="absolute inset-0 h-full w-full object-cover opacity-80" /> : <img src={url} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" />
+                            <LazyThumb kind={asset?.kind === "video" ? "video" : "image"} url={url} className="absolute inset-0 h-full w-full opacity-80" />
                           ) : null}
                           {asset?.kind === "video" || (!asset && bound?.mediaAssetVersionId) ? (
                             <span className="absolute right-1 top-1 rounded bg-black/50 px-1 text-[9px] text-white" title={t("studioPro.originalAudioMutedHint")}>🔇</span>
