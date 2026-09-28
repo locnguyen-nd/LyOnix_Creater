@@ -176,8 +176,12 @@ describe("PexelsService", () => {
       const fetchMock = vi.fn(async (input: string | URL | Request) => {
         const url = String(input);
         if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
-        if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
-        if (url.includes("/v1/photos/")) return new Response(JSON.stringify(photoDetail), { status: 200 });
+        // `alt` is real Pexels metadata (the only descriptive text its API exposes) - required here
+        // since VE2E-15a's Auto-only relevance guard now abstains on a photo with no real
+        // descriptor/vision evidence at all, even one that otherwise ranks well on continuity/quality.
+        const photoWithAlt = { ...photoDetail, alt: "empty stadium stands with no crowd" };
+        if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoWithAlt] }), { status: 200 });
+        if (url.includes("/v1/photos/")) return new Response(JSON.stringify(photoWithAlt), { status: 200 });
         throw new Error(`unexpected fetch: ${url}`);
       });
       vi.stubGlobal("fetch", fetchMock);
