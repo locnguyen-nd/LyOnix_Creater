@@ -26,6 +26,26 @@ describe("parseScriptDraftV2", () => {
     expect(parseScriptDraftV2("not json at all", "vi")).toBeNull();
   });
 
+  it("VE2E-32: splits a scene whose narration packs 2+ sentences into one scene per sentence, redistributing duration and keeping visualQuery", () => {
+    const parsed = parseScriptDraftV2({
+      ...validDraft,
+      scenes: [
+        { sceneId: "s01", narration: "Messi is a football player. He plays for Inter Miami now.", screenText: "Messi is a football player. He plays for Inter Miami now.", visualQuery: "soccer player", durationHintMs: 9000 },
+      ],
+    }, "vi");
+    expect(parsed?.scenes).toHaveLength(2);
+    expect(parsed?.scenes[0]).toMatchObject({ sceneId: "s01-1", narration: "Messi is a football player.", visualQuery: "soccer player" });
+    expect(parsed?.scenes[1]).toMatchObject({ sceneId: "s01-2", narration: "He plays for Inter Miami now.", visualQuery: "soccer player" });
+    const total = parsed!.scenes.reduce((sum, s) => sum + s.durationHintMs, 0);
+    expect(total).toBe(9000);
+  });
+
+  it("VE2E-32: leaves a single-sentence scene untouched", () => {
+    const parsed = parseScriptDraftV2(validDraft, "vi");
+    expect(parsed?.scenes).toHaveLength(1);
+    expect(parsed?.scenes[0]?.sceneId).toBe("s01");
+  });
+
   it("dedupes repeated sceneId values", () => {
     const parsed = parseScriptDraftV2({
       ...validDraft,

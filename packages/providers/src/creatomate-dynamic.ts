@@ -15,13 +15,26 @@
  * Captions here are always the plain narration/caption text the tool itself generated.
  * Likewise an audio element's `provider`/`dynamic` Creatomate-native-voiceover metadata is
  * never copied — the audio `source` is always LyOnix's own already-generated narration clip.
+ *
+ * VE2E-32: a scene's caption is no longer always one static text block for the whole scene.
+ * When `captionSegments` is given (the scene's real ElevenLabs-alignment-derived
+ * `SubtitleVersion.segments` - see `caption-segmentation.ts`), each segment becomes its own
+ * timed text element (`time`/`duration` taken straight from that segment's real start/end),
+ * so on-screen text actually tracks the spoken narration instead of sitting on screen for the
+ * scene's entire duration. `text` remains the fallback static block, used whenever
+ * `captionSegments` is omitted/empty (no alignment available yet, or the caller passed a
+ * human-typed Studio override that has no per-word timing to draw from).
  */
+
+export type DynamicCaptionSegment = { text: string; startMs: number; endMs: number };
 
 export type DynamicSceneInput = {
   sceneId: string;
   mediaUrl: string;
   mediaKind: "image" | "video";
   text: string;
+  /** Real voice-timed caption segments for this scene, when available - see file header. Empty/omitted falls back to one static `text` block for the whole scene. */
+  captionSegments?: readonly DynamicCaptionSegment[];
   audioUrl: string;
   audioDurationMs: number;
 };
@@ -229,12 +242,12 @@ export function buildDynamicComposition(
         : {}),
     };
 
-    const caption: RawNode = {
+    const captionNode = (text: string, nodeTime: number, nodeDuration: number): RawNode => ({
       type: "text",
       track: 2,
-      time: 0,
-      duration: durationSeconds,
-      text: scene.text,
+      time: nodeTime,
+      duration: nodeDuration,
+      text,
       font_family: style.text.fontFamily,
       font_size: style.text.fontSize,
       font_weight: style.text.fontWeight,
@@ -249,7 +262,20 @@ export function buildDynamicComposition(
       ...(style.text.backgroundXPadding ? { background_x_padding: style.text.backgroundXPadding } : {}),
       ...(style.text.backgroundYPadding ? { background_y_padding: style.text.backgroundYPadding } : {}),
       ...(style.text.backgroundBorderRadius ? { background_border_radius: style.text.backgroundBorderRadius } : {}),
-    };
+    });
+
+    // VE2E-32: real voice-timed segments (when given) become one text node each, clamped inside
+    // this scene's own real audio duration (defends only against float/drift edge cases - both
+    // come from the same underlying narration synthesis, so they should already agree); a scene
+    // with no usable segments keeps the prior single-static-block behavior unchanged.
+    const usableSegments = (scene.captionSegments ?? []).filter((s) => s.text.trim() && s.endMs > s.startMs);
+    const captions: RawNode[] = usableSegments.length
+      ? usableSegments.map((segment) => {
+          const segStart = Math.min(durationSeconds, Math.max(0, segment.startMs / 1000));
+          const segEnd = Math.min(durationSeconds, Math.max(segStart + 0.05, segment.endMs / 1000));
+          return captionNode(segment.text, segStart, segEnd - segStart);
+        })
+      : [captionNode(scene.text, 0, durationSeconds)];
 
     const audio: RawNode = {
       type: "audio",
@@ -265,7 +291,7 @@ export function buildDynamicComposition(
       track: 1,
       time,
       duration: durationSeconds,
-      elements: [visual, caption, audio],
+      elements: [visual, ...captions, audio],
     };
   });
 

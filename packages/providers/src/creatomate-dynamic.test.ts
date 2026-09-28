@@ -168,6 +168,40 @@ describe("buildDynamicComposition", () => {
     expect(elements[0]!.elements[2]).toMatchObject({ type: "audio", source: "https://x/a1" });
   });
 
+  it("VE2E-32: builds one timed text node per real caption segment instead of one static block for the whole scene", () => {
+    const scenes = [
+      {
+        sceneId: "s1",
+        mediaUrl: "https://x/img1",
+        mediaKind: "image" as const,
+        text: "fallback static text",
+        captionSegments: [
+          { text: "Messi is a football player.", startMs: 0, endMs: 1800 },
+          { text: "He plays for Inter Miami now.", startMs: 1800, endMs: 3600 },
+        ],
+        audioUrl: "https://x/a1",
+        audioDurationMs: 4000,
+      },
+    ];
+    const source = buildDynamicComposition(scenes, DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });
+    const elements = source.elements as Array<{ elements: Array<{ type: string; time?: number; duration?: number; text?: string }> }>;
+    const textNodes = elements[0]!.elements.filter((el) => el.type === "text");
+    expect(textNodes).toHaveLength(2);
+    expect(textNodes[0]).toMatchObject({ text: "Messi is a football player.", time: 0, duration: 1.8 });
+    expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+    // audio is still the last element, after every caption node.
+    expect(elements[0]!.elements.at(-1)).toMatchObject({ type: "audio" });
+  });
+
+  it("VE2E-32: falls back to one static text block for the whole scene when captionSegments is omitted", () => {
+    const scenes = [{ sceneId: "s1", mediaUrl: "https://x/img1", mediaKind: "image" as const, text: "Hook", audioUrl: "https://x/a1", audioDurationMs: 2000 }];
+    const source = buildDynamicComposition(scenes, DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });
+    const elements = source.elements as Array<{ elements: Array<{ type: string; time?: number; duration?: number; text?: string }> }>;
+    const textNodes = elements[0]!.elements.filter((el) => el.type === "text");
+    expect(textNodes).toHaveLength(1);
+    expect(textNodes[0]).toMatchObject({ type: "text", time: 0, duration: 2, text: "Hook" });
+  });
+
   it("never fabricates a Creatomate-native voiceover/transcript element - audio and text stay plain", () => {
     const scenes = [{ sceneId: "s1", mediaUrl: "https://x/img1", mediaKind: "image" as const, text: "Hook", audioUrl: "https://x/a1", audioDurationMs: 1000 }];
     const source = buildDynamicComposition(scenes, DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });

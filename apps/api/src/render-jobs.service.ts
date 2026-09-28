@@ -372,6 +372,18 @@ export class RenderJobsService {
       ? await this.prisma.audioVersion.findMany({ where: { id: { in: audioVersionIds } }, select: { id: true, durationMs: true } })
       : [];
     const audioDurationById = new Map(audioRows.map((row) => [row.id, row.durationMs]));
+    // VE2E-32: each scene's own real ElevenLabs-alignment-derived caption segments (see
+    // `caption-segmentation.ts`), so the dynamic composition can show on-screen text timed to the
+    // actual narration instead of one static block for the whole scene (`dynamicScenes` loop
+    // below still falls back to the static block whenever a scene has none, or a Studio override).
+    const subtitleRows = audioVersionIds.length
+      ? await this.prisma.subtitleVersion.findMany({ where: { audioVersionId: { in: audioVersionIds } }, orderBy: { version: "desc" }, select: { audioVersionId: true, segments: true } })
+      : [];
+    const captionSegmentsByAudioVersionId = new Map<string, DynamicSceneInput["captionSegments"]>();
+    for (const row of subtitleRows) {
+      if (captionSegmentsByAudioVersionId.has(row.audioVersionId)) continue;
+      captionSegmentsByAudioVersionId.set(row.audioVersionId, (Array.isArray(row.segments) ? row.segments : []) as unknown as DynamicSceneInput["captionSegments"]);
+    }
 
     const renderable = [...resolved]
       .sort((a, b) => a.orderIndex - b.orderIndex)
@@ -389,11 +401,16 @@ export class RenderJobsService {
       const audioIssued = await this.mediaDelivery.issueToken(scene.audioMediaAssetVersionId!, userId, role, DELIVERY_TOKEN_TTL_SEC);
       if (audioIssued === "not_configured") return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
       if (!audioIssued || audioIssued === "forbidden") continue;
+      // A human-typed Studio override has no real per-word timing to draw from, so it always
+      // stays a single static block for the whole scene - only the un-overridden (script-derived)
+      // caption uses the scene's real voice-timed segments.
+      const captionSegments = scene.screenTextOverride ? undefined : captionSegmentsByAudioVersionId.get(scene.audioVersionId!);
       dynamicScenes.push({
         sceneId: scene.sceneId,
         mediaUrl: mediaIssued.url,
         mediaKind: scene.mediaKind === "video" ? "video" : "image",
         text: (scene.screenTextOverride ?? scene.fallbackScreenText ?? "").trim(),
+        ...(captionSegments?.length ? { captionSegments } : {}),
         audioUrl: audioIssued.url,
         audioDurationMs: audioDurationById.get(scene.audioVersionId!) ?? 0,
       });

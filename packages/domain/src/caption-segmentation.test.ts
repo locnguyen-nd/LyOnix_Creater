@@ -60,6 +60,18 @@ describe("buildCaptionSegmentsFromAlignment", () => {
     expect(segments[0]!.text).toBe("supercalifragilisticexpialidocious");
   });
 
+  it("closes a segment at sentence-terminal punctuation even when well under the char/duration caps", () => {
+    const alignment = alignmentFor("Hi there. How are you?", 60);
+    const segments = buildCaptionSegmentsFromAlignment(alignment);
+    expect(segments.map((s) => s.text)).toEqual(["Hi there.", "How are you?"]);
+  });
+
+  it("still applies the char/duration cap fallback inside one long run-on sentence with no punctuation", () => {
+    const alignment = alignmentFor("one two three four five six seven eight nine ten", 50);
+    const segments = buildCaptionSegmentsFromAlignment(alignment, { maxCharsPerSegment: 12 });
+    expect(segments.length).toBeGreaterThan(1);
+  });
+
   it("segments are ordered and non-overlapping (monotonic time)", () => {
     const alignment = alignmentFor("the quick brown fox jumps over the lazy dog again and again", 40);
     const segments = buildCaptionSegmentsFromAlignment(alignment, { maxCharsPerSegment: 20 });

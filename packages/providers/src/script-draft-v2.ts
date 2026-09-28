@@ -4,6 +4,7 @@
  * Pure logic only — no network I/O, no provider secret handling. See `live-script-v2.ts`
  * for the orchestration that calls a live content provider with this schema.
  */
+import { splitIntoSentences } from "@lyonix/domain";
 
 export const SCRIPT_DRAFT_V2_SCHEMA_VERSION = "script-draft.v2" as const;
 export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2" as const;
@@ -99,6 +100,57 @@ const sceneDuration = (value: unknown, fallback: number) => {
   return Math.min(15000, Math.round(n));
 };
 
+const MIN_SPLIT_SCENE_DURATION_MS = 1000;
+/** Hard ceiling on how many scenes one narration-splitting pass can ever produce, regardless of how many sentences a single scene's narration contains - a bounded, documented safety net against a pathological/garbled input producing dozens of near-empty scenes. */
+const MAX_SCENES_AFTER_SPLIT = 24;
+
+/**
+ * Auto-cuts a scene whose narration packs 2+ full sentences into one visual into one scene
+ * per sentence, instead of leaving a single image/video stretched across a run-on narration
+ * (spec ask: "câu dài thì tự cắt cảnh" - a long/multi-sentence narration must not sit behind
+ * one static visual). `durationHintMs` is redistributed proportionally by each sentence's
+ * character share of the original scene's duration (never invented - always sums back to the
+ * original, remainder absorbed by the last part) so total spoken length is unchanged. Every
+ * split part keeps the parent's own `visualQuery` verbatim (no model call available here to
+ * author a new one per sentence) - `deriveSceneBrief`/`rankMediaCandidates` (VE2E-15a) still
+ * differentiate each part's actual media search because they combine `visualQuery` with that
+ * part's own (now single-sentence) `narration`/`screenText`, not `visualQuery` alone. Bounded
+ * by `MAX_SCENES_AFTER_SPLIT` total - once reached, a scene's remaining sentences merge back
+ * into its last split part rather than growing the scene count further.
+ */
+const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): ScriptDraftSceneV2[] => {
+  const expanded: ScriptDraftSceneV2[] = [];
+  let remainingBudget = MAX_SCENES_AFTER_SPLIT - scenes.length;
+  for (const scene of scenes) {
+    const sentences = splitIntoSentences(scene.narration);
+    if (sentences.length < 2 || remainingBudget <= 0) {
+      expanded.push(scene);
+      continue;
+    }
+    const partCount = Math.min(sentences.length, remainingBudget + 1);
+    remainingBudget -= partCount - 1;
+    const parts = partCount < sentences.length
+      ? [...sentences.slice(0, partCount - 1), sentences.slice(partCount - 1).join(" ")]
+      : sentences;
+    const screenParts = splitIntoSentences(scene.screenText);
+    const totalChars = parts.reduce((sum, part) => sum + part.length, 0) || 1;
+    let remainingMs = scene.durationHintMs;
+    parts.forEach((part, index) => {
+      const isLast = index === parts.length - 1;
+      const share = isLast ? remainingMs : Math.max(MIN_SPLIT_SCENE_DURATION_MS, Math.round((part.length / totalChars) * scene.durationHintMs));
+      remainingMs -= isLast ? 0 : share;
+      expanded.push({
+        sceneId: `${scene.sceneId}-${index + 1}`,
+        narration: part,
+        screenText: screenParts[index] || part,
+        visualQuery: scene.visualQuery,
+        durationHintMs: Math.max(MIN_SPLIT_SCENE_DURATION_MS, share),
+      });
+    });
+  }
+  return expanded;
+};
+
 export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2): ScriptDraftV2 | null {
   const root = asRecord(extractJsonObjectV2(value));
   if (!root) return null;
@@ -126,6 +178,11 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
     return { ...scene, sceneId };
   });
   const body = text(nested.body) || uniqueScenes.map((scene) => scene.narration).filter(Boolean).join(" ");
+  // Split any scene whose narration packs 2+ full sentences into one scene per sentence - see
+  // `expandOverlongScenes`'s own doc comment. Runs after sceneId dedup so every split id (derived
+  // from an already-unique parent id) is guaranteed unique too, and after `body` is computed so a
+  // split never changes the full spoken transcript, only how it's carved into scenes.
+  const finalScenes = expandOverlongScenes(uniqueScenes);
   return {
     schemaVersion: SCRIPT_DRAFT_V2_SCHEMA_VERSION,
     language: isContentLanguageV2(text(nested.language)) ? (nested.language as ContentLanguageV2) : language,
@@ -134,8 +191,8 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
     body,
     cta: text(nested.cta),
     caption: text(nested.caption),
-    scenes: uniqueScenes.length
-      ? uniqueScenes
+    scenes: finalScenes.length
+      ? finalScenes
       : [{ sceneId: "s01", narration: body, screenText: title || body, visualQuery: title || body, durationHintMs: 5000 }],
   };
 }
@@ -207,6 +264,7 @@ Creative direction / requested changes: ${direction}
 Target spoken length: 55-65 seconds. 10-14 scenes. Total durationHintMs between 30000 and 90000.
 Required keys: schemaVersion, language, title, hook, body, cta, caption, scenes.
 Each scene: sceneId, narration (spoken), screenText (on-screen, no HTML/URLs), visualQuery (short media search query/framing brief, non-empty), durationHintMs.
+Each scene's narration must be exactly ONE sentence (one visual per sentence, so the video cuts to a new shot every sentence) - never pack 2+ sentences into a single scene's narration; split a long thought across multiple scenes instead.
 body must be the full spoken narration concatenating scene narration in order.
 Every scene visualQuery must be a concrete, searchable phrase (e.g. "city skyline at night"), not empty and not a duplicate placeholder.
 Do not invent music beds or render steps. Do not wrap JSON in markdown.
