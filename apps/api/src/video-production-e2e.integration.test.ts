@@ -357,7 +357,7 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     fake.tables.providerAccounts.push(
       { id: "content-acc-e2e", role: "content", provider: "openai", scope: "organization", ownerUserId: null, status: "verified", model: "gpt-4o-mini", availableModels: ["gpt-4o-mini"], modelSnapshot: [], encryptedSecret: "openai-test-key", configVersion: 1, isFake: false, deletedAt: null, activeContentRequests: 0, cooldownUntil: null, version: 1 },
       { id: "tts-acc-e2e", role: "tts", provider: "elevenlabs", scope: "organization", ownerUserId: null, status: "verified", model: "eleven_multilingual_v2", availableModels: ["eleven_multilingual_v2"], encryptedSecret: "elevenlabs-test-key", isFake: false, deletedAt: null, version: 1 },
-      { id: "visual-acc-e2e", role: "visual", provider: "pexels", scope: "organization", ownerUserId: null, status: "verified", model: "", encryptedSecret: "pexels-test-key", isFake: false, deletedAt: null, version: 1 },
+      { id: "visual-acc-e2e", role: "visual", provider: "pexels", scope: "organization", ownerUserId: null, status: "verified", model: "", encryptedSecret: "pexels-test-key", isFake: false, deletedAt: null, activeContentRequests: 0, cooldownUntil: null, version: 1 },
       { id: "render-acc-e2e", role: "render", provider: "creatomate", scope: "organization", ownerUserId: null, status: "verified", model: "", encryptedSecret: "creatomate-test-key", isFake: false, deletedAt: null, version: 1 },
     );
     fake.tables.templateSnapshots.push({
@@ -392,7 +392,7 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     const scriptGeneration = new ScriptGenerationService(sources, providerAccounts);
     const scriptVersions = new ScriptVersionsService(fake.prisma as never, grants);
     const audioVersions = new AudioVersionsService(fake.prisma as never, grants, elevenLabs);
-    const pexels = new PexelsService(fake.prisma as never, grants, media);
+    const pexels = new PexelsService(fake.prisma as never, grants, media, providerAccounts);
     const templates = new CreatomateTemplatesService(fake.prisma as never);
     const mediaDelivery = new MediaDeliveryService(fake.prisma as never, grants);
     const renderJobsService = new RenderJobsService(fake.prisma as never, grants, templates, mediaDelivery);
