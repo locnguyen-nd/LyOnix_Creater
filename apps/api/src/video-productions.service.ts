@@ -15,7 +15,15 @@ import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun } from "@lyonix/db";
-import { canAccessProject, canWriteProjectResource } from "@lyonix/domain";
+import {
+  canAccessProject,
+  canWriteProjectResource,
+  normalizeBackgroundSegmentBounds,
+  parseBackgroundSegmentsSetting,
+  readBackgroundSegmentsSetting,
+  resolveBackgroundSegmentRange,
+  type BackgroundSegmentCountBounds,
+} from "@lyonix/domain";
 import type { ErrorCode, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
@@ -44,6 +52,20 @@ const notFoundProject = { ok: false as const, code: "NOT_FOUND" as const, messag
 const notFoundRun = { ok: false as const, code: "NOT_FOUND" as const, message: "Không tìm thấy video production", status: 404 };
 const removableStatuses = ["completed", "failed", "cancelled", "blocked_provider", "needs_input"] as const;
 const retriableStatuses = ["failed", "blocked_provider", "needs_input"] as const;
+
+const optionalInt = (value: string | undefined): number | undefined => {
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : Number.NaN;
+};
+
+/**
+ * VE2E-40: allowed range for a user-fixed background segment count. Placeholder 1..6 (DEC #2 does
+ * not fix limits); override with BACKGROUND_SEGMENTS_MIN_COUNT / BACKGROUND_SEGMENTS_MAX_COUNT.
+ * A misconfigured pair falls back to the placeholder rather than accepting nonsense.
+ */
+export const backgroundSegmentBoundsFromEnv = (env: NodeJS.ProcessEnv = process.env): BackgroundSegmentCountBounds =>
+  normalizeBackgroundSegmentBounds({ min: optionalInt(env.BACKGROUND_SEGMENTS_MIN_COUNT) ?? 1, max: optionalInt(env.BACKGROUND_SEGMENTS_MAX_COUNT) ?? 6 });
 
 @Injectable()
 export class VideoProductionsService {
@@ -122,6 +144,9 @@ export class VideoProductionsService {
     if (Boolean(input.sourceId?.trim()) === Boolean(input.source)) {
       return { ok: false, code: "VALIDATION_FAILED", message: "Cần cung cấp đúng một trong sourceId hoặc source" };
     }
+    // VE2E-40: validated before any row (source/run) is created.
+    const backgroundSegments = parseBackgroundSegmentsSetting(input.backgroundSegments, backgroundSegmentBoundsFromEnv());
+    if (!backgroundSegments.ok) return { ok: false, code: "VALIDATION_FAILED", message: backgroundSegments.message };
 
     const profile = await this.prisma.automationProfileVersion.findUnique({ where: { id: input.automationProfileId } });
     if (!profile) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy automation profile", status: 404 };
@@ -155,8 +180,16 @@ export class VideoProductionsService {
       sourceVersionId = created.id;
     }
 
+    // A fixed segment count is part of what the run produces, so it is part of the dedupe key; the
+    // default auto setting is left out so the fingerprint of an auto submit is unchanged from before VE2E-40.
     const fingerprint = createHash("sha256")
-      .update(JSON.stringify({ projectId: input.projectId, automationProfileId: input.automationProfileId, profileVersion: profile.version, sourceVersionId }))
+      .update(JSON.stringify({
+        projectId: input.projectId,
+        automationProfileId: input.automationProfileId,
+        profileVersion: profile.version,
+        sourceVersionId,
+        ...(backgroundSegments.value.mode === "fixed" ? { backgroundSegments: backgroundSegments.value } : {}),
+      }))
       .digest("hex");
 
     let run: WorkflowRun;
@@ -170,6 +203,7 @@ export class VideoProductionsService {
           requestFingerprint: fingerprint,
           createdByUserId: userId,
           status: "draft",
+          backgroundSegments: backgroundSegments.value as Prisma.InputJsonValue,
         },
       });
     } catch (error) {
@@ -303,6 +337,11 @@ export class VideoProductionsService {
       scriptDraftVersionId = approved?.id ?? null;
     }
     const renderJob = await this.prisma.renderJob.findFirst({ where: { workflowRunId: run.id }, orderBy: { createdAt: "desc" } });
+    // VE2E-40: auto resolves against the intake target duration (the pinned profile version's durationSec).
+    const backgroundSetting = readBackgroundSegmentsSetting(run.backgroundSegments);
+    const profile = run.automationProfileVersionId
+      ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId }, select: { durationSec: true } })
+      : null;
     return {
       ok: true,
       data: {
@@ -316,6 +355,7 @@ export class VideoProductionsService {
         renderJobId: renderJob?.id ?? null,
         resultUrl: renderJob?.resultUrl ?? null,
         lastError: (run.lastError as VideoProductionResponse["lastError"]) ?? null,
+        backgroundSegments: { setting: backgroundSetting, range: resolveBackgroundSegmentRange(backgroundSetting, profile?.durationSec ?? null) },
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       },

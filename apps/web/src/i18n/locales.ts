@@ -201,6 +201,10 @@ const vi = {
     preset: "Preset 9:16, 1080p, 30fps, 30–90s",
     durationTarget: "Độ dài mục tiêu",
     sceneCountTarget: "Số cảnh mục tiêu",
+    backgroundSegments: "Số đoạn nền",
+    backgroundSegmentsAuto: "Tự động ({{min}}–{{max}} đoạn)",
+    backgroundSegmentsFixed: "{{count}} đoạn",
+    backgroundSegmentsHint: "Mỗi đoạn nền là một B-roll liền mạch qua nhiều cảnh liên tiếp. Tự động: video ≤30 giây 2–3 đoạn, dài hơn 3–5 đoạn.",
     nextStepsHint: "Voice, media và template Creatomate sẽ chọn ở Studio sau khi kịch bản được duyệt.",
     basicsSection: "Thông tin cơ bản",
     submitHint: "Bạn sẽ xem trước và chỉnh kịch bản ở bước sau — chưa tốn phí render.",
@@ -720,6 +724,10 @@ const en: typeof vi = {
     openStudio: "Open Studio",
     durationTarget: "Target duration",
     sceneCountTarget: "Target scene count",
+    backgroundSegments: "Background segments",
+    backgroundSegmentsAuto: "Auto ({{min}}–{{max}} segments)",
+    backgroundSegmentsFixed: "{{count}} segments",
+    backgroundSegmentsHint: "Each background segment is one continuous B-roll across consecutive scenes. Auto: videos ≤30s get 2–3 segments, longer ones 3–5.",
     nextStepsHint: "Voice, media and the Creatomate template are chosen in Studio once the script is approved.",
     basicsSection: "Basics",
     submitHint: "You'll preview and edit the script in the next step — no render cost yet.",
@@ -1184,6 +1192,13 @@ const en: typeof vi = {
 
 const ja: typeof vi = {
   ...en,
+  jobs: {
+    ...en.jobs,
+    backgroundSegments: "背景セグメント数",
+    backgroundSegmentsAuto: "自動（{{min}}〜{{max}}セグメント）",
+    backgroundSegmentsFixed: "{{count}}セグメント",
+    backgroundSegmentsHint: "各背景セグメントは連続する複数シーンにまたがる1本のBロールです。自動：30秒以下は2〜3、それより長い動画は3〜5セグメント。",
+  },
   assets: { ...en.assets, previewDirect: "画像/動画をプレビュー", previewLoading: "プレビューを準備中…", previewFailed: "この素材をプレビューできません", closePreview: "プレビューを閉じる" },
   providers: { ...en.providers, title: "プロバイダー", add: "アカウントを追加", verify: "確認", personal: "個人", organization: "組織", secret: "APIキー", secretHint: "キーはサーバーにのみ送信され、再表示されません。", quota: "利用枠", kind: "サービス", model: "モデル", unverified: "未確認", verified: "確認済み", failed: "確認失敗", verifyOk: "APIキーとモデルを実際の生成リクエストで確認しました。", verifyFail: "APIキーが無効か、プロバイダーに拒否されました。", verifyCostWarning: "コンテンツアカウントの確認では実際の生成リクエストを送信し、有料クレジットを消費する場合があります。続行しますか？", edit: "編集", delete: "削除", deleteConfirm: "アカウント {{name}} を削除しますか？既存ジョブの設定は保持されます。", deleted: "アカウントを選択肢から削除しました。", updated: "アカウントを更新しました。", replaceSecret: "APIキーを変更（任意）", replaceSecretHint: "キーを変更した場合、生成前に再確認が必要です。", modelUsable: "利用可能（最近確認済み）", modelStale: "利用可能（選択時に再確認）", modelUnverified: "未確認（選択時に確認）", modelStatus: { retired: "サポート終了", unsupported: "このエンドポイントでは未対応", temporarily_unavailable: "一時的に利用できません" } },
   tagline: "ショート動画プロダクションスタジオ",
@@ -1374,6 +1389,13 @@ const ja: typeof vi = {
 
 const ko: typeof vi = {
   ...en,
+  jobs: {
+    ...en.jobs,
+    backgroundSegments: "배경 구간 수",
+    backgroundSegmentsAuto: "자동 ({{min}}–{{max}}개 구간)",
+    backgroundSegmentsFixed: "{{count}}개 구간",
+    backgroundSegmentsHint: "각 배경 구간은 연속된 여러 장면에 걸친 하나의 B롤입니다. 자동: 30초 이하는 2–3개, 더 긴 영상은 3–5개 구간.",
+  },
   assets: { ...en.assets, previewDirect: "이미지/동영상 미리보기", previewLoading: "미리보기 준비 중…", previewFailed: "이 자료를 미리 볼 수 없습니다", closePreview: "미리보기 닫기" },
   providers: { ...en.providers, title: "제공업체", add: "계정 추가", verify: "확인", personal: "개인", organization: "조직", secret: "API 키", secretHint: "키는 서버에만 전송되며 다시 표시되지 않습니다.", quota: "사용량", kind: "제공업체", model: "모델", unverified: "미확인", verified: "확인됨", failed: "확인 실패", verifyOk: "실제 생성 요청으로 API 키와 모델을 확인했습니다.", verifyFail: "API 키가 올바르지 않거나 제공업체에서 거부했습니다.", verifyCostWarning: "콘텐츠 계정을 확인할 때 실제 생성 요청을 보내며 유료 크레딧이 사용될 수 있습니다. 계속할까요?", edit: "수정", delete: "삭제", deleteConfirm: "{{name}} 계정을 삭제할까요? 기존 작업의 설정은 유지됩니다.", deleted: "계정을 선택 목록에서 삭제했습니다.", updated: "계정이 업데이트되었습니다.", replaceSecret: "API 키 변경(선택 사항)", replaceSecretHint: "키를 바꾸면 생성 전에 계정을 다시 확인해야 합니다.", modelUsable: "사용 가능(최근 확인됨)", modelStale: "사용 가능(선택 시 다시 확인)", modelUnverified: "미확인(선택 시 확인)", modelStatus: { retired: "지원 종료", unsupported: "이 엔드포인트에서 지원하지 않음", temporarily_unavailable: "일시적으로 사용할 수 없음" } },
   tagline: "숏폼 제작 스튜디오",

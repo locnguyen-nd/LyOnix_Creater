@@ -6,13 +6,21 @@ import { Button, Field, Select, TextArea } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { CreatomateTemplateSummaryResponse, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { BackgroundSegmentsSetting, CreatomateTemplateSummaryResponse, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+// Browser-safe subpath (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
+import { BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS, resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 
 const DURATION_TARGETS = ["30-45s", "45-65s", "65-90s"] as const;
 const SCENE_COUNT_TARGETS = ["6-8", "8-12", "12-16"] as const;
 const AUTO_SOURCE_TYPES = ["topic", "raw_script", "article_url"] as const;
+/** VE2E-40: "auto" or a fixed count within the placeholder bounds (the server re-validates against its configured bounds). */
+const BACKGROUND_SEGMENT_CHOICES = [
+  "auto",
+  ...Array.from({ length: BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS.max - BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS.min + 1 }, (_, index) => String(BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS.min + index)),
+];
+const toBackgroundSegmentsSetting = (choice: string): BackgroundSegmentsSetting => (choice === "auto" ? { mode: "auto" } : { mode: "fixed", count: Number(choice) });
 
 /** Auto mode has no manual review step (D10) - it needs one concrete number, not a range. */
 const midpoint = (range: string) => {
@@ -52,6 +60,9 @@ export function JobNewPage() {
   const [content, setContent] = useState("");
   const [durationTarget, setDurationTarget] = useState<(typeof DURATION_TARGETS)[number]>("45-65s");
   const [sceneCountTarget, setSceneCountTarget] = useState<(typeof SCENE_COUNT_TARGETS)[number]>("8-12");
+  const [backgroundSegmentsChoice, setBackgroundSegmentsChoice] = useState<string>("auto");
+  // Auto resolves against the same target duration the Auto profile is created with (midpoint of the range).
+  const autoSegmentRange = resolveBackgroundSegmentRange({ mode: "auto" }, midpoint(durationTarget));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -179,7 +190,7 @@ export function JobNewPage() {
                     durationSec: midpoint(durationTarget),
                     sceneCount: midpoint(sceneCountTarget),
                   });
-                  const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source);
+                  const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(backgroundSegmentsChoice));
                   navigate(`/video-productions/${submitted.id}`);
                 } catch (err) {
                   setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -395,6 +406,27 @@ export function JobNewPage() {
                   </Select>
                 </dd>
               </div>
+              {entryMode === "auto" ? (
+                <div className="flex flex-col gap-1 border-t border-lyx-neutral-bg py-2 text-[12.5px]">
+                  <div className="flex items-center justify-between">
+                    <dt className="text-lyx-fg-muted">
+                      <label htmlFor="background-segments">{t("jobs.backgroundSegments")}</label>
+                    </dt>
+                    <dd>
+                      <Select id="background-segments" className="h-8 text-[12px]" value={backgroundSegmentsChoice} onChange={(e) => setBackgroundSegmentsChoice(e.target.value)}>
+                        {BACKGROUND_SEGMENT_CHOICES.map((value) => (
+                          <option key={value} value={value}>
+                            {value === "auto"
+                              ? t("jobs.backgroundSegmentsAuto", { min: autoSegmentRange?.min ?? "?", max: autoSegmentRange?.max ?? "?" })
+                              : t("jobs.backgroundSegmentsFixed", { count: Number(value) })}
+                          </option>
+                        ))}
+                      </Select>
+                    </dd>
+                  </div>
+                  <p className="text-[11px] text-lyx-fg-subtle">{t("jobs.backgroundSegmentsHint")}</p>
+                </div>
+              ) : null}
             </dl>
           </div>
 

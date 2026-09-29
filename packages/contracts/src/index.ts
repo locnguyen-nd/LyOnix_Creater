@@ -538,6 +538,22 @@ export type VideoProductionSubmitRequest = {
   sourceId?: string;
   /** Inline-create a new `SourceVersion` for this run. Mutually exclusive with `sourceId`. `file` sources are not supported inline (no text extraction adapter exists yet — see VE2E-01 handoff); create the source via the existing endpoint and pass `sourceId` instead. */
   source?: VideoProductionSourceInput;
+  /** VE2E-40: background segment count for this run; omitted = `{ mode: "auto" }`. Persisted on the run (retry/resume reuse it). */
+  backgroundSegments?: BackgroundSegmentsSetting;
+};
+
+/**
+ * VE2E-40 (DEC-2026-09-29-JP-ONESHOT-MEDIA #2): number of background ("one-shot") segments.
+ * `auto` = by video length (<= 30s: 2-3, > 30s: 3-5; by the intake target duration, else the real
+ * total voice duration); `fixed` = exactly `count`, validated server-side against configurable
+ * bounds (placeholder 1..6). Rules live in `@lyonix/domain/background-segments`.
+ */
+export type BackgroundSegmentsSetting = { mode: "auto" } | { mode: "fixed"; count: number };
+
+/** VE2E-40: the persisted setting plus the segment-count range it resolves to for this run (`null` = auto with no known duration yet). */
+export type BackgroundSegmentsResolvedResponse = {
+  setting: BackgroundSegmentsSetting;
+  range: { min: number; max: number } | null;
 };
 
 export type VideoProductionSubmitResponse = {
@@ -567,6 +583,8 @@ export type VideoProductionResponse = {
   renderJobId: string | null;
   resultUrl: string | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
+  /** VE2E-40: the run's persisted background segment setting (legacy runs read as auto) and its resolved range. */
+  backgroundSegments: BackgroundSegmentsResolvedResponse;
   createdAt: string;
   updatedAt: string;
 };
