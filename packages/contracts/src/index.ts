@@ -577,6 +577,43 @@ export type BackgroundSegmentsResolvedResponse = {
   range: { min: number; max: number } | null;
 };
 
+/**
+ * VE2E-31: `POST /projects/:projectId/media-plans` - runs the same server-side MediaPlanService the
+ * Auto runner uses (segments + one source B-roll per segment + contiguous per-scene source ranges)
+ * for one script version and returns timeline bindings WITHOUT saving a TimelineVersion (Studio,
+ * VE2E-41, saves through the normal timeline save). It does search/import media into the project
+ * library (Pexels calls + asset rows), so it is a CSRF-protected POST.
+ */
+export type MediaPlanRequest = {
+  scriptDraftVersionId: string;
+  /** Verified `visual` (Pexels) provider account. */
+  providerAccountId: string;
+  /** Omitted = `{ mode: "auto" }`, resolved against the scenes' real voice duration. */
+  backgroundSegments?: BackgroundSegmentsSetting;
+};
+
+export type MediaPlanSegmentDiagnostics = {
+  segmentId: string;
+  origin: "visual_plan" | "fallback";
+  /** `reused` = an asset already assigned to the segment's first scene in this project; `imported` = newly searched + imported; `failed` = no acceptable source (see `errorCode`), scenes left unbound. */
+  sourcing: "reused" | "imported" | "failed";
+  errorCode: string | null;
+  durationMs: number;
+  /** Source shorter than the segment: some scene restarted from 0 at a scene boundary (documented loop policy). */
+  looped: boolean;
+  /** A single scene longer than the whole source clip (its range is the whole clip, shorter than the voice). */
+  short: boolean;
+};
+
+export type MediaPlanResponse = {
+  policyVersion: string;
+  range: { min: number; max: number } | null;
+  /** Ready to send as `SaveTimelineVersionRequest.scenes`/`segments` (Studio merges its own audio/text bindings). */
+  scenes: Array<{ sceneId: string; mediaAssetVersionId: string | null; segmentId: string | null; sourceStartMs: number | null; sourceDurationMs: number | null }>;
+  segments: TimelineSegmentInput[];
+  diagnostics: MediaPlanSegmentDiagnostics[];
+};
+
 export type VideoProductionSubmitResponse = {
   id: string;
   status: WorkflowRunStatus;

@@ -181,3 +181,18 @@ export {
   type BackgroundSegmentRange,
   type BackgroundSegmentsParseResult,
 } from "./background-segments.js";
+export {
+  planBackgroundSegments,
+  fitSegmentsToRange,
+  chooseFallbackSegmentCount,
+  groupScenesByDuration,
+  computeSegmentSourceRanges,
+  MEDIA_PLAN_POLICY_VERSION,
+  MEDIA_PLAN_MIN_SEGMENT_MS,
+  MEDIA_PLAN_MAX_SEGMENT_MS,
+  type MediaPlanScene,
+  type MediaPlanVisualSegment,
+  type PlannedSegment,
+  type SegmentCountRange,
+  type SceneSourceRange,
+} from "./media-plan.js";
