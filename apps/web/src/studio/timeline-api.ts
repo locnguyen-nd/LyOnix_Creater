@@ -11,6 +11,8 @@ import type {
   ElevenLabsVoiceSummaryResponse,
   MediaAssetVersionSummary,
   MediaDeliveryIssueResponse,
+  MediaPlanRequest,
+  MediaPlanResponse,
   PexelsMediaType,
   PexelsSearchResponse,
   RenderJobResponse,
@@ -35,6 +37,15 @@ export async function fetchStudioContext(jobId: string): Promise<StudioContextRe
 
 export async function saveTimelineVersion(projectId: string, input: SaveTimelineVersionRequest): Promise<TimelineVersionResponse> {
   return api<TimelineVersionResponse>(`/projects/${projectId}/timeline-versions`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Uses the same server-side planner as Auto; the caller merges the returned media bindings into its editable Studio draft. */
+export async function planProjectMedia(projectId: string, input: MediaPlanRequest): Promise<MediaPlanResponse> {
+  return api<MediaPlanResponse>(`/projects/${projectId}/media-plans`, {
     method: "POST",
     headers: await csrfHeaders(),
     body: JSON.stringify(input),

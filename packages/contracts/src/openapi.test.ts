@@ -10,4 +10,12 @@ describe("OpenAPI baseline", () => {
     expect(openApiDocument.components.schemas.SuccessHealth.required).toEqual(["data", "meta"]);
     expect(openApiDocument.components.schemas.ErrorEnvelope.required).toEqual(["error", "meta"]);
   });
+
+  it("documents the Studio media-plan endpoint, request and response", () => {
+    const operation = openApiDocument.paths["/projects/{projectId}/media-plans"].post;
+    expect(operation.operationId).toBe("createProjectMediaPlan");
+    expect(operation.requestBody.content["application/json"].schema).toEqual({ $ref: "#/components/schemas/MediaPlanRequest" });
+    expect(openApiDocument.components.schemas.MediaPlanRequest.required).toEqual(["scriptDraftVersionId", "providerAccountId"]);
+    expect(openApiDocument.components.schemas.SuccessMediaPlan.required).toEqual(["data", "meta"]);
+  });
 });
