@@ -4,9 +4,10 @@
  * (`WorkflowRunnerService`) since Auto mode has no human building a timeline. This is
  * NOT a general timeline editor — it never reorders/trims/crops, just fills each
  * slot queue (by kind, in the template's own element order) with the next scene that
- * has a matching asset, in scene order. A `TimelineVersion` persistence/editing model
- * remains out of scope (still deferred, same known-limitation VE2E-01/04/05 already
- * documented) — Studio's real timeline builder is VE2E-07 scope.
+ * has a matching asset, in scene order. Since VE2E-42 the Auto runner uses this only as a
+ * preflight (exact missing required keys) and persists its bindings as an auto-approved
+ * `TimelineVersion` rendered through the shared timeline mapping; `buildAutoTimelineOptionValues`
+ * below keeps the title/caption leftover-slot fill identical on that path.
  *
  * Known limitation (documented, not silently worked around): a template with a
  * single audio element only ever receives the first scene's narration clip, because
@@ -104,4 +105,30 @@ export function buildAutoRenderAssignments(
   const missingKeys = slots.filter((slot) => slot.required && !assignedKeys.has(slot.key)).map((slot) => slot.key);
   if (missingKeys.length > 0) return { ok: false, reason: "missing_required_slot", missingKeys };
   return { ok: true, assignments };
+}
+
+/**
+ * VE2E-42: the Auto runner now persists its bindings as a `TimelineVersion` and renders through
+ * the shared timeline mapping, which fills one text slot per scene (from the scene's text) and
+ * then any still-unclaimed slot from the timeline's `optionValues`. This returns exactly the
+ * leftover-text-slot fill `buildAutoRenderAssignments` applies for `extraText` (title, then
+ * caption, into the text slots left after every scene with non-empty `displayText` took one), as
+ * `optionValues`, so the rendered text is identical on both paths.
+ */
+export function buildAutoTimelineOptionValues(
+  slots: AutoTemplateSlot[],
+  scenes: AutoSceneMedia[],
+  extraText: { title?: string; caption?: string } = {},
+): Record<string, string> {
+  const textSlots = slots.filter((slot) => slot.kind === "text");
+  const sceneTextCount = scenes.filter((scene) => scene.displayText.trim()).length;
+  const leftover = textSlots.slice(Math.min(sceneTextCount, textSlots.length));
+  const values: Record<string, string> = {};
+  for (const text of [extraText.title?.trim(), extraText.caption?.trim()]) {
+    if (!text) continue;
+    const slot = leftover.shift();
+    if (!slot) break;
+    values[slot.key] = text;
+  }
+  return values;
 }

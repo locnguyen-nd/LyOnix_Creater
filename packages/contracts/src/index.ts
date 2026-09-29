@@ -53,7 +53,10 @@ export type ErrorCode =
   // apps/api/src/workflow-runner.service.ts), never an implicit accept.
   | "MEDIA_RELEVANCE_BELOW_THRESHOLD"
   | "MEDIA_RELEVANCE_UNVERIFIED"
-  | "MEDIA_RIGHTS_UNRESOLVED";
+  | "MEDIA_RIGHTS_UNRESOLVED"
+  // VE2E-37: media-worker could not cut/deliver a derivative clip for render (timeout, broker down,
+  // retryable worker error). Retryable; render never falls back to the full source file.
+  | "MEDIA_PREPARE_FAILED";
 
 export type ErrorEnvelope = {
   error: {
@@ -144,7 +147,8 @@ export type ScriptDraftV2GenerationResponse = {
 export const mediaAssetKinds = ["image", "video", "audio", "document"] as const;
 export type MediaAssetKind = (typeof mediaAssetKinds)[number];
 
-export const mediaOrigins = ["upload", "import_url", "generated", "pexels"] as const;
+/** `apify` (VE2E-42, DEC-2026-09-29-JP-ONESHOT-MEDIA): social media fetched through an allowlisted Apify Actor - the adapter/registration path is VE2E-34; only the origin value exists here. */
+export const mediaOrigins = ["upload", "import_url", "generated", "pexels", "apify"] as const;
 export type MediaOrigin = (typeof mediaOrigins)[number];
 
 export const retentionClasses = ["project", "working"] as const;
@@ -187,6 +191,24 @@ export type MediaAssetVersionSummary = {
   sceneId: string | null;
   /** Attribution to display in the UI next to this asset; only set for `origin==="pexels"`. */
   attribution: PexelsAttribution | null;
+  /** VE2E-42 lineage: the source asset this one was derived from (e.g. a clip trimmed by media-worker), null for an original. */
+  parentMediaAssetVersionId: string | null;
+  /** VE2E-42 lineage: how this derivative was produced from its parent; null for an original (or an unreadable stored value). */
+  transform: MediaAssetTransform | null;
+};
+
+/**
+ * VE2E-42: how a derivative `MediaAssetVersion` was produced from its `parentMediaAssetVersionId`
+ * (CR-JP-ONESHOT-MEDIA-2026-09-29 §8), stored as `MediaAssetVersion.transform` JSON and written by the
+ * media-worker derivative flow (VE2E-36/37). `range` is expressed in the parent's own timeline (ms);
+ * `stripAudio` records that the audio track was removed at file level (mandatory for social sources,
+ * DEC-2026-09-29 #1); `tool`/`profileVersion` pin what produced the file, for audit/reproducibility.
+ */
+export type MediaAssetTransform = {
+  range: { startMs: number; durationMs: number } | null;
+  stripAudio: boolean;
+  tool: { name: string; version: string } | null;
+  profileVersion: string | null;
 };
 
 // --- VE2E-04: Pexels search/import + media library extras ---
@@ -601,6 +623,20 @@ export type TimelineSceneBindingInput = {
   annotation?: string | null;
   /** User-toggled "remove from render" — the scene and its authored content are kept, just skipped when building the render (dynamic composition drops it, same as a scene with no audio yet). */
   excluded?: boolean;
+  /**
+   * VE2E-42 (optional, additive): the background segment this scene belongs to; must name a
+   * `segments[]` entry of the same timeline that lists this scene. Absent/null = not part of a
+   * planned segment (every timeline saved before VE2E-42).
+   */
+  segmentId?: string | null;
+  /**
+   * VE2E-42 (optional, additive): the slice of the bound source video this scene uses, in the
+   * source's own timeline (ms). Set both or neither; only allowed on a scene bound to a `video`
+   * asset. Absent = the source is used from its start, exactly as before VE2E-42. The derivative
+   * for this range is cut at render time by media-worker (VE2E-37), never in the API.
+   */
+  sourceStartMs?: number | null;
+  sourceDurationMs?: number | null;
 };
 
 export type TimelineSceneBindingResponse = {
@@ -612,6 +648,33 @@ export type TimelineSceneBindingResponse = {
   screenTextOverride: string | null;
   annotation: string | null;
   excluded: boolean;
+  /** VE2E-42: see `TimelineSceneBindingInput.segmentId`; `null` on timelines saved before VE2E-42. */
+  segmentId: string | null;
+  /** VE2E-42: see `TimelineSceneBindingInput.sourceStartMs`; `null` = no range (source used as before). */
+  sourceStartMs: number | null;
+  sourceDurationMs: number | null;
+};
+
+/**
+ * VE2E-42: one background segment - a run of consecutive scenes (timeline order) sharing one
+ * B-roll source (CR-JP-ONESHOT-MEDIA-2026-09-29 §4/§8). `priority` is an integer 1..10 where
+ * 1 = the video's main subject; `subject` is a short label. Structural rules live in
+ * `@lyonix/domain/timeline-segments` (`validateTimelineSegmentStructure`).
+ */
+export type TimelineSegmentInput = {
+  segmentId: string;
+  sceneIds: string[];
+  mediaAssetVersionId?: string | null;
+  subject?: string | null;
+  priority?: number | null;
+};
+
+export type TimelineSegmentResponse = {
+  segmentId: string;
+  sceneIds: string[];
+  mediaAssetVersionId: string | null;
+  subject: string | null;
+  priority: number | null;
 };
 
 /** Template-level modification values not tied to one scene (secondary text/color/font/volume), keyed by the pinned `TemplateSnapshot`'s modification key. */
@@ -623,6 +686,8 @@ export type SaveTimelineVersionRequest = {
   templateSnapshotId?: string | null;
   scenes: TimelineSceneBindingInput[];
   optionValues?: TimelineOptionValues;
+  /** VE2E-42 (optional): background segments; omitted/empty = no segment plan (pre-VE2E-42 behavior). */
+  segments?: TimelineSegmentInput[];
 };
 
 export type TimelineVersionResponse = {
@@ -633,7 +698,11 @@ export type TimelineVersionResponse = {
   templateSnapshotId: string | null;
   scenes: TimelineSceneBindingResponse[];
   optionValues: TimelineOptionValues;
+  /** VE2E-42: always an array; empty for timelines saved before VE2E-42 or without a segment plan. */
+  segments: TimelineSegmentResponse[];
   supersedesId: string | null;
+  /** VE2E-42: set when this version was written + auto-approved by an Auto `WorkflowRun` (exactly what that run rendered); null for Studio-authored versions. */
+  workflowRunId: string | null;
   createdAt: string;
   approvedAt: string | null;
 };

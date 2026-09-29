@@ -120,7 +120,7 @@ describe("getPexelsPhoto", () => {
 });
 
 describe("pickPexelsVideoFile", () => {
-  it("prefers the smallest mp4 variant whose height already reaches HD (1280+)", () => {
+  it("prefers the smallest mp4 variant whose short side reaches 1080", () => {
     const picked = pickPexelsVideoFile(videoRow.video_files.map((f) => ({ quality: f.quality, width: f.width, height: f.height, fileType: f.file_type, link: f.link })));
     expect(picked?.quality).toBe("hd");
   });
@@ -131,6 +131,22 @@ describe("pickPexelsVideoFile", () => {
       { quality: "sd2", width: 540, height: 960, fileType: "video/mp4", link: "https://videos.pexels.com/b.mp4" },
     ];
     expect(pickPexelsVideoFile(files)?.quality).toBe("sd2");
+  });
+
+  it("VE2E-37: judges landscape by its short side and never picks 1440p/4K when a 1080p variant exists", () => {
+    const files = [
+      { quality: "uhd", width: 3840, height: 2160, fileType: "video/mp4", link: "https://videos.pexels.com/4k.mp4" },
+      { quality: "qhd", width: 2560, height: 1440, fileType: "video/mp4", link: "https://videos.pexels.com/1440.mp4" },
+      { quality: "hd", width: 1920, height: 1080, fileType: "video/mp4", link: "https://videos.pexels.com/1080.mp4" },
+      { quality: "hd720", width: 1280, height: 720, fileType: "video/mp4", link: "https://videos.pexels.com/720.mp4" },
+    ];
+    expect(pickPexelsVideoFile(files)?.quality).toBe("hd");
+    // portrait 720x1280 has a 720 short side: not enough when a 1080x1920 exists
+    expect(pickPexelsVideoFile([
+      { quality: "p720", width: 720, height: 1280, fileType: "video/mp4", link: "https://videos.pexels.com/p720.mp4" },
+      { quality: "p1080", width: 1080, height: 1920, fileType: "video/mp4", link: "https://videos.pexels.com/p1080.mp4" },
+      { quality: "p4k", width: 2160, height: 3840, fileType: "video/mp4", link: "https://videos.pexels.com/p4k.mp4" },
+    ])?.quality).toBe("p1080");
   });
 
   it("returns null when there is no usable mp4 file", () => {

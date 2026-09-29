@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAutoRenderAssignments, type AutoSceneMedia, type AutoTemplateSlot } from "./auto-render-assignments.js";
+import { buildAutoRenderAssignments, buildAutoTimelineOptionValues, type AutoSceneMedia, type AutoTemplateSlot } from "./auto-render-assignments.js";
 
 const scene = (overrides: Partial<AutoSceneMedia>): AutoSceneMedia => ({
   sceneId: "scene-1",
@@ -104,5 +104,30 @@ describe("buildAutoRenderAssignments", () => {
       ok: true,
       assignments: [{ modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "asset-1" }],
     });
+  });
+});
+
+describe("buildAutoTimelineOptionValues (VE2E-42)", () => {
+  const textSlots: AutoTemplateSlot[] = [
+    { key: "Text-1.text", kind: "text", required: false },
+    { key: "Text-2.text", kind: "text", required: false },
+    { key: "Text-3.text", kind: "text", required: false },
+  ];
+
+  it("returns exactly the title/caption fill buildAutoRenderAssignments applies to leftover text slots", () => {
+    const scenes = [scene({ orderIndex: 0, displayText: "Nội dung" }), scene({ sceneId: "scene-2", orderIndex: 1, displayText: "  " })];
+    const extra = { title: "Tiêu đề", caption: "Caption" };
+    const values = buildAutoTimelineOptionValues(textSlots, scenes, extra);
+    expect(values).toEqual({ "Text-2.text": "Tiêu đề", "Text-3.text": "Caption" });
+    const built = buildAutoRenderAssignments(textSlots, scenes, extra);
+    if (!built.ok) throw new Error("expected ok");
+    const extraAssignments = built.assignments.filter((a) => a.kind === "text" && a.text !== "Nội dung");
+    expect(Object.fromEntries(extraAssignments.map((a) => [a.modificationKey, a.kind === "text" ? a.text : ""]))).toEqual(values);
+  });
+
+  it("returns nothing when scenes consume every text slot or there is no title/caption", () => {
+    const scenes = [0, 1, 2].map((i) => scene({ sceneId: `s${i}`, orderIndex: i, displayText: `T${i}` }));
+    expect(buildAutoTimelineOptionValues(textSlots, scenes, { title: "x", caption: "y" })).toEqual({});
+    expect(buildAutoTimelineOptionValues(textSlots, [], {})).toEqual({});
   });
 });

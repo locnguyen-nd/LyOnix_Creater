@@ -33,12 +33,13 @@ import type {
   TemplateModificationSlotResponse,
   TimelineSceneBindingResponse,
 } from "@lyonix/contracts";
+import { ClipDerivativesService, type ClipDerivativeRequest } from "./clip-derivatives.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
-import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping } from "./timeline-render-mapping.js";
+import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 
 export type RenderOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -112,7 +113,47 @@ export class RenderJobsService {
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(CreatomateTemplatesService) private readonly templates: CreatomateTemplatesService,
     @Inject(MediaDeliveryService) private readonly mediaDelivery: MediaDeliveryService,
+    // VE2E-37: optional only so pre-VE2E-37 unit tests can construct the service with 4 args; both
+    // Nest modules register it. Without it, a timeline with source ranges fails (never full-source fallback).
+    @Inject(ClipDerivativesService) private readonly clipDerivatives?: ClipDerivativesService,
   ) {}
+
+  /**
+   * VE2E-37: scenes whose binding carries a source range on a video asset. Bindings without a
+   * range (every timeline saved before VE2E-42, and Studio timelines without a segment plan) are
+   * not returned, so they keep rendering the full asset exactly as before.
+   */
+  private static rangedVideoScenes(scenes: readonly SceneBindingForMapping[]): SceneBindingForMapping[] {
+    return scenes.filter(
+      (scene) =>
+        scene.mediaKind === "video" &&
+        Boolean(scene.mediaAssetVersionId) &&
+        typeof scene.sourceStartMs === "number" &&
+        typeof scene.sourceDurationMs === "number" &&
+        scene.sourceDurationMs > 0,
+    );
+  }
+
+  /**
+   * VE2E-37: cut (via media-worker) or reuse a derivative for each ranged request and return the
+   * scene list with those scenes re-pointed at their derivative. Any failure is returned as-is —
+   * the caller must abort the render, never send the full source instead.
+   */
+  private async withClipDerivatives(
+    projectId: string,
+    userId: string,
+    scenes: SceneBindingForMapping[],
+    requests: ClipDerivativeRequest[],
+  ): Promise<RenderOutcome<SceneBindingForMapping[]>> {
+    if (requests.length === 0) return { ok: true, data: scenes };
+    if (!this.clipDerivatives) {
+      return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Media worker chưa được nối vào render — không cắt được clip", status: 503, retryable: false };
+    }
+    const prepared = await this.clipDerivatives.prepare(projectId, userId, requests);
+    if (!prepared.ok) return prepared;
+    const bySceneId = prepared.data.derivativeBySceneId;
+    return { ok: true, data: scenes.map((scene) => (bySceneId.has(scene.sceneId) ? { ...scene, mediaAssetVersionId: bySceneId.get(scene.sceneId)! } : scene)) };
+  }
 
   private async assertProjectAccess(projectId: string, userId: string, role: "admin" | "staff") {
     const project = await this.prisma.project.findUnique({ where: { id: projectId } });
@@ -293,6 +334,10 @@ export class RenderJobsService {
    * bindings into the same whitelisted `RenderAssignmentInput[]` shape `submit()` already
    * validates and delegates to it unchanged - no duplicated Creatomate-call/idempotency/
    * webhook logic, this is purely an alternate input-building path.
+   *
+   * VE2E-42: the Auto runner renders through this same path (after persisting its bindings as an
+   * auto-approved timeline), passing `workflowRunId` so the `RenderJob` stays linked to its run.
+   * Like `submit`'s own `workflowRunId`, it is never taken from an HTTP body.
    */
   async submitFromTimelineVersion(
     projectId: string,
@@ -300,6 +345,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     input: RenderSubmitFromTimelineRequest,
+    workflowRunId?: string,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -312,9 +358,28 @@ export class RenderJobsService {
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
-    const built = buildRenderAssignmentsFromTimeline(slots, resolved, optionValues);
+    let built = buildRenderAssignmentsFromTimeline(slots, resolved, optionValues);
     if (built.missingRequiredModificationKeys.length > 0) {
       return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
+    }
+    // VE2E-37: only scenes whose video actually landed in a template slot are cut. A scene keeps its
+    // source audio only if the timeline explicitly set a non-zero volume for that slot (apify: never).
+    const clipRequests = RenderJobsService.rangedVideoScenes(resolved)
+      .filter((scene) => built.videoSlotKeyBySceneId[scene.sceneId] !== undefined)
+      .map((scene): ClipDerivativeRequest => {
+        const volumeKey = built.videoSlotKeyBySceneId[scene.sceneId]!.replace(/\.source$/, ".volume");
+        const explicitVolume = optionValues[volumeKey];
+        const keepSourceAudio = explicitVolume !== undefined && Number(explicitVolume) > 0;
+        return { sceneId: scene.sceneId, parentMediaAssetVersionId: scene.mediaAssetVersionId!, startMs: scene.sourceStartMs!, durationMs: scene.sourceDurationMs!, stripAudio: !keepSourceAudio };
+      });
+    if (clipRequests.length > 0) {
+      // Same no-charge preflight `submit` runs, but before any clip is cut.
+      const account = await this.templates.usableAccount(input.providerAccountId);
+      if (!account.ok) return account;
+      if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests);
+      if (!withDerivatives.ok) return withDerivatives;
+      built = buildRenderAssignmentsFromTimeline(slots, withDerivatives.data, optionValues);
     }
     return this.submit(projectId, userId, role, {
       templateSnapshotId: timeline.templateSnapshotId,
@@ -322,7 +387,7 @@ export class RenderJobsService {
       assignments: built.assignments,
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-    });
+    }, workflowRunId);
   }
 
   /**
@@ -350,6 +415,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     outputFormat?: "mp4" | "mov" | "gif",
+    options: { prepareClipDerivatives?: boolean } = {},
   ): Promise<
     RenderOutcome<{
       templateSnapshotId: string;
@@ -385,12 +451,27 @@ export class RenderJobsService {
       captionSegmentsByAudioVersionId.set(row.audioVersionId, (Array.isArray(row.segments) ? row.segments : []) as unknown as DynamicSceneInput["captionSegments"]);
     }
 
-    const renderable = [...resolved]
+    let renderable = [...resolved]
       .sort((a, b) => a.orderIndex - b.orderIndex)
       .filter((scene) => !scene.excluded && scene.audioVersionId && scene.audioMediaAssetVersionId && scene.mediaAssetVersionId && scene.mediaKind)
       .filter((scene) => (audioDurationById.get(scene.audioVersionId!) ?? 0) > 0);
     if (renderable.length === 0) {
       return { ok: false, code: "VALIDATION_FAILED", message: "Chưa có cảnh nào đủ audio + media để render — tạo voice/gán media rồi thử lại" };
+    }
+    // VE2E-37: the real dynamic render sends trimmed derivatives (always audio-stripped: the dynamic
+    // composition has no per-video volume, so the B-roll audio would otherwise play under the
+    // narration). The read-only preview never enqueues cut jobs (CR §8: preview uses the source asset).
+    if (options.prepareClipDerivatives) {
+      const clipRequests = RenderJobsService.rangedVideoScenes(renderable).map((scene): ClipDerivativeRequest => ({
+        sceneId: scene.sceneId,
+        parentMediaAssetVersionId: scene.mediaAssetVersionId!,
+        startMs: scene.sourceStartMs!,
+        durationMs: scene.sourceDurationMs!,
+        stripAudio: true,
+      }));
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests);
+      if (!withDerivatives.ok) return withDerivatives;
+      renderable = withDerivatives.data;
     }
 
     const dynamicScenes: DynamicSceneInput[] = [];
@@ -452,7 +533,7 @@ export class RenderJobsService {
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
 
-    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
+    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true });
     if (!resolvedComposition.ok) return resolvedComposition;
     const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
 

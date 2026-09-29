@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DYNAMIC_STYLE_OPTION_KEYS } from "@lyonix/providers";
-import { TimelineVersionsService } from "./timeline-versions.service.js";
+import { TimelineVersionsService, toTimelineVersionResponse } from "./timeline-versions.service.js";
 
 const projectId = "project-1";
 
@@ -18,7 +18,11 @@ describe("TimelineVersionsService", () => {
     nextId = 1;
     projectRows = [{ id: projectId }];
     timelineRows = [];
-    mediaRows = [{ id: "media-1", projectId, kind: "video", deletedAt: null }];
+    mediaRows = [
+      { id: "media-1", projectId, kind: "video", durationMs: 30_000, deletedAt: null },
+      { id: "media-2", projectId, kind: "image", durationMs: null, deletedAt: null },
+      { id: "media-3", projectId, kind: "video", durationMs: null, deletedAt: null },
+    ];
     templateRows = [{ id: "template-1", modifications: [{ key: "Video-1.source", kind: "video", label: "Video-1.source", required: true }, { key: "Text-1.fill_color", kind: "color", label: "Text-1.fill_color", required: false }] }];
 
     prisma = {
@@ -188,6 +192,117 @@ describe("TimelineVersionsService", () => {
       if (!saved.ok) throw new Error("expected ok");
       const preview = await service.preview(saved.data.id, "user-1", "staff");
       expect(preview).toMatchObject({ ok: true, data: { ready: false } });
+    });
+  });
+
+  describe("VE2E-42 segments + source ranges", () => {
+    it("reads a legacy row (no segments/ranges/workflowRunId) back with null/[] defaults", () => {
+      const legacy = toTimelineVersionResponse({
+        id: "t-legacy", projectId, version: 1, status: "approved", templateSnapshotId: "template-1",
+        scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null }],
+        optionValues: {}, supersedesId: null, createdAt: new Date(), approvedAt: new Date(),
+      });
+      expect(legacy.segments).toEqual([]);
+      expect(legacy.workflowRunId).toBeNull();
+      expect(legacy.scenes[0]).toMatchObject({ excluded: false, segmentId: null, sourceStartMs: null, sourceDurationMs: null });
+    });
+
+    it("saves a timeline without segments exactly as before (segments [] and null ranges)", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1" }] });
+      expect(outcome).toMatchObject({ ok: true, data: { segments: [], workflowRunId: null, scenes: [{ sceneId: "s1", segmentId: null, sourceStartMs: null, sourceDurationMs: null }] } });
+      expect(timelineRows[0].segments).toEqual([]);
+    });
+
+    it("persists consecutive segments and per-scene video ranges", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        scenes: [
+          { sceneId: "s1", mediaAssetVersionId: "media-1", segmentId: "g1", sourceStartMs: 0, sourceDurationMs: 4000 },
+          { sceneId: "s2", mediaAssetVersionId: "media-1", segmentId: "g1", sourceStartMs: 4000, sourceDurationMs: 5000 },
+          { sceneId: "s3", mediaAssetVersionId: "media-3", sourceStartMs: 1000, sourceDurationMs: 600_000 },
+        ],
+        segments: [{ segmentId: "g1", sceneIds: ["s1", "s2"], mediaAssetVersionId: "media-1", subject: "  Tokyo street  ", priority: 1 }],
+      });
+      expect(outcome).toMatchObject({
+        ok: true,
+        data: {
+          segments: [{ segmentId: "g1", sceneIds: ["s1", "s2"], mediaAssetVersionId: "media-1", subject: "Tokyo street", priority: 1 }],
+          scenes: [
+            { sceneId: "s1", segmentId: "g1", sourceStartMs: 0, sourceDurationMs: 4000 },
+            { sceneId: "s2", segmentId: "g1", sourceStartMs: 4000, sourceDurationMs: 5000 },
+            // unknown source duration (older import) -> range accepted, not bounded
+            { sceneId: "s3", segmentId: null, sourceStartMs: 1000, sourceDurationMs: 600_000 },
+          ],
+        },
+      });
+    });
+
+    it("rejects a range on an image, past the known source duration, or half-set", async () => {
+      const onImage = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-2", sourceStartMs: 0, sourceDurationMs: 1000 }] });
+      expect(onImage).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const tooLong = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1", sourceStartMs: 29_000, sourceDurationMs: 2000 }] });
+      expect(tooLong).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const halfSet = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1", sourceStartMs: 0 }] });
+      expect(halfSet).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(timelineRows).toHaveLength(0);
+    });
+
+    it("rejects non-consecutive segments, a non-array segments value, and a segment media from another project", async () => {
+      const nonConsecutive = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        scenes: [{ sceneId: "s1", segmentId: "g1" }, { sceneId: "s2" }, { sceneId: "s3", segmentId: "g1" }],
+        segments: [{ segmentId: "g1", sceneIds: ["s1", "s3"] }],
+      });
+      expect(nonConsecutive).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const notArray = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1" }], segments: "g1" as never });
+      expect(notArray).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const foreignMedia = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        scenes: [{ sceneId: "s1", segmentId: "g1" }],
+        segments: [{ segmentId: "g1", sceneIds: ["s1"], mediaAssetVersionId: "media-elsewhere" }],
+      });
+      expect(foreignMedia).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    });
+  });
+
+  describe("persistApprovedForWorkflowRun (VE2E-42 Auto path)", () => {
+    const input = { templateSnapshotId: "template-1", scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1", screenTextOverride: "Narration 1" }], optionValues: {} };
+
+    it("writes an already-approved version tagged with the run, superseding the latest", async () => {
+      const studio = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1" }] });
+      if (!studio.ok) throw new Error("expected ok");
+      const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      expect(outcome).toMatchObject({ ok: true, data: { version: 2, status: "approved", workflowRunId: "run-1", supersedesId: studio.data.id, templateSnapshotId: "template-1" } });
+      expect(timelineRows[1]).toMatchObject({ approvedByUserId: "user-1", createdByUserId: "user-1", workflowRunId: "run-1" });
+      expect(timelineRows[1].approvedAt).toBeInstanceOf(Date);
+      const latest = await service.latest(projectId, "user-1", "staff");
+      expect(latest).toMatchObject({ ok: true, data: { id: timelineRows[1].id, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1", screenTextOverride: "Narration 1" }] } });
+    });
+
+    it("is idempotent on retry of the same run with identical content, but versions a changed binding", async () => {
+      const first = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      const again = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      if (!first.ok || !again.ok) throw new Error("expected ok");
+      expect(again.data.id).toBe(first.data.id);
+      expect(timelineRows).toHaveLength(1);
+      const changed = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", { ...input, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-3" }] });
+      expect(changed).toMatchObject({ ok: true, data: { version: 2, supersedesId: first.data.id } });
+      const otherRun = await service.persistApprovedForWorkflowRun("run-2", projectId, "user-1", "staff", { ...input, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-3" }] });
+      expect(otherRun).toMatchObject({ ok: true, data: { version: 3, workflowRunId: "run-2" } });
+    });
+
+    it("validates through the same rules as a Studio save (unknown media rejected, nothing written)", async () => {
+      const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", { ...input, scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-elsewhere" }] });
+      expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(timelineRows).toHaveLength(0);
+    });
+
+    it("maps a concurrent version-number collision to VERSION_CONFLICT", async () => {
+      prisma.timelineVersion.create = async () => {
+        throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+      };
+      const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      expect(outcome).toMatchObject({ ok: false, code: "VERSION_CONFLICT" });
     });
   });
 });

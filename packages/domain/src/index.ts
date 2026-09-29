@@ -91,6 +91,7 @@ export {
 } from "./caption-segmentation.js";
 export {
   buildAutoRenderAssignments,
+  buildAutoTimelineOptionValues,
   type AutoModificationKind,
   type AutoTemplateSlot,
   type AutoSceneMedia,
@@ -147,3 +148,21 @@ export {
   type VisionModerationPolicyInput,
   type ModerationAuditEntry,
 } from "./vision-moderation-policy.js";
+export {
+  validateTimelineSegmentStructure,
+  normalizeTimelineSegments,
+  TIMELINE_SEGMENT_ID_MAX_LENGTH,
+  TIMELINE_SEGMENT_SUBJECT_MAX_LENGTH,
+  TIMELINE_SEGMENT_PRIORITY_MIN,
+  TIMELINE_SEGMENT_PRIORITY_MAX,
+  TIMELINE_SOURCE_RANGE_MAX_MS,
+  type TimelineSceneRangeLike,
+  type TimelineSegmentLike,
+  type TimelineStructureResult,
+} from "./timeline-segments.js";
+export {
+  parseMediaAssetTransform,
+  isValidMediaAssetTransform,
+  type MediaTransformRange,
+  type MediaAssetTransformValue,
+} from "./media-lineage.js";

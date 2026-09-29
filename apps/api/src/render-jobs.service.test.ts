@@ -5,6 +5,8 @@ import { RenderJobsService } from "./render-jobs.service.js";
 import type { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import type { MediaDeliveryService } from "./media-delivery.service.js";
 import * as secretCrypto from "./secret-crypto.js";
+import { ClipDerivativesService } from "./clip-derivatives.service.js";
+import { failedClipResult, mediaAssetStore, startStubMediaWorker, type StubWorkerBehavior } from "./clip-derivatives.test-helpers.js";
 
 const projectId = "project-1";
 const templateSnapshotId = "snap-1";
@@ -98,6 +100,26 @@ describe("RenderJobsService", () => {
     service = new RenderJobsService(prisma, grants, templates as CreatomateTemplatesService, mediaDelivery as MediaDeliveryService);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("ctm-test");
   });
+
+  /**
+   * VE2E-37: re-creates `service` with a real ClipDerivativesService talking to a stub media-worker over
+   * InMemoryMediaJobBroker, backed by an in-memory MediaAssetVersion store (asset-1 = 50MB Pexels video).
+   * Delivery URLs embed the asset id so a test can see which file Creatomate would fetch.
+   */
+  const withStubClipDerivatives = async (behavior?: StubWorkerBehavior, parentOrigin = "pexels") => {
+    const worker = await startStubMediaWorker(behavior);
+    const store = mediaAssetStore([
+      { id: "asset-1", projectId, kind: "video", origin: parentOrigin, bytes: 50_000_000, relativePath: "projects/project-1/assets/src.mp4", originalFileName: "src.mp4" },
+      { id: "asset-audio", projectId, kind: "audio", origin: "generated", bytes: 1000, relativePath: "projects/project-1/assets/a.mp3", originalFileName: "a.mp3" },
+    ]);
+    prisma.mediaAssetVersion = store;
+    mediaDelivery.issueToken = vi.fn(async (id: string) => ({ token: id, url: `https://api.lyonix.local/api/v1/media-delivery/${id}`, expiresAt: new Date().toISOString() })) as never;
+    const clip = new ClipDerivativesService(prisma, worker.client);
+    const logs: string[] = [];
+    clip.log = (message) => logs.push(message);
+    service = new RenderJobsService(prisma, grants, templates as CreatomateTemplatesService, mediaDelivery as MediaDeliveryService, clip);
+    return { worker, store, logs };
+  };
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -368,6 +390,32 @@ describe("RenderJobsService", () => {
       expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
     });
 
+    it("VE2E-42/37: a ranged scene renders its trimmed derivative instead of the full source, and links workflowRunId for Auto", async () => {
+      const legacyScene = { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null };
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const cut = await withStubClipDerivatives();
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: [legacyScene], optionValues: {} });
+      await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId, idempotencyKey: "a" });
+      expect(cut.worker.jobs).toHaveLength(0); // no range -> exactly today's behavior, no media-worker call
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId, projectId, status: "approved", templateSnapshotId, optionValues: {},
+        scenes: [{ ...legacyScene, excluded: false, segmentId: "g1", sourceStartMs: 2000, sourceDurationMs: 3000 }],
+        segments: [{ segmentId: "g1", sceneIds: ["s1"], mediaAssetVersionId: "asset-1", subject: null, priority: 1 }],
+        workflowRunId: "run-1",
+      });
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId, idempotencyKey: "b" }, "run-1");
+      expect(outcome.ok).toBe(true);
+      const legacyBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const rangedBody = JSON.parse(String((fetchMock.mock.calls[1] as any)[1].body));
+      expect(legacyBody.modifications["Video-1.source"]).toBe("https://api.lyonix.local/api/v1/media-delivery/asset-1");
+      expect(rangedBody.modifications["Video-1.source"]).toBe("https://api.lyonix.local/api/v1/media-delivery/deriv-1");
+      expect(rangedBody.modifications["Text-1.text"]).toBe(legacyBody.modifications["Text-1.text"]);
+      expect(cut.worker.jobs).toHaveLength(1);
+      expect(cut.worker.jobs[0]).toMatchObject({ startMs: 2000, durationMs: 3000, stripAudio: true, source: { mediaAssetVersionId: "asset-1" } });
+      expect(prisma.renderJob.create).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ workflowRunId: "run-1" }) }));
+    });
+
     it("returns NOT_FOUND for a timeline version belonging to a different project", async () => {
       timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId: "other-project", status: "approved", templateSnapshotId, scenes: [], optionValues: {} });
       const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
@@ -555,6 +603,119 @@ describe("RenderJobsService", () => {
       expect(second.ok).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       if (first.ok && second.ok) expect(second.data.id).not.toBe(first.data.id);
+    });
+  });
+
+  describe("VE2E-37: trimmed derivatives in the shared render step", () => {
+    const timelineVersionId = "timeline-37";
+    const rangedScene = (overrides: Record<string, unknown> = {}) => ({
+      sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: "audio-1", subtitleVersionId: null,
+      screenTextOverride: "Xin chào", annotation: null, excluded: false, segmentId: "g1", sourceStartMs: 1000, sourceDurationMs: 4000, ...overrides,
+    });
+    const setTimeline = (scenes: unknown[], optionValues: Record<string, string> = {}) =>
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes, optionValues, segments: [] });
+    const okFetch = () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      return fetchMock;
+    };
+
+    it("template path: keeps source audio only when the timeline explicitly set a non-zero volume for that video slot", async () => {
+      okFetch();
+      const cut = await withStubClipDerivatives();
+      setTimeline([rangedScene()], { "Video-1.volume": "60" });
+      expect((await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
+      expect(cut.worker.jobs[0]!.stripAudio).toBe(false);
+    });
+
+    it("template path: a social (apify) parent is always cut without audio, even with an explicit volume", async () => {
+      okFetch();
+      const cut = await withStubClipDerivatives(undefined, "apify");
+      setTimeline([rangedScene()], { "Video-1.volume": "60" });
+      await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(cut.worker.jobs[0]!.stripAudio).toBe(true);
+      expect((cut.store.rows.get("deriv-1")!.transform as any).stripAudio).toBe(true);
+    });
+
+    it("template path: only scenes that landed in a video slot are cut", async () => {
+      okFetch();
+      const cut = await withStubClipDerivatives();
+      setTimeline([rangedScene(), rangedScene({ sceneId: "s2", orderIndex: 1, sourceStartMs: 5000 })]);
+      await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(cut.worker.jobs).toHaveLength(1); // the template has a single Video-1 slot
+    });
+
+    it("template path: worker timeout fails the render with retryable MEDIA_PREPARE_FAILED - no render job, no Creatomate call, no full-source fallback", async () => {
+      const fetchMock = okFetch();
+      await withStubClipDerivatives(() => "silent");
+      setTimeline([rangedScene()]);
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "MEDIA_PREPARE_FAILED", retryable: true });
+      expect(prisma.renderJob.create).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(mediaDelivery.issueToken).not.toHaveBeenCalledWith("asset-1", expect.anything(), expect.anything(), expect.anything());
+    }, 10_000);
+
+    it("template path: a non-retryable worker error (range past the source end) is VALIDATION_FAILED", async () => {
+      okFetch();
+      await withStubClipDerivatives((job) => failedClipResult(job, "RANGE_OUT_OF_BOUNDS", false));
+      setTimeline([rangedScene()]);
+      expect(await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("template path: preflight (render account) fails before any clip is cut", async () => {
+      const cut = await withStubClipDerivatives();
+      templates.usableAccount = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_NOT_CONFIGURED" as const, message: "x", status: 503 }));
+      setTimeline([rangedScene()]);
+      expect((await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(false);
+      expect(cut.worker.jobs).toHaveLength(0);
+    });
+
+    it("a ranged timeline without the derivative service wired fails closed (never sends the full source)", async () => {
+      const fetchMock = okFetch();
+      setTimeline([rangedScene()]);
+      const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    describe("dynamic path", () => {
+      beforeEach(() => {
+        prisma.templateSnapshot.findUnique = async ({ where }: any) => (where.id === templateSnapshotId ? { ...snapshotRow, rawTemplate: null } : null);
+      });
+
+      it("sends the audio-stripped derivative for a ranged scene and logs bytes before/after", async () => {
+        const fetchMock = okFetch();
+        const cut = await withStubClipDerivatives();
+        setTimeline([rangedScene(), rangedScene({ sceneId: "s2", orderIndex: 1, sourceStartMs: null, sourceDurationMs: null, segmentId: null })]);
+        const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+        expect(outcome.ok).toBe(true);
+        const body = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+        const sources = JSON.stringify(body.source);
+        expect(sources).toContain("media-delivery/deriv-1");
+        expect(sources).toContain("media-delivery/asset-1"); // the range-less scene still sends its source unchanged
+        expect(cut.worker.jobs).toHaveLength(1);
+        expect(cut.worker.jobs[0]).toMatchObject({ stripAudio: true, startMs: 1000, durationMs: 4000 });
+        expect(cut.logs.join("\n")).toMatch(/47\.68MB -> 1\.91MB/);
+      });
+
+      it("worker failure fails the dynamic render too, without creating a render job", async () => {
+        const fetchMock = okFetch();
+        await withStubClipDerivatives((job) => failedClipResult(job, "FFMPEG_FAILED", true));
+        setTimeline([rangedScene()]);
+        expect(await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).toMatchObject({ ok: false, code: "MEDIA_PREPARE_FAILED", retryable: true });
+        expect(prisma.renderJob.create).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("the read-only preview never enqueues a cut job and keeps the source asset", async () => {
+        const cut = await withStubClipDerivatives();
+        setTimeline([rangedScene()]);
+        const preview = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+        expect(preview.ok && preview.data.ready).toBe(true);
+        expect(cut.worker.jobs).toHaveLength(0);
+        expect(JSON.stringify(preview.ok && preview.data.source)).toContain("media-delivery/asset-1");
+      });
     });
   });
 

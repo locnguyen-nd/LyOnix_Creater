@@ -69,6 +69,8 @@ enum MediaOrigin {
   import_url
   generated
   pexels
+  /// VE2E-42 (DEC-2026-09-29-JP-ONESHOT-MEDIA): social media via an allowlisted Apify Actor; adapter is VE2E-34.
+  apify
 }
 
 enum RetentionClass {
@@ -470,17 +472,24 @@ model MediaAssetVersion {
   // generated is not persisted"). Simple assignment/replacement only; no FK, no
   // orchestration — full scene/media orchestration is left to VE2E-06.
   sceneId          String?
+  /// VE2E-42 lineage: the source asset this derivative was cut/transcoded from (media-worker, VE2E-36/37); null for an original.
+  parentMediaAssetVersionId String?     @db.Uuid
+  /// VE2E-42 lineage: MediaAssetTransform JSON ({range:{startMs,durationMs}|null, stripAudio, tool:{name,version}|null, profileVersion|null}); null for an original.
+  transform        Json?
   project          Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   folder           MediaFolder?         @relation(fields: [folderId], references: [id], onDelete: SetNull)
   createdBy        User                 @relation("MediaAssetVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   supersedes       MediaAssetVersion?   @relation("MediaAssetVersionChain", fields: [supersedesId], references: [id], onDelete: SetNull)
   supersededBy     MediaAssetVersion[]  @relation("MediaAssetVersionChain")
+  parent           MediaAssetVersion?   @relation("MediaAssetVersionLineage", fields: [parentMediaAssetVersionId], references: [id], onDelete: SetNull)
+  derivatives      MediaAssetVersion[]  @relation("MediaAssetVersionLineage")
   deliveryTokens   MediaDeliveryToken[]
   audioVersions    AudioVersion[]
 
   @@index([projectId, checksumSha256])
   @@index([projectId, retentionClass, expiresAt])
   @@index([projectId, sceneId])
+  @@index([parentMediaAssetVersionId])
 }
 
 model SourceVersion {
@@ -960,7 +969,11 @@ model TimelineVersion {
   scenes             Json
   // Record<modificationKey, string> - template-level option values not tied to one scene (secondary text/color/font/volume).
   optionValues       Json                  @default("{}")
+  // VE2E-42: TimelineSegmentResponse[] ({segmentId, sceneIds, mediaAssetVersionId?, subject?, priority?}); [] = no segment plan.
+  segments           Json                  @default("[]")
   supersedesId       String?               @db.Uuid
+  // VE2E-42: the Auto WorkflowRun that wrote + auto-approved this version (what it rendered); null for Studio saves. Opaque ref, no FK (see block comment above).
+  workflowRunId      String?               @db.Uuid
   createdByUserId    String                @db.Uuid
   createdAt          DateTime              @default(now())
   approvedAt         DateTime?
@@ -968,4 +981,5 @@ model TimelineVersion {
 
   @@unique([projectId, version])
   @@index([projectId, status])
+  @@index([workflowRunId])
 }

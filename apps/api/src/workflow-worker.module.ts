@@ -12,6 +12,9 @@ import { AudioVersionsService } from "./audio-versions.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
+import { ClipDerivativesService } from "./clip-derivatives.service.js";
+import { MediaJobsGateway } from "./media-jobs.gateway.js";
+import { TimelineVersionsService } from "./timeline-versions.service.js";
 import { WorkflowRunnerService } from "./workflow-runner.service.js";
 
 /** VE2E-06: providers for `workflow-worker-main.ts`, the background process that actually executes the Auto DAG — never wired into `apps/api`'s HTTP `AppModule` request path. */
@@ -30,6 +33,10 @@ import { WorkflowRunnerService } from "./workflow-runner.service.js";
     PexelsService,
     CreatomateTemplatesService,
     RenderJobsService,
+    // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
+    MediaJobsGateway,
+    ClipDerivativesService,
+    TimelineVersionsService,
     WorkflowRunnerService,
   ],
 })

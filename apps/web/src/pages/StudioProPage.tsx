@@ -29,9 +29,11 @@ import type {
   TemplateSnapshotResponse,
   TimelineOptionValues,
   TimelineRenderPreviewResponse,
+  TimelineSegmentResponse,
 } from "@lyonix/contracts";
 import { AUTO_FILL_CANDIDATE_POOL, pickBestPhotoCandidate, pickBestVideoCandidate } from "../studio/media-selection";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
+import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
   approveTimelineVersion,
@@ -90,12 +92,18 @@ type SceneDraft = {
   annotation: string | null;
   /** User-removed from the render (kept, not deleted — see `toggleSceneExcluded`). */
   excluded: boolean;
+  /** VE2E-42: carried through from the saved timeline (no segment UI until VE2E-41); see studio/timeline-save.ts. */
+  segmentId: string | null;
+  sourceStartMs: number | null;
+  sourceDurationMs: number | null;
 };
 
 type TimelineDraft = {
   templateSnapshotId: string | null;
   scenes: SceneDraft[];
   optionValues: TimelineOptionValues;
+  /** VE2E-42: the saved segment plan, carried through unchanged on re-save. */
+  segments: TimelineSegmentResponse[];
 };
 
 const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
@@ -112,6 +120,7 @@ const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
   return {
     templateSnapshotId: saved?.templateSnapshotId ?? null,
     optionValues: saved?.optionValues ?? {},
+    segments: saved?.segments ?? [],
     scenes: orderedSceneIds.map((sceneId) => {
       const bound = savedById.get(sceneId);
       return {
@@ -123,6 +132,9 @@ const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
         screenTextOverride: bound?.screenTextOverride ?? null,
         annotation: bound?.annotation ?? null,
         excluded: bound?.excluded ?? false,
+        segmentId: bound?.segmentId ?? null,
+        sourceStartMs: bound?.sourceStartMs ?? null,
+        sourceDurationMs: bound?.sourceDurationMs ?? null,
       };
     }),
   };
@@ -158,7 +170,7 @@ export function StudioProPage() {
   const [mediaLibrary, setMediaLibrary] = useState<MediaAssetVersionSummary[]>([]);
   const [thumbCache, setThumbCache] = useState<Record<string, string>>({});
 
-  const [draft, setDraft] = useState<TimelineDraft>({ templateSnapshotId: null, scenes: [], optionValues: {} });
+  const [draft, setDraft] = useState<TimelineDraft>({ templateSnapshotId: null, scenes: [], optionValues: {}, segments: [] });
   const [baseVersionId, setBaseVersionId] = useState<string | null>(null);
   const [timelineStatus, setTimelineStatus] = useState<"draft" | "approved" | null>(null);
   const [lastSavedJson, setLastSavedJson] = useState("");
@@ -398,15 +410,7 @@ export function StudioProPage() {
       const result = await saveTimelineVersion(context.projectId, {
         supersedesId: baseVersionId,
         templateSnapshotId: draft.templateSnapshotId,
-        scenes: draft.scenes.map((scene) => ({
-          sceneId: scene.sceneId,
-          mediaAssetVersionId: scene.mediaAssetVersionId,
-          audioVersionId: scene.audioVersionId,
-          subtitleVersionId: scene.subtitleVersionId,
-          screenTextOverride: scene.screenTextOverride,
-          annotation: scene.annotation,
-          excluded: scene.excluded,
-        })),
+        ...buildTimelineSaveScenes(draft.scenes, draft.segments),
         optionValues: draft.optionValues,
       });
       setBaseVersionId(result.id);
@@ -569,7 +573,7 @@ export function StudioProPage() {
   const assignMediaToScene = (sceneId: string, asset: { id: string; label: string }) => {
     mutate((prev) => ({
       ...prev,
-      scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...scene, mediaAssetVersionId: asset.id, mediaLabel: asset.label } : scene)),
+      scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...withMediaAssigned(scene, asset.id), mediaLabel: asset.label } : scene)),
     }));
   };
 

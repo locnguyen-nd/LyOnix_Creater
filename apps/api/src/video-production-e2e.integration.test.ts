@@ -43,6 +43,7 @@ import { ScriptGenerationService } from "./script-generation.service.js";
 import { ScriptVersionsService } from "./script-versions.service.js";
 import * as secretCrypto from "./secret-crypto.js";
 import { SourcesService } from "./sources.service.js";
+import { TimelineVersionsService } from "./timeline-versions.service.js";
 import { WorkflowRunnerService } from "./workflow-runner.service.js";
 
 // --- generic in-memory Prisma double -------------------------------------------------
@@ -156,8 +157,15 @@ function buildFakePrisma() {
   const automationProfileVersions: Record<string, unknown>[] = [];
   const channelConnections: Record<string, unknown>[] = [];
   const teams: Record<string, unknown>[] = [];
+  const timelineVersions: Record<string, unknown>[] = [];
 
   const withScenes = (row: Record<string, unknown>) => ({ ...row, scenes: sceneDraftVersions.filter((s) => s.scriptDraftVersionId === row.id) });
+  const sceneWithProject = (sceneDraftVersionId: string) => {
+    const scene = sceneDraftVersions.find((s) => s.id === sceneDraftVersionId);
+    const script = scene ? scriptDraftVersions.find((r) => r.id === scene.scriptDraftVersionId) : undefined;
+    const source = script ? sourceVersions.find((r) => r.id === script.sourceVersionId) : undefined;
+    return { scriptDraftVersion: { sourceVersion: { projectId: (source?.projectId as string | undefined) ?? null } } };
+  };
   let scriptSeq = 0;
   let sceneSeq = 0;
   let stepSeq = 0;
@@ -167,8 +175,22 @@ function buildFakePrisma() {
     providerAccount: table(providerAccounts, "account"),
     project: table(projects, "project"),
     sourceVersion: table(sourceVersions, "source"),
-    audioVersion: table(audioVersions, "audio"),
-    subtitleVersion: table(subtitleVersions, "subtitle"),
+    audioVersion: {
+      ...table(audioVersions, "audio"),
+      // Supports the one nested `select` TimelineVersionsService uses to re-scope audio ids to the project.
+      findMany: async ({ where, select }: { where?: Record<string, unknown>; select?: Record<string, unknown> } = {}) =>
+        audioVersions.filter((r) => matchesWhere(r, where)).map((r) => (select?.sceneDraftVersion ? { id: r.id, sceneDraftVersion: sceneWithProject(r.sceneDraftVersionId as string) } : select ? pick(r, select as Record<string, boolean>) : r)),
+    },
+    subtitleVersion: {
+      ...table(subtitleVersions, "subtitle"),
+      findMany: async ({ where, select }: { where?: Record<string, unknown>; select?: Record<string, unknown> } = {}) =>
+        subtitleVersions.filter((r) => matchesWhere(r, where)).map((r) => {
+          if (!select?.audioVersion) return select ? pick(r, select as Record<string, boolean>) : r;
+          const audio = audioVersions.find((a) => a.id === r.audioVersionId);
+          return { id: r.id, audioVersion: { sceneDraftVersion: sceneWithProject(audio?.sceneDraftVersionId as string) } };
+        }),
+    },
+    timelineVersion: table(timelineVersions, "timeline"),
     mediaAssetVersion: table(mediaAssetVersions, "media"),
     mediaDeliveryToken: table(mediaDeliveryTokens, "token"),
     templateSnapshot: table(templateSnapshots, "snap"),
@@ -202,6 +224,11 @@ function buildFakePrisma() {
       },
     },
     sceneDraftVersion: {
+      // Only the shape resolveSceneBindingsForMapping reads: {sceneId in [...], same project} -> {sceneId, screenText}.
+      findMany: async ({ where }: { where: { sceneId: { in: string[] }; scriptDraftVersion: { sourceVersion: { projectId: string } } } }) =>
+        sceneDraftVersions
+          .filter((s) => where.sceneId.in.includes(s.sceneId as string) && sceneWithProject(s.id as string).scriptDraftVersion.sourceVersion.projectId === where.scriptDraftVersion.sourceVersion.projectId)
+          .map((s) => ({ sceneId: s.sceneId, screenText: s.screenText })),
       findUnique: async ({ where }: { where: { id: string } }) => {
         const scene = sceneDraftVersions.find((r) => r.id === where.id);
         if (!scene) return null;
@@ -237,7 +264,7 @@ function buildFakePrisma() {
     tables: {
       users, providerAccounts, projects, sourceVersions, scriptDraftVersions, sceneDraftVersions,
       audioVersions, subtitleVersions, mediaAssetVersions, mediaDeliveryTokens, templateSnapshots,
-      renderJobs, workflowRuns, stepRuns, providerOperations, automationProfileVersions,
+      renderJobs, workflowRuns, stepRuns, providerOperations, automationProfileVersions, timelineVersions,
     },
   };
 }
@@ -397,7 +424,9 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     const mediaDelivery = new MediaDeliveryService(fake.prisma as never, grants);
     const renderJobsService = new RenderJobsService(fake.prisma as never, grants, templates, mediaDelivery);
 
-    runner = new WorkflowRunnerService(fake.prisma as never, sources, scriptGeneration, scriptVersions, audioVersions, pexels, renderJobsService);
+    const timelines = new TimelineVersionsService(fake.prisma as never, grants);
+
+    runner = new WorkflowRunnerService(fake.prisma as never, sources, scriptGeneration, scriptVersions, audioVersions, pexels, renderJobsService, timelines);
   });
 
   afterEach(() => {
@@ -431,6 +460,7 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
         "generate_audio_s02",
         "import_media_s01",
         "import_media_s02",
+        "persist_timeline_version",
         "submit_render",
       ]),
     );
@@ -483,6 +513,17 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     // deliberately shorter) screenText - guarantees the on-screen text fully matches what the
     // voice actually says, word for word.
     expect(submittedBody.modifications["Text-1.text"]).toBe("Messi la mot cau thu bong da noi tieng the gioi.");
+
+    // --- VE2E-42: what was rendered is persisted as the project's latest, auto-approved
+    // TimelineVersion tagged with this run - exactly what "Mở trong Studio" loads -------------
+    expect(fake.tables.timelineVersions).toHaveLength(1);
+    const timeline = fake.tables.timelineVersions[0]!;
+    expect(timeline).toMatchObject({ status: "approved", workflowRunId: "run-e2e", templateSnapshotId: "snap-e2e", version: 1, supersedesId: null, segments: [] });
+    const timelineScenes = timeline.scenes as Array<Record<string, unknown>>;
+    expect(timelineScenes.map((s) => s.sceneId)).toEqual(["s01", "s02"]);
+    expect(timelineScenes.map((s) => s.mediaAssetVersionId)).toEqual([...videoAssetIds]);
+    expect(timelineScenes.every((s) => typeof s.audioVersionId === "string" && typeof s.subtitleVersionId === "string")).toBe(true);
+    expect(timelineScenes[0]).toMatchObject({ screenTextOverride: "Messi la mot cau thu bong da noi tieng the gioi.", sourceStartMs: null, sourceDurationMs: null, segmentId: null });
   });
 
   it("fails closed to blocked_provider through the real wiring when the content account is not verified - zero provider calls, never a runtime fake fallback", async () => {

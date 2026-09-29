@@ -24,15 +24,22 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const apiDir = resolve(here, "../../api");
+const mediaWorkerDir = resolve(here, "../../media-worker");
 
 interface WorkerSpec {
   readonly name: string;
-  readonly script: "worker:audio" | "worker:workflow";
+  readonly script: "worker:audio" | "worker:workflow" | "start";
+  readonly cwd: string;
+  /** Printed when this worker exits/fails to start, so the operator knows what is missing. */
+  readonly requirement?: string;
 }
 
 const workers: readonly WorkerSpec[] = [
-  { name: "audio", script: "worker:audio" },
-  { name: "workflow", script: "worker:workflow" },
+  { name: "audio", script: "worker:audio", cwd: apiDir },
+  { name: "workflow", script: "worker:workflow", cwd: apiDir },
+  // VE2E-36/37: FFmpeg media worker (RabbitMQ consumer for clip.prepare) — the only FFmpeg process.
+  // Required since VE2E-37: rendering a timeline with source ranges depends on it.
+  { name: "media", script: "start", cwd: mediaWorkerDir, requirement: "needs ffmpeg + ffprobe (FFMPEG_PATH/FFPROBE_PATH) and RABBITMQ_URL; see README \"Media worker (FFmpeg)\"" },
 ];
 
 const children: ChildProcess[] = [];
@@ -51,12 +58,13 @@ function launch(spec: WorkerSpec): ChildProcess {
   // `shell: true` lets the OS shell resolve `corepack` (`.cmd` on Windows) the same
   // way a developer typing the command in a terminal would — no hardcoded extension.
   const child = spawn("corepack", ["pnpm", "run", spec.script], {
-    cwd: apiDir,
+    cwd: spec.cwd,
     stdio: "inherit",
     shell: true,
   });
   child.on("exit", (code, signal) => {
     if (shuttingDown) return;
+    if (spec.requirement) console.error(`[worker:${spec.name}] ${spec.requirement}`);
     console.error(
       `[worker:${spec.name}] exited unexpectedly (code=${code ?? "null"} signal=${signal ?? "null"}); stopping all workers`,
     );
@@ -65,6 +73,7 @@ function launch(spec: WorkerSpec): ChildProcess {
   child.on("error", (error) => {
     if (shuttingDown) return;
     console.error(`[worker:${spec.name}] failed to start`, error instanceof Error ? error.message : error);
+    if (spec.requirement) console.error(`[worker:${spec.name}] ${spec.requirement}`);
     shutdown(1);
   });
   return child;
