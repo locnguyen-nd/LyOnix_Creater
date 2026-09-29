@@ -293,6 +293,10 @@ export class RenderJobsService {
    * bindings into the same whitelisted `RenderAssignmentInput[]` shape `submit()` already
    * validates and delegates to it unchanged - no duplicated Creatomate-call/idempotency/
    * webhook logic, this is purely an alternate input-building path.
+   *
+   * VE2E-42: the Auto runner renders through this same path (after persisting its bindings as an
+   * auto-approved timeline), passing `workflowRunId` so the `RenderJob` stays linked to its run.
+   * Like `submit`'s own `workflowRunId`, it is never taken from an HTTP body.
    */
   async submitFromTimelineVersion(
     projectId: string,
@@ -300,6 +304,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     input: RenderSubmitFromTimelineRequest,
+    workflowRunId?: string,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -322,7 +327,7 @@ export class RenderJobsService {
       assignments: built.assignments,
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-    });
+    }, workflowRunId);
   }
 
   /**

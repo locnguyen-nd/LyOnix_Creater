@@ -23,7 +23,15 @@ import type { PrismaService } from "./prisma.service.js";
 export type TimelineSceneMediaKind = "video" | "image" | null;
 
 /** One scene binding plus the kind of its bound media asset (looked up by the caller - this module never touches Prisma). */
-export type SceneBindingForMapping = TimelineSceneBindingResponse & {
+/**
+ * A scene binding as stored in `TimelineVersion.scenes` JSON. Rows written before VE2E-42 have no
+ * `segmentId`/`sourceStartMs`/`sourceDurationMs`; the render mapping never needs them (range-based
+ * derivative cutting is VE2E-37), so they are optional here and a legacy row maps exactly as before.
+ */
+export type StoredTimelineSceneBinding = Omit<TimelineSceneBindingResponse, "segmentId" | "sourceStartMs" | "sourceDurationMs"> &
+  Partial<Pick<TimelineSceneBindingResponse, "segmentId" | "sourceStartMs" | "sourceDurationMs">>;
+
+export type SceneBindingForMapping = StoredTimelineSceneBinding & {
   mediaKind: TimelineSceneMediaKind;
   /** `AudioVersion.mediaAssetVersionId` for this scene's bound audio, if any - resolved by the caller. */
   audioMediaAssetVersionId?: string | null;
@@ -128,7 +136,7 @@ export function buildRenderAssignmentsFromTimeline(
 export async function resolveSceneBindingsForMapping(
   prisma: PrismaService,
   projectId: string,
-  scenes: TimelineSceneBindingResponse[],
+  scenes: StoredTimelineSceneBinding[],
 ): Promise<SceneBindingForMapping[]> {
   const audioIds = [...new Set(scenes.map((scene) => scene.audioVersionId).filter((id): id is string => Boolean(id)))];
   const audioRows = audioIds.length

@@ -6,6 +6,8 @@ import type { RenderJobsService } from "./render-jobs.service.js";
 import type { ScriptGenerationService } from "./script-generation.service.js";
 import type { ScriptVersionsService } from "./script-versions.service.js";
 import type { SourcesService } from "./sources.service.js";
+import type { TimelineVersionsService } from "./timeline-versions.service.js";
+import { buildRenderAssignmentsFromTimeline } from "./timeline-render-mapping.js";
 
 const projectId = "project-1";
 const userId = "user-1";
@@ -94,6 +96,7 @@ describe("WorkflowRunnerService", () => {
   let audioVersions: Partial<AudioVersionsService>;
   let pexels: Partial<PexelsService>;
   let renderJobs: Partial<RenderJobsService>;
+  let timelines: Partial<TimelineVersionsService>;
   let service: WorkflowRunnerService;
   let runs: any[];
   let mediaAssets: any[];
@@ -165,13 +168,17 @@ describe("WorkflowRunnerService", () => {
       approve: vi.fn(async () => ({ ok: true as const, data: approvedScript as any })),
     };
     audioVersions = {
-      generateForWorkflowRun: vi.fn(async (sceneDraftVersionId: string) => ({ ok: true as const, data: { id: `audio-${sceneDraftVersionId}`, mediaAssetVersionId: `audio-asset-${sceneDraftVersionId}` } as any })),
+      generateForWorkflowRun: vi.fn(async (sceneDraftVersionId: string) => ({ ok: true as const, data: { id: `audio-${sceneDraftVersionId}`, mediaAssetVersionId: `audio-asset-${sceneDraftVersionId}`, subtitleVersion: { id: `subtitle-${sceneDraftVersionId}` } } as any })),
     };
     pexels = {
       autoImportForScene: vi.fn(async (_projectId: string, _userId: string, _role: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video" } as any, externalId: `ext-${input.sceneId}` } })),
     };
+    timelines = {
+      persistApprovedForWorkflowRun: vi.fn(async () => ({ ok: true as const, data: { id: "timeline-1", status: "approved" } as any })),
+    };
     renderJobs = {
       submit: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
+      submitFromTimelineVersion: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
       reconcileOne: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
     };
     service = new WorkflowRunnerService(
@@ -182,8 +189,27 @@ describe("WorkflowRunnerService", () => {
       audioVersions as AudioVersionsService,
       pexels as PexelsService,
       renderJobs as RenderJobsService,
+      timelines as TimelineVersionsService,
     );
   });
+
+  const persistedTimeline = () => (timelines.persistApprovedForWorkflowRun as ReturnType<typeof vi.fn>).mock.calls[0]![4];
+  /** What the shared timeline->render mapping (the step submitFromTimelineVersion runs) produces from the persisted timeline, given every bound media is a video and audio ids resolve 1:1. */
+  const renderedFromPersisted = (slots: unknown[] = templateSlots) => {
+    const input = persistedTimeline();
+    const resolved = input.scenes.map((scene: any, index: number) => ({
+      ...scene,
+      orderIndex: index,
+      annotation: null,
+      excluded: false,
+      subtitleVersionId: scene.subtitleVersionId ?? null,
+      audioVersionId: scene.audioVersionId ?? null,
+      mediaKind: scene.mediaAssetVersionId ? "video" : null,
+      audioMediaAssetVersionId: null,
+      fallbackScreenText: null,
+    }));
+    return buildRenderAssignmentsFromTimeline(slots as any, resolved, input.optionValues ?? {}).assignments;
+  };
 
   it("runs the full Auto DAG (source→script→voice→media→timeline→render) to render_queued", async () => {
     const processed = await service.processNext();
@@ -194,22 +220,53 @@ describe("WorkflowRunnerService", () => {
     expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
     expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledWith("scene-db-1", userId, "staff", { providerAccountId: "voice-acc", voiceId: "voice-1" });
     expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
-    expect(renderJobs.submit).toHaveBeenCalledWith(
-      projectId,
-      userId,
-      "staff",
-      expect.objectContaining({ templateSnapshotId, providerAccountId: "render-acc", idempotencyKey: "fp-1" }),
-      "run-1",
-    );
-    const submittedAssignments = (renderJobs.submit as ReturnType<typeof vi.fn>).mock.calls[0]![3].assignments;
-    // The rendered caption is the scene's narration, not its separately-authored screenText -
+    // VE2E-42: Auto persists its bindings as an auto-approved TimelineVersion tagged with the run,
+    // then renders from that timeline through the shared path (never raw assignments any more).
+    expect(timelines.persistApprovedForWorkflowRun).toHaveBeenCalledWith("run-1", projectId, userId, "staff", {
+      templateSnapshotId,
+      scenes: [
+        { sceneId: "scene-1", mediaAssetVersionId: "pexels-scene-1", audioVersionId: "audio-scene-db-1", subtitleVersionId: "subtitle-scene-db-1", screenTextOverride: "Narration 1" },
+        { sceneId: "scene-2", mediaAssetVersionId: "pexels-scene-2", audioVersionId: "audio-scene-db-2", subtitleVersionId: "subtitle-scene-db-2", screenTextOverride: "Narration 2" },
+      ],
+      optionValues: {},
+    });
+    expect(renderJobs.submit).not.toHaveBeenCalled();
+    expect(renderJobs.submitFromTimelineVersion).toHaveBeenCalledWith(projectId, "timeline-1", userId, "staff", { providerAccountId: "render-acc", idempotencyKey: "fp-1" }, "run-1");
+    // The rendered caption is the scene narration, not its separately-authored screenText -
     // guarantees the on-screen text matches word-for-word what the voice actually says.
-    expect(submittedAssignments).toEqual([
+    expect(renderedFromPersisted()).toEqual([
       { modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "pexels-scene-1" },
       { modificationKey: "Text-1.text", kind: "text", text: "Narration 1" },
       { modificationKey: "Video-2.source", kind: "video", mediaAssetVersionId: "pexels-scene-2" },
     ]);
+    const stepKeys = stepRuns.map((s) => s.stepKey);
+    expect(stepKeys.indexOf("persist_timeline_version")).toBeGreaterThan(-1);
+    expect(stepKeys.indexOf("persist_timeline_version")).toBeLessThan(stepKeys.indexOf("submit_render"));
     expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("VE2E-42: title/caption fill leftover template text slots through the timeline optionValues, same as the old raw-assignment path", async () => {
+    const slotsWithTitle = [...templateSlots, { key: "Title.text", kind: "text", label: "Title.text", required: true }, { key: "Caption.text", kind: "text", label: "Caption.text", required: false }];
+    prisma.templateSnapshot.findUnique = vi.fn(async () => ({ id: templateSnapshotId, providerAccountId: "render-acc", modifications: slotsWithTitle }));
+    await service.processNext();
+    // Text-1 takes scene-1 narration, Title takes scene-2 narration, Caption takes the script title
+    // - exactly the positional rule of buildAutoRenderAssignments.
+    expect(persistedTimeline().optionValues).toEqual({ "Caption.text": "Tiêu đề" });
+    expect(renderedFromPersisted(slotsWithTitle)).toEqual([
+      { modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "pexels-scene-1" },
+      { modificationKey: "Text-1.text", kind: "text", text: "Narration 1" },
+      { modificationKey: "Video-2.source", kind: "video", mediaAssetVersionId: "pexels-scene-2" },
+      { modificationKey: "Title.text", kind: "text", text: "Narration 2" },
+      { modificationKey: "Caption.text", kind: "text", text: "Tiêu đề" },
+    ]);
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("VE2E-42: a timeline persistence failure is classified like any other step failure and never submits a render", async () => {
+    timelines.persistApprovedForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "VALIDATION_FAILED" as const, message: "bad timeline" }));
+    await service.processNext();
+    expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "VALIDATION_FAILED", message: "bad timeline" } });
+    expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
   });
 
   it("reuses an existing project-library asset for a scene instead of calling Pexels", async () => {
@@ -217,8 +274,8 @@ describe("WorkflowRunnerService", () => {
     await service.processNext();
     expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
     expect(pexels.autoImportForScene).toHaveBeenCalledWith(projectId, userId, "staff", expect.objectContaining({ sceneId: "scene-2" }));
-    const submittedAssignments = (renderJobs.submit as ReturnType<typeof vi.fn>).mock.calls[0]![3].assignments;
-    expect(submittedAssignments).toContainEqual({ modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "library-asset-1" });
+    expect(persistedTimeline().scenes[0]).toMatchObject({ sceneId: "scene-1", mediaAssetVersionId: "library-asset-1" });
+    expect(renderedFromPersisted()).toContainEqual({ modificationKey: "Video-1.source", kind: "video", mediaAssetVersionId: "library-asset-1" });
   });
 
   it("retry: reuses an already-approved script instead of generating a new one (stable sceneIds so media/voice idempotency below still works)", async () => {
@@ -233,10 +290,11 @@ describe("WorkflowRunnerService", () => {
 
   it("retry: reuses an existing current AudioVersion for a scene instead of calling ElevenLabs again", async () => {
     prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) =>
-      where.sceneDraftVersionId === "scene-db-1" ? { sceneDraftVersionId: "scene-db-1", status: "current", mediaAssetVersionId: "audio-asset-reused" } : null,
+      where.sceneDraftVersionId === "scene-db-1" ? { id: "audio-reused", sceneDraftVersionId: "scene-db-1", status: "current", mediaAssetVersionId: "audio-asset-reused", subtitleVersions: [{ id: "subtitle-reused" }] } : null,
     );
     await service.processNext();
     expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(1);
+    expect(persistedTimeline().scenes[0]).toMatchObject({ audioVersionId: "audio-reused", subtitleVersionId: "subtitle-reused" });
     expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledWith("scene-db-2", userId, "staff", { providerAccountId: "voice-acc", voiceId: "voice-1" });
     expect(runs[0]).toMatchObject({ status: "render_queued" });
   });
@@ -260,6 +318,8 @@ describe("WorkflowRunnerService", () => {
     await service.processNext();
     expect(runs[0]).toMatchObject({ status: "needs_input" });
     expect(renderJobs.submit).not.toHaveBeenCalled();
+    expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
+    expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
   });
 
   it("bounded-retries a transient provider failure (re-queues to draft, increments attempts) then fails after maxAttempts", async () => {

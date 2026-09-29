@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import type { Prisma } from "@lyonix/db";
 import type { MediaAssetKind, MediaAssetVersionSummary, MediaFolderSummary, MediaOrigin, PexelsAttribution } from "@lyonix/contracts";
-import { canAccessProject, computeExpiresAt, findDuplicateReusableAsset, isSafeSegmentName, isSha256Hex } from "@lyonix/domain";
+import { canAccessProject, computeExpiresAt, findDuplicateReusableAsset, isSafeSegmentName, isSha256Hex, parseMediaAssetTransform } from "@lyonix/domain";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { promoteQuarantineFileToProjectAsset, readQuarantineFile, writeQuarantineFile } from "./quarantine.js";
@@ -88,7 +88,7 @@ const toAssetSummary = (row: {
   id: string; projectId: string; folderId: string | null; kind: string; originalFileName: string; mimeType: string;
   checksumSha256: string; bytes: number; widthPx: number | null; heightPx: number | null; durationMs: number | null;
   origin: string; license: string | null; reusable: boolean; retentionClass: string; expiresAt: Date | null; version: number; createdAt: Date;
-  sceneId?: string | null; provenance?: unknown;
+  sceneId?: string | null; provenance?: unknown; parentMediaAssetVersionId?: string | null; transform?: unknown;
 }): MediaAssetVersionSummary => ({
   id: row.id,
   projectId: row.projectId,
@@ -110,6 +110,9 @@ const toAssetSummary = (row: {
   createdAt: row.createdAt.toISOString(),
   sceneId: row.sceneId ?? null,
   attribution: attributionFromProvenance(row.provenance),
+  parentMediaAssetVersionId: row.parentMediaAssetVersionId ?? null,
+  // Tolerant: a malformed stored value surfaces as null instead of breaking the listing.
+  transform: parseMediaAssetTransform(row.transform),
 });
 
 @Injectable()
