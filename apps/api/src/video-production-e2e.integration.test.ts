@@ -34,6 +34,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService } from "./media-delivery.service.js";
+import { MediaPlanService } from "./media-plan.service.js";
 import { MediaService } from "./media.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
@@ -426,7 +427,9 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
 
     const timelines = new TimelineVersionsService(fake.prisma as never, grants);
 
-    runner = new WorkflowRunnerService(fake.prisma as never, sources, scriptGeneration, scriptVersions, audioVersions, pexels, renderJobsService, timelines);
+    const mediaPlans = new MediaPlanService(fake.prisma as never, grants, pexels);
+
+    runner = new WorkflowRunnerService(fake.prisma as never, sources, scriptGeneration, scriptVersions, audioVersions, mediaPlans, renderJobsService, timelines);
   });
 
   afterEach(() => {
@@ -458,8 +461,9 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
         "approve_script_version",
         "generate_audio_s01",
         "generate_audio_s02",
-        "import_media_s01",
-        "import_media_s02",
+        // VE2E-31: one media step per background segment (2 scenes, range 3-5 -> 2 single-scene segments)
+        "import_media_seg-1",
+        "import_media_seg-2",
         "persist_timeline_version",
         "submit_render",
       ]),
@@ -518,12 +522,24 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     // TimelineVersion tagged with this run - exactly what "Mở trong Studio" loads -------------
     expect(fake.tables.timelineVersions).toHaveLength(1);
     const timeline = fake.tables.timelineVersions[0]!;
-    expect(timeline).toMatchObject({ status: "approved", workflowRunId: "run-e2e", templateSnapshotId: "snap-e2e", version: 1, supersedesId: null, segments: [] });
+    expect(timeline).toMatchObject({ status: "approved", workflowRunId: "run-e2e", templateSnapshotId: "snap-e2e", version: 1, supersedesId: null });
     const timelineScenes = timeline.scenes as Array<Record<string, unknown>>;
     expect(timelineScenes.map((s) => s.sceneId)).toEqual(["s01", "s02"]);
     expect(timelineScenes.map((s) => s.mediaAssetVersionId)).toEqual([...videoAssetIds]);
     expect(timelineScenes.every((s) => typeof s.audioVersionId === "string" && typeof s.subtitleVersionId === "string")).toBe(true);
-    expect(timelineScenes[0]).toMatchObject({ screenTextOverride: "Messi la mot cau thu bong da noi tieng the gioi.", sourceStartMs: null, sourceDurationMs: null, segmentId: null });
+    expect(timelineScenes[0]).toMatchObject({ screenTextOverride: "Messi la mot cau thu bong da noi tieng the gioi.", segmentId: "seg-1", sourceStartMs: 0 });
+    // VE2E-31: each scene carries a range inside its segment source (Pexels fixture clips are 8s), sized by the real voice duration.
+    const importedVideos = fake.tables.mediaAssetVersions.filter((m) => m.kind === "video");
+    for (const [index, scene] of timelineScenes.entries()) {
+      const audio = fake.tables.audioVersions.find((a) => a.id === scene.audioVersionId)!;
+      expect(scene.segmentId).toBe(`seg-${index + 1}`);
+      expect(scene.sourceDurationMs).toBe(audio.durationMs);
+      expect((scene.sourceStartMs as number) + (scene.sourceDurationMs as number)).toBeLessThanOrEqual(importedVideos[index]!.durationMs as number);
+    }
+    expect(timeline.segments).toEqual([
+      { segmentId: "seg-1", sceneIds: ["s01"], mediaAssetVersionId: importedVideos[0]!.id, subject: null, priority: null },
+      { segmentId: "seg-2", sceneIds: ["s02"], mediaAssetVersionId: importedVideos[1]!.id, subject: null, priority: null },
+    ]);
   });
 
   it("fails closed to blocked_provider through the real wiring when the content account is not verified - zero provider calls, never a runtime fake fallback", async () => {

@@ -136,6 +136,19 @@ export {
   type ScriptPromptPackageV2,
   type ScriptSourceKind,
 } from "./script-draft-v2.js";
+export {
+  SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA,
+  VISUAL_PLAN_MAX_SEGMENTS,
+  VISUAL_PLAN_PRIORITY_MIN,
+  VISUAL_PLAN_PRIORITY_MAX,
+  normalizeScriptVisualPlanV2,
+  findVisualSegmentForScene,
+  mediaSearchQueryForScene,
+  type ScriptVisualPlanV2,
+  type ScriptVisualSegmentV2,
+  type ScriptVisualKeywordsV2,
+  type ScriptVisualStyleHintsV2,
+} from "./script-visual-plan.js";
 export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result } from "./live-script-v2.js";
 export {
   SCRIPT_DRAFT_SCHEMA_VERSION,

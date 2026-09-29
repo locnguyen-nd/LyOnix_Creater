@@ -149,6 +149,77 @@ describe("VideoProductionsService", () => {
     });
   });
 
+  describe("backgroundSegments (VE2E-40)", () => {
+    const previousMin = process.env.BACKGROUND_SEGMENTS_MIN_COUNT;
+    const previousMax = process.env.BACKGROUND_SEGMENTS_MAX_COUNT;
+    const restoreEnv = () => {
+      if (previousMin === undefined) delete process.env.BACKGROUND_SEGMENTS_MIN_COUNT;
+      else process.env.BACKGROUND_SEGMENTS_MIN_COUNT = previousMin;
+      if (previousMax === undefined) delete process.env.BACKGROUND_SEGMENTS_MAX_COUNT;
+      else process.env.BACKGROUND_SEGMENTS_MAX_COUNT = previousMax;
+    };
+
+    it("persists the default auto setting when omitted and resolves it from the intake target duration", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      expect(workflowRuns[0].backgroundSegments).toEqual({ mode: "auto" });
+      const run = await service.get(submitted.data.id, userId, "staff");
+      // profile durationSec 30 -> "<= 30s" rule
+      expect(run).toMatchObject({ ok: true, data: { backgroundSegments: { setting: { mode: "auto" }, range: { min: 2, max: 3 } } } });
+    });
+
+    it("persists a user-fixed count and exposes it as an exact range", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "fixed", count: 4 } });
+      if (!submitted.ok) throw new Error("expected ok");
+      expect(workflowRuns[0].backgroundSegments).toEqual({ mode: "fixed", count: 4 });
+      expect(await service.get(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { backgroundSegments: { setting: { mode: "fixed", count: 4 }, range: { min: 4, max: 4 } } } });
+    });
+
+    it("rejects an out-of-range or malformed setting before creating any source/run", async () => {
+      for (const bad of [{ mode: "fixed", count: 0 }, { mode: "fixed", count: 7 }, { mode: "fixed", count: 2.5 }, { mode: "other" }]) {
+        const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, source: { type: "topic", topic: "x" }, backgroundSegments: bad as never });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      }
+      expect(sources.create).not.toHaveBeenCalled();
+      expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+    });
+
+    it("uses configurable bounds (BACKGROUND_SEGMENTS_MIN_COUNT/MAX_COUNT)", async () => {
+      process.env.BACKGROUND_SEGMENTS_MIN_COUNT = "2";
+      process.env.BACKGROUND_SEGMENTS_MAX_COUNT = "8";
+      try {
+        expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "fixed", count: 1 } })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+        expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "fixed", count: 8 } })).toMatchObject({ ok: true });
+      } finally {
+        restoreEnv();
+      }
+    });
+
+    it("keeps the auto-submit fingerprint unchanged but distinguishes a fixed count", async () => {
+      const auto = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      const explicitAuto = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "auto" } });
+      const fixed = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "fixed", count: 3 } });
+      if (!auto.ok || !explicitAuto.ok || !fixed.ok) throw new Error("expected ok");
+      expect(explicitAuto.data.id).toBe(auto.data.id);
+      expect(fixed.data.id).not.toBe(auto.data.id);
+    });
+
+    it("a retry keeps the run's persisted setting (only status/attempts/lastError are reset)", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, backgroundSegments: { mode: "fixed", count: 5 } });
+      if (!submitted.ok) throw new Error("expected ok");
+      workflowRuns[0].status = "failed";
+      expect(await service.retry(submitted.data.id, userId, "staff")).toMatchObject({ ok: true });
+      expect(workflowRuns[0]).toMatchObject({ status: "draft", backgroundSegments: { mode: "fixed", count: 5 } });
+    });
+
+    it("reads a legacy run without the column as auto", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      delete workflowRuns[0].backgroundSegments;
+      expect(await service.get(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { backgroundSegments: { setting: { mode: "auto" } } } });
+    });
+  });
+
   describe("get / listEvents", () => {
     it("reports the linked render job's resultUrl and the latest approved scriptDraftVersionId", async () => {
       const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });

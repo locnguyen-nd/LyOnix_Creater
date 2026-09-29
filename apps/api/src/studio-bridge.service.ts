@@ -20,6 +20,7 @@ import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import { canAccessProject } from "@lyonix/domain";
+import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import type { ErrorCode, StudioContextResponse } from "@lyonix/contracts";
 import { GrantsService } from "./grants.service.js";
 import { JobsService, type JobRecord } from "./jobs.service.js";
@@ -144,9 +145,10 @@ export class StudioBridgeService {
   }
 
   private async buildContext(displayId: string, bridge: { projectId: string; sourceVersionId: string; scriptDraftVersionId: string }): Promise<StudioBridgeOutcome<StudioContextResponse>> {
-    const [scenes, latestTimeline] = await Promise.all([
+    const [scenes, latestTimeline, script] = await Promise.all([
       this.prisma.sceneDraftVersion.findMany({ where: { scriptDraftVersionId: bridge.scriptDraftVersionId }, orderBy: { orderIndex: "asc" } }),
       this.prisma.timelineVersion.findFirst({ where: { projectId: bridge.projectId }, orderBy: { version: "desc" } }),
+      this.prisma.scriptDraftVersion.findUnique({ where: { id: bridge.scriptDraftVersionId }, select: { visualPlan: true } }),
     ]);
     return {
       ok: true,
@@ -165,6 +167,8 @@ export class StudioBridgeService {
           durationHintMs: scene.durationHintMs,
         })),
         latestTimelineVersion: latestTimeline ? toTimelineVersionResponse(latestTimeline) : null,
+        // VE2E-38: lets Studio show the segments and prefill ja/en search keywords; tolerant (bad/legacy -> null).
+        visualPlan: normalizeScriptVisualPlanV2(script?.visualPlan ?? null, scenes.map((scene) => scene.sceneId)),
       },
     };
   }

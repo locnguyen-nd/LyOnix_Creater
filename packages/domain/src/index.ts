@@ -166,3 +166,33 @@ export {
   type MediaTransformRange,
   type MediaAssetTransformValue,
 } from "./media-lineage.js";
+export {
+  parseBackgroundSegmentsSetting,
+  readBackgroundSegmentsSetting,
+  resolveBackgroundSegmentRange,
+  normalizeBackgroundSegmentBounds,
+  BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS,
+  BACKGROUND_SEGMENT_SHORT_VIDEO_MAX_SEC,
+  BACKGROUND_SEGMENT_AUTO_SHORT,
+  BACKGROUND_SEGMENT_AUTO_LONG,
+  DEFAULT_BACKGROUND_SEGMENTS_SETTING,
+  type BackgroundSegmentsSettingValue,
+  type BackgroundSegmentCountBounds,
+  type BackgroundSegmentRange,
+  type BackgroundSegmentsParseResult,
+} from "./background-segments.js";
+export {
+  planBackgroundSegments,
+  fitSegmentsToRange,
+  chooseFallbackSegmentCount,
+  groupScenesByDuration,
+  computeSegmentSourceRanges,
+  MEDIA_PLAN_POLICY_VERSION,
+  MEDIA_PLAN_MIN_SEGMENT_MS,
+  MEDIA_PLAN_MAX_SEGMENT_MS,
+  type MediaPlanScene,
+  type MediaPlanVisualSegment,
+  type PlannedSegment,
+  type SegmentCountRange,
+  type SceneSourceRange,
+} from "./media-plan.js";

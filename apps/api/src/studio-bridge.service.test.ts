@@ -89,6 +89,7 @@ describe("StudioBridgeService", () => {
           return row;
         },
         findFirst: async ({ where }: any) => scriptRows.filter((r) => r.sourceVersionId === where.sourceVersionId && r.status === where.status).sort((a, b) => b.version - a.version)[0] ?? null,
+        findUnique: async ({ where }: any) => scriptRows.find((r) => r.id === where.id) ?? null,
       },
       sceneDraftVersion: {
         findMany: async ({ where }: any) => sceneRows.filter((r) => r.scriptDraftVersionId === where.scriptDraftVersionId).sort((a, b) => a.orderIndex - b.orderIndex),
@@ -188,7 +189,23 @@ describe("StudioBridgeService", () => {
       if (!outcome.ok) return;
       expect(outcome.data).toMatchObject({ jobId: runId, projectId: "project-auto-1", sourceVersionId: "source-1", scriptDraftVersionId: "script-auto-1" });
       expect(outcome.data.scenes).toHaveLength(1);
+      expect(outcome.data.visualPlan).toBeNull();
       expect(bridgeRows).toHaveLength(0);
+    });
+
+    it("VE2E-38: exposes the approved script's visualPlan so Studio can show segments and prefill ja/en keywords", async () => {
+      const visualPlan = { segments: [{ segmentId: "g1", sceneIds: ["s01", "s02"], subject: "Shibuya", priority: 1, keywords: { ja: "渋谷 交差点", en: "shibuya crossing" }, styleHints: { setting: "street", timeOfDay: "night", lighting: "neon", palette: "blue" } }] };
+      workflowRunRows.push({ id: runId, projectId: "project-auto-1", sourceVersionId: "source-1" });
+      scriptRows.push({ id: "script-auto-1", sourceVersionId: "source-1", version: 1, status: "approved", visualPlan });
+      sceneRows.push(
+        { id: "scene-auto-1", scriptDraftVersionId: "script-auto-1", sceneId: "s01", orderIndex: 0, narration: "n", screenText: "t", visualQuery: "q", durationHintMs: 5000 },
+        { id: "scene-auto-2", scriptDraftVersionId: "script-auto-1", sceneId: "s02", orderIndex: 1, narration: "n2", screenText: "t2", visualQuery: "q2", durationHintMs: 5000 },
+      );
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      expect(outcome).toMatchObject({ ok: true, data: { visualPlan } });
+      // A stored plan that no longer matches the scenes (e.g. legacy/garbled) reads as null instead of breaking Studio.
+      sceneRows.pop();
+      expect(await service.contextForVideoProduction(runId, userId, "staff")).toMatchObject({ ok: true, data: { visualPlan: null } });
     });
   });
 });

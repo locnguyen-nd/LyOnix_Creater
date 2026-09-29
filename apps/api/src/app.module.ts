@@ -31,6 +31,8 @@ import { ScriptGenerationController } from "./script-generation.controller.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
 import { ElevenLabsVoiceController } from "./elevenlabs-voice.controller.js";
 import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
+import { MediaPlanController } from "./media-plan.controller.js";
+import { MediaPlanService } from "./media-plan.service.js";
 import { PexelsController } from "./pexels.controller.js";
 import { PexelsService } from "./pexels.service.js";
 import { CreatomateTemplatesController } from "./creatomate-templates.controller.js";
@@ -73,6 +75,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptGenerationController,
     ElevenLabsVoiceController,
     PexelsController,
+    MediaPlanController,
     CreatomateTemplatesController,
     RenderJobsController,
     ScriptVersionsController,
@@ -99,6 +102,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptGenerationService,
     ElevenLabsVoiceService,
     PexelsService,
+    MediaPlanService,
     CreatomateTemplatesService,
     RenderJobsService,
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).

@@ -8,6 +8,7 @@ import type { ScriptVersionsService } from "./script-versions.service.js";
 import type { SourcesService } from "./sources.service.js";
 import type { TimelineVersionsService } from "./timeline-versions.service.js";
 import { buildRenderAssignmentsFromTimeline } from "./timeline-render-mapping.js";
+import { MediaPlanService } from "./media-plan.service.js";
 
 const projectId = "project-1";
 const userId = "user-1";
@@ -187,7 +188,7 @@ describe("WorkflowRunnerService", () => {
       scriptGeneration as ScriptGenerationService,
       scriptVersions as ScriptVersionsService,
       audioVersions as AudioVersionsService,
-      pexels as PexelsService,
+      new MediaPlanService(prisma, { forUser: async () => ({ teamIds: [], projectIds: [], channelIds: [] }) } as never, pexels as PexelsService),
       renderJobs as RenderJobsService,
       timelines as TimelineVersionsService,
     );
@@ -225,8 +226,14 @@ describe("WorkflowRunnerService", () => {
     expect(timelines.persistApprovedForWorkflowRun).toHaveBeenCalledWith("run-1", projectId, userId, "staff", {
       templateSnapshotId,
       scenes: [
-        { sceneId: "scene-1", mediaAssetVersionId: "pexels-scene-1", audioVersionId: "audio-scene-db-1", subtitleVersionId: "subtitle-scene-db-1", screenTextOverride: "Narration 1" },
-        { sceneId: "scene-2", mediaAssetVersionId: "pexels-scene-2", audioVersionId: "audio-scene-db-2", subtitleVersionId: "subtitle-scene-db-2", screenTextOverride: "Narration 2" },
+        // VE2E-31: no visualPlan -> deterministic fallback; profile 30s -> range 2-3 -> one segment per scene here.
+        // The mocked Pexels asset has no durationMs, so no ranges (bound exactly as before).
+        { sceneId: "scene-1", mediaAssetVersionId: "pexels-scene-1", audioVersionId: "audio-scene-db-1", subtitleVersionId: "subtitle-scene-db-1", screenTextOverride: "Narration 1", segmentId: "seg-1", sourceStartMs: null, sourceDurationMs: null },
+        { sceneId: "scene-2", mediaAssetVersionId: "pexels-scene-2", audioVersionId: "audio-scene-db-2", subtitleVersionId: "subtitle-scene-db-2", screenTextOverride: "Narration 2", segmentId: "seg-2", sourceStartMs: null, sourceDurationMs: null },
+      ],
+      segments: [
+        { segmentId: "seg-1", sceneIds: ["scene-1"], mediaAssetVersionId: "pexels-scene-1", subject: null, priority: null },
+        { segmentId: "seg-2", sceneIds: ["scene-2"], mediaAssetVersionId: "pexels-scene-2", subject: null, priority: null },
       ],
       optionValues: {},
     });
@@ -267,6 +274,74 @@ describe("WorkflowRunnerService", () => {
     await service.processNext();
     expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "VALIDATION_FAILED", message: "bad timeline" } });
     expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
+  });
+
+  it("VE2E-38/40: asks the content provider for the run's background segment range (legacy run -> auto by target duration)", async () => {
+    await service.processNext();
+    // profile durationSec 30 -> "<= 30s" auto rule
+    expect(scriptGeneration.generate).toHaveBeenCalledWith("source-1", userId, "staff", expect.objectContaining({ backgroundSegmentRange: { min: 2, max: 3 } }));
+  });
+
+  it("VE2E-38/40: a run with a fixed intake count asks for exactly that many segments", async () => {
+    runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 4 } })];
+    await service.processNext();
+    expect(scriptGeneration.generate).toHaveBeenCalledWith("source-1", userId, "staff", expect.objectContaining({ backgroundSegmentRange: { min: 4, max: 4 } }));
+  });
+
+  it("VE2E-38: Pexels query uses the segment keywords.en when the approved script has a visualPlan, visualQuery otherwise", async () => {
+    const visualPlan = {
+      segments: [
+        { segmentId: "g1", sceneIds: ["scene-1"], subject: "stadium", priority: 1, keywords: { ja: "スタジアム", en: "packed football stadium at night" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } },
+        { segmentId: "g2", sceneIds: ["scene-2"], subject: "crowd", priority: 2, keywords: { ja: "観客", en: "" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } },
+      ],
+    };
+    (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan } });
+    await service.processNext();
+    const queries = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[3].query);
+    expect(queries).toEqual(["packed football stadium at night", "stadium"]);
+  });
+
+  describe("VE2E-31 one-shot background media plan", () => {
+    const style = { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" };
+    const withDuration = (durationMs: number) =>
+      vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs } as any, externalId: `ext-${input.sceneId}` } }));
+
+    it("one visualPlan segment over both scenes -> ONE source, contiguous ranges by voice duration, segment kept on the timeline", async () => {
+      const visualPlan = { segments: [{ segmentId: "g1", sceneIds: ["scene-1", "scene-2"], subject: "Messi", priority: 1, keywords: { ja: "メッシ", en: "soccer star dribbling" }, styleHints: style }] };
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan } });
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: id === "scene-db-1" ? 4200 : 3100, subtitleVersion: null } as any }));
+      pexels.autoImportForScene = withDuration(20_000);
+      // fixed 1 segment so the plan's single segment fits the range as-is
+      runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 1 } })];
+      await service.processNext();
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
+      const call = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls[0]![3];
+      expect(call.sceneBrief.phrases[0]).toBe("soccer star dribbling");
+      expect(call.sceneBrief.targetDurationSeconds).toBeCloseTo(7.3);
+      expect(call.usedExternalIds).toEqual([]);
+      const persisted = persistedTimeline();
+      expect(persisted.scenes.map((s: any) => [s.mediaAssetVersionId, s.segmentId, s.sourceStartMs, s.sourceDurationMs])).toEqual([
+        ["pexels-scene-1", "g1", 0, 4200],
+        ["pexels-scene-1", "g1", 4200, 3100],
+      ]);
+      expect(persisted.segments).toEqual([{ segmentId: "g1", sceneIds: ["scene-1", "scene-2"], mediaAssetVersionId: "pexels-scene-1", subject: "Messi", priority: 1 }]);
+      expect(stepRuns.map((s) => s.stepKey)).toContain("import_media_g1");
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("a new segment never reuses an earlier segment's source (replaces the per-scene hard block)", async () => {
+      pexels.autoImportForScene = withDuration(20_000);
+      await service.processNext();
+      const calls = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[3]);
+      expect(calls.map((c) => c.usedExternalIds)).toEqual([[], ["ext-scene-1"]]);
+    });
+
+    it("stops as needs_input when a segment cannot be sourced (unattended Auto), nothing persisted", async () => {
+      pexels.autoImportForScene = vi.fn(async () => ({ ok: false as const, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" as const, message: "weak" }));
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" } });
+      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+    });
   });
 
   it("reuses an existing project-library asset for a scene instead of calling Pexels", async () => {

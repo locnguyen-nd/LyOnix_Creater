@@ -117,6 +117,23 @@ export type ScriptDraftSceneV2Response = {
   durationHintMs: number;
 };
 
+/**
+ * VE2E-38 (CR-JP-ONESHOT-MEDIA-2026-09-29 §4): whole-script background plan generated in the same
+ * content-provider call as the script. Segments are runs of consecutive scenes covering the whole
+ * script in order; `priority` 1..10 (1 = main subject); `keywords.ja` for Japanese-native media
+ * sources, `keywords.en` for Pexels (at least one non-empty); `styleHints` keep one consistent look.
+ */
+export type ScriptVisualSegmentResponse = {
+  segmentId: string;
+  sceneIds: string[];
+  subject: string;
+  priority: number;
+  keywords: { ja: string; en: string };
+  styleHints: { setting: string; timeOfDay: string; lighting: string; palette: string };
+};
+
+export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[] };
+
 export type ScriptDraftV2Response = {
   schemaVersion: "script-draft.v2";
   language: string;
@@ -126,6 +143,8 @@ export type ScriptDraftV2Response = {
   cta: string;
   caption: string;
   scenes: ScriptDraftSceneV2Response[];
+  /** VE2E-38 (optional, additive): `null`/absent = no usable plan; consumers fall back to per-scene `visualQuery`. */
+  visualPlan?: ScriptVisualPlanResponse | null;
 };
 
 export type ScriptDraftV2GenerationResponse = {
@@ -480,6 +499,8 @@ export type ScriptDraftVersionResponse = {
   createdAt: string;
   approvedAt: string | null;
   scenes: SceneDraftVersionResponse[];
+  /** VE2E-38: the persisted `visualPlan` (`null` for versions without one, including every version stored before VE2E-38). */
+  visualPlan: ScriptVisualPlanResponse | null;
 };
 
 export const audioSubtitleVersionStatuses = ["current", "stale"] as const;
@@ -541,6 +562,59 @@ export type VideoProductionSubmitRequest = {
   sourceId?: string;
   /** Inline-create a new `SourceVersion` for this run. Mutually exclusive with `sourceId`. `file` sources are not supported inline (no text extraction adapter exists yet — see VE2E-01 handoff); create the source via the existing endpoint and pass `sourceId` instead. */
   source?: VideoProductionSourceInput;
+  /** VE2E-40: background segment count for this run; omitted = `{ mode: "auto" }`. Persisted on the run (retry/resume reuse it). */
+  backgroundSegments?: BackgroundSegmentsSetting;
+};
+
+/**
+ * VE2E-40 (DEC-2026-09-29-JP-ONESHOT-MEDIA #2): number of background ("one-shot") segments.
+ * `auto` = by video length (<= 30s: 2-3, > 30s: 3-5; by the intake target duration, else the real
+ * total voice duration); `fixed` = exactly `count`, validated server-side against configurable
+ * bounds (placeholder 1..6). Rules live in `@lyonix/domain/background-segments`.
+ */
+export type BackgroundSegmentsSetting = { mode: "auto" } | { mode: "fixed"; count: number };
+
+/** VE2E-40: the persisted setting plus the segment-count range it resolves to for this run (`null` = auto with no known duration yet). */
+export type BackgroundSegmentsResolvedResponse = {
+  setting: BackgroundSegmentsSetting;
+  range: { min: number; max: number } | null;
+};
+
+/**
+ * VE2E-31: `POST /projects/:projectId/media-plans` - runs the same server-side MediaPlanService the
+ * Auto runner uses (segments + one source B-roll per segment + contiguous per-scene source ranges)
+ * for one script version and returns timeline bindings WITHOUT saving a TimelineVersion (Studio,
+ * VE2E-41, saves through the normal timeline save). It does search/import media into the project
+ * library (Pexels calls + asset rows), so it is a CSRF-protected POST.
+ */
+export type MediaPlanRequest = {
+  scriptDraftVersionId: string;
+  /** Verified `visual` (Pexels) provider account. */
+  providerAccountId: string;
+  /** Omitted = `{ mode: "auto" }`, resolved against the scenes' real voice duration. */
+  backgroundSegments?: BackgroundSegmentsSetting;
+};
+
+export type MediaPlanSegmentDiagnostics = {
+  segmentId: string;
+  origin: "visual_plan" | "fallback";
+  /** `reused` = an asset already assigned to the segment's first scene in this project; `imported` = newly searched + imported; `failed` = no acceptable source (see `errorCode`), scenes left unbound. */
+  sourcing: "reused" | "imported" | "failed";
+  errorCode: string | null;
+  durationMs: number;
+  /** Source shorter than the segment: some scene restarted from 0 at a scene boundary (documented loop policy). */
+  looped: boolean;
+  /** A single scene longer than the whole source clip (its range is the whole clip, shorter than the voice). */
+  short: boolean;
+};
+
+export type MediaPlanResponse = {
+  policyVersion: string;
+  range: { min: number; max: number } | null;
+  /** Ready to send as `SaveTimelineVersionRequest.scenes`/`segments` (Studio merges its own audio/text bindings). */
+  scenes: Array<{ sceneId: string; mediaAssetVersionId: string | null; segmentId: string | null; sourceStartMs: number | null; sourceDurationMs: number | null }>;
+  segments: TimelineSegmentInput[];
+  diagnostics: MediaPlanSegmentDiagnostics[];
 };
 
 export type VideoProductionSubmitResponse = {
@@ -570,6 +644,8 @@ export type VideoProductionResponse = {
   renderJobId: string | null;
   resultUrl: string | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
+  /** VE2E-40: the run's persisted background segment setting (legacy runs read as auto) and its resolved range. */
+  backgroundSegments: BackgroundSegmentsResolvedResponse;
   createdAt: string;
   updatedAt: string;
 };
@@ -772,4 +848,6 @@ export type StudioContextResponse = {
   scriptDraftVersionId: string;
   scenes: StudioSceneContextResponse[];
   latestTimelineVersion: TimelineVersionResponse | null;
+  /** VE2E-38: the bridged script version's `visualPlan` (segments + ja/en keywords to prefill Studio search), `null` when none. */
+  visualPlan: ScriptVisualPlanResponse | null;
 };

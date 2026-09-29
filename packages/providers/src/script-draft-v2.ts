@@ -4,10 +4,12 @@
  * Pure logic only — no network I/O, no provider secret handling. See `live-script-v2.ts`
  * for the orchestration that calls a live content provider with this schema.
  */
-import { splitIntoSentences } from "@lyonix/domain";
+import { resolveBackgroundSegmentRange, splitIntoSentences } from "@lyonix/domain";
+import { SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA, normalizeScriptVisualPlanV2, type ScriptVisualPlanV2 } from "./script-visual-plan.js";
 
 export const SCRIPT_DRAFT_V2_SCHEMA_VERSION = "script-draft.v2" as const;
-export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2" as const;
+/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. */
+export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.1" as const;
 
 export const contentLanguagesV2 = ["vi", "en", "ja", "ko"] as const;
 export type ContentLanguageV2 = (typeof contentLanguagesV2)[number];
@@ -39,12 +41,18 @@ export type ScriptDraftV2 = {
   cta: string;
   caption: string;
   scenes: ScriptDraftSceneV2[];
+  /**
+   * VE2E-38 (optional, additive): whole-script background segment plan produced in the same
+   * provider call. `null`/absent = no usable plan (older drafts, or the model returned an invalid
+   * one) - every consumer must then fall back to the per-scene `visualQuery` behavior.
+   */
+  visualPlan?: ScriptVisualPlanV2 | null;
 };
 
 export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["schemaVersion", "language", "title", "hook", "body", "cta", "caption", "scenes"],
+  required: ["schemaVersion", "language", "title", "hook", "body", "cta", "caption", "scenes", "visualPlan"],
   properties: {
     schemaVersion: { type: "string", enum: [SCRIPT_DRAFT_V2_SCHEMA_VERSION] },
     language: { type: "string", enum: [...contentLanguagesV2] },
@@ -70,6 +78,7 @@ export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
         },
       },
     },
+    visualPlan: SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA,
   },
 } as Readonly<Record<string, unknown>>;
 
@@ -118,13 +127,17 @@ const MAX_SCENES_AFTER_SPLIT = 24;
  * by `MAX_SCENES_AFTER_SPLIT` total - once reached, a scene's remaining sentences merge back
  * into its last split part rather than growing the scene count further.
  */
-const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): ScriptDraftSceneV2[] => {
+const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): { scenes: ScriptDraftSceneV2[]; childrenById: Map<string, string[]> } => {
   const expanded: ScriptDraftSceneV2[] = [];
+  // VE2E-38: which final scene id(s) each pre-split scene became, so a `visualPlan` written
+  // against the model's own scene ids can be re-pointed at the split scenes.
+  const childrenById = new Map<string, string[]>();
   let remainingBudget = MAX_SCENES_AFTER_SPLIT - scenes.length;
   for (const scene of scenes) {
     const sentences = splitIntoSentences(scene.narration);
     if (sentences.length < 2 || remainingBudget <= 0) {
       expanded.push(scene);
+      childrenById.set(scene.sceneId, [scene.sceneId]);
       continue;
     }
     const partCount = Math.min(sentences.length, remainingBudget + 1);
@@ -135,6 +148,7 @@ const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): ScriptDraf
     const screenParts = splitIntoSentences(scene.screenText);
     const totalChars = parts.reduce((sum, part) => sum + part.length, 0) || 1;
     let remainingMs = scene.durationHintMs;
+    childrenById.set(scene.sceneId, parts.map((_, index) => `${scene.sceneId}-${index + 1}`));
     parts.forEach((part, index) => {
       const isLast = index === parts.length - 1;
       const share = isLast ? remainingMs : Math.max(MIN_SPLIT_SCENE_DURATION_MS, Math.round((part.length / totalChars) * scene.durationHintMs));
@@ -148,7 +162,7 @@ const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): ScriptDraf
       });
     });
   }
-  return expanded;
+  return { scenes: expanded, childrenById };
 };
 
 export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2): ScriptDraftV2 | null {
@@ -160,6 +174,7 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
     .map((item, index) => {
       const row = asRecord(item) ?? {};
       return {
+        rawSceneId: text(row.sceneId),
         sceneId: text(row.sceneId) || `s${String(index + 1).padStart(2, "0")}`,
         narration: text(row.narration),
         screenText: text(row.screenText),
@@ -171,10 +186,13 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
   const title = text(nested.title) || text(nested.hook);
   if (!title && scenes.length === 0) return null;
   const seen = new Set<string>();
-  const uniqueScenes = scenes.map((scene, index) => {
+  // VE2E-38: the model's own scene id -> the unique id it kept (first occurrence wins on a duplicate).
+  const uniqueIdByRawId = new Map<string, string>();
+  const uniqueScenes = scenes.map(({ rawSceneId, ...scene }, index) => {
     let sceneId = scene.sceneId;
     if (seen.has(sceneId)) sceneId = `${sceneId}-${index + 1}`;
     seen.add(sceneId);
+    if (rawSceneId && !uniqueIdByRawId.has(rawSceneId)) uniqueIdByRawId.set(rawSceneId, sceneId);
     return { ...scene, sceneId };
   });
   const body = text(nested.body) || uniqueScenes.map((scene) => scene.narration).filter(Boolean).join(" ");
@@ -182,7 +200,18 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
   // `expandOverlongScenes`'s own doc comment. Runs after sceneId dedup so every split id (derived
   // from an already-unique parent id) is guaranteed unique too, and after `body` is computed so a
   // split never changes the full spoken transcript, only how it's carved into scenes.
-  const finalScenes = expandOverlongScenes(uniqueScenes);
+  const { scenes: finalScenes, childrenById } = expandOverlongScenes(uniqueScenes);
+  // VE2E-38: tolerant - any problem with the plan yields null and never affects the script itself.
+  const visualPlan = finalScenes.length
+    ? normalizeScriptVisualPlanV2(
+        nested.visualPlan,
+        finalScenes.map((scene) => scene.sceneId),
+        (rawId) => {
+          const uniqueId = uniqueIdByRawId.get(rawId);
+          return uniqueId ? childrenById.get(uniqueId) ?? [] : [];
+        },
+      )
+    : null;
   return {
     schemaVersion: SCRIPT_DRAFT_V2_SCHEMA_VERSION,
     language: isContentLanguageV2(text(nested.language)) ? (nested.language as ContentLanguageV2) : language,
@@ -194,6 +223,7 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
     scenes: finalScenes.length
       ? finalScenes
       : [{ sceneId: "s01", narration: body, screenText: title || body, visualQuery: title || body, durationHintMs: 5000 }],
+    visualPlan,
   };
 }
 
@@ -220,6 +250,12 @@ export type ScriptPromptPackageV2 = {
   text: string;
   repairText: string;
 };
+
+/** The spoken length this prompt asks for is 55-65s; the auto segment rule is applied to its midpoint when no range is given. */
+const PROMPT_TARGET_SECONDS = 60;
+
+const validSegmentRange = (range: { min: number; max: number } | null | undefined) =>
+  range && Number.isInteger(range.min) && Number.isInteger(range.max) && range.min >= 1 && range.max >= range.min && range.max <= 10 ? range : null;
 
 const languageName: Record<ContentLanguageV2, string> = {
   vi: "Vietnamese",
@@ -249,6 +285,12 @@ export function buildScriptV2PromptPackage(input: {
   originRef?: string | null;
   language: string;
   direction?: string;
+  /**
+   * VE2E-38/40: target background segment count range for `visualPlan`, resolved by the caller from
+   * the run's intake setting. Absent = the default auto rule applied to this prompt's own target
+   * length (55-65s -> 3-5 segments).
+   */
+  backgroundSegmentRange?: { min: number; max: number } | null;
 }): ScriptPromptPackageV2 {
   const language: ContentLanguageV2 = isContentLanguageV2(input.language) ? input.language : "vi";
   const sourceType = isScriptSourceKind(input.sourceType) ? input.sourceType : "topic";
@@ -256,6 +298,8 @@ export function buildScriptV2PromptPackage(input: {
   const clippedSource = clipForPromptV2(input.sourceText, sourceType === "topic" ? 240 : 8000);
   const provenance = sourceType === "article_url" && input.originRef ? `\nSource URL (provenance only, do not repeat as text): ${input.originRef}` : "";
   const promptBody = `Source (${sourceType}):\n${clippedSource}${provenance}`;
+  const segmentRange = validSegmentRange(input.backgroundSegmentRange) ?? resolveBackgroundSegmentRange({ mode: "auto" }, PROMPT_TARGET_SECONDS)!;
+  const segmentCount = segmentRange.min === segmentRange.max ? `exactly ${segmentRange.min}` : `${segmentRange.min}-${segmentRange.max}`;
   const body = `You are LyOnix. Return one JSON object that matches schema ${SCRIPT_DRAFT_V2_SCHEMA_VERSION}.
 Prompt template: ${SCRIPT_PROMPT_TEMPLATE_V2_VERSION}
 Spoken short-form TikTok script in ${languageName[language]}.
@@ -267,11 +311,18 @@ Each scene: sceneId, narration (spoken), screenText (on-screen, no HTML/URLs), v
 Each scene's narration must be exactly ONE sentence (one visual per sentence, so the video cuts to a new shot every sentence) - never pack 2+ sentences into a single scene's narration; split a long thought across multiple scenes instead.
 body must be the full spoken narration concatenating scene narration in order.
 Every scene visualQuery must be a concrete, searchable phrase (e.g. "city skyline at night"), not empty and not a duplicate placeholder.
+visualPlan (whole-video background plan, decided after writing all scenes): split the scenes into ${segmentCount} background segments. Each segment is ONE continuous B-roll shot shown behind a run of consecutive scenes, so the video keeps a consistent look instead of cutting to an unrelated clip every scene.
+- segments: in script order, covering every sceneId exactly once, each segment a run of consecutive sceneIds.
+- Keep all scenes about the same subject (person, place or event) in the same segment - never split one subject across segments; the segment showing the video's main subject gets priority 1 and the most scenes; other segments priority 2+.
+- subject: short label of what that segment shows.
+- keywords.ja: natural Japanese search keywords a Japanese creator would use to find that footage (native wording, not a literal translation); keywords.en: a concrete English stock-footage search phrase for the same shot. At least one must be non-empty.
+- styleHints (setting, timeOfDay, lighting, palette): short phrases; keep them consistent across segments unless the story really changes place or time.
+If you cannot produce a valid plan, set visualPlan to null.
 Do not invent music beds or render steps. Do not wrap JSON in markdown.
 ${promptBody}`;
   const repairText = `${body}
 
-The previous reply was not valid ${SCRIPT_DRAFT_V2_SCHEMA_VERSION}. Repair it: output a single JSON object only, unique sceneId values, every scene has a non-empty visualQuery, and total duration 30-90s.`;
+The previous reply was not valid ${SCRIPT_DRAFT_V2_SCHEMA_VERSION}. Repair it: output a single JSON object only, unique sceneId values, every scene has a non-empty visualQuery, and total duration 30-90s. visualPlan must reference the final sceneIds (or be null).`;
   return {
     promptTemplateVersion: SCRIPT_PROMPT_TEMPLATE_V2_VERSION,
     schemaVersion: SCRIPT_DRAFT_V2_SCHEMA_VERSION,

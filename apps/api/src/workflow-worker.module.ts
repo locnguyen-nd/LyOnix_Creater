@@ -10,6 +10,7 @@ import { ScriptVersionsService } from "./script-versions.service.js";
 import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { PexelsService } from "./pexels.service.js";
+import { MediaPlanService } from "./media-plan.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
@@ -31,6 +32,7 @@ import { WorkflowRunnerService } from "./workflow-runner.service.js";
     ElevenLabsVoiceService,
     AudioVersionsService,
     PexelsService,
+    MediaPlanService,
     CreatomateTemplatesService,
     RenderJobsService,
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).

@@ -5,6 +5,7 @@
  */
 import { api, csrfHeaders } from "./api";
 import type {
+  BackgroundSegmentsSetting,
   StudioContextResponse,
   VideoProductionListItemResponse,
   VideoProductionResponse,
@@ -36,11 +37,17 @@ export async function setupAutoProfile(input: AutoProfileSetupRequest): Promise<
   });
 }
 
-export async function submitVideoProduction(projectId: string, automationProfileId: string, source: VideoProductionSourceInput): Promise<VideoProductionSubmitResponse> {
+/** `backgroundSegments` (VE2E-40) is optional; omitted = server default `{ mode: "auto" }`. */
+export async function submitVideoProduction(
+  projectId: string,
+  automationProfileId: string,
+  source: VideoProductionSourceInput,
+  backgroundSegments?: BackgroundSegmentsSetting,
+): Promise<VideoProductionSubmitResponse> {
   return api<VideoProductionSubmitResponse>("/video-productions", {
     method: "POST",
     headers: await csrfHeaders(),
-    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source }),
+    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source, ...(backgroundSegments ? { backgroundSegments } : {}) }),
   });
 }
 
