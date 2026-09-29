@@ -155,18 +155,19 @@ export async function getPexelsVideo(apiKey: string, id: string): Promise<Pexels
 }
 
 /**
- * Pick a video file variant sized for a 9:16 short video: prefers `video/mp4`,
- * the smallest option whose shorter (portrait height) side is at least 1280px
- * (HD), falling back to the largest available so a too-small source is never
- * silently rejected. Avoids grabbing an unnecessarily heavy 4K/UHD file when a
- * smaller one is already good enough for the target output.
+ * Pick a video file variant sized for a 1080x1920 short video (VE2E-37, CR-JP-ONESHOT-MEDIA §3):
+ * prefers `video/mp4`, the smallest option whose SHORT side (min of width/height, so portrait and
+ * landscape are treated alike) is at least 1080px, falling back to the largest available so a
+ * too-small source is never silently rejected. Never grabs a 1440p/4K file when a 1080p variant
+ * exists: media-worker then cuts it (usually by stream copy) instead of shipping a heavy download.
  */
+export const PEXELS_MIN_SHORT_SIDE_PX = 1080;
+
 export const pickPexelsVideoFile = (files: readonly PexelsVideoFileOption[]): PexelsVideoFileOption | null => {
   const mp4 = files.filter((f) => f.fileType === "video/mp4" && f.link && f.width > 0 && f.height > 0);
   if (mp4.length === 0) return null;
   const sorted = [...mp4].sort((a, b) => a.width * a.height - b.width * b.height);
-  const targetMinHeight = 1280;
-  return sorted.find((f) => f.height >= targetMinHeight) ?? sorted[sorted.length - 1]!;
+  return sorted.find((f) => Math.min(f.width, f.height) >= PEXELS_MIN_SHORT_SIDE_PX) ?? sorted[sorted.length - 1]!;
 };
 
 // --- VE2E-15a: normalized MediaCandidate mapping ---
