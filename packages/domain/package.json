@@ -7,7 +7,9 @@
     ".": "./src/index.ts",
     "./media-ranking": "./src/media-ranking.ts",
     "./media-candidate": "./src/media-candidate.ts",
-    "./vision-moderation-policy": "./src/vision-moderation-policy.ts"
+    "./vision-moderation-policy": "./src/vision-moderation-policy.ts",
+    "./timeline-segments": "./src/timeline-segments.ts",
+    "./media-lineage": "./src/media-lineage.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
