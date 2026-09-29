@@ -43,6 +43,8 @@ export type BuiltTimelineAssignments = {
   assignments: RenderAssignmentInput[];
   filledModificationKeys: string[];
   missingRequiredModificationKeys: string[];
+  /** VE2E-37: which template video slot (e.g. `Video-1.source`) each scene's video landed in; scenes past the last slot are absent. */
+  videoSlotKeyBySceneId: Record<string, string>;
 };
 
 const byKind = (slots: TemplateModificationSlotResponse[], kind: TemplateModificationSlotResponse["kind"]) =>
@@ -62,6 +64,7 @@ export function buildRenderAssignmentsFromTimeline(
 
   const assignments: RenderAssignmentInput[] = [];
   const claimed = new Set<string>();
+  const videoSlotKeyBySceneId: Record<string, string> = {};
   let videoCursor = 0;
   let imageCursor = 0;
   let audioCursor = 0;
@@ -73,6 +76,7 @@ export function buildRenderAssignmentsFromTimeline(
         const slot = videoSlots[videoCursor++]!;
         assignments.push({ modificationKey: slot.key, kind: "video", mediaAssetVersionId: scene.mediaAssetVersionId });
         claimed.add(slot.key);
+        videoSlotKeyBySceneId[scene.sceneId] = slot.key;
         // A scene's video is always an imported/fetched clip (Pexels or project library) whose
         // own audio track is never the intended sound - the real voiceover lives on the audio
         // track above. Creatomate names an element's volume slot `<name>.volume` alongside its
@@ -116,7 +120,7 @@ export function buildRenderAssignmentsFromTimeline(
   }
 
   const missingRequiredModificationKeys = slots.filter((slot) => slot.required && !claimed.has(slot.key)).map((slot) => slot.key);
-  return { assignments, filledModificationKeys: [...claimed], missingRequiredModificationKeys };
+  return { assignments, filledModificationKeys: [...claimed], missingRequiredModificationKeys, videoSlotKeyBySceneId };
 }
 
 /**

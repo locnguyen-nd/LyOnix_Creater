@@ -14,9 +14,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@lyonix/db": "workspace:*",
     "@lyonix/contracts": "workspace:*",
+    "@lyonix/db": "workspace:*",
     "@lyonix/domain": "workspace:*",
+    "@lyonix/media-jobs": "workspace:*",
     "@lyonix/providers": "workspace:*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",

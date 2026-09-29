@@ -53,7 +53,10 @@ export type ErrorCode =
   // apps/api/src/workflow-runner.service.ts), never an implicit accept.
   | "MEDIA_RELEVANCE_BELOW_THRESHOLD"
   | "MEDIA_RELEVANCE_UNVERIFIED"
-  | "MEDIA_RIGHTS_UNRESOLVED";
+  | "MEDIA_RIGHTS_UNRESOLVED"
+  // VE2E-37: media-worker could not cut/deliver a derivative clip for render (timeout, broker down,
+  // retryable worker error). Retryable; render never falls back to the full source file.
+  | "MEDIA_PREPARE_FAILED";
 
 export type ErrorEnvelope = {
   error: {

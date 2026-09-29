@@ -22,6 +22,9 @@ importers:
       '@lyonix/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@lyonix/media-jobs':
+        specifier: workspace:*
+        version: link:../../packages/media-jobs
       '@lyonix/providers':
         specifier: workspace:*
         version: link:../../packages/providers
