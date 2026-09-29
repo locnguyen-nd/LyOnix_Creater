@@ -24,15 +24,25 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const apiDir = resolve(here, "../../api");
+const mediaWorkerDir = resolve(here, "../../media-worker");
 
 interface WorkerSpec {
   readonly name: string;
-  readonly script: "worker:audio" | "worker:workflow";
+  readonly script: "worker:audio" | "worker:workflow" | "start";
+  readonly cwd: string;
+  /**
+   * VE2E-36: an optional worker exiting (e.g. FFmpeg not installed, RABBITMQ_URL unset) is
+   * reported loudly but does not tear down the other workers, so Auto/TTS keep working on
+   * machines without FFmpeg until a flow actually needs clip.prepare.
+   */
+  readonly optional?: boolean;
 }
 
 const workers: readonly WorkerSpec[] = [
-  { name: "audio", script: "worker:audio" },
-  { name: "workflow", script: "worker:workflow" },
+  { name: "audio", script: "worker:audio", cwd: apiDir },
+  { name: "workflow", script: "worker:workflow", cwd: apiDir },
+  // VE2E-36: FFmpeg media worker (RabbitMQ consumer for clip.prepare) — the only FFmpeg process.
+  { name: "media", script: "start", cwd: mediaWorkerDir, optional: true },
 ];
 
 const children: ChildProcess[] = [];
@@ -51,12 +61,18 @@ function launch(spec: WorkerSpec): ChildProcess {
   // `shell: true` lets the OS shell resolve `corepack` (`.cmd` on Windows) the same
   // way a developer typing the command in a terminal would — no hardcoded extension.
   const child = spawn("corepack", ["pnpm", "run", spec.script], {
-    cwd: apiDir,
+    cwd: spec.cwd,
     stdio: "inherit",
     shell: true,
   });
   child.on("exit", (code, signal) => {
     if (shuttingDown) return;
+    if (spec.optional) {
+      console.error(
+        `[worker:${spec.name}] optional worker exited (code=${code ?? "null"} signal=${signal ?? "null"}); other workers keep running — see its log above`,
+      );
+      return;
+    }
     console.error(
       `[worker:${spec.name}] exited unexpectedly (code=${code ?? "null"} signal=${signal ?? "null"}); stopping all workers`,
     );
@@ -65,6 +81,7 @@ function launch(spec: WorkerSpec): ChildProcess {
   child.on("error", (error) => {
     if (shuttingDown) return;
     console.error(`[worker:${spec.name}] failed to start`, error instanceof Error ? error.message : error);
+    if (spec.optional) return;
     shutdown(1);
   });
   return child;
