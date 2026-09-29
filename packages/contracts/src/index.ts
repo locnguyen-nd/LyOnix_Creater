@@ -114,6 +114,23 @@ export type ScriptDraftSceneV2Response = {
   durationHintMs: number;
 };
 
+/**
+ * VE2E-38 (CR-JP-ONESHOT-MEDIA-2026-09-29 §4): whole-script background plan generated in the same
+ * content-provider call as the script. Segments are runs of consecutive scenes covering the whole
+ * script in order; `priority` 1..10 (1 = main subject); `keywords.ja` for Japanese-native media
+ * sources, `keywords.en` for Pexels (at least one non-empty); `styleHints` keep one consistent look.
+ */
+export type ScriptVisualSegmentResponse = {
+  segmentId: string;
+  sceneIds: string[];
+  subject: string;
+  priority: number;
+  keywords: { ja: string; en: string };
+  styleHints: { setting: string; timeOfDay: string; lighting: string; palette: string };
+};
+
+export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[] };
+
 export type ScriptDraftV2Response = {
   schemaVersion: "script-draft.v2";
   language: string;
@@ -123,6 +140,8 @@ export type ScriptDraftV2Response = {
   cta: string;
   caption: string;
   scenes: ScriptDraftSceneV2Response[];
+  /** VE2E-38 (optional, additive): `null`/absent = no usable plan; consumers fall back to per-scene `visualQuery`. */
+  visualPlan?: ScriptVisualPlanResponse | null;
 };
 
 export type ScriptDraftV2GenerationResponse = {
@@ -477,6 +496,8 @@ export type ScriptDraftVersionResponse = {
   createdAt: string;
   approvedAt: string | null;
   scenes: SceneDraftVersionResponse[];
+  /** VE2E-38: the persisted `visualPlan` (`null` for versions without one, including every version stored before VE2E-38). */
+  visualPlan: ScriptVisualPlanResponse | null;
 };
 
 export const audioSubtitleVersionStatuses = ["current", "stale"] as const;
@@ -787,4 +808,6 @@ export type StudioContextResponse = {
   scriptDraftVersionId: string;
   scenes: StudioSceneContextResponse[];
   latestTimelineVersion: TimelineVersionResponse | null;
+  /** VE2E-38: the bridged script version's `visualPlan` (segments + ja/en keywords to prefill Studio search), `null` when none. */
+  visualPlan: ScriptVisualPlanResponse | null;
 };

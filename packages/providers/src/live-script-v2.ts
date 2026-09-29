@@ -23,6 +23,8 @@ export type GenerateScriptDraftV2Input = {
   originRef?: string | null;
   language: string;
   direction?: string;
+  /** VE2E-38/40: target background segment count for the draft's `visualPlan` (see `buildScriptV2PromptPackage`). */
+  backgroundSegmentRange?: { min: number; max: number } | null;
 };
 
 export type GenerateScriptDraftV2Result = {

@@ -34,6 +34,7 @@ import type {
 import { AUTO_FILL_CANDIDATE_POOL, pickBestPhotoCandidate, pickBestVideoCandidate } from "../studio/media-selection";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
+import { pexelsQueryForScene } from "../studio/visual-plan";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
   approveTimelineVersion,
@@ -645,10 +646,12 @@ export function StudioProPage() {
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i]!;
       const targetDurationSeconds = scene.durationHintMs / 1000;
+      // VE2E-38: same query the Auto runner uses (segment keywords.en, else visualQuery).
+      const query = pexelsQueryForScene(scene, context.visualPlan);
       try {
         let picked = false;
         if (wantsVideo) {
-          const videoResults = await searchPexels(context.projectId, visualAccountId, "video", scene.visualQuery, AUTO_FILL_CANDIDATE_POOL);
+          const videoResults = await searchPexels(context.projectId, visualAccountId, "video", query, AUTO_FILL_CANDIDATE_POOL);
           const videoPick = pickBestVideoCandidate(videoResults.videos, usedExternalIds, targetDurationSeconds);
           if (videoPick) {
             const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "video", externalId: videoPick.externalId, sceneId: scene.sceneId });
@@ -659,7 +662,7 @@ export function StudioProPage() {
           }
         }
         if (!picked && wantsImage) {
-          const photoResults = await searchPexels(context.projectId, visualAccountId, "photo", scene.visualQuery, AUTO_FILL_CANDIDATE_POOL);
+          const photoResults = await searchPexels(context.projectId, visualAccountId, "photo", query, AUTO_FILL_CANDIDATE_POOL);
           const photoPick = pickBestPhotoCandidate(photoResults.photos, usedExternalIds);
           if (photoPick) {
             const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "photo", externalId: photoPick.externalId, sceneId: scene.sceneId });

@@ -9,6 +9,7 @@
  */
 import { Inject, Injectable } from "@nestjs/common";
 import { canAccessProject } from "@lyonix/domain";
+import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import type {
   ErrorCode,
   ScriptDraftSceneV2Response,
@@ -32,6 +33,7 @@ const toResponse = (row: {
   id: string; sourceVersionId: string; version: number; status: string; language: string; title: string; hook: string; body: string;
   cta: string; caption: string; providerPin: unknown; supersedesId: string | null; createdAt: Date; approvedAt: Date | null;
   scenes: { id: string; sceneId: string; orderIndex: number; narration: string; screenText: string; visualQuery: string; durationHintMs: number }[];
+  visualPlan?: unknown;
 }): ScriptDraftVersionResponse => ({
   id: row.id,
   sourceVersionId: row.sourceVersionId,
@@ -58,6 +60,8 @@ const toResponse = (row: {
       visualQuery: scene.visualQuery,
       durationHintMs: scene.durationHintMs,
     })),
+  // VE2E-38: re-checked on read against this version's own scenes - a legacy/garbled value reads as null, never breaks the script.
+  visualPlan: normalizeScriptVisualPlanV2(row.visualPlan, [...row.scenes].sort((a, b) => a.orderIndex - b.orderIndex).map((scene) => scene.sceneId)),
 });
 
 @Injectable()
@@ -132,6 +136,9 @@ export class ScriptVersionsService {
     const sceneIds = new Set(draft.scenes.map((scene: ScriptDraftSceneV2Response) => scene.sceneId));
     if (sceneIds.size !== draft.scenes.length) return { ok: false, code: "VALIDATION_FAILED", message: "sceneId trùng lặp trong scenes" };
 
+    // VE2E-38: optional + tolerant - a missing/invalid plan (e.g. scenes edited since generation) is stored as null, the script itself is still accepted.
+    const visualPlan = normalizeScriptVisualPlanV2(draft.visualPlan, draft.scenes.map((scene: ScriptDraftSceneV2Response) => scene.sceneId));
+
     const latest = await this.prisma.scriptDraftVersion.findFirst({ where: { sourceVersionId }, orderBy: { version: "desc" } });
     const version = (latest?.version ?? 0) + 1;
     const created = await this.prisma.scriptDraftVersion.create({
@@ -147,6 +154,7 @@ export class ScriptVersionsService {
         cta: draft.cta,
         caption: draft.caption,
         providerPin: input.providerPin as unknown as object,
+        ...(visualPlan ? { visualPlan: visualPlan as unknown as object } : {}),
         supersedesId: latest?.id ?? null,
         createdByUserId: userId,
         scenes: {

@@ -794,6 +794,8 @@ model ScriptDraftVersion {
   caption         String
   // { accountId, provider, modelId, configVersion, promptTemplateVersion } pinned at generation time (VE2E-01 shape).
   providerPin     Json
+  // VE2E-38: optional whole-script visualPlan ({segments:[{segmentId, sceneIds, subject, priority, keywords:{ja,en}, styleHints}]}); null = none (all pre-VE2E-38 rows).
+  visualPlan      Json?
   supersedesId    String?              @db.Uuid
   createdByUserId String               @db.Uuid
   createdAt       DateTime             @default(now())

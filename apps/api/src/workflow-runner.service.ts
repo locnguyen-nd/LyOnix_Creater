@@ -25,7 +25,16 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import { buildAutoRenderAssignments, buildAutoTimelineOptionValues, deriveSceneBrief, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
+import {
+  buildAutoRenderAssignments,
+  buildAutoTimelineOptionValues,
+  deriveSceneBrief,
+  readBackgroundSegmentsSetting,
+  resolveBackgroundSegmentRange,
+  type AutoSceneMedia,
+  type AutoTemplateSlot,
+} from "@lyonix/domain";
+import { mediaSearchQueryForScene } from "@lyonix/providers";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -252,12 +261,20 @@ export class WorkflowRunnerService {
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
+      // VE2E-38/40: the run's persisted intake setting (legacy null -> auto), resolved against the
+      // intake target duration, sets the segment count the same content call plans visualPlan for.
+      const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
       const generation = await this.recordStep(
         run,
         "generate_script",
         { role: "content", operation: "generate_script", providerAccountId: contentConfig.providerAccountId },
         async () => {
-          const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, { providerAccountId: contentConfig.providerAccountId, language: profile.locale, direction });
+          const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
+            providerAccountId: contentConfig.providerAccountId,
+            language: profile.locale,
+            direction,
+            ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+          });
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
@@ -343,7 +360,9 @@ export class WorkflowRunnerService {
           const outcome = await this.pexels.autoImportForScene(run.projectId, userId, role, {
             providerAccountId: mediaConfig.providerAccountId,
             sceneId: scene.sceneId,
-            query: scene.visualQuery.trim() || scene.narration,
+            // VE2E-38: the scene's segment keywords.en when the approved script has a visualPlan,
+            // otherwise exactly the previous visualQuery -> narration fallback.
+            query: mediaSearchQueryForScene(scene, approved.visualPlan),
             sceneBrief,
             usedExternalIds: [...usedExternalIds],
           });

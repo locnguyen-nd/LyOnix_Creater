@@ -269,6 +269,31 @@ describe("WorkflowRunnerService", () => {
     expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
   });
 
+  it("VE2E-38/40: asks the content provider for the run's background segment range (legacy run -> auto by target duration)", async () => {
+    await service.processNext();
+    // profile durationSec 30 -> "<= 30s" auto rule
+    expect(scriptGeneration.generate).toHaveBeenCalledWith("source-1", userId, "staff", expect.objectContaining({ backgroundSegmentRange: { min: 2, max: 3 } }));
+  });
+
+  it("VE2E-38/40: a run with a fixed intake count asks for exactly that many segments", async () => {
+    runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 4 } })];
+    await service.processNext();
+    expect(scriptGeneration.generate).toHaveBeenCalledWith("source-1", userId, "staff", expect.objectContaining({ backgroundSegmentRange: { min: 4, max: 4 } }));
+  });
+
+  it("VE2E-38: Pexels query uses the segment keywords.en when the approved script has a visualPlan, visualQuery otherwise", async () => {
+    const visualPlan = {
+      segments: [
+        { segmentId: "g1", sceneIds: ["scene-1"], subject: "stadium", priority: 1, keywords: { ja: "スタジアム", en: "packed football stadium at night" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } },
+        { segmentId: "g2", sceneIds: ["scene-2"], subject: "crowd", priority: 2, keywords: { ja: "観客", en: "" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } },
+      ],
+    };
+    (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan } });
+    await service.processNext();
+    const queries = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[3].query);
+    expect(queries).toEqual(["packed football stadium at night", "stadium"]);
+  });
+
   it("reuses an existing project-library asset for a scene instead of calling Pexels", async () => {
     mediaAssets.push({ projectId, sceneId: "scene-1", id: "library-asset-1", kind: "video", createdAt: new Date() });
     await service.processNext();

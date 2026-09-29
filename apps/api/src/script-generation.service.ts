@@ -13,7 +13,13 @@ import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 
-export type GenerateScriptDraftInput = { providerAccountId?: string; language?: string; direction?: string };
+export type GenerateScriptDraftInput = {
+  providerAccountId?: string;
+  language?: string;
+  direction?: string;
+  /** VE2E-38/40: target background segment range for the draft's visualPlan (Auto passes the run's resolved intake setting; absent = default rule). Internal only, not an HTTP body field. */
+  backgroundSegmentRange?: { min: number; max: number } | null;
+};
 
 export type GenerateScriptDraftOutcome =
   | { ok: true; response: ScriptDraftV2GenerationResponse }
@@ -87,6 +93,7 @@ export class ScriptGenerationService {
               originRef: source.originRef,
               language,
               ...(input.direction ? { direction: input.direction } : {}),
+              ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
             });
             if (result.modelId !== account.model) {
               await this.providerAccounts.repinModel(account.id, result.modelId).catch(() => undefined);

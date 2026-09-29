@@ -145,6 +145,23 @@ describe("ScriptVersionsService", () => {
       const outcome = await service.create(sourceVersionId, "user-1", "staff", { draft, providerPin });
       expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
+
+    it("VE2E-38: persists a valid visualPlan and returns it; a draft without one reads back visualPlan null", async () => {
+      const visualPlan = { segments: [{ segmentId: "g1", sceneIds: ["s01", "s02"], subject: "Messi", priority: 1, keywords: { ja: "メッシ", en: "soccer star" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlight", palette: "green" } }] };
+      const withPlan = await service.create(sourceVersionId, "user-1", "staff", { draft: { ...draft, visualPlan }, providerPin });
+      expect(withPlan).toMatchObject({ ok: true, data: { visualPlan } });
+      expect(scriptRows[0].visualPlan).toEqual(visualPlan);
+      const without = await service.create(sourceVersionId, "user-1", "staff", { draft, providerPin });
+      expect(without).toMatchObject({ ok: true, data: { visualPlan: null } });
+      expect(scriptRows[1].visualPlan).toBeUndefined();
+    });
+
+    it("VE2E-38: stores an invalid visualPlan (e.g. referencing an unknown scene) as null but still accepts the script", async () => {
+      const broken = { segments: [{ segmentId: "g1", sceneIds: ["s01", "s99"], subject: "x", priority: 1, keywords: { ja: "", en: "q" }, styleHints: { setting: "", timeOfDay: "", lighting: "", palette: "" } }] };
+      const outcome = await service.create(sourceVersionId, "user-1", "staff", { draft: { ...draft, visualPlan: broken as never }, providerPin });
+      expect(outcome).toMatchObject({ ok: true, data: { version: 1, visualPlan: null } });
+      expect(scriptRows[0].visualPlan).toBeUndefined();
+    });
   });
 
   describe("approve + invalidation cascade", () => {

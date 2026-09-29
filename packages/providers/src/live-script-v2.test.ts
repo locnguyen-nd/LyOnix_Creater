@@ -41,6 +41,26 @@ describe("generateScriptDraftV2", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("VE2E-38: returns the visualPlan from the same single provider call (schema + prompt carry it)", async () => {
+    const visualPlan = {
+      segments: [
+        { segmentId: "g1", sceneIds: ["s01", "s02"], subject: "Messi", priority: 1, keywords: { ja: "メッシ サッカー", en: "soccer player dribbling" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green + white" } },
+        { segmentId: "g2", sceneIds: ["s03"], subject: "follow CTA", priority: 2, keywords: { ja: "", en: "phone social media scrolling" }, styleHints: { setting: "home", timeOfDay: "night", lighting: "screen glow", palette: "blue" } },
+      ],
+    };
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { input: unknown; text: { format: { schema: { required: string[] } } } };
+      expect(body.text.format.schema.required).toContain("visualPlan");
+      expect(JSON.stringify(body.input)).toContain("into 2-3 background segments");
+      return new Response(JSON.stringify({ output_text: draftJson({ visualPlan }) }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await generateScriptDraftV2("openai", "sk-test", "gpt-4o-mini", { sourceType: "topic", sourceText: "Messi", language: "vi", backgroundSegmentRange: { min: 2, max: 3 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.draft.visualPlan?.segments.map((s) => s.sceneIds)).toEqual([["s01", "s02"], ["s03"]]);
+    expect(result.promptTemplateVersion).toBe("script-prompt.v2.1");
+  });
+
   it("retries once with a repair prompt when the first reply fails semantic validation", async () => {
     let call = 0;
     const fetchMock = vi.fn(async () => {
