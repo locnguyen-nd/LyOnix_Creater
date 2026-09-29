@@ -28,15 +28,13 @@ import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
-  deriveSceneBrief,
   readBackgroundSegmentsSetting,
   resolveBackgroundSegmentRange,
   type AutoSceneMedia,
   type AutoTemplateSlot,
 } from "@lyonix/domain";
-import { mediaSearchQueryForScene } from "@lyonix/providers";
 import { AudioVersionsService } from "./audio-versions.service.js";
-import { PexelsService } from "./pexels.service.js";
+import { MediaPlanService, SegmentSourceLedger, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
@@ -117,7 +115,7 @@ export class WorkflowRunnerService {
     @Inject(ScriptGenerationService) private readonly scriptGeneration: ScriptGenerationService,
     @Inject(ScriptVersionsService) private readonly scriptVersions: ScriptVersionsService,
     @Inject(AudioVersionsService) private readonly audioVersions: AudioVersionsService,
-    @Inject(PexelsService) private readonly pexels: PexelsService,
+    @Inject(MediaPlanService) private readonly mediaPlans: MediaPlanService,
     @Inject(RenderJobsService) private readonly renderJobs: RenderJobsService,
     @Inject(TimelineVersionsService) private readonly timelines: TimelineVersionsService,
   ) {}
@@ -257,13 +255,14 @@ export class WorkflowRunnerService {
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
       return outcome.data;
     });
+    // VE2E-38/40/31: the run's persisted intake setting (legacy null -> auto), resolved against the
+    // intake target duration - used both for the visualPlan the content call writes and for the
+    // media plan's segment count, so a retry that reuses the approved script plans the same count.
+    const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
     let approved = existingApproved;
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
-      // VE2E-38/40: the run's persisted intake setting (legacy null -> auto), resolved against the
-      // intake target duration, sets the segment count the same content call plans visualPlan for.
-      const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
       const generation = await this.recordStep(
         run,
         "generate_script",
@@ -299,7 +298,7 @@ export class WorkflowRunnerService {
 
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
-    const audioByScene = new Map<string, { audioVersionId: string; mediaAssetVersionId: string; subtitleVersionId: string | null }>();
+    const audioByScene = new Map<string, { audioVersionId: string; mediaAssetVersionId: string; subtitleVersionId: string | null; durationMs: number | null }>();
     for (const scene of approved.scenes) {
       // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion
       // already tied to this exact SceneDraftVersion id reflects a real, already-paid-for prior
@@ -314,6 +313,7 @@ export class WorkflowRunnerService {
           audioVersionId: existingAudio.id,
           mediaAssetVersionId: existingAudio.mediaAssetVersionId,
           subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
+          durationMs: typeof existingAudio.durationMs === "number" ? existingAudio.durationMs : null,
         });
         continue;
       }
@@ -331,49 +331,58 @@ export class WorkflowRunnerService {
           return outcome.data;
         },
       );
-      audioByScene.set(scene.sceneId, { audioVersionId: audio.id, mediaAssetVersionId: audio.mediaAssetVersionId, subtitleVersionId: audio.subtitleVersion?.id ?? null });
+      audioByScene.set(scene.sceneId, {
+        audioVersionId: audio.id,
+        mediaAssetVersionId: audio.mediaAssetVersionId,
+        subtitleVersionId: audio.subtitleVersion?.id ?? null,
+        durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
+      });
     }
     // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
     await this.setStatus(run.id, "aligning");
 
-    // --- 5. media: project library first, Pexels fallback per scene ---
+    // --- 5. media: VE2E-31 one-shot background plan (MediaPlanService, shared with Studio) ---
+    // Consecutive scenes are grouped into background segments (script visualPlan or deterministic
+    // fallback, count from the run's VE2E-40 setting); each segment gets ONE source (reused from the
+    // project library on retry, else searched by keywords.en through the Pexels rank/moderation/
+    // rights gate) and a new segment never reuses an earlier segment's source. Replaces the old
+    // per-scene `usedExternalIds` hard block. Unattended Auto stops at the first unsourceable
+    // segment (needs_input), same as the old per-scene abstention.
     await this.setStatus(run.id, "media_preparing");
-    const mediaByScene = new Map<string, { id: string; kind: "video" | "image" }>();
-    // VE2E-15a continuity: an external id already imported earlier in this same run is never picked again for a later scene (mirrors `usedExternalIds` in `apps/web/src/studio/media-selection.ts`).
-    const usedExternalIds = new Set<string>();
-    const scriptForBrief = { language: approved.language, scenes: approved.scenes.map((s) => ({ sceneId: s.sceneId, narration: s.narration, screenText: s.screenText, visualQuery: s.visualQuery, durationHintMs: s.durationHintMs })) };
-    for (const [sceneIndex, scene] of approved.scenes.entries()) {
-      const existing = await this.prisma.mediaAssetVersion.findFirst({
-        where: { projectId: run.projectId, sceneId: scene.sceneId, deletedAt: null },
-        orderBy: { createdAt: "desc" },
-      });
-      if (existing && (existing.kind === "video" || existing.kind === "image")) {
-        mediaByScene.set(scene.sceneId, { id: existing.id, kind: existing.kind });
-        continue;
-      }
-      const sceneBrief = deriveSceneBrief(scriptForBrief, sceneIndex);
-      const imported = await this.recordStep(
-        run,
-        `import_media_${scene.sceneId}`,
-        { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
-        async () => {
-          const outcome = await this.pexels.autoImportForScene(run.projectId, userId, role, {
-            providerAccountId: mediaConfig.providerAccountId,
-            sceneId: scene.sceneId,
-            // VE2E-38: the scene's segment keywords.en when the approved script has a visualPlan,
-            // otherwise exactly the previous visualQuery -> narration fallback.
-            query: mediaSearchQueryForScene(scene, approved.visualPlan),
-            sceneBrief,
-            usedExternalIds: [...usedExternalIds],
-          });
-          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-          return outcome.data;
-        },
-      );
-      if (imported.asset.kind !== "video" && imported.asset.kind !== "image") throw new WorkflowStepFailure("PROVIDER_SCHEMA_INVALID", `Asset Pexels vừa import có kind không hỗ trợ: ${imported.asset.kind}`);
-      mediaByScene.set(scene.sceneId, { id: imported.asset.id, kind: imported.asset.kind });
-      usedExternalIds.add(imported.externalId);
+    const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+    const planScript: MediaPlanScript = {
+      language: approved.language,
+      scenes: orderedScenes.map((scene) => ({
+        sceneId: scene.sceneId,
+        narration: scene.narration,
+        screenText: scene.screenText,
+        visualQuery: scene.visualQuery,
+        durationHintMs: scene.durationHintMs,
+        voiceDurationMs: audioByScene.get(scene.sceneId)?.durationMs ?? null,
+      })),
+      visualPlan: approved.visualPlan ?? null,
+    };
+    const ledger = new SegmentSourceLedger();
+    const sourced: SourcedSegment[] = [];
+    for (const segment of this.mediaPlans.planSegments(planScript, backgroundSegmentRange)) {
+      const source =
+        (await this.mediaPlans.findReusableSource(run.projectId, segment, ledger)) ??
+        (await this.recordStep(
+          run,
+          `import_media_${segment.segmentId}`,
+          { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+          async () => {
+            const outcome = await this.mediaPlans.importSegmentSource(run.projectId, userId, role, { providerAccountId: mediaConfig.providerAccountId, script: planScript, segment, ledger });
+            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+            return outcome.data;
+          },
+        ));
+      ledger.add(source);
+      sourced.push({ segment, source, errorCode: null });
     }
+    const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
+    const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
+    const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 
     // --- 6. timeline: preflight the positional slot mapping, then persist it as an auto-approved TimelineVersion (VE2E-42) ---
     await this.setStatus(run.id, "editing");
@@ -404,8 +413,8 @@ export class WorkflowRunnerService {
     // the one shared timeline->render step Studio also uses. The persisted content reproduces the
     // assignments above: each scene's caption is pinned to its narration via `screenTextOverride`
     // (the same word-for-word rule `AutoSceneMedia.displayText` documents), and title/caption fill
-    // the leftover text slots via `optionValues`. No segments/ranges yet - VE2E-31 plans those.
-    const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+    // the leftover text slots via `optionValues`. VE2E-31: segments + per-scene source ranges from
+    // the media plan are persisted too (ranges are cut into derivatives at render time, VE2E-37).
     const timeline = await this.recordStep(run, "persist_timeline_version", null, async () => {
       const outcome = await this.timelines.persistApprovedForWorkflowRun(run.id, run.projectId, userId, role, {
         templateSnapshotId: renderConfig.templateSnapshotId,
@@ -415,7 +424,11 @@ export class WorkflowRunnerService {
           audioVersionId: audioByScene.get(scene.sceneId)?.audioVersionId ?? null,
           subtitleVersionId: audioByScene.get(scene.sceneId)?.subtitleVersionId ?? null,
           screenTextOverride: scene.narration.trim() || null,
+          segmentId: planByScene.get(scene.sceneId)?.segmentId ?? null,
+          sourceStartMs: planByScene.get(scene.sceneId)?.sourceStartMs ?? null,
+          sourceDurationMs: planByScene.get(scene.sceneId)?.sourceDurationMs ?? null,
         })),
+        segments: mediaPlan.segments,
         optionValues: buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
       });
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
