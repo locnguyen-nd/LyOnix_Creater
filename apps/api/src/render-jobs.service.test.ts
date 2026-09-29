@@ -368,6 +368,26 @@ describe("RenderJobsService", () => {
       expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
     });
 
+    it("VE2E-42: a timeline with segments/source ranges submits the same modifications as its legacy (range-less) equivalent, and links workflowRunId for Auto", async () => {
+      const legacyScene = { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null };
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: [legacyScene], optionValues: {} });
+      await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId, idempotencyKey: "a" });
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId, projectId, status: "approved", templateSnapshotId, optionValues: {},
+        scenes: [{ ...legacyScene, excluded: false, segmentId: "g1", sourceStartMs: 2000, sourceDurationMs: 3000 }],
+        segments: [{ segmentId: "g1", sceneIds: ["s1"], mediaAssetVersionId: "asset-1", subject: null, priority: 1 }],
+        workflowRunId: "run-1",
+      });
+      await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId, idempotencyKey: "b" }, "run-1");
+      const legacyBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const rangedBody = JSON.parse(String((fetchMock.mock.calls[1] as any)[1].body));
+      // Range-based derivative cutting is VE2E-37 (media-worker); until then a range never changes the payload.
+      expect(rangedBody.modifications).toEqual(legacyBody.modifications);
+      expect(prisma.renderJob.create).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ workflowRunId: "run-1" }) }));
+    });
+
     it("returns NOT_FOUND for a timeline version belonging to a different project", async () => {
       timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId: "other-project", status: "approved", templateSnapshotId, scenes: [], optionValues: {} });
       const outcome = await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });

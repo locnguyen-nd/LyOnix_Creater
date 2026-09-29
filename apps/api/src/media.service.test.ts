@@ -92,6 +92,22 @@ describe("MediaService", () => {
     });
   });
 
+  describe("listAssets lineage (VE2E-42)", () => {
+    const baseRow = { projectId, folderId: null, kind: "video", originalFileName: "clip.mp4", mimeType: "video/mp4", checksumSha256: "a".repeat(64), bytes: 10, widthPx: null, heightPx: null, durationMs: 4000, origin: "pexels", license: null, reusable: false, retentionClass: "working", expiresAt: null, version: 1, createdAt: new Date(), deletedAt: null, provenance: {} };
+
+    it("surfaces parent + parsed transform on a derivative, null on originals and on a malformed stored transform", async () => {
+      assets.set("orig", { ...baseRow, id: "orig" });
+      assets.set("deriv", { ...baseRow, id: "deriv", parentMediaAssetVersionId: "orig", transform: { range: { startMs: 1000, durationMs: 4000 }, stripAudio: true, tool: { name: "ffmpeg", version: "7" }, profileVersion: "clip.prepare@1" } });
+      assets.set("broken", { ...baseRow, id: "broken", parentMediaAssetVersionId: "orig", transform: { stripAudio: "yes" } });
+      const rows = await service.listAssets(projectId, userId, "staff");
+      if (rows === "forbidden") throw new Error("expected rows");
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      expect(byId.get("orig")).toMatchObject({ parentMediaAssetVersionId: null, transform: null });
+      expect(byId.get("deriv")).toMatchObject({ parentMediaAssetVersionId: "orig", transform: { range: { startMs: 1000, durationMs: 4000 }, stripAudio: true, tool: { name: "ffmpeg", version: "7" }, profileVersion: "clip.prepare@1" } });
+      expect(byId.get("broken")).toMatchObject({ parentMediaAssetVersionId: "orig", transform: null });
+    });
+  });
+
   describe("assignScene", () => {
     it("assigns and then clears the sceneId on an existing asset", async () => {
       const { writeQuarantineFile } = await import("./quarantine.js");

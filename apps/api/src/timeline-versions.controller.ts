@@ -1,12 +1,12 @@
 import { Body, Controller, Get, Inject, Param, Post, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
-import type { SaveTimelineVersionRequest, TimelineOptionValues, TimelineSceneBindingInput } from "@lyonix/contracts";
+import type { SaveTimelineVersionRequest, TimelineOptionValues, TimelineSceneBindingInput, TimelineSegmentInput } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { normalizedError, success } from "./envelopes.js";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
 
-type SaveBody = { supersedesId?: string | null; templateSnapshotId?: string | null; scenes?: TimelineSceneBindingInput[]; optionValues?: TimelineOptionValues };
+type SaveBody = { supersedesId?: string | null; templateSnapshotId?: string | null; scenes?: TimelineSceneBindingInput[]; optionValues?: TimelineOptionValues; segments?: TimelineSegmentInput[] };
 
 @Controller()
 export class TimelineVersionsController {
@@ -41,6 +41,8 @@ export class TimelineVersionsController {
       scenes: body.scenes,
       ...(body.templateSnapshotId !== undefined ? { templateSnapshotId: body.templateSnapshotId } : {}),
       ...(body.optionValues ? { optionValues: body.optionValues } : {}),
+      // VE2E-42: optional; shape is validated in the service (non-array -> VALIDATION_FAILED).
+      ...(body.segments !== undefined && body.segments !== null ? { segments: body.segments } : {}),
     };
     const outcome = await this.timelines.save(projectId, user.id, user.role, input);
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);

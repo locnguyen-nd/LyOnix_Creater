@@ -25,8 +25,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import { buildAutoRenderAssignments, deriveSceneBrief, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
-import type { RenderAssignmentInput } from "@lyonix/contracts";
+import { buildAutoRenderAssignments, buildAutoTimelineOptionValues, deriveSceneBrief, type AutoSceneMedia, type AutoTemplateSlot } from "@lyonix/domain";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -34,6 +33,7 @@ import { RenderJobsService } from "./render-jobs.service.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
 import { ScriptVersionsService } from "./script-versions.service.js";
 import { SourcesService } from "./sources.service.js";
+import { TimelineVersionsService } from "./timeline-versions.service.js";
 
 // --- AutomationProfileVersion JSON config parsing (shared with video-productions.service.ts) ---
 
@@ -110,6 +110,7 @@ export class WorkflowRunnerService {
     @Inject(AudioVersionsService) private readonly audioVersions: AudioVersionsService,
     @Inject(PexelsService) private readonly pexels: PexelsService,
     @Inject(RenderJobsService) private readonly renderJobs: RenderJobsService,
+    @Inject(TimelineVersionsService) private readonly timelines: TimelineVersionsService,
   ) {}
 
   /** One tick: claim+run at most one draft Auto run, then reconcile every run waiting on a render. Returns whether anything happened (used by the worker loop to decide whether to sleep). */
@@ -281,7 +282,7 @@ export class WorkflowRunnerService {
 
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
-    const audioByScene = new Map<string, { mediaAssetVersionId: string }>();
+    const audioByScene = new Map<string, { audioVersionId: string; mediaAssetVersionId: string; subtitleVersionId: string | null }>();
     for (const scene of approved.scenes) {
       // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion
       // already tied to this exact SceneDraftVersion id reflects a real, already-paid-for prior
@@ -289,9 +290,14 @@ export class WorkflowRunnerService {
       const existingAudio = await this.prisma.audioVersion.findFirst({
         where: { sceneDraftVersionId: scene.id, status: "current" },
         orderBy: { version: "desc" },
+        include: { subtitleVersions: { where: { status: "current" }, orderBy: { version: "desc" }, take: 1 } },
       });
       if (existingAudio) {
-        audioByScene.set(scene.sceneId, { mediaAssetVersionId: existingAudio.mediaAssetVersionId });
+        audioByScene.set(scene.sceneId, {
+          audioVersionId: existingAudio.id,
+          mediaAssetVersionId: existingAudio.mediaAssetVersionId,
+          subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
+        });
         continue;
       }
       const audio = await this.recordStep(
@@ -308,7 +314,7 @@ export class WorkflowRunnerService {
           return outcome.data;
         },
       );
-      audioByScene.set(scene.sceneId, { mediaAssetVersionId: audio.mediaAssetVersionId });
+      audioByScene.set(scene.sceneId, { audioVersionId: audio.id, mediaAssetVersionId: audio.mediaAssetVersionId, subtitleVersionId: audio.subtitleVersion?.id ?? null });
     }
     // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
     await this.setStatus(run.id, "aligning");
@@ -350,7 +356,7 @@ export class WorkflowRunnerService {
       usedExternalIds.add(imported.externalId);
     }
 
-    // --- 6. build timeline assignments (positional best-effort mapping, no human timeline editor in Auto) ---
+    // --- 6. timeline: preflight the positional slot mapping, then persist it as an auto-approved TimelineVersion (VE2E-42) ---
     await this.setStatus(run.id, "editing");
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
     if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
@@ -366,28 +372,52 @@ export class WorkflowRunnerService {
       visualKind: mediaByScene.get(scene.sceneId)?.kind ?? null,
       audioMediaAssetVersionId: audioByScene.get(scene.sceneId)?.mediaAssetVersionId ?? null,
     }));
-    const built = buildAutoRenderAssignments(slots, sceneMedia, { title: approved.title, caption: approved.caption });
+    const extraText = { title: approved.title, caption: approved.caption };
+    // Preflight only (no DB/provider effect): fail fast as needs_input with the exact missing keys
+    // before anything is persisted, same message/classification as before VE2E-42.
+    const built = buildAutoRenderAssignments(slots, sceneMedia, extraText);
     if (!built.ok) {
       const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
       throw new WorkflowStepFailure("VALIDATION_FAILED", detail);
     }
+    // VE2E-42 (CR-JP-ONESHOT-MEDIA §8): Auto's bindings become a real, auto-approved TimelineVersion
+    // so "Mở trong Studio" on this run shows exactly what was rendered, and the render goes through
+    // the one shared timeline->render step Studio also uses. The persisted content reproduces the
+    // assignments above: each scene's caption is pinned to its narration via `screenTextOverride`
+    // (the same word-for-word rule `AutoSceneMedia.displayText` documents), and title/caption fill
+    // the leftover text slots via `optionValues`. No segments/ranges yet - VE2E-31 plans those.
+    const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+    const timeline = await this.recordStep(run, "persist_timeline_version", null, async () => {
+      const outcome = await this.timelines.persistApprovedForWorkflowRun(run.id, run.projectId, userId, role, {
+        templateSnapshotId: renderConfig.templateSnapshotId,
+        scenes: orderedScenes.map((scene) => ({
+          sceneId: scene.sceneId,
+          mediaAssetVersionId: mediaByScene.get(scene.sceneId)?.id ?? null,
+          audioVersionId: audioByScene.get(scene.sceneId)?.audioVersionId ?? null,
+          subtitleVersionId: audioByScene.get(scene.sceneId)?.subtitleVersionId ?? null,
+          screenTextOverride: scene.narration.trim() || null,
+        })),
+        optionValues: buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
+      });
+      if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+      return outcome.data;
+    });
     await this.setStatus(run.id, "ready_to_render");
 
-    // --- 7. submit render (idempotent by run.requestFingerprint) ---
+    // --- 7. submit render from the approved timeline (idempotent by run.requestFingerprint) ---
     await this.setStatus(run.id, "render_queued");
     await this.recordStep(
       run,
       "submit_render",
       { role: "render", operation: "render_submit", providerAccountId: renderConfig.providerAccountId },
       async () => {
-        const outcome = await this.renderJobs.submit(
+        const outcome = await this.renderJobs.submitFromTimelineVersion(
           run.projectId,
+          timeline.id,
           userId,
           role,
           {
-            templateSnapshotId: renderConfig.templateSnapshotId,
             providerAccountId: renderConfig.providerAccountId,
-            assignments: built.assignments as RenderAssignmentInput[],
             idempotencyKey: run.requestFingerprint,
             ...(renderConfig.outputFormat ? { outputFormat: renderConfig.outputFormat } : {}),
           },
