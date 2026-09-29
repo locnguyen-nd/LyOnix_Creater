@@ -29,9 +29,11 @@ corepack pnpm build
 `correlationId`. Contract + client enqueue/await: `packages/media-jobs`.
 
 - Cần `ffmpeg` + `ffprobe` (có `libx264`) trên PATH, hoặc đặt `FFMPEG_PATH` / `FFPROBE_PATH`. Thiếu binary thì
-  worker thoát với thông báo rõ ràng; các worker khác của `pnpm dev` vẫn chạy.
+  worker thoát với thông báo rõ ràng và `pnpm dev` dừng mọi worker (bắt buộc từ VE2E-37 vì render cắt clip qua worker này).
 - Cần RabbitMQ (`infra/compose`, `RABBITMQ_URL`); worker tự kết nối lại với backoff.
 - Output ở `MEDIA_ROOT/working/media-jobs/` (retention `working`, TTL 7 ngày, local disk, không S3).
+- Render timeline có dải nguồn (VE2E-37) gửi clip derivative đã cắt, không bao giờ gửi file gốc; worker lỗi/timeout →
+  render lỗi `MEDIA_PREPARE_FAILED` (retry được). Chờ tối đa `MEDIA_PREPARE_TIMEOUT_MS` (mặc định 180000) mỗi clip.
 - `corepack pnpm dev` / `corepack pnpm --filter @lyonix/worker start` khởi động audio + workflow + media worker.
 - Test tích hợp FFmpeg thật: `corepack pnpm --filter @lyonix/media-worker test` (tự skip nếu không có FFmpeg).
 

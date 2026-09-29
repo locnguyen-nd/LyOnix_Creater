@@ -30,19 +30,16 @@ interface WorkerSpec {
   readonly name: string;
   readonly script: "worker:audio" | "worker:workflow" | "start";
   readonly cwd: string;
-  /**
-   * VE2E-36: an optional worker exiting (e.g. FFmpeg not installed, RABBITMQ_URL unset) is
-   * reported loudly but does not tear down the other workers, so Auto/TTS keep working on
-   * machines without FFmpeg until a flow actually needs clip.prepare.
-   */
-  readonly optional?: boolean;
+  /** Printed when this worker exits/fails to start, so the operator knows what is missing. */
+  readonly requirement?: string;
 }
 
 const workers: readonly WorkerSpec[] = [
   { name: "audio", script: "worker:audio", cwd: apiDir },
   { name: "workflow", script: "worker:workflow", cwd: apiDir },
-  // VE2E-36: FFmpeg media worker (RabbitMQ consumer for clip.prepare) — the only FFmpeg process.
-  { name: "media", script: "start", cwd: mediaWorkerDir, optional: true },
+  // VE2E-36/37: FFmpeg media worker (RabbitMQ consumer for clip.prepare) — the only FFmpeg process.
+  // Required since VE2E-37: rendering a timeline with source ranges depends on it.
+  { name: "media", script: "start", cwd: mediaWorkerDir, requirement: "needs ffmpeg + ffprobe (FFMPEG_PATH/FFPROBE_PATH) and RABBITMQ_URL; see README \"Media worker (FFmpeg)\"" },
 ];
 
 const children: ChildProcess[] = [];
@@ -67,12 +64,7 @@ function launch(spec: WorkerSpec): ChildProcess {
   });
   child.on("exit", (code, signal) => {
     if (shuttingDown) return;
-    if (spec.optional) {
-      console.error(
-        `[worker:${spec.name}] optional worker exited (code=${code ?? "null"} signal=${signal ?? "null"}); other workers keep running — see its log above`,
-      );
-      return;
-    }
+    if (spec.requirement) console.error(`[worker:${spec.name}] ${spec.requirement}`);
     console.error(
       `[worker:${spec.name}] exited unexpectedly (code=${code ?? "null"} signal=${signal ?? "null"}); stopping all workers`,
     );
@@ -81,7 +73,7 @@ function launch(spec: WorkerSpec): ChildProcess {
   child.on("error", (error) => {
     if (shuttingDown) return;
     console.error(`[worker:${spec.name}] failed to start`, error instanceof Error ? error.message : error);
-    if (spec.optional) return;
+    if (spec.requirement) console.error(`[worker:${spec.name}] ${spec.requirement}`);
     shutdown(1);
   });
   return child;
