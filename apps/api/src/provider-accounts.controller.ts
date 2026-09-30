@@ -30,6 +30,8 @@ export class ProviderAccountsController {
       { provider: "youtube", role: "visual", implementationStatus: "available", models: [] },
       // VE2E-15b: real search/partner/pins adapter (see packages/providers/src/pinterest.ts) - Pinterest carries no reliable rights signal, so every candidate is rights-unclear/never Auto-eligible; manual Studio review/import only.
       { provider: "pinterest", role: "visual", implementationStatus: "available", models: [] },
+      // VE2E-45: account + read-only key probe only; Actor runs/search/import are VE2E-34.
+      { provider: "apify", role: "visual", implementationStatus: "available", models: [] },
       // VE2E-15b: evaluated, not implemented - Google Custom Search JSON API is closed to new customers (existing customers only, until 2027-01-01); no other currently-available Google product fits a stock-media search role, so it is skipped rather than forced.
       { provider: "google", role: "visual", implementationStatus: "blocked", models: [] },
       { provider: "creatomate", role: "render", implementationStatus: "available", models: [] },
@@ -52,7 +54,7 @@ export class ProviderAccountsController {
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest (visual) hoặc Creatomate (render)", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate (render)", requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {

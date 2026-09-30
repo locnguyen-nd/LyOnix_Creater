@@ -19,7 +19,7 @@
  *
  * No FFmpeg / clip cutting here: only ranges are written; derivative cutting at render is VE2E-37.
  */
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   MAX_QUERY_VARIANTS,
   MEDIA_PLAN_POLICY_VERSION,
@@ -41,6 +41,8 @@ import type {
   TimelineSegmentInput,
 } from "@lyonix/contracts";
 import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
+import { ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -71,6 +73,11 @@ export type SegmentSource = {
   /** Provider external id when known (used to keep later segments off this source). */
   externalId: string | null;
   sourcing: "reused" | "imported";
+  /** VE2E-46: which provider produced the source (reused assets are classified by their stored `origin`). */
+  provider?: "apify" | "pexels";
+  /** VE2E-46: recorded when Apify was tried/skipped and the source came from the Pexels fallback. */
+  fallbackReason?: string | null;
+  apifyProvenance?: MediaPlanSegmentDiagnostics["apifyProvenance"];
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
@@ -88,6 +95,18 @@ export class SegmentSourceLedger {
 /** Pexels imports are registered as `pexels-<id>.<ext>` (pexels.service.ts `import`); that is the only place the external id survives on the asset row. */
 export const pexelsExternalIdFromFileName = (fileName: string): string | null => /^pexels-(\d+)\./.exec(fileName)?.[1] ?? null;
 
+/** VE2E-34 registers Apify imports as `apify-<platform>-<id>.<ext>`; the segment ledger tracks them as `apify:<platform>:<id>` (same as `candidate.source:externalId`). */
+export const apifyLedgerIdFromFileName = (fileName: string): string | null => {
+  const match = /^apify-([a-z_]+)-([A-Za-z0-9_-]+)\.[a-z0-9]+$/.exec(fileName);
+  return match ? `apify:${match[1]}:${match[2]}` : null;
+};
+
+/** Approved platforms for unattended sourcing (Google video is never importable). Env `APIFY_AUTO_PLATFORM`, default TikTok. */
+export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
+  const value = process.env.APIFY_AUTO_PLATFORM;
+  return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
+};
+
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
 
 @Injectable()
@@ -96,6 +115,8 @@ export class MediaPlanService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(PexelsService) private readonly pexels: PexelsService,
+    /** VE2E-46: Apify-first sourcing. Absent (older 3-argument construction) = unchanged Pexels-only behaviour. */
+    @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
   ) {}
 
   planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
@@ -116,9 +137,9 @@ export class MediaPlanService {
       orderBy: { createdAt: "desc" },
     });
     if (!row || (row.kind !== "video" && row.kind !== "image")) return null;
-    const externalId = pexelsExternalIdFromFileName(row.originalFileName);
+    const externalId = pexelsExternalIdFromFileName(row.originalFileName) ?? apifyLedgerIdFromFileName(row.originalFileName);
     if (ledger.assetIds.has(row.id) || (externalId && ledger.externalIds.has(externalId))) return null;
-    return { mediaAssetVersionId: row.id, kind: row.kind, durationMs: row.durationMs, externalId, sourcing: "reused" };
+    return { mediaAssetVersionId: row.id, kind: row.kind, durationMs: row.durationMs, externalId, sourcing: "reused", ...(row.origin === "apify" ? { provider: "apify" as const } : {}) };
   }
 
   /**
@@ -135,13 +156,64 @@ export class MediaPlanService {
     return { ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 };
   }
 
-  /** Searches/ranks/moderates/imports one new source for the segment via the existing Pexels gate, excluding every source an earlier segment used. */
+  /**
+   * VE2E-46: Apify first. Runs only when the segment has `keywords.ja` AND the user can see a verified Apify account; a single
+   * Apify search (ja) is ranked + moderated once by `ApifyService.autoImportForSegment`. Returns the source, or the reason to
+   * fall back to Pexels (recorded in diagnostics). Never throws.
+   */
+  private async tryApify(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
+  ): Promise<{ source: SegmentSource } | { reason: string | null }> {
+    if (!this.apify) return { reason: null };
+    const keyword = input.segment.keywords?.ja.trim();
+    if (!keyword) return { reason: "no_ja_keywords" };
+    try {
+      const account = await this.apify.findAccountForUser(userId, role);
+      if (!account) return { reason: null }; // No Apify account: behave exactly as before (nothing to record).
+      const brief = this.segmentBrief(input.script, input.segment);
+      const usedExternalIds = new Set([...input.ledger.externalIds].map((id) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id)));
+      const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {
+        platform: apifyAutoPlatformFromEnv(),
+        keyword,
+        brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
+        sceneId: input.segment.sceneIds[0]!,
+        usedExternalIds,
+      });
+      if (!outcome.ok) return { reason: outcome.reason };
+      const asset = outcome.data.asset;
+      if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
+        return { reason: "apify_duplicate_or_unsupported_source" };
+      }
+      const provenance = outcome.data.provenance;
+      return {
+        source: {
+          mediaAssetVersionId: asset.id,
+          kind: asset.kind,
+          durationMs: asset.durationMs,
+          externalId: outcome.data.ledgerId,
+          sourcing: "imported",
+          provider: "apify",
+          apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
+        },
+      };
+    } catch {
+      return { reason: "apify_error:unexpected" };
+    }
+  }
+
+  /** Searches/ranks/moderates/imports one new source for the segment: Apify first (VE2E-46), then the existing Pexels gate, excluding every source an earlier segment used. */
   async importSegmentSource(
     projectId: string,
     userId: string,
     role: "admin" | "staff",
     input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
+    const apifyAttempt = await this.tryApify(projectId, userId, role, input);
+    if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
+    const fallbackReason = apifyAttempt.reason;
     const brief = this.segmentBrief(input.script, input.segment);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
@@ -158,7 +230,7 @@ export class MediaPlanService {
       // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
       return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
     }
-    return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported" } };
+    return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason } };
   }
 
   /** Per-scene bindings + timeline segments for the sourced segments (a segment without a source leaves its scenes unbound). */
@@ -189,6 +261,9 @@ export class MediaPlanService {
         durationMs: segment.durationMs,
         looped: Boolean(ranges?.some((r) => r.looped)),
         short: Boolean(ranges?.some((r) => r.short)),
+        ...(source?.provider ? { sourceProvider: source.provider } : {}),
+        ...(source?.fallbackReason ? { fallbackReason: source.fallbackReason } : {}),
+        ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
       });
     }
     return {

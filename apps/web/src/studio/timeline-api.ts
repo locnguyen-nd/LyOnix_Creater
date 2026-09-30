@@ -5,12 +5,17 @@
  */
 import { api, csrfHeaders } from "../api";
 import type {
+  ApifyImportRequest,
+  ApifySearchRequest,
+  ApifySearchResponse,
   AudioVersionResponse,
   CreatomatePreviewConfigResponse,
   CreatomateTemplateSummaryResponse,
   ElevenLabsVoiceSummaryResponse,
   MediaAssetVersionSummary,
   MediaDeliveryIssueResponse,
+  MediaPlanRequest,
+  MediaPlanResponse,
   PexelsMediaType,
   PexelsSearchResponse,
   RenderJobResponse,
@@ -41,6 +46,15 @@ export async function saveTimelineVersion(projectId: string, input: SaveTimeline
   });
 }
 
+/** Uses the same server-side planner as Auto; the caller merges the returned media bindings into its editable Studio draft. */
+export async function planProjectMedia(projectId: string, input: MediaPlanRequest): Promise<MediaPlanResponse> {
+  return api<MediaPlanResponse>(`/projects/${projectId}/media-plans`, {
+    method: "POST",
+    headers: await csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
 export async function approveTimelineVersion(id: string): Promise<TimelineVersionResponse> {
   return api<TimelineVersionResponse>(`/timeline-versions/${id}/approve`, { method: "POST", headers: await csrfHeaders() });
 }
@@ -60,6 +74,16 @@ export async function importPexels(projectId: string, input: { providerAccountId
     headers: await csrfHeaders(),
     body: JSON.stringify(input),
   });
+}
+
+/** VE2E-34: runs a server-pinned Apify Actor for one platform (CSRF POST; the server picks the Actor, the client only names the platform). */
+export async function searchApify(projectId: string, input: ApifySearchRequest): Promise<ApifySearchResponse> {
+  return api<ApifySearchResponse>(`/projects/${projectId}/apify/search`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
+}
+
+/** VE2E-34: imports a candidate by its server-sealed `importRef` - the client never supplies a URL. */
+export async function importApify(projectId: string, input: ApifyImportRequest): Promise<{ asset: MediaAssetVersionSummary }> {
+  return api<{ asset: MediaAssetVersionSummary }>(`/projects/${projectId}/apify/import`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
 }
 
 export async function listProjectMedia(projectId: string): Promise<MediaAssetVersionSummary[]> {
@@ -112,13 +136,10 @@ export async function getTemplateSnapshot(id: string): Promise<TemplateSnapshotR
 export async function submitRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
 ): Promise<RenderJobResponse> {
-  // No client-generated idempotencyKey here on purpose: the server's own requestFingerprint
-  // is already derived from the stable (projectId, templateSnapshotId, providerAccountId,
-  // assignments) tuple. Inventing a fresh key per call (e.g. from Date.now()) would defeat
-  // that dedupe instead of reinforcing it - an accidental duplicate submit of the same
-  // approved timeline must resolve to the existing job, not call Creatomate twice.
+  // The server deduplicates identical requests; a caller can supply a fresh key for an
+  // intentional retry after a failed job.
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/render-jobs`, {
     method: "POST",
     headers: await csrfHeaders(),
@@ -130,7 +151,7 @@ export async function submitRenderFromTimeline(
 export async function submitDynamicRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
 ): Promise<RenderJobResponse> {
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/dynamic-render-jobs`, {
     method: "POST",

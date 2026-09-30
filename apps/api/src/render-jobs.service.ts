@@ -84,6 +84,7 @@ const stableStringify = (value: unknown): string => {
 
 const toJobResponse = (row: {
   id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
+  clipsTotal?: number; clipsReady?: number; clipFailures?: unknown;
   resultUrl: string | null; snapshotUrl?: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
 }): RenderJobResponse => ({
@@ -93,6 +94,7 @@ const toJobResponse = (row: {
   status: row.status as RenderJobResponse["status"],
   externalJobId: row.externalJobId,
   progress: row.progress,
+  clipPreparation: { clipsTotal: row.clipsTotal ?? 0, clipsReady: row.clipsReady ?? 0, failed: Array.isArray(row.clipFailures) ? row.clipFailures as Array<{ sceneId: string; code: string; message: string }> : [] },
   resultUrl: row.resultUrl,
   snapshotUrl: row.snapshotUrl ?? null,
   resultExpiresAt: row.resultExpiresAt?.toISOString() ?? null,
@@ -144,12 +146,25 @@ export class RenderJobsService {
     userId: string,
     scenes: SceneBindingForMapping[],
     requests: ClipDerivativeRequest[],
+    preparationJobId?: string,
   ): Promise<RenderOutcome<SceneBindingForMapping[]>> {
     if (requests.length === 0) return { ok: true, data: scenes };
     if (!this.clipDerivatives) {
       return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Media worker chưa được nối vào render — không cắt được clip", status: 503, retryable: false };
     }
-    const prepared = await this.clipDerivatives.prepare(projectId, userId, requests);
+    const jobId = preparationJobId;
+    let failureWrite = Promise.resolve();
+    const prepared = await this.clipDerivatives.prepare(projectId, userId, requests, jobId ? async (ready) => {
+      void ready;
+      await this.prisma.renderJob.update({ where: { id: jobId }, data: { clipsReady: { increment: 1 }, preparationLeaseUntil: new Date(Date.now() + 10 * 60_000) } });
+    } : undefined, jobId ? async (sceneId, code, message) => {
+      failureWrite = failureWrite.then(async () => {
+        const row = await this.prisma.renderJob.findUnique({ where: { id: jobId } });
+        const failed = Array.isArray(row?.clipFailures) ? row.clipFailures : [];
+        await this.prisma.renderJob.update({ where: { id: jobId }, data: { clipFailures: [...failed, { sceneId, code, message }] } });
+      });
+      await failureWrite;
+    } : undefined);
     if (!prepared.ok) return prepared;
     const bySceneId = prepared.data.derivativeBySceneId;
     return { ok: true, data: scenes.map((scene) => (bySceneId.has(scene.sceneId) ? { ...scene, mediaAssetVersionId: bySceneId.get(scene.sceneId)! } : scene)) };
@@ -218,7 +233,7 @@ export class RenderJobsService {
    * run) — it is only ever passed by `WorkflowRunnerService`, which calls this method
    * directly (not over HTTP) from the trusted background orchestrator.
    */
-  async submit(projectId: string, userId: string, role: "admin" | "staff", input: RenderSubmitRequest, workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+  async submit(projectId: string, userId: string, role: "admin" | "staff", input: RenderSubmitRequest, workflowRunId?: string, queuedJobId?: string): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     // Preflight: provider account usable and PUBLIC_BASE_URL reachable *before* touching the DB or Creatomate — no charge on a preflight failure.
     const account = await this.templates.usableAccount(input.providerAccountId);
@@ -247,7 +262,7 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId },
+      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId },
       (webhookUrl) =>
         submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
           templateId: snapshot.externalTemplateId,
@@ -269,11 +284,19 @@ export class RenderJobsService {
    * never the actual request if that would embed a volatile signed media-delivery URL.
    */
   private async createAndSubmitRenderJob(
-    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined },
+    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined },
     callProvider: (webhookUrl: string) => Promise<CreatomateRenderResult>,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
     try {
+      if (params.queuedJobId) {
+        // Compare-and-set: only one worker may move preparing_clips -> accepted (and so call the provider).
+        const claimedQueued = await this.prisma.renderJob.updateMany({ where: { id: params.queuedJobId, status: "preparing_clips" }, data: { status: "accepted", modificationsPayload: params.payload as Prisma.InputJsonValue, preparationLeaseUntil: null } });
+        if (claimedQueued.count !== 1) return { ok: false, code: "INVALID_STATE", message: "Render job không còn ở trạng thái chuẩn bị clip", status: 409 };
+        const claimedRow = await this.prisma.renderJob.findUnique({ where: { id: params.queuedJobId } });
+        if (!claimedRow) return { ok: false, code: "INVALID_STATE", message: "Render job không còn ở trạng thái chuẩn bị clip", status: 409 };
+        job = claimedRow;
+      } else {
       job = await this.prisma.renderJob.create({
         data: {
           projectId: params.projectId,
@@ -287,6 +310,7 @@ export class RenderJobsService {
           ...(params.workflowRunId ? { workflowRunId: params.workflowRunId } : {}),
         },
       });
+      }
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
         const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: params.fingerprint } });
@@ -346,6 +370,7 @@ export class RenderJobsService {
     role: "admin" | "staff",
     input: RenderSubmitFromTimelineRequest,
     workflowRunId?: string,
+    queuedJobId?: string,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -356,7 +381,7 @@ export class RenderJobsService {
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
     const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
-    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
     let built = buildRenderAssignmentsFromTimeline(slots, resolved, optionValues);
     if (built.missingRequiredModificationKeys.length > 0) {
@@ -377,7 +402,7 @@ export class RenderJobsService {
       const account = await this.templates.usableAccount(input.providerAccountId);
       if (!account.ok) return account;
       if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
-      const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests);
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests, queuedJobId);
       if (!withDerivatives.ok) return withDerivatives;
       built = buildRenderAssignmentsFromTimeline(slots, withDerivatives.data, optionValues);
     }
@@ -387,7 +412,7 @@ export class RenderJobsService {
       assignments: built.assignments,
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-    }, workflowRunId);
+    }, workflowRunId, queuedJobId);
   }
 
   /**
@@ -415,7 +440,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     outputFormat?: "mp4" | "mov" | "gif",
-    options: { prepareClipDerivatives?: boolean } = {},
+    options: { prepareClipDerivatives?: boolean; preparationJobId?: string } = {},
   ): Promise<
     RenderOutcome<{
       templateSnapshotId: string;
@@ -432,7 +457,7 @@ export class RenderJobsService {
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
 
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
-    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     const audioVersionIds = [...new Set(resolved.map((scene) => scene.audioVersionId).filter((sceneId): sceneId is string => Boolean(sceneId)))];
     const audioRows = audioVersionIds.length
       ? await this.prisma.audioVersion.findMany({ where: { id: { in: audioVersionIds } }, select: { id: true, durationMs: true } })
@@ -469,7 +494,7 @@ export class RenderJobsService {
         durationMs: scene.sourceDurationMs!,
         stripAudio: true,
       }));
-      const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests);
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests, options.preparationJobId);
       if (!withDerivatives.ok) return withDerivatives;
       renderable = withDerivatives.data;
     }
@@ -490,6 +515,9 @@ export class RenderJobsService {
         sceneId: scene.sceneId,
         mediaUrl: mediaIssued.url,
         mediaKind: scene.mediaKind === "video" ? "video" : "image",
+        ...(!options.prepareClipDerivatives && scene.mediaKind === "video" && typeof scene.sourceStartMs === "number" && typeof scene.sourceDurationMs === "number"
+          ? { sourceStartMs: scene.sourceStartMs, sourceDurationMs: scene.sourceDurationMs }
+          : {}),
         text: (scene.screenTextOverride ?? scene.fallbackScreenText ?? "").trim(),
         ...(captionSegments?.length ? { captionSegments } : {}),
         audioUrl: audioIssued.url,
@@ -523,6 +551,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     input: RenderSubmitFromTimelineRequest,
+    queuedJobId?: string,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.templates.usableAccount(input.providerAccountId);
@@ -533,7 +562,7 @@ export class RenderJobsService {
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
 
-    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true });
+    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}) });
     if (!resolvedComposition.ok) return resolvedComposition;
     const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
 
@@ -565,7 +594,7 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source },
+      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId },
       (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
     );
   }
@@ -606,6 +635,107 @@ export class RenderJobsService {
         missingReason: null,
       },
     };
+  }
+
+  /** Durable render queue shared by Studio and Auto. The HTTP path never waits for media-worker or Creatomate. */
+  async enqueueTimelineRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff", input: RenderSubmitFromTimelineRequest, mode: "template" | "dynamic", workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
+    if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
+    if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
+    if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template" };
+    const account = await this.templates.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
+    if (!snapshot || snapshot.providerAccountId !== input.providerAccountId) return { ok: false, code: "VALIDATION_FAILED", message: "Template không thuộc tài khoản render đã chọn" };
+    const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
+    let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
+    if (mode === "dynamic") {
+      const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
+      if (!composition.ok) return composition;
+      clipScenes = RenderJobsService.rangedVideoScenes(composition.data.renderable).map((scene) => ({ ...scene, stripAudio: true }));
+    } else {
+      const slots = Array.isArray(snapshot.modifications) ? snapshot.modifications as unknown as TemplateModificationSlotResponse[] : [];
+      const options = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
+      const built = buildRenderAssignmentsFromTimeline(slots, resolved, options);
+      if (built.missingRequiredModificationKeys.length) return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
+      clipScenes = RenderJobsService.rangedVideoScenes(resolved)
+        .filter((scene) => built.videoSlotKeyBySceneId[scene.sceneId] !== undefined)
+        .map((scene) => {
+          const explicitVolume = options[built.videoSlotKeyBySceneId[scene.sceneId]!.replace(/\.source$/, ".volume")];
+          return { ...scene, stripAudio: !(explicitVolume !== undefined && Number(explicitVolume) > 0) };
+        });
+    }
+    const clipsTotal = new Set(clipScenes.map((scene) => `${scene.mediaAssetVersionId}|${scene.sourceStartMs}|${scene.sourceDurationMs}|${scene.stripAudio}`)).size;
+    // VE2E-43 P1-2: an Auto run's key is identical across manual retries, so the previous attempt's
+    // FAILED job would be replayed forever. The attempt generation is the number of failed jobs this
+    // run already has; a non-failed job (in flight or completed) keeps generation stable so concurrent
+    // duplicate submits still dedupe onto one job and a second paid job is never created.
+    let generation = 0;
+    if (workflowRunId) {
+      const failedJobs = await this.prisma.renderJob.count({ where: { workflowRunId, status: "failed" } });
+      generation = failedJobs;
+    }
+    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, scenes: timeline.scenes, options: timeline.optionValues, ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
+    const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
+    if (existing) return { ok: true, data: toJobResponse(existing) };
+    try {
+      const row = await this.prisma.renderJob.create({ data: {
+        projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId,
+        requestFingerprint: fingerprint, webhookToken: randomBytes(24).toString("base64url"), status: "preparing_clips",
+        modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null },
+        createdByUserId: userId, clipsTotal, clipsReady: 0,
+        ...(workflowRunId ? { workflowRunId } : {}),
+      } });
+      return { ok: true, data: toJobResponse(row) };
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        const winner = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
+        if (winner) return { ok: true, data: toJobResponse(winner) };
+      }
+      throw error;
+    }
+  }
+
+  /** One background tick. Expired leases are reclaimed after a worker restart. */
+  async processNextPreparation(): Promise<boolean> {
+    const now = new Date();
+    // A crash after the provider call starts cannot be safely replayed: the remote job id may
+    // exist while our response was lost. Mark it explicitly unknown instead of double charging.
+    const uncertain = await this.prisma.renderJob.findFirst({ where: { status: "accepted", requestFingerprint: { startsWith: "async:" }, externalJobId: null, submittedAt: null, updatedAt: { lt: new Date(Date.now() - 10 * 60_000) } }, orderBy: { createdAt: "asc" } });
+    if (uncertain) {
+      await this.prisma.renderJob.updateMany({ where: { id: uncertain.id, status: "accepted", externalJobId: null }, data: { status: "failed", lastError: { code: "PROVIDER_SUBMIT_UNKNOWN", message: "Không xác định được kết quả gửi Creatomate sau khi worker khởi động lại", retryable: false } } });
+      return true;
+    }
+    const candidate = await this.prisma.renderJob.findFirst({ where: { status: "preparing_clips", OR: [{ preparationLeaseUntil: null }, { preparationLeaseUntil: { lt: now } }] }, orderBy: { createdAt: "asc" } });
+    if (!candidate) return false;
+    const claimed = await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips", preparationLeaseUntil: candidate.preparationLeaseUntil }, data: { preparationLeaseUntil: new Date(Date.now() + 10 * 60_000), clipsReady: 0, clipFailures: [] } });
+    if (claimed.count !== 1) return true;
+    const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null };
+    try {
+      const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}) };
+      const actor = await this.prisma.user.findUnique({ where: { id: candidate.createdByUserId }, select: { role: true } });
+      if (!actor) throw new Error("Render creator no longer exists");
+      const role = actor.role === "admin" ? "admin" : "staff";
+      const outcome = payload.mode === "dynamic"
+        ? await this.submitDynamicFromTimeline(candidate.projectId, payload.timelineVersionId, candidate.createdByUserId, role, input, candidate.id)
+        : await this.submitFromTimelineVersion(candidate.projectId, payload.timelineVersionId, candidate.createdByUserId, role, input, candidate.workflowRunId ?? undefined, candidate.id);
+      if (!outcome.ok) {
+        const current = await this.prisma.renderJob.findUnique({ where: { id: candidate.id } });
+        const clipFailures = Array.isArray(current?.clipFailures) && current.clipFailures.length ? current.clipFailures as Prisma.InputJsonValue : [{ sceneId: "", code: outcome.code, message: outcome.message }];
+        // Compare-and-set: a job another worker already moved past preparing_clips (accepted/queued/
+        // rendering/completed, with or without externalJobId) is never overwritten from here.
+        await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: outcome.code, message: outcome.message, retryable: outcome.retryable ?? false }, clipFailures } });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Render preparation failed";
+      // Same guard: an exception after the provider call succeeded must not fail a submitted job
+      // (an `accepted` job with unknown outcome is settled by the PROVIDER_SUBMIT_UNKNOWN sweep instead).
+      await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: "MEDIA_PREPARE_FAILED", message, retryable: true }, clipFailures: [{ sceneId: "", code: "MEDIA_PREPARE_FAILED", message }] } });
+    }
+    return true;
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {

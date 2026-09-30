@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { LazyThumb } from "../components/LazyThumb";
+import { RenderProgress } from "../components/RenderProgress";
 import { Button, Select, TextArea } from "../components/ui";
 import { api, ApiError } from "../api";
 import type { ApiProvider } from "../jobs-api";
@@ -22,6 +23,7 @@ import type {
   ElevenLabsVoiceSummaryResponse,
   MediaAssetVersionSummary,
   PexelsSearchResponse,
+  PexelsMediaType,
   RenderJobResponse,
   StudioContextResponse,
   StudioSceneContextResponse,
@@ -30,11 +32,11 @@ import type {
   TimelineOptionValues,
   TimelineRenderPreviewResponse,
   TimelineSegmentResponse,
+  MediaPlanResponse,
 } from "@lyonix/contracts";
-import { AUTO_FILL_CANDIDATE_POOL, pickBestPhotoCandidate, pickBestVideoCandidate } from "../studio/media-selection";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
-import { pexelsQueryForScene } from "../studio/visual-plan";
+import { applyMediaPlan, assignSceneOnly, inPointShortfall, replaceSegmentSource } from "../studio/media-segments";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
   approveTimelineVersion,
@@ -50,12 +52,14 @@ import {
   listElevenLabsVoices,
   listProjectMedia,
   listSceneAudioVersions,
+  planProjectMedia,
   previewTimelineVersion,
   saveTimelineVersion,
   searchPexels,
   submitDynamicRenderFromTimeline,
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
+import { ApifyMediaTab } from "../studio/ApifyMediaTab";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
@@ -191,9 +195,14 @@ export function StudioProPage() {
 
   const [visualAccountId, setVisualAccountId] = useState("");
   const [pexelsQuery, setPexelsQuery] = useState("");
+  const [manualMediaType, setManualMediaType] = useState<PexelsMediaType>("video");
   const [pexelsResults, setPexelsResults] = useState<PexelsSearchResponse | null>(null);
   const [pexelsSearching, setPexelsSearching] = useState(false);
-  const [autoFillBusy, setAutoFillBusy] = useState<{ done: number; total: number } | null>(null);
+  const [mediaPlanBusy, setMediaPlanBusy] = useState(false);
+  const [mediaPlanDiagnostics, setMediaPlanDiagnostics] = useState<MediaPlanResponse["diagnostics"]>([]);
+  const [segmentCount, setSegmentCount] = useState("auto");
+  const [mediaScope, setMediaScope] = useState<"segment" | "scene">("segment");
+  const [segmentInPoints, setSegmentInPoints] = useState<Record<string, number>>({});
 
   const [voiceAccountId, setVoiceAccountId] = useState("");
   const [voices, setVoices] = useState<ElevenLabsVoiceSummaryResponse[]>([]);
@@ -305,7 +314,7 @@ export function StudioProPage() {
 
   useEffect(() => {
     if (providers.length === 0) return;
-    setVisualAccountId((current) => current || usableAccounts(providers, "visual")[0]?.id || "");
+    setVisualAccountId((current) => current || usableAccounts(providers, "visual").find((row) => row.provider === "pexels")?.id || "");
     setVoiceAccountId((current) => current || usableAccounts(providers, "tts")[0]?.id || "");
     setRenderAccountId((current) => current || usableAccounts(providers, "render")[0]?.id || "");
   }, [providers]);
@@ -467,6 +476,12 @@ export function StudioProPage() {
   const sceneOptionGroups = template ? groupTemplateOptionsByScene(template.modifications, orderedScenes.map((scene) => ({ sceneId: scene.sceneId }))) : { bySceneId: new Map(), leftover: [] };
   const selectedSceneOptions: TemplateModificationSlotResponse[] = selectedScene ? sceneOptionGroups.bySceneId.get(selectedScene.sceneId) ?? [] : [];
 
+  useEffect(() => {
+    const player = previewVideoRef.current;
+    if (!player || selectedSceneDraft?.sourceStartMs == null) return;
+    player.currentTime = selectedSceneDraft.sourceStartMs / 1000;
+  }, [selectedMediaAsset?.id, selectedSceneDraft?.sourceStartMs]);
+
   // Switching scenes always stops whatever was playing - the media/audio elements below are
   // re-pointed at the newly selected scene's own source, so a stale play state would otherwise
   // keep an old clip's audio going under a different scene's preview.
@@ -580,6 +595,20 @@ export function StudioProPage() {
 
   const assignMediaToSelectedScene = (asset: { id: string; label: string }) => {
     if (!selectedSceneId) return;
+    const selected = draft.scenes.find((scene) => scene.sceneId === selectedSceneId);
+    const libraryAsset = mediaLibrary.find((row) => row.id === asset.id);
+    if (selected?.segmentId && mediaScope === "scene") {
+      mutate((prev) => ({ ...prev, ...assignSceneOnly(prev.scenes, prev.segments, selectedSceneId, { id: asset.id, label: asset.label }) }));
+      return;
+    }
+    if (selected?.segmentId && libraryAsset && (libraryAsset.kind === "video" || libraryAsset.kind === "image")) {
+      mutate((prev) => {
+        const segmentAsset = { id: libraryAsset.id, kind: libraryAsset.kind as "video" | "image", durationMs: libraryAsset.durationMs };
+        const replaced = replaceSegmentSource(prev.scenes, prev.segments, selected.segmentId!, segmentAsset);
+        return { ...prev, ...replaced, scenes: replaced.scenes.map((scene) => scene.segmentId === selected.segmentId ? { ...scene, mediaLabel: asset.label } : scene) };
+      });
+      return;
+    }
     assignMediaToScene(selectedSceneId, asset);
   };
 
@@ -601,7 +630,7 @@ export function StudioProPage() {
     if (!q) return;
     setPexelsSearching(true);
     try {
-      const results = await searchPexels(context.projectId, visualAccountId, "video", q);
+      const results = await searchPexels(context.projectId, visualAccountId, manualMediaType, q);
       setPexelsResults(results);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -610,73 +639,53 @@ export function StudioProPage() {
     }
   };
 
-  const importPexelsResult = async (externalId: string, label: string) => {
+  // Shared by Pexels and Apify imports: honours the "this scene / whole segment" scope. The new asset is not in
+  // `mediaLibrary` yet (state update pending), so the segment path must use the asset object directly.
+  const applyImportedAsset = (asset: MediaAssetVersionSummary, label: string) => {
+    const selectedSegmentId = draft.scenes.find((scene) => scene.sceneId === selectedSceneId)?.segmentId;
+    if (selectedSegmentId && mediaScope === "segment") {
+      if (asset.kind !== "video" && asset.kind !== "image") return;
+      mutate((prev) => {
+        const segmentAsset = { id: asset.id, kind: asset.kind as "video" | "image", durationMs: asset.durationMs };
+        const replaced = replaceSegmentSource(prev.scenes, prev.segments, selectedSegmentId, segmentAsset, segmentInPoints[selectedSegmentId] ?? 0);
+        return { ...prev, ...replaced, scenes: replaced.scenes.map((scene) => scene.segmentId === selectedSegmentId ? { ...scene, mediaLabel: label } : scene) };
+      });
+    } else {
+      assignMediaToSelectedScene({ id: asset.id, label });
+    }
+  };
+
+  const importPexelsResult = async (externalId: string, label: string, type: PexelsMediaType = manualMediaType) => {
     if (!context || !visualAccountId) return;
     try {
-      const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "video", externalId, sceneId: selectedSceneId });
+      const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type, externalId, sceneId: selectedSceneId });
       setMediaLibrary((prev) => [asset, ...prev]);
-      assignMediaToSelectedScene({ id: asset.id, label });
+      applyImportedAsset(asset, label);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
     }
   };
 
-  // Auto mode: searches Pexels by each scene's own visualQuery and imports the best hit
-  // directly into that scene - same search()/import() calls the manual per-scene flow above
-  // already uses, just looped across every scene instead of requiring one click each. Which
-  // kind to search for is driven by the pinned template's own slots: a template with only
-  // `Image-N.source` elements (no `Video-N.source`) can never use a video-kind asset -
-  // `buildRenderAssignmentsFromTimeline` matches scene media to slots by kind, so a video
-  // bound to an image-only template silently never fills anything. Falls back to trying both
-  // when no template is pinned yet.
-  //
-  // "Best hit" is never just the API's first result: a pool of `AUTO_FILL_CANDIDATE_POOL`
-  // candidates is fetched per scene and `usedExternalIds` is threaded through the whole run,
-  // so a clip/photo already assigned to an earlier scene is never picked again for a later
-  // one - the same generic query (e.g. "person talking") would otherwise keep returning the
-  // same top result for every scene. A scene whose entire candidate pool is already used, or
-  // that has no hits at all, is simply left unassigned rather than failing the whole batch.
+  // VE2E-41: Studio calls the server-side MediaPlanService that Auto uses, keeping media
+  // source selection and segment ranges consistent across both entry points.
   const autoFillAllMedia = async () => {
     if (!context || !visualAccountId || scenes.length === 0) return;
-    const wantsVideo = !template || template.modifications.some((mod) => mod.kind === "video");
-    const wantsImage = !template || template.modifications.some((mod) => mod.kind === "image");
     setError(null);
-    setAutoFillBusy({ done: 0, total: scenes.length });
-    const usedExternalIds = new Set<string>();
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i]!;
-      const targetDurationSeconds = scene.durationHintMs / 1000;
-      // VE2E-38: same query the Auto runner uses (segment keywords.en, else visualQuery).
-      const query = pexelsQueryForScene(scene, context.visualPlan);
-      try {
-        let picked = false;
-        if (wantsVideo) {
-          const videoResults = await searchPexels(context.projectId, visualAccountId, "video", query, AUTO_FILL_CANDIDATE_POOL);
-          const videoPick = pickBestVideoCandidate(videoResults.videos, usedExternalIds, targetDurationSeconds);
-          if (videoPick) {
-            const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "video", externalId: videoPick.externalId, sceneId: scene.sceneId });
-            usedExternalIds.add(videoPick.externalId);
-            setMediaLibrary((prev) => [asset, ...prev]);
-            assignMediaToScene(scene.sceneId, { id: asset.id, label: `Pexels ${videoPick.attribution.photographerName}` });
-            picked = true;
-          }
-        }
-        if (!picked && wantsImage) {
-          const photoResults = await searchPexels(context.projectId, visualAccountId, "photo", query, AUTO_FILL_CANDIDATE_POOL);
-          const photoPick = pickBestPhotoCandidate(photoResults.photos, usedExternalIds);
-          if (photoPick) {
-            const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type: "photo", externalId: photoPick.externalId, sceneId: scene.sceneId });
-            usedExternalIds.add(photoPick.externalId);
-            setMediaLibrary((prev) => [asset, ...prev]);
-            assignMediaToScene(scene.sceneId, { id: asset.id, label: `Pexels ${photoPick.attribution.photographerName}` });
-          }
-        }
-      } catch (err) {
-        setError(err instanceof ApiError ? err.message : t("common.error"));
-      }
-      setAutoFillBusy({ done: i + 1, total: scenes.length });
+    setMediaPlanBusy(true);
+    try {
+      const backgroundSegments = segmentCount === "auto" ? { mode: "auto" as const } : { mode: "fixed" as const, count: Number(segmentCount) };
+      const plan = await planProjectMedia(context.projectId, { scriptDraftVersionId: context.scriptDraftVersionId, providerAccountId: visualAccountId, backgroundSegments });
+      setMediaPlanDiagnostics(plan.diagnostics);
+      setDraft((prev) => {
+        undoStack.current.push(prev);
+        return { ...prev, ...applyMediaPlan(prev.scenes, plan) };
+      });
+      void listProjectMedia(context.projectId).then(setMediaLibrary).catch(() => undefined);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t("common.error"));
+    } finally {
+      setMediaPlanBusy(false);
     }
-    setAutoFillBusy(null);
   };
 
   // Resolves once that scene's audio finishes (completed or failed) so callers can await
@@ -772,7 +781,11 @@ export function StudioProPage() {
     if (!context || !baseVersionId || !renderAccountId || dirty) return;
     setRenderSubmitting(true);
     try {
-      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, { providerAccountId: renderAccountId });
+      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, {
+        providerAccountId: renderAccountId,
+        // Only a deliberate submit after a failed job creates a new attempt.
+        ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}),
+      });
       setRenderJob(job);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -870,7 +883,9 @@ export function StudioProPage() {
   if (error && !context) return <Banner variant="danger">{error}</Banner>;
   if (!context) return <Banner variant="info">{t("common.loading")}</Banner>;
 
-  const visualAccounts = usableAccounts(providers, "visual");
+  // Pexels feeds the auto-fill/search box; Apify (VE2E-34) has its own tab. Other visual providers (YouTube/Pinterest) are not selectable here.
+  const visualAccounts = usableAccounts(providers, "visual").filter((row) => row.provider === "pexels");
+  const apifyAccountId = usableAccounts(providers, "visual").find((row) => row.provider === "apify")?.id ?? null;
   const voiceAccounts = usableAccounts(providers, "tts");
   const renderAccounts = usableAccounts(providers, "render");
   const workspaceGridClass = leftCollapsed && rightCollapsed
@@ -959,11 +974,7 @@ export function StudioProPage() {
         </Banner>
       ) : null}
       {preview && !preview.ready ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
-      {renderJob ? (
-        <Banner variant={renderJob.status === "failed" ? "danger" : "info"}>
-          {t("studioPro.renderStatusLabel", { status: renderJob.status })}
-        </Banner>
-      ) : null}
+      {renderJob ? <RenderProgress job={renderJob} /> : null}
       </div>
 
       {/* VE2E-13: resultUrl plays only here, inside Studio - never as direct autoplay from a
@@ -1066,11 +1077,68 @@ export function StudioProPage() {
                   <option key={account.id} value={account.id}>{account.name}</option>
                 ))}
               </Select>
-              <Button disabled={!visualAccountId || !!autoFillBusy} onClick={() => void autoFillAllMedia()}>
-                {autoFillBusy ? t("studioPro.autoFillingMedia", { done: autoFillBusy.done, total: autoFillBusy.total }) : t("studioPro.autoFillMedia")}
+              <label className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted">
+                <span>{t("studioPro.backgroundSegments")}</span>
+                <Select value={segmentCount} onChange={(event) => setSegmentCount(event.target.value)} disabled={mediaPlanBusy}>
+                  <option value="auto">{t("studioPro.backgroundSegmentsAuto")}</option>
+                  {[1, 2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{t("studioPro.backgroundSegmentsFixed", { count })}</option>)}
+                </Select>
+              </label>
+              <Button disabled={!visualAccountId || mediaPlanBusy} onClick={() => void autoFillAllMedia()}>
+                {mediaPlanBusy ? t("studioPro.mediaPlanning") : t("studioPro.autoFillMedia")}
               </Button>
               <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.autoFillMediaHint")}</p>
+              {draft.segments.length ? (
+                <div className="flex flex-col gap-2 border-y border-lyx-border py-2">
+                  <p className="text-[11px] font-medium">{t("studioPro.backgroundSegments")}</p>
+                  {draft.scenes.find((row) => row.sceneId === selectedScene?.sceneId)?.segmentId ? (
+                    <div role="radiogroup" aria-label={t("studioPro.mediaScope")} className="flex flex-wrap items-center gap-3 text-[10px]">
+                      <span className="text-lyx-fg-muted">{t("studioPro.mediaScope")}</span>
+                      {(["segment", "scene"] as const).map((scope) => (
+                        <label key={scope} className="flex items-center gap-1">
+                          <input type="radio" name="media-scope" checked={mediaScope === scope} onChange={() => setMediaScope(scope)} />
+                          {t(scope === "scene" ? "studioPro.mediaScopeScene" : "studioPro.mediaScopeSegment")}
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
+                  {draft.segments.map((segment, index) => {
+                    const sourceId = segment.mediaAssetVersionId ?? draft.scenes.find((scene) => segment.sceneIds.includes(scene.sceneId))?.mediaAssetVersionId ?? null;
+                    const source = sourceId ? mediaAssetById.get(sourceId) : undefined;
+                    const diagnostic = mediaPlanDiagnostics.find((row) => row.segmentId === segment.segmentId);
+                    const visualSegment = context.visualPlan?.segments.find((row) => row.segmentId === segment.segmentId);
+                    const selectedInSegment = segment.sceneIds.includes(selectedScene?.sceneId ?? "");
+                    return (
+                      <div key={segment.segmentId} className={`rounded border p-2 text-[10px] ${selectedInSegment ? "border-lyx-fg" : "border-lyx-border"}`}>
+                        <div className="flex items-start justify-between gap-2">
+                          <button type="button" className="text-left font-medium" onClick={() => setSelectedSceneId(segment.sceneIds[0] ?? null)}>{index + 1}. {segment.subject || visualSegment?.subject || t("studioPro.segmentFallback")}</button>
+                          <span className="text-lyx-fg-muted">{segment.sceneIds.length} {t("studioPro.scenesShort")}</span>
+                        </div>
+                        {source ? <p className="mt-1 truncate text-lyx-fg-muted">{source.origin === "apify" ? `⚠ ${t("studioPro.ownerAcceptedRisk")}` : source.originalFileName}</p> : null}
+                        {diagnostic?.sourcing === "failed" ? <p className="mt-1 text-lyx-danger">{t("studioPro.segmentSourceMissing")}</p> : null}
+                        {(() => {
+                          const shortfall = selectedInSegment && source?.kind === "video" ? inPointShortfall(draft.scenes, segment, source.durationMs, segmentInPoints[segment.segmentId] ?? 0) : null;
+                          return shortfall ? <p role="alert" className="mt-1 text-amber-500">⚠ {t("studioPro.inPointShortfall", { seconds: (shortfall.shortByMs / 1000).toFixed(1) })}</p> : null;
+                        })()}
+                        {selectedInSegment && source?.kind === "video" ? (
+                          <label className="mt-2 flex items-center gap-2 text-lyx-fg-muted">
+                            {t("studioPro.segmentInPoint")}
+                            <input aria-label={t("studioPro.segmentInPoint")} type="number" min={0} max={Math.max(0, source.durationMs ?? 0)} step={500} value={segmentInPoints[segment.segmentId] ?? 0} onChange={(event) => setSegmentInPoints((prev) => ({ ...prev, [segment.segmentId]: Math.max(0, Number(event.target.value) || 0) }))} className="h-7 w-24 rounded border border-lyx-border bg-lyx-muted px-1" /> ms
+                            <Button variant="secondary" onClick={() => {
+                              mutate((prev) => ({ ...prev, ...replaceSegmentSource(prev.scenes, prev.segments, segment.segmentId, { id: source.id, kind: source.kind as "video" | "image", durationMs: source.durationMs }, segmentInPoints[segment.segmentId] ?? 0) }));
+                            }}>{t("studioPro.applyInPoint")}</Button>
+                          </label>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.perSceneOverrideHint")}</p>
+              <Select aria-label={t("studioPro.manualMediaType")} value={manualMediaType} onChange={(event) => setManualMediaType(event.target.value as PexelsMediaType)}>
+                <option value="video">{t("studioPro.videoMedia")}</option>
+                <option value="photo">{t("studioPro.photoMedia")}</option>
+              </Select>
               <div className="flex gap-1.5">
                 <input
                   value={pexelsQuery}
@@ -1083,10 +1151,30 @@ export function StudioProPage() {
                 </Button>
               </div>
               {selectedScene ? (
-                <button type="button" className="text-left text-[10px] text-lyx-fg-muted underline" onClick={() => { setPexelsQuery(selectedScene.visualQuery); void runPexelsSearch(selectedScene.visualQuery); }}>
-                  {selectedScene.visualQuery}
-                </button>
+                <div className="flex flex-wrap gap-2 text-[10px] text-lyx-fg-muted">
+                  {(() => {
+                    const visualSegment = context.visualPlan?.segments.find((row) => row.sceneIds.includes(selectedScene.sceneId));
+                    const keywords = [{ lang: "en", value: visualSegment?.keywords.en }, { lang: "ja", value: visualSegment?.keywords.ja }].filter((row): row is { lang: string; value: string } => Boolean(row.value?.trim()));
+                    const queries = keywords.length ? keywords : [{ lang: "", value: selectedScene.visualQuery }];
+                    return queries.map((row) => <button key={row.lang || row.value} type="button" className="underline" onClick={() => { setPexelsQuery(row.value); void runPexelsSearch(row.value); }}>{row.lang ? `${row.lang}: ` : ""}{row.value}</button>);
+                  })()}
+                </div>
               ) : null}
+              <details className="rounded-[4px] border border-lyx-border p-2">
+                <summary className="cursor-pointer text-[11px] font-medium">{t("studioPro.apifyTab")}</summary>
+                <div className="mt-2">
+                  <ApifyMediaTab
+                    projectId={context.projectId}
+                    accountId={apifyAccountId}
+                    visualPlan={context.visualPlan}
+                    selectedSceneId={selectedSceneId}
+                    onImported={(asset, label) => {
+                      setMediaLibrary((prev) => [asset, ...prev]);
+                      applyImportedAsset(asset, label);
+                    }}
+                  />
+                </div>
+              </details>
               <Button variant="secondary" disabled title={t("common.comingSoon")} onClick={() => fileInputRef.current?.click()}>
                 {t("studioPro.uploadReplace")}
               </Button>
@@ -1100,7 +1188,7 @@ export function StudioProPage() {
                       <button
                         key={video.externalId}
                         type="button"
-                        onClick={() => void importPexelsResult(video.externalId, `Pexels ${video.attribution.photographerName}`)}
+                        onClick={() => void importPexelsResult(video.externalId, `Pexels ${video.attribution.photographerName}`, "video")}
                         className="relative overflow-hidden rounded-[4px] border border-lyx-border bg-lyx-muted"
                         style={{ aspectRatio: "9 / 16" }}
                         title={`${video.attribution.photographerName} · ${video.attribution.pexelsPageUrl}`}
@@ -1113,7 +1201,7 @@ export function StudioProPage() {
                       <button
                         key={photo.externalId}
                         type="button"
-                        onClick={() => void importPexelsResult(photo.externalId, `Pexels ${photo.attribution.photographerName}`)}
+                        onClick={() => void importPexelsResult(photo.externalId, `Pexels ${photo.attribution.photographerName}`, "photo")}
                         className="relative overflow-hidden rounded-[4px] border border-lyx-border bg-lyx-muted"
                         style={{ aspectRatio: "9 / 16" }}
                         title={`${photo.attribution.photographerName} · ${photo.attribution.pexelsPageUrl}`}
@@ -1283,6 +1371,21 @@ export function StudioProPage() {
                         muted
                         playsInline
                         loop
+                        onLoadedMetadata={(event) => {
+                          const start = selectedSceneDraft?.sourceStartMs ?? 0;
+                          const duration = selectedSceneDraft?.sourceDurationMs;
+                          event.currentTarget.currentTime = start / 1000;
+                          if (duration != null) event.currentTarget.loop = false;
+                        }}
+                        onTimeUpdate={(event) => {
+                          const start = selectedSceneDraft?.sourceStartMs ?? 0;
+                          const duration = selectedSceneDraft?.sourceDurationMs;
+                          if (duration != null && event.currentTarget.currentTime >= (start + duration) / 1000) {
+                            event.currentTarget.pause();
+                            event.currentTarget.currentTime = start / 1000;
+                            setPlaying(false);
+                          }
+                        }}
                         className="absolute inset-0 h-full w-full object-cover"
                       />
                     ) : selectedMediaAsset?.kind === "image" && thumbCache[selectedMediaAsset.id] ? (
@@ -1352,6 +1455,7 @@ export function StudioProPage() {
                       const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
                       const url = bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined;
                       const asset = bound?.mediaAssetVersionId ? mediaAssetById.get(bound.mediaAssetVersionId) : undefined;
+                      const segmentIndex = bound?.segmentId ? draft.segments.findIndex((row) => row.segmentId === bound.segmentId) : -1;
                       const excluded = Boolean(bound?.excluded);
                       const clipWidth = Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4));
                       return (
@@ -1359,8 +1463,8 @@ export function StudioProPage() {
                           key={scene.sceneId}
                           type="button"
                           onClick={() => setSelectedSceneId(scene.sceneId)}
-                          title={`${index + 1} · ${Math.round(scene.durationHintMs / 1000)}s`}
-                          className={`relative h-[52px] shrink-0 overflow-hidden rounded-[6px] border text-left ${excluded ? "opacity-35" : ""} ${
+                          title={`${index + 1} · ${Math.round(scene.durationHintMs / 1000)}s${segmentIndex >= 0 ? ` · ${t("studioPro.backgroundSegments")} ${segmentIndex + 1}` : ""}`}
+                          className={`relative h-[52px] shrink-0 overflow-hidden rounded-[6px] border text-left ${segmentIndex >= 0 ? "border-violet-400" : ""} ${excluded ? "opacity-35" : ""} ${
                             scene.sceneId === selectedScene?.sceneId ? "outline outline-2 outline-offset-1 outline-lyx-fg" : "border-lyx-border"
                           }`}
                           style={{ width: clipWidth, background: "linear-gradient(160deg,#3a3a38,#1c1c1b)" }}
@@ -1371,6 +1475,7 @@ export function StudioProPage() {
                           {asset?.kind === "video" || (!asset && bound?.mediaAssetVersionId) ? (
                             <span className="absolute right-1 top-1 rounded bg-black/50 px-1 text-[9px] text-white" title={t("studioPro.originalAudioMutedHint")}>🔇</span>
                           ) : null}
+                          {segmentIndex >= 0 ? <span className="absolute left-1 top-1 rounded bg-violet-700/85 px-1 text-[8px] font-semibold text-white">B{segmentIndex + 1}</span> : null}
                           <span className="absolute bottom-1 left-1 rounded bg-black/35 px-1 text-[9px] font-bold text-white">
                             {index + 1} · {Math.round(scene.durationHintMs / 1000)}s
                           </span>

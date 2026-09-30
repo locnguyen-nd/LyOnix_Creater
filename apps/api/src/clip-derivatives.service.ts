@@ -74,7 +74,9 @@ async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, fn: 
       results[index] = await fn(items[index]!);
     }
   });
-  await Promise.all(workers);
+  const settled = await Promise.allSettled(workers);
+  const failure = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+  if (failure) throw failure.reason;
   return results;
 }
 
@@ -97,7 +99,7 @@ export class ClipDerivativesService {
   now: () => Date = () => new Date();
   log: (message: string) => void = (message) => console.info(message);
 
-  async prepare(projectId: string, userId: string, requests: readonly ClipDerivativeRequest[]): Promise<RenderOutcome<PreparedClipDerivatives>> {
+  async prepare(projectId: string, userId: string, requests: readonly ClipDerivativeRequest[], onReady?: (ready: number) => Promise<void>, onFailure?: (sceneId: string, code: string, message: string) => Promise<void>): Promise<RenderOutcome<PreparedClipDerivatives>> {
     const result: PreparedClipDerivatives = { derivativeBySceneId: new Map(), items: [], totals: { parentBytes: 0, derivativeBytes: 0 } };
     if (requests.length === 0) return { ok: true, data: result };
 
@@ -123,13 +125,23 @@ export class ClipDerivativesService {
     }
 
     let prepared: Array<{ entry: Unique; derivativeId: string; source: "registry" | "worker"; mode: "copy" | "reencode" | null; bytes: number }>;
+    let ready = 0;
     try {
       prepared = await mapWithConcurrency([...unique.values()], PREPARE_CONCURRENCY, async (entry) => {
-        const reusable = await this.findReusable(projectId, entry.parent.id, entry, entry.stripAudio);
-        if (reusable) return { entry, derivativeId: reusable.id, source: "registry" as const, mode: null, bytes: reusable.bytes };
-        const output = await this.cut(entry.parent, entry.startMs, entry.durationMs, entry.stripAudio);
-        const row = await this.register(projectId, userId, entry.parent, entry, entry.stripAudio, output);
-        return { entry, derivativeId: row.id, source: "worker" as const, mode: output.mode, bytes: output.output.bytes };
+        try {
+          const reusable = await this.findReusable(projectId, entry.parent.id, entry, entry.stripAudio);
+          if (reusable) {
+            if (onReady) await onReady(++ready);
+            return { entry, derivativeId: reusable.id, source: "registry" as const, mode: null, bytes: reusable.bytes };
+          }
+          const output = await this.cut(entry.parent, entry.startMs, entry.durationMs, entry.stripAudio);
+          const row = await this.register(projectId, userId, entry.parent, entry, entry.stripAudio, output);
+          if (onReady) await onReady(++ready);
+          return { entry, derivativeId: row.id, source: "worker" as const, mode: output.mode, bytes: output.output.bytes };
+        } catch (error) {
+          if (error instanceof PrepareFailure && onFailure) await onFailure(entry.sceneIds[0]!, error.outcome.code, error.outcome.message);
+          throw error;
+        }
       });
     } catch (error) {
       if (error instanceof PrepareFailure) return error.outcome;

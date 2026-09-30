@@ -37,6 +37,9 @@ export type DynamicSceneInput = {
   captionSegments?: readonly DynamicCaptionSegment[];
   audioUrl: string;
   audioDurationMs: number;
+  /** Preview-only source range. Final renders use a prepared derivative instead. */
+  sourceStartMs?: number | null;
+  sourceDurationMs?: number | null;
 };
 
 export type DynamicImageAnimation = { type: string; startScale: string; endScale: string; startX: string; endX: string; easing: string };
@@ -223,6 +226,9 @@ export function buildDynamicComposition(
       duration: durationSeconds,
       source: scene.mediaUrl,
       fit: "cover",
+      ...(scene.mediaKind === "video" && scene.sourceStartMs != null && scene.sourceDurationMs != null
+        ? { trim_start: scene.sourceStartMs / 1000, trim_duration: scene.sourceDurationMs / 1000 }
+        : {}),
       ...(style.image.colorOverlay ? { color_overlay: style.image.colorOverlay } : {}),
       ...(style.image.animation
         ? {

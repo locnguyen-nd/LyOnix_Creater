@@ -22,6 +22,7 @@
  * (the raw `visualQuery`/`screenText` strings are preserved verbatim, never translated), but the
  * `entities`/`action`/`setting`/`mood` buckets stay coarse (see `bucketize`) for ja/ko.
  */
+import { isRightsUsableForAuto } from "./media-candidate.js";
 import type {
   MediaCandidate,
   MediaCandidateType,
@@ -328,7 +329,9 @@ const computeContinuityScore = (candidate: MediaCandidate, brief: SceneBrief): n
 
 const computeQualityScore = (candidate: MediaCandidate): number => {
   if (!candidate.heightPx) return 0.5;
-  const target = candidate.mediaType === "video" ? 1280 : 1080; // mirrors `pickPexelsVideoFile`'s HD floor
+  // This is the ranking score's height target, not the import file floor. Pexels import picks
+  // the smallest video file whose short side is at least 1080 pixels.
+  const target = candidate.mediaType === "video" ? 1280 : 1080;
   return clamp01(candidate.heightPx / target);
 };
 
@@ -446,7 +449,7 @@ export function decideMediaSelection(ranked: readonly RankedMediaCandidate[], op
       sawBelowThreshold = true;
       continue;
     }
-    if (entry.candidate.rightsStatus !== "cleared") {
+    if (!isRightsUsableForAuto(entry.candidate.rightsStatus)) {
       sawRightsUnresolved = true;
       continue;
     }
@@ -515,7 +518,7 @@ export function buildMediaCandidateCacheKey(input: {
  */
 export function canAutoApplyMediaCandidate(candidate: MediaCandidate): boolean {
   if (candidate.moderationDecision === "rejected") return false;
-  if (candidate.rightsStatus !== "cleared") return false;
+  if (!isRightsUsableForAuto(candidate.rightsStatus)) return false;
   if (!candidate.eligibility.autoEligible) return false;
   return true;
 }

@@ -394,3 +394,48 @@ describe("ProviderAccountsService Pinterest (visual, manual-review-only) account
     expect(store.status).toBe("failed");
   });
 });
+
+describe("ProviderAccountsService Apify (visual) account - VE2E-45", () => {
+  let store: any;
+  let service: ProviderAccountsService;
+
+  beforeEach(() => {
+    process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    store = null;
+    const prisma: any = {
+      providerAccount: {
+        create: async ({ data }: any) => { store = { id: "apf-1", version: 1, configVersion: 1, isFake: false, deletedAt: null, ownerUserId: "user-1", ...data }; return store; },
+        findFirst: async ({ where }: any) => (store && where.id === store.id && store.deletedAt === null ? store : null),
+        update: async ({ data }: any) => { Object.assign(store, data); if (data.version?.increment) store.version += data.version.increment; return store; },
+      },
+    };
+    service = new ProviderAccountsService(prisma);
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); process.env.PERSISTENCE_ENCRYPTION_KEY = originalEncryptionKey; });
+
+  it("creates an apify/visual account with an encrypted, never-returned secret; other roles are unsupported", async () => {
+    const created = await service.create({ name: "Apify", provider: "apify", role: "visual", scope: "personal", model: "n/a", secret: "apify_stub_secret" }, "user-1", "staff");
+    expect(created).toMatchObject({ provider: "apify", role: "visual", status: "unverified" });
+    expect(JSON.stringify(created)).not.toContain("apify_stub_secret");
+    expect(store.encryptedSecret).not.toContain("apify_stub_secret");
+    expect(await service.create({ name: "Apify content", provider: "apify", role: "content", scope: "personal", model: "x", secret: "y" }, "user-1", "staff")).toBe("unsupported");
+  });
+
+  it("verifies via read-only GET /v2/users/me and marks verified", async () => {
+    await service.create({ name: "Apify", provider: "apify", role: "visual", scope: "personal", model: "n/a", secret: "apify_stub_secret" }, "user-1", "staff");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: {} }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await service.verify("apf-1", "user-1", "staff")).toMatchObject({ status: "verified" });
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toBe("https://api.apify.com/v2/users/me");
+  });
+
+  it("marks failed and passes the real provider message through on 401", async () => {
+    await service.create({ name: "Apify", provider: "apify", role: "visual", scope: "personal", model: "n/a", secret: "bad" }, "user-1", "staff");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "User was not found or authentication token is not valid" } }), { status: 401 })));
+    const result = await service.verify("apf-1", "user-1", "staff");
+    expect(result).toMatchObject({ code: "PROVIDER_AUTH_INVALID" });
+    expect((result as any).message).toContain("authentication token is not valid");
+    expect(store.status).toBe("failed");
+  });
+});

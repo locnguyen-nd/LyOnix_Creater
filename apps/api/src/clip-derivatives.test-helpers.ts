@@ -72,6 +72,7 @@ export type StoredAsset = {
   kind: "video" | "image" | "audio" | "document";
   origin: string;
   bytes: number;
+  durationMs?: number | null;
   relativePath: string;
   originalFileName: string;
   mimeType?: string;
