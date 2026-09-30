@@ -6,7 +6,7 @@
  * structurally invalid (a reorder that splits a segment, a range left on a scene whose media was
  * removed) with the same pure rules the API validates against, so a save never fails on them.
  */
-// Browser-safe subpath, not the bare `@lyonix/domain` barrel (see media-selection.ts for why).
+// Browser-safe subpath, not the bare `@lyonix/domain` barrel.
 import { normalizeTimelineSegments } from "@lyonix/domain/timeline-segments";
 import type { TimelineSceneBindingInput, TimelineSegmentInput, TimelineSegmentResponse } from "@lyonix/contracts";
 

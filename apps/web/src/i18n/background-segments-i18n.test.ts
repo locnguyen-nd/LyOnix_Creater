@@ -22,3 +22,13 @@ describe("VE2E-40 background segment i18n", () => {
     }
   });
 });
+
+describe("VE2E-41 fix-round studioPro keys", () => {
+  it("has scope + shortfall labels in every locale", () => {
+    for (const locale of ["vi", "en", "ja", "ko"] as const) {
+      const pro = locales[locale].studioPro;
+      for (const key of ["mediaScope", "mediaScopeScene", "mediaScopeSegment", "inPointShortfall"] as const) expect(pro[key], `${locale}.${key}`).toBeTruthy();
+      expect(pro.inPointShortfall).toContain("{{seconds}}");
+    }
+  });
+});

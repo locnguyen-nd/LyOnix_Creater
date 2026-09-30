@@ -328,7 +328,9 @@ const computeContinuityScore = (candidate: MediaCandidate, brief: SceneBrief): n
 
 const computeQualityScore = (candidate: MediaCandidate): number => {
   if (!candidate.heightPx) return 0.5;
-  const target = candidate.mediaType === "video" ? 1280 : 1080; // mirrors `pickPexelsVideoFile`'s HD floor
+  // This is the ranking score's height target, not the import file floor. Pexels import picks
+  // the smallest video file whose short side is at least 1080 pixels.
+  const target = candidate.mediaType === "video" ? 1280 : 1080;
   return clamp01(candidate.heightPx / target);
 };
 

@@ -168,6 +168,25 @@ describe("buildDynamicComposition", () => {
     expect(elements[0]!.elements[2]).toMatchObject({ type: "audio", source: "https://x/a1" });
   });
 
+  it("VE2E-41: previews the selected source range from the original video", () => {
+    const source = buildDynamicComposition([{
+      sceneId: "s1", mediaUrl: "https://x/original.mp4", mediaKind: "video", text: "Caption",
+      audioUrl: "https://x/a1", audioDurationMs: 3000, sourceStartMs: 4200, sourceDurationMs: 3000,
+    }], DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });
+    const elements = source.elements as Array<{ elements: Array<Record<string, unknown>> }>;
+    expect(elements[0]!.elements[0]).toMatchObject({ source: "https://x/original.mp4", trim_start: 4.2, trim_duration: 3 });
+  });
+
+  it("does not add video trim fields when the scene has no source range", () => {
+    const source = buildDynamicComposition([{
+      sceneId: "s1", mediaUrl: "https://x/original.mp4", mediaKind: "video", text: "Caption",
+      audioUrl: "https://x/a1", audioDurationMs: 3000,
+    }], DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });
+    const elements = source.elements as Array<{ elements: Array<Record<string, unknown>> }>;
+    expect(elements[0]!.elements[0]).not.toHaveProperty("trim_start");
+    expect(elements[0]!.elements[0]).not.toHaveProperty("trim_duration");
+  });
+
   it("VE2E-32: builds one timed text node per real caption segment instead of one static block for the whole scene", () => {
     const scenes = [
       {
