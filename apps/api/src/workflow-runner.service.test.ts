@@ -142,11 +142,17 @@ describe("WorkflowRunnerService", () => {
         }),
       },
       stepRun: {
-        upsert: vi.fn(async ({ create }: any) => {
+        upsert: vi.fn(async ({ create, update }: any) => {
+          const existing = stepRuns.find((s) => s.workflowRunId === create.workflowRunId && s.stepKey === create.stepKey && s.attempt === create.attempt);
+          if (existing) return Object.assign(existing, update);
           const id = `step-${stepRuns.length + 1}`;
           const row = { id, ...create };
           stepRuns.push(row);
           return row;
+        }),
+        findUnique: vi.fn(async ({ where }: any) => {
+          const key = where.workflowRunId_stepKey_attempt;
+          return stepRuns.find((s) => s.workflowRunId === key.workflowRunId && s.stepKey === key.stepKey && s.attempt === key.attempt) ?? null;
         }),
         update: vi.fn(async ({ where, data }: any) => {
           const row = stepRuns.find((s) => s.id === where.id);
@@ -250,6 +256,77 @@ describe("WorkflowRunnerService", () => {
     expect(stepKeys.indexOf("persist_timeline_version")).toBeGreaterThan(-1);
     expect(stepKeys.indexOf("persist_timeline_version")).toBeLessThan(stepKeys.indexOf("submit_render"));
     expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  describe("VE2E-50: Japanese keywords for Apify", () => {
+    const jaScript = { ...approvedScript, language: "ja", scenes: scenes.map((scene, i) => ({ ...scene, narration: i === 0 ? "新宿の夜景を紹介します。" : "渋谷のスクランブル交差点です。", visualQuery: i === 0 ? "Flashy news intro, breaking news graphic" : "Boxing ring center, empty ring" })) };
+    let apify: { findAccountForUser: ReturnType<typeof vi.fn>; autoImportForSegment: ReturnType<typeof vi.fn> };
+    const build = () => {
+      apify = {
+        findAccountForUser: vi.fn(async () => ({ id: "apify-acc", encryptedSecret: "enc" })),
+        autoImportForSegment: vi.fn(async (_p: string, _u: string, _r: string, _a: unknown, input: any) => ({
+          ok: true as const,
+          data: { asset: { id: `apify-${input.sceneId}`, kind: "video", durationMs: 30_000 } as any, externalId: input.sceneId, ledgerId: `apify:tiktok:${input.sceneId}`, platform: "tiktok" as const, provenance: null },
+        })),
+      };
+      scriptVersions.getApprovedForSource = vi.fn(async () => ({ ok: true as const, data: jaScript as any }));
+      (scriptGeneration as any).extractSegmentKeywords = vi.fn(async () => ({
+        ok: true as const,
+        keywords: { "seg-1": { ja: "新宿 夜景", en: "shinjuku night" }, "seg-2": { ja: "渋谷 スクランブル交差点", en: "shibuya crossing" } },
+        rejectedSegmentIds: [],
+        usage: { inputTokens: 300, outputTokens: 40, costAmount: null, costCurrency: null, providerRequestId: null },
+        modelId: "gpt-x",
+        provider: "openai",
+        promptTemplateVersion: "segment-keywords.v1",
+      }));
+      service = new WorkflowRunnerService(
+        prisma,
+        sources as SourcesService,
+        scriptGeneration as ScriptGenerationService,
+        scriptVersions as ScriptVersionsService,
+        audioVersions as AudioVersionsService,
+        new MediaPlanService(prisma, { forUser: async () => ({ teamIds: [], projectIds: [], channelIds: [] }) } as never, pexels as PexelsService, apify as never),
+        renderJobs as RenderJobsService,
+        timelines as TimelineVersionsService,
+      );
+    };
+
+    it("no visualPlan: one extraction call from the narration feeds Apify; the English visualQuery never reaches Apify", async () => {
+      build();
+      await service.processNext();
+      const extraction = (scriptGeneration as any).extractSegmentKeywords as ReturnType<typeof vi.fn>;
+      expect(extraction).toHaveBeenCalledTimes(1);
+      expect(extraction.mock.calls[0]![2].segments).toEqual([
+        { segmentId: "seg-1", narration: "新宿の夜景を紹介します。" },
+        { segmentId: "seg-2", narration: "渋谷のスクランブル交差点です。" },
+      ]);
+      expect(apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword)).toEqual(["新宿 夜景", "渋谷 スクランブル交差点"]);
+      // the search query handed to the Actor is only the keyword (the brief is used locally for ranking/moderation)
+      expect(apify.autoImportForSegment.mock.calls.every((call) => !/Flashy|Boxing/.test(call[4].keyword))).toBe(true);
+      expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+      // cost/usage bookkeeping like other content calls: a StepRun + ProviderOperation, and an entry in the run usage ledger
+      expect(stepRuns.some((row) => row.stepKey === "extract_keywords")).toBe(true);
+      const usage = stepRuns.find((row) => row.stepKey === "run_usage");
+      expect(usage.outputRef.entries).toEqual([expect.objectContaining({ step: "extract_keywords", kind: "content", inputTokens: 300, outputTokens: 40 })]);
+    });
+
+    it("extraction failure: Pexels with reason no_ja_keywords, Apify never searched, run still completes", async () => {
+      build();
+      (scriptGeneration as any).extractSegmentKeywords = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_TIMEOUT", message: "timeout" }));
+      await service.processNext();
+      expect(apify.autoImportForSegment).not.toHaveBeenCalled();
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+      const diagnostics = stepRuns.find((row) => row.stepKey === "media_plan_diagnostics");
+      expect(diagnostics.outputRef.segments.map((segment: any) => segment.fallbackReason)).toEqual(["no_ja_keywords", "no_ja_keywords"]);
+      expect(stepRuns.find((row) => row.stepKey === "keyword_extraction_diagnostics").outputRef).toMatchObject({ reason: "no_ja_keywords", extracted: [] });
+    });
+
+    it("no Apify account: no extraction call is paid", async () => {
+      build();
+      apify.findAccountForUser.mockResolvedValue(null);
+      await service.processNext();
+      expect((scriptGeneration as any).extractSegmentKeywords).not.toHaveBeenCalled();
+    });
   });
 
   it("VE2E-42: title/caption fill leftover template text slots through the timeline optionValues, same as the old raw-assignment path", async () => {

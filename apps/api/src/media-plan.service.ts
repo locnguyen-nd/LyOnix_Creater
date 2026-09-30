@@ -40,7 +40,7 @@ import type {
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
@@ -107,28 +107,31 @@ export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
   return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
 };
 
-/** Apify search rejects queries over 200 chars; stay well below. */
-export const APIFY_FALLBACK_KEYWORD_MAX_CHARS = 100;
-
 /**
- * VE2E-48: the Japanese Apify keyword of a segment. `keywords.ja` from the plan wins; otherwise, for a
- * `ja` script (whose scene `visualQuery` is already Japanese) the first 1-2 distinct scene queries are
- * joined within {@link APIFY_FALLBACK_KEYWORD_MAX_CHARS}. Non-ja scripts without keywords get `null`
- * (English is never invented) -> Pexels with reason `no_ja_keywords`.
+ * The Japanese Apify keyword of a segment (VE2E-50): only `segment.keywords.ja` when it is a real short
+ * Japanese search phrase (kana/kanji, see `isValidJaSearchKeyword`). The scene `visualQuery` is NEVER
+ * used (VE2E-48's fallback was wrong: for a ja script it is a long English shot description that returns
+ * global template/greenscreen TikToks). No valid keyword -> `null` -> Pexels with reason `no_ja_keywords`.
  */
-export const apifyKeywordForSegment = (script: MediaPlanScript, segment: PlannedSegment): string | null => {
+export const apifyKeywordForSegment = (segment: PlannedSegment): string | null => {
   const planned = segment.keywords?.ja.trim();
-  if (planned) return planned;
-  if (!/^ja($|[-_])/i.test(script.language.trim())) return null;
-  const distinct: string[] = [];
-  for (const sceneId of segment.sceneIds) {
-    const query = script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery.replace(/\s+/g, " ").trim();
-    if (query && !distinct.some((existing) => existing.toLowerCase() === query.toLowerCase())) distinct.push(query);
-    if (distinct.length >= 2) break;
+  return planned && isValidJaSearchKeyword(planned) ? planned : null;
+};
+
+/** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
+export const segmentsNeedingKeywords = (segments: readonly PlannedSegment[]): PlannedSegment[] => segments.filter((segment) => apifyKeywordForSegment(segment) === null);
+
+/** Narration of a segment's scenes in script order (the only text the keyword extraction sees). */
+export const segmentNarration = (script: MediaPlanScript, segment: PlannedSegment): string =>
+  segment.sceneIds.map((sceneId) => script.scenes.find((scene) => scene.sceneId === sceneId)?.narration.trim() ?? "").filter(Boolean).join(" ");
+
+/** Applies extracted keywords to the planned segments in place; `en` from the plan wins, extracted `en` only fills a gap. */
+export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extracted: Readonly<Record<string, { ja: string; en: string }>>): void => {
+  for (const segment of segments) {
+    const found = extracted[segment.segmentId];
+    if (!found || !isValidJaSearchKeyword(found.ja)) continue;
+    segment.keywords = { ja: found.ja.trim(), en: segment.keywords?.en.trim() || found.en.trim() };
   }
-  if (distinct.length === 0) return null;
-  const joined = distinct.length === 2 && `${distinct[0]} ${distinct[1]}`.length <= APIFY_FALLBACK_KEYWORD_MAX_CHARS ? `${distinct[0]} ${distinct[1]}` : distinct[0]!;
-  return joined.slice(0, APIFY_FALLBACK_KEYWORD_MAX_CHARS).trim() || null;
 };
 
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
@@ -142,6 +145,16 @@ export class MediaPlanService {
     /** VE2E-46: Apify-first sourcing. Absent (older 3-argument construction) = unchanged Pexels-only behaviour. */
     @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
   ) {}
+
+  /** VE2E-50: whether the user can run an Apify search at all (the runner only pays for keyword extraction when it can). */
+  async apifyAvailable(userId: string, role: "admin" | "staff"): Promise<boolean> {
+    if (!this.apify) return false;
+    try {
+      return Boolean(await this.apify.findAccountForUser(userId, role));
+    } catch {
+      return false;
+    }
+  }
 
   planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
     const scenes: MediaPlanScene[] = script.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: sceneDuration(scene) }));
@@ -192,7 +205,7 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
   ): Promise<{ source: SegmentSource } | { reason: string | null }> {
     if (!this.apify) return { reason: null };
-    const keyword = apifyKeywordForSegment(input.script, input.segment);
+    const keyword = apifyKeywordForSegment(input.segment);
     if (!keyword) return { reason: "no_ja_keywords" };
     try {
       const account = await this.apify.findAccountForUser(userId, role);
