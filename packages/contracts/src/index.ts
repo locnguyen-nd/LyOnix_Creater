@@ -528,6 +528,12 @@ export type RenderJobResponse = {
   resultUrl: string | null;
   /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
   snapshotUrl: string | null;
+  /** VE2E-52b: actual Creatomate output (render_scale/width/height) and the template canvas; null on older jobs / before the provider reports. */
+  outputRenderScale?: number | null;
+  outputWidth?: number | null;
+  outputHeight?: number | null;
+  canvasWidth?: number | null;
+  canvasHeight?: number | null;
   resultExpiresAt: string | null;
   attempts: number;
   requestFingerprint: string;
