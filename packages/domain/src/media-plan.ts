@@ -232,3 +232,67 @@ export function computeSegmentSourceRanges(scenes: MediaPlanScene[], sourceDurat
   }
   return ranges;
 }
+
+/** VE2E-53: apify (social) clips start with the author's own intro and end with outro/watermark - keep ranges inside [startGuard, duration - endGuard]. */
+export const SOCIAL_CLIP_START_GUARD_MS = 1_000;
+export const SOCIAL_CLIP_END_GUARD_MS = 1_500;
+
+export type SocialWindowOptions = { startGuardMs?: number; endGuardMs?: number };
+
+export type SocialWindowPlan = {
+  ranges: SceneSourceRange[];
+  /** Usable window [startMs, endMs] inside the source (endMs - startMs may be <= 0 for tiny sources). */
+  window: { startMs: number; endMs: number; usableMs: number };
+  neededMs: number;
+  coveredMs: number;
+  /** The window cannot cover every scene: scenes after the covered part have no range; caller should fetch a second source for them (never loop overlapping footage). */
+  needsSecondSource: boolean;
+  /** Ids of the scenes that are not (fully) covered, in order (a partially covered scene is included). */
+  uncoveredSceneIds: string[];
+};
+
+/** Reads guard overrides from env (`SOCIAL_CLIP_START_GUARD_MS` / `SOCIAL_CLIP_END_GUARD_MS`); invalid values fall back to the defaults. */
+export function socialWindowOptionsFromEnv(env: Record<string, string | undefined> = process.env): Required<SocialWindowOptions> {
+  const read = (value: string | undefined, fallback: number) => {
+    const n = value === undefined || value.trim() === "" ? Number.NaN : Number(value);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+  };
+  return { startGuardMs: read(env.SOCIAL_CLIP_START_GUARD_MS, SOCIAL_CLIP_START_GUARD_MS), endGuardMs: read(env.SOCIAL_CLIP_END_GUARD_MS, SOCIAL_CLIP_END_GUARD_MS) };
+}
+
+/**
+ * Deterministic window planner for origin=apify sources: contiguous, non-overlapping per-scene
+ * ranges starting at `startGuardMs` and ending no later than `duration - endGuardMs`. NEVER loops:
+ * when the usable window is shorter than the scenes, the last covered scene gets the remainder
+ * (`short: true`), later scenes get no range and `needsSecondSource` is set. Returns `null` when the
+ * source duration is unknown (caller keeps the legacy behaviour).
+ */
+export function computeSocialWindowRanges(scenes: MediaPlanScene[], sourceDurationMs: number | null | undefined, options: SocialWindowOptions = {}): SocialWindowPlan | null {
+  if (typeof sourceDurationMs !== "number" || !Number.isFinite(sourceDurationMs) || sourceDurationMs <= 0) return null;
+  const startGuard = Math.max(0, Math.floor(options.startGuardMs ?? SOCIAL_CLIP_START_GUARD_MS));
+  const endGuard = Math.max(0, Math.floor(options.endGuardMs ?? SOCIAL_CLIP_END_GUARD_MS));
+  const source = Math.floor(sourceDurationMs);
+  const startMs = startGuard;
+  const endMs = source - endGuard;
+  const usableMs = Math.max(0, endMs - startMs);
+  const wanted = scenes.map((scene) => Math.max(1, Math.round(scene.durationMs)));
+  const neededMs = sum(wanted);
+  const ranges: SceneSourceRange[] = [];
+  const uncoveredSceneIds: string[] = [];
+  let cursor = startMs;
+  let remaining = usableMs;
+  scenes.forEach((scene, index) => {
+    const want = wanted[index]!;
+    if (remaining <= 0) {
+      uncoveredSceneIds.push(scene.sceneId);
+      return;
+    }
+    const take = Math.min(want, remaining);
+    ranges.push({ sceneId: scene.sceneId, sourceStartMs: cursor, sourceDurationMs: take, looped: false, short: take < want });
+    if (take < want) uncoveredSceneIds.push(scene.sceneId);
+    cursor += take;
+    remaining -= take;
+  });
+  const coveredMs = sum(ranges.map((r) => r.sourceDurationMs));
+  return { ranges, window: { startMs, endMs, usableMs }, neededMs, coveredMs, needsSecondSource: coveredMs < neededMs, uncoveredSceneIds };
+}
