@@ -25,7 +25,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import type { MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
+import type { MediaPlanApifyUsage, MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -194,9 +194,10 @@ export class WorkflowRunnerService {
   }
 
   /** VE2E-48: persists per-segment sourceProvider + fallbackReason as the `media_plan_diagnostics` StepRun outputRef (no migration; read by GET /video-productions/:id). Best-effort. */
-  private async saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[]): Promise<void> {
+  private async saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[], apifyUsage: MediaPlanApifyUsage | null = null): Promise<void> {
     try {
-      const output = { segments } as unknown as Prisma.InputJsonValue;
+      // VE2E-51: per-job Apify spend (runs, seconds, USD from run.usageTotalUsd) rides in the same StepRun outputRef.
+      const output = { segments, ...(apifyUsage ? { apifyUsage } : {}) } as unknown as Prisma.InputJsonValue;
       const now = new Date();
       await this.prisma.stepRun.upsert({
         where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "media_plan_diagnostics", attempt: run.attempts } },
@@ -379,32 +380,33 @@ export class WorkflowRunnerService {
       visualPlan: approved.visualPlan ?? null,
     };
     const ledger = new SegmentSourceLedger();
-    const sourced: SourcedSegment[] = [];
-    const persistSourcing = () => this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics);
-    try {
-      for (const segment of this.mediaPlans.planSegments(planScript, backgroundSegmentRange)) {
-        const source =
-          (await this.mediaPlans.findReusableSource(run.projectId, segment, ledger)) ??
-          (await this.recordStep(
-            run,
-            `import_media_${segment.segmentId}`,
-            { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
-            async () => {
-              const outcome = await this.mediaPlans.importSegmentSource(run.projectId, userId, role, { providerAccountId: mediaConfig.providerAccountId, script: planScript, segment, ledger });
-              if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-              return outcome.data;
-            },
-          ));
-        ledger.add(source);
-        sourced.push({ segment, source, errorCode: null });
-      }
-    } catch (error) {
+    // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
+    const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {
+      providerAccountId: mediaConfig.providerAccountId,
+      script: planScript,
+      segments: this.mediaPlans.planSegments(planScript, backgroundSegmentRange),
+      ledger,
+      stopOnFailure: true,
+      runImport: (segment, task) =>
+        this.recordStep(
+          run,
+          `import_media_${segment.segmentId}`,
+          { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+          async () => {
+            const outcome = await task();
+            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+            return outcome;
+          },
+        ),
+    });
+    const sourced: SourcedSegment[] = sourcing.sourced;
+    if (sourcing.failure) {
       // VE2E-48: keep the per-segment sourcing decisions made before the failing segment visible on the run.
-      await persistSourcing();
-      throw error;
+      await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage);
+      throw sourcing.failure.error;
     }
     const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
-    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics);
+    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage);
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 

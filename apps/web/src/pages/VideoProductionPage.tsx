@@ -14,6 +14,10 @@ const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "ca
 const RETRIABLE_STATUSES = new Set<WorkflowRunStatus>(["failed", "blocked_provider", "needs_input"]);
 const POLL_MS = 2500;
 
+/** `{ language_mismatch: 3, too_short: 1 }` -> `language_mismatch x3, too_short x1`. */
+const formatRejectReasons = (rejected: Record<string, number>) =>
+  Object.entries(rejected).map(([reason, count]) => `${reason} x${count}`).join(", ") || "-";
+
 function statusTone(status: WorkflowRunStatus) {
   if (status === "completed") return "ok" as const;
   if (status === "failed" || status === "cancelled") return "danger" as const;
@@ -125,9 +129,21 @@ export function VideoProductionPage() {
               <li key={segment.segmentId} className="text-[12.5px]">
                 {index + 1}. {segment.segmentId}
                 <SourceBadge diagnostic={segment} />
+                {segment.apifyQuality && segment.apifyQuality.considered > 0 ? (
+                  <span className="mt-0.5 block text-[10px] text-lyx-fg-muted" data-testid="apify-quality">
+                    {t("studioPro.apifyQualityLine", { passed: segment.apifyQuality.passed, considered: segment.apifyQuality.considered, reasons: formatRejectReasons(segment.apifyQuality.rejected) })}
+                  </span>
+                ) : null}
               </li>
             ))}
           </ul>
+          {run.apifyUsage ? (
+            <p className="mt-3 text-[11.5px] text-lyx-fg-muted" data-testid="apify-usage">
+              <span className="font-semibold">{t("studioPro.apifyUsageTitle")}: </span>
+              {t("studioPro.apifyUsageLine", { runs: run.apifyUsage.runs, seconds: Math.round(run.apifyUsage.seconds), usd: run.apifyUsage.usd === null ? t("studioPro.apifyUsageUsdUnknown") : `$${run.apifyUsage.usd.toFixed(4)}` })}
+              {run.apifyUsage.searchesReused > 0 || run.apifyUsage.libraryReuses > 0 ? ` · ${t("studioPro.apifyUsageReuse", { searches: run.apifyUsage.searchesReused, library: run.apifyUsage.libraryReuses })}` : ""}
+            </p>
+          ) : null}
         </div>
       ) : null}
 

@@ -14,7 +14,7 @@
  *  - The API token is only ever sent as a Bearer header to `api.apify.com`; it is redacted from
  *    every error message. Signed CDN links are never used as an import source.
  */
-import type { MediaCandidate } from "@lyonix/domain";
+import type { MediaCandidate, SocialCandidateSignals } from "@lyonix/domain";
 import { ProviderError } from "./index.js";
 
 const API_BASE = "https://api.apify.com";
@@ -22,6 +22,13 @@ const timeoutMs = 30_000;
 
 export const APIFY_MAX_RESULTS = 20;
 export const APIFY_RUN_TIMEOUT_SECS = 120;
+/** VE2E-51: run timeout for the phase that DOWNLOADS video (spec VE2E-APIFY-ACTORS section 5: 240 s for clockworks); search-only runs keep 120 s. */
+export const APIFY_DOWNLOAD_RUN_TIMEOUT_SECS = 240;
+/**
+ * VE2E-51: input field of `clockworks/tiktok-scraper` that takes direct post URLs. The name is from the Actor's public
+ * input schema and is UNVERIFIED in this repo (see the VE2E-51 handoff for the read-only probe); callers may override it.
+ */
+export const APIFY_TIKTOK_POST_URL_FIELD = "postURLs";
 export const APIFY_MAX_RETRIES = 1;
 export const APIFY_ADAPTER_VERSION = "apify-adapter.v1";
 
@@ -58,6 +65,16 @@ export type ApifyDeps = {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+};
+
+/** VE2E-51: cost/time accounting of Actor runs (all attempts of a call, incl. failed/retried ones). `usd` is null when Apify reported no `usageTotalUsd`. */
+export type ApifyUsage = { runs: number; seconds: number; usd: number | null };
+export const emptyApifyUsage = (): ApifyUsage => ({ runs: 0, seconds: 0, usd: null });
+export const addApifyUsage = (into: ApifyUsage, add: ApifyUsage): ApifyUsage => {
+  into.runs += add.runs;
+  into.seconds = Math.round((into.seconds + add.seconds) * 100) / 100;
+  if (add.usd !== null) into.usd = Math.round(((into.usd ?? 0) + add.usd) * 1e6) / 1e6;
+  return into;
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -133,10 +150,17 @@ export type ApifySearchInput = { platform: ApifyPlatform; keyword: string; lang:
 
 const countryOf = (lang: ApifyLang) => (lang === "ja" ? "JP" : "US");
 
-export function buildActorInput(actorId: string, keyword: string, lang: ApifyLang, limit: number): Record<string, unknown> {
+export type ActorInputOptions = {
+  /** TikTok (clockworks) only: `false` = search-only phase (no video/cover download, pay per result only). Default `true` (unchanged single-phase). */
+  download?: boolean;
+};
+
+export function buildActorInput(actorId: string, keyword: string, lang: ApifyLang, limit: number, options: ActorInputOptions = {}): Record<string, unknown> {
   switch (actorId) {
-    case "clockworks/tiktok-scraper":
-      return { searchQueries: [keyword], searchSection: "/video", resultsPerPage: limit, proxyCountryCode: countryOf(lang), shouldDownloadVideos: true, shouldDownloadCovers: true, shouldDownloadSlideshowImages: false };
+    case "clockworks/tiktok-scraper": {
+      const download = options.download !== false;
+      return { searchQueries: [keyword], searchSection: "/video", resultsPerPage: limit, proxyCountryCode: countryOf(lang), shouldDownloadVideos: download, shouldDownloadCovers: download, shouldDownloadSlideshowImages: false };
+    }
     case "apidojo/tiktok-scraper":
       return { keywords: [keyword], maxItems: Math.max(limit, 10), location: countryOf(lang), sortType: "RELEVANCE" };
     case "fatihtahta/pinterest-scraper-search":
@@ -172,48 +196,86 @@ const TERMINAL_FAILURES = new Set(["FAILED", "ABORTED", "ABORTING", "TIMED-OUT"]
  */
 export const APIFY_MAX_ITEMS_QUERY_ACTORS: ReadonlySet<string> = new Set(["clockworks/tiktok-scraper"]);
 
-type RunResult = { runId: string; items: unknown[] };
+type RunResult = { runId: string; items: unknown[]; timedOutWithItems: boolean };
+type RunOptions = { timeoutSecs: number; usage: ApifyUsage };
 
-/** Runs one pinned Actor asynchronously (start -> poll <=120 s -> read dataset). Aborts the run if it overruns. */
-async function runActorOnce(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, deps?: ApifyDeps): Promise<RunResult> {
-  const now = deps?.now ?? Date.now;
-  const sleep = deps?.sleep ?? defaultSleep;
-  const start = await apifyFetch(deps, `/v2/acts/${actorPath(pin.actorId)}/runs?build=${encodeURIComponent(pin.version)}&timeout=${APIFY_RUN_TIMEOUT_SECS}${APIFY_MAX_ITEMS_QUERY_ACTORS.has(pin.actorId) ? `&maxItems=${limit}` : ""}`, token, { method: "POST", body: input });
-  if (!start.ok) return failFromResponse(start, token);
-  const started = ((await start.json().catch(() => ({}))) as { data?: Record<string, unknown> }).data ?? {};
-  const runId = typeof started.id === "string" ? started.id : "";
-  if (!runId || !/^[A-Za-z0-9]+$/.test(runId)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify did not return a run id", false);
+const runSeconds = (run: Record<string, unknown>, fallback: number): number => {
+  const stats = run.stats;
+  const fromStats = stats && typeof stats === "object" ? (stats as Record<string, unknown>).runTimeSecs : undefined;
+  if (typeof fromStats === "number" && Number.isFinite(fromStats) && fromStats >= 0) return fromStats;
+  const started = typeof run.startedAt === "string" ? Date.parse(run.startedAt) : NaN;
+  const finished = typeof run.finishedAt === "string" ? Date.parse(run.finishedAt) : NaN;
+  if (Number.isFinite(started) && Number.isFinite(finished) && finished >= started) return (finished - started) / 1000;
+  return fallback;
+};
 
-  const deadline = now() + APIFY_RUN_TIMEOUT_SECS * 1000;
-  let run: Record<string, unknown> = started;
-  for (;;) {
-    const status = typeof run.status === "string" ? run.status : "";
-    if (status === "SUCCEEDED") break;
-    if (TERMINAL_FAILURES.has(status)) throw new ProviderError("PROVIDER_UNAVAILABLE", `Apify run ended with status ${status}`, true);
-    if (now() >= deadline) {
-      await apifyFetch(deps, `/v2/actor-runs/${runId}/abort`, token, { method: "POST" }).catch(() => undefined);
-      throw new ProviderError("PROVIDER_TIMEOUT", "Apify run exceeded the time limit", true);
-    }
-    await sleep(1000);
-    const poll = await apifyFetch(deps, `/v2/actor-runs/${runId}?waitForFinish=20`, token);
-    if (!poll.ok) return failFromResponse(poll, token);
-    run = ((await poll.json().catch(() => ({}))) as { data?: Record<string, unknown> }).data ?? {};
-  }
+async function readDataset(token: string, run: Record<string, unknown>, limit: number, deps?: ApifyDeps): Promise<unknown[]> {
   const datasetId = typeof run.defaultDatasetId === "string" ? run.defaultDatasetId : "";
   if (!datasetId || !/^[A-Za-z0-9]+$/.test(datasetId)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify run has no dataset", false);
   const dataset = await apifyFetch(deps, `/v2/datasets/${datasetId}/items?clean=true&format=json&limit=${limit}`, token);
   if (!dataset.ok) return failFromResponse(dataset, token);
   const items = await dataset.json().catch(() => null);
   if (!Array.isArray(items)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify dataset was not a list", false);
-  return { runId, items: items.slice(0, limit) };
+  return items.slice(0, limit);
+}
+
+/**
+ * Runs one pinned Actor asynchronously (start -> poll <= `timeoutSecs` -> read dataset). Aborts the run if it overruns.
+ * VE2E-51: a run that ended TIMED-OUT (or that we aborted at our own deadline) but already produced dataset items is a
+ * SUCCESS with those items (owner job bb9b2449 re-ran a TIMED-OUT run that already held 10 items). Usage of every run is
+ * accumulated into `options.usage` even when the run fails.
+ */
+async function runActorOnce(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, deps: ApifyDeps | undefined, options: RunOptions): Promise<RunResult> {
+  const now = deps?.now ?? Date.now;
+  const sleep = deps?.sleep ?? defaultSleep;
+  const t0 = now();
+  let run: Record<string, unknown> = {};
+  let started = false;
+  try {
+    const start = await apifyFetch(deps, `/v2/acts/${actorPath(pin.actorId)}/runs?build=${encodeURIComponent(pin.version)}&timeout=${options.timeoutSecs}${APIFY_MAX_ITEMS_QUERY_ACTORS.has(pin.actorId) ? `&maxItems=${limit}` : ""}`, token, { method: "POST", body: input });
+    if (!start.ok) return await failFromResponse(start, token);
+    const began = ((await start.json().catch(() => ({}))) as { data?: Record<string, unknown> }).data ?? {};
+    const runId = typeof began.id === "string" ? began.id : "";
+    if (!runId || !/^[A-Za-z0-9]+$/.test(runId)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify did not return a run id", false);
+    started = true;
+    run = began;
+
+    const deadline = t0 + options.timeoutSecs * 1000;
+    for (;;) {
+      const status = typeof run.status === "string" ? run.status : "";
+      if (status === "SUCCEEDED") break;
+      if (status === "TIMED-OUT") {
+        const items = await readDataset(token, run, limit, deps).catch(() => [] as unknown[]);
+        if (items.length > 0) return { runId, items, timedOutWithItems: true };
+        throw new ProviderError("PROVIDER_UNAVAILABLE", `Apify run ended with status ${status}`, true);
+      }
+      if (TERMINAL_FAILURES.has(status)) throw new ProviderError("PROVIDER_UNAVAILABLE", `Apify run ended with status ${status}`, true);
+      if (now() >= deadline) {
+        await apifyFetch(deps, `/v2/actor-runs/${runId}/abort`, token, { method: "POST" }).catch(() => undefined);
+        const items = await readDataset(token, run, limit, deps).catch(() => [] as unknown[]);
+        if (items.length > 0) return { runId, items, timedOutWithItems: true };
+        throw new ProviderError("PROVIDER_TIMEOUT", "Apify run exceeded the time limit", true);
+      }
+      await sleep(1000);
+      const poll = await apifyFetch(deps, `/v2/actor-runs/${runId}?waitForFinish=20`, token);
+      if (!poll.ok) return await failFromResponse(poll, token);
+      run = ((await poll.json().catch(() => ({}))) as { data?: Record<string, unknown> }).data ?? {};
+    }
+    return { runId, items: await readDataset(token, run, limit, deps), timedOutWithItems: false };
+  } finally {
+    if (started) {
+      const usd = typeof run.usageTotalUsd === "number" && Number.isFinite(run.usageTotalUsd) && run.usageTotalUsd >= 0 ? run.usageTotalUsd : null;
+      addApifyUsage(options.usage, { runs: 1, seconds: runSeconds(run, (now() - t0) / 1000), usd });
+    }
+  }
 }
 
 /** One retry (network/5xx/FAILED/timeout) with a short backoff; auth/permission/schema errors never retry. */
-async function runActorWithRetry(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, deps?: ApifyDeps): Promise<RunResult> {
+async function runActorWithRetry(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, deps: ApifyDeps | undefined, options: RunOptions): Promise<RunResult> {
   const sleep = deps?.sleep ?? defaultSleep;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await runActorOnce(token, pin, input, limit, deps);
+      return await runActorOnce(token, pin, input, limit, deps, options);
     } catch (error) {
       const retryable = error instanceof ProviderError && error.retryable && error.code !== "PROVIDER_RATE_LIMITED";
       if (!retryable || attempt >= APIFY_MAX_RETRIES) throw error;
@@ -274,7 +336,13 @@ type Normalized = {
   authorUrl: string | null;
   sourceUrl: string | null;
   text: string;
+  /** VE2E-51: dataset quality signals (TikTok) used by the pre-download filter. */
+  social?: SocialCandidateSignals;
+  /** VE2E-51: search-only phase - the video page URL to fetch in phase 2 (no file is stored yet). */
+  deferredPostUrl?: string;
 };
+
+type NormalizeOptions = { deferDownload?: boolean };
 
 const parseDuration = (v: unknown): number | null => {
   const n = num(v);
@@ -297,7 +365,21 @@ const tiktokPreview = (item: Json): string => {
   return "";
 };
 
-function normalizeTikTok(item: Json): Normalized | null {
+/** Hashtags arrive as strings or `{ name }` objects depending on the Actor build; both are accepted (clipped, max 30). */
+const tiktokHashtags = (item: Json): string[] => {
+  if (!Array.isArray(item.hashtags)) return [];
+  const out: string[] = [];
+  for (const tag of item.hashtags) {
+    const name = typeof tag === "string" ? clip(tag, 60) : isObj(tag) ? clip(tag.name ?? tag.title, 60) : "";
+    if (name) out.push(name);
+    if (out.length >= 30) break;
+  }
+  return out;
+};
+
+const TIKTOK_PAGE_HOSTS = ["tiktok.com"] as const;
+
+function normalizeTikTok(item: Json, options: NormalizeOptions = {}): Normalized | null {
   if (item.error || item.errorCode) return null;
   const externalId = clip(item.id, 64) || clip(at(item, "video", "id"), 64) || clip(item.postPage, 200);
   if (!externalId || item.isSlideshow === true) return null;
@@ -305,19 +387,41 @@ function normalizeTikTok(item: Json): Normalized | null {
   const kv = safeUrl(Array.isArray(item.mediaUrls) ? item.mediaUrls[0] : undefined, APIFY_HOST_ALLOWLIST.apifyApi);
   const kvOk = kv && new URL(kv).pathname.startsWith("/v2/key-value-stores/") ? kv : "";
   const author = clip(at(item, "authorMeta", "name"), 100) || clip(at(item, "channel", "username"), 100) || clip(at(item, "channel", "name"), 100) || null;
+  const pageUrl = anyHttpsUrl(item.webVideoUrl ?? item.postPage);
+  // Search-only phase: no stored file yet; the page URL (tiktok.com only) is what phase 2 downloads.
+  const deferred = !kvOk && options.deferDownload && pageUrl && safeUrl(pageUrl, TIKTOK_PAGE_HOSTS) ? pageUrl : "";
+  const durationSeconds = num(at(item, "videoMeta", "duration") ?? at(item, "video", "duration"));
+  const widthPx = num(at(item, "videoMeta", "width") ?? at(item, "video", "width"));
+  const heightPx = num(at(item, "videoMeta", "height") ?? at(item, "video", "height"));
+  const text = clip(item.text ?? item.title, 500);
+  const language = clip(item.textLanguage, 12);
+  const country = clip(at(item, "locationMeta", "countryCode"), 12);
   return {
     externalId,
     mediaType: "video",
     previewUrl: tiktokPreview(item),
     download: kvOk ? { url: kvOk, kind: "video", policy: "apify_api", hostSuffixes: [...APIFY_HOST_ALLOWLIST.apifyApi], maxBytes: APIFY_MAX_VIDEO_BYTES } : null,
-    ...(kvOk ? {} : { previewOnlyReason: "no_apify_stored_file" }),
-    durationSeconds: num(at(item, "videoMeta", "duration") ?? at(item, "video", "duration")),
-    widthPx: num(at(item, "videoMeta", "width") ?? at(item, "video", "width")),
-    heightPx: num(at(item, "videoMeta", "height") ?? at(item, "video", "height")),
+    ...(kvOk || deferred ? {} : { previewOnlyReason: "no_apify_stored_file" }),
+    ...(deferred ? { deferredPostUrl: deferred } : {}),
+    durationSeconds,
+    widthPx,
+    heightPx,
     author,
     authorUrl: anyHttpsUrl(at(item, "authorMeta", "profileUrl") ?? at(item, "channel", "url")) || null,
-    sourceUrl: anyHttpsUrl(item.webVideoUrl ?? item.postPage) || null,
-    text: clip(item.text ?? item.title, 500),
+    sourceUrl: pageUrl || null,
+    text,
+    social: {
+      videoId: externalId,
+      text,
+      hashtags: tiktokHashtags(item),
+      textLanguage: language || null,
+      countryCode: country || null,
+      isAd: item.isAd === true,
+      isSponsored: item.isSponsored === true,
+      widthPx,
+      heightPx,
+      durationSeconds,
+    },
   };
 }
 
@@ -457,7 +561,7 @@ function normalizeGoogleVideo(item: Json): Normalized | null {
   };
 }
 
-const NORMALIZERS: Record<ApifyPlatform, (item: Json) => Normalized | null> = {
+const NORMALIZERS: Record<ApifyPlatform, (item: Json, options: NormalizeOptions) => Normalized | null> = {
   tiktok: normalizeTikTok,
   pinterest: normalizePinterest,
   x: normalizeX,
@@ -467,16 +571,27 @@ const NORMALIZERS: Record<ApifyPlatform, (item: Json) => Normalized | null> = {
 
 // --- search ----------------------------------------------------------------------------------------------
 
-export type ApifyCandidateResult = { candidate: MediaCandidate; download: ApifyDownloadPlan | null };
+export type ApifyCandidateResult = {
+  candidate: MediaCandidate;
+  download: ApifyDownloadPlan | null;
+  /** VE2E-51: dataset quality signals (TikTok). */
+  social?: SocialCandidateSignals;
+  /** VE2E-51: search-only phase - page URL to download in phase 2 (`download` is null until then). */
+  deferredPostUrl?: string;
+};
 export type ApifySearchOutcome = {
   results: ApifyCandidateResult[];
   actor: { actorId: string; version: string; role: "primary" | "backup" };
   runId: string;
   /** Set when the primary failed and the backup produced this result. */
   primaryError: { code: string; message: string } | null;
+  /** VE2E-51: runs/seconds/USD of every attempt this call made (primary retries + backup). */
+  usage: ApifyUsage;
+  /** VE2E-51: the run hit TIMED-OUT but already had items, which were used. */
+  timedOutWithItems?: boolean;
 };
 
-export type ApifyCandidateContext = { query: string; providerAccountId: string; fetchedAt?: string };
+export type ApifyCandidateContext = { query: string; providerAccountId: string; fetchedAt?: string; deferDownload?: boolean };
 
 /** Turns raw (untrusted) dataset items into MediaCandidates; unusable items are dropped, never patched up. */
 export function normalizeApifyItems(
@@ -488,12 +603,12 @@ export function normalizeApifyItems(
   items.slice(0, APIFY_MAX_RESULTS).forEach((raw, index) => {
     if (!isObj(raw)) return;
     let n: Normalized | null = null;
-    try { n = NORMALIZERS[platform](raw); } catch { n = null; }
+    try { n = NORMALIZERS[platform](raw, { deferDownload: ctx.deferDownload === true }); } catch { n = null; }
     if (!n) return;
     const candidateId = `apify:${platform}:${n.mediaType}:${n.externalId}`;
     if (seen.has(candidateId)) return;
     seen.add(candidateId);
-    const importable = n.download !== null;
+    const importable = n.download !== null || Boolean(n.deferredPostUrl);
     const candidate: MediaCandidate = {
       candidateId,
       source: `apify:${platform}`,
@@ -524,29 +639,41 @@ export function normalizeApifyItems(
       moderationDecision: null,
       eligibility: importable ? { autoEligible: true } : { autoEligible: false, reason: n.previewOnlyReason ?? "discovery_only_no_import_capability" },
     };
-    out.push({ candidate, download: n.download });
+    out.push({ candidate, download: n.download, ...(n.social ? { social: n.social } : {}), ...(n.deferredPostUrl ? { deferredPostUrl: n.deferredPostUrl } : {}) });
   });
   return out;
 }
 
-const usable = (results: ApifyCandidateResult[]) => results.some((r) => r.download !== null || r.candidate.previewUrl);
+const usable = (results: ApifyCandidateResult[]) => results.some((r) => r.download !== null || r.deferredPostUrl || r.candidate.previewUrl);
+
+export type ApifySearchRunOptions = {
+  /** TikTok primary only: `false` = search-only phase (no file downloads; candidates carry `deferredPostUrl`). Default `true`. */
+  download?: boolean;
+  /** Run timeout override (seconds). Default {@link APIFY_RUN_TIMEOUT_SECS}. */
+  runTimeoutSecs?: number;
+  /** Receives usage of EVERY run this call started, also when the call throws (VE2E-51 cost accounting). */
+  usageSink?: ApifyUsage;
+};
 
 /**
  * Searches one platform through its pinned Actor. Primary first (with 1 retry); the pinned backup runs
  * only if the primary failed (not on auth/permission errors) or yielded nothing usable.
  */
-export async function searchApify(token: string, input: ApifySearchInput & { providerAccountId: string }, deps?: ApifyDeps): Promise<ApifySearchOutcome> {
+export async function searchApify(token: string, input: ApifySearchInput & ApifySearchRunOptions & { providerAccountId: string }, deps?: ApifyDeps): Promise<ApifySearchOutcome> {
   if (!isApifyPlatform(input.platform)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Unsupported Apify platform", false);
   const keyword = input.keyword.trim().replace(/\s+/g, " ").slice(0, 200);
   if (!keyword) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify search needs a keyword", false);
   const limit = Math.min(Math.max(Math.floor(input.limit ?? 10), 1), APIFY_MAX_RESULTS);
   const pins = APIFY_ACTOR_ALLOWLIST[input.platform];
-  const ctx: ApifyCandidateContext = { query: keyword, providerAccountId: input.providerAccountId };
+  const download = input.download !== false;
+  const usage = input.usageSink ?? emptyApifyUsage();
+  const ctx: ApifyCandidateContext = { query: keyword, providerAccountId: input.providerAccountId, deferDownload: !download };
+  const runOptions: RunOptions = { timeoutSecs: input.runTimeoutSecs ?? APIFY_RUN_TIMEOUT_SECS, usage };
 
   const attempt = async (pin: ApifyActorPin, role: "primary" | "backup"): Promise<ApifySearchOutcome> => {
-    const run = await runActorWithRetry(token, pin, buildActorInput(pin.actorId, keyword, input.lang, limit), limit, deps);
+    const run = await runActorWithRetry(token, pin, buildActorInput(pin.actorId, keyword, input.lang, limit, { download }), limit, deps, runOptions);
     const results = normalizeApifyItems(input.platform, run.items, { ...pin, role, runId: run.runId }, ctx);
-    return { results, actor: { ...pin, role }, runId: run.runId, primaryError: null };
+    return { results, actor: { ...pin, role }, runId: run.runId, primaryError: null, usage, ...(run.timedOutWithItems ? { timedOutWithItems: true } : {}) };
   };
 
   let primaryFailure: ProviderError | null = null;
@@ -562,4 +689,44 @@ export async function searchApify(token: string, input: ApifySearchInput & { pro
   }
   const backup = await attempt(pins.backup!, "backup").catch((error) => { if (primaryFailure && !primaryOutcome) throw primaryFailure; throw error; });
   return { ...backup, primaryError: primaryFailure ? { code: primaryFailure.code, message: primaryFailure.message } : null };
+}
+
+// --- VE2E-51 phase 2: download ONE chosen TikTok post ---------------------------------------------------------
+
+export type ApifyPostFetchInput = {
+  /** Page URL of the chosen video (must be https on tiktok.com). */
+  postUrl: string;
+  /** Platform video id the result MUST contain (guards against an Actor that ignores the post-URL input). */
+  expectedVideoId: string;
+  lang: ApifyLang;
+  providerAccountId: string;
+  /** Input field carrying the URL list; default {@link APIFY_TIKTOK_POST_URL_FIELD}. */
+  postUrlField?: string;
+  runTimeoutSecs?: number;
+  usageSink?: ApifyUsage;
+};
+
+/** Actor input for downloading exactly one post: the URL list, one result, download on. Exported for the handoff probe/tests. */
+export function buildTikTokPostInput(postUrl: string, lang: ApifyLang, postUrlField: string = APIFY_TIKTOK_POST_URL_FIELD): Record<string, unknown> {
+  return { [postUrlField]: [postUrl], resultsPerPage: 1, proxyCountryCode: countryOf(lang), shouldDownloadVideos: true, shouldDownloadCovers: true, shouldDownloadSlideshowImages: false };
+}
+
+/**
+ * Runs the pinned PRIMARY TikTok Actor for ONE post URL with download enabled and returns the importable candidate.
+ * The `postURLs` input field of `clockworks/tiktok-scraper` is UNVERIFIED here, so the result is only accepted when it
+ * holds an item with the expected video id AND a stored Key-Value-Store file; anything else throws
+ * PROVIDER_SCHEMA_INVALID so the caller can fall back to the single-phase flow. No backup Actor (different input shape).
+ */
+export async function fetchApifyTikTokPost(token: string, input: ApifyPostFetchInput, deps?: ApifyDeps): Promise<ApifySearchOutcome> {
+  const url = safeUrl(input.postUrl, ["tiktok.com"]);
+  const expected = input.expectedVideoId.trim();
+  if (!url || !expected) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify post fetch needs a tiktok.com URL and a video id", false);
+  const pin = APIFY_ACTOR_ALLOWLIST.tiktok.primary;
+  const usage = input.usageSink ?? emptyApifyUsage();
+  const field = /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(input.postUrlField ?? "") ? input.postUrlField! : APIFY_TIKTOK_POST_URL_FIELD;
+  const run = await runActorWithRetry(token, pin, buildTikTokPostInput(url, input.lang, field), 1, deps, { timeoutSecs: input.runTimeoutSecs ?? APIFY_DOWNLOAD_RUN_TIMEOUT_SECS, usage });
+  const results = normalizeApifyItems("tiktok", run.items, { ...pin, role: "primary", runId: run.runId }, { query: url, providerAccountId: input.providerAccountId });
+  const match = results.find((r) => r.candidate.externalId === expected && r.download !== null);
+  if (!match) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify post fetch returned no stored file for the requested video", false);
+  return { results: [match], actor: { ...pin, role: "primary" }, runId: run.runId, primaryError: null, usage, ...(run.timedOutWithItems ? { timedOutWithItems: true } : {}) };
 }

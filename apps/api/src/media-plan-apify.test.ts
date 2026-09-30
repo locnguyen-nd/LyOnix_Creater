@@ -163,8 +163,10 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     ledger.add({ mediaAssetVersionId: "earlier", kind: "video", durationMs: 1, externalId: "apify:tiktok:7001", sourcing: "imported" });
     ledger.add({ mediaAssetVersionId: "earlier-2", kind: "video", durationMs: 1, externalId: "555", sourcing: "imported" });
     const s = script();
+    let seen: string[] = [];
+    apify.autoImportForSegment.mockImplementationOnce(async (...args: any[]) => { seen = [...args[4].usedExternalIds].sort(); return apifyOk; });
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger });
-    expect([...apify.autoImportForSegment.mock.calls[0]![4].usedExternalIds].sort()).toEqual(["555", "7001"]);
+    expect(seen).toEqual(["555", "7001"]);
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_duplicate_or_unsupported_source" } });
   });
 

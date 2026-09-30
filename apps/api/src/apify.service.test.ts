@@ -101,11 +101,14 @@ describe("ApifyService - VE2E-34", () => {
     const original = slow.fetch!;
     slow.fetch = (async (input: string | URL | Request, init?: RequestInit) => { await gate; return original(input, init); }) as typeof fetch;
     service.apifyDeps = slow;
-    const first = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "桜" });
-    await Promise.resolve();
-    expect(await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "ラーメン" })).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
+    // VE2E-51: up to 3 distinct runs per (project, platform) at once; the 4th is refused, an identical one shares the run.
+    const queries = ["桜", "ラーメン", "寿司"];
+    const running = queries.map((query) => service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query }));
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "温泉" })).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
+    const sameAsFirst = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "桜" });
     release();
-    expect((await first).ok).toBe(true);
+    expect((await Promise.all([...running, sameAsFirst])).every((r) => r.ok)).toBe(true);
   });
 
   it("imports a TikTok candidate via api.apify.com with the server-side token, registers origin=apify with provenance", async () => {
@@ -221,13 +224,13 @@ describe("ApifyService.autoImportForSegment - VE2E-46 pool rules", () => {
   it("drops preview-only candidates before ranking (TikTok without a stored file never enters the pool)", async () => {
     service.apifyDeps = apifyStub([{ ...tiktokItem, mediaUrls: [] }]);
     const fetchSpy = vi.spyOn(safeBinaryFetch, "fetchBinarySafely");
-    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toEqual({ ok: false, reason: "apify_no_usable_candidate" });
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_no_usable_candidate" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("Pinterest HLS-only pins never enter the pool", async () => {
     service.apifyDeps = apifyStub([{ id: "p2", pin: { is_video: true }, media: { video: { hls_url: "https://v1.pinimg.com/videos/a.m3u8", thumbnail: "https://i.pinimg.com/x.jpg" } } }]);
-    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input("pinterest"))).toEqual({ ok: false, reason: "apify_no_usable_candidate" });
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input("pinterest"))).toMatchObject({ ok: false, reason: "apify_no_usable_candidate" });
   });
 
   it("refuses google_video outright without calling Apify", async () => {
@@ -239,7 +242,7 @@ describe("ApifyService.autoImportForSegment - VE2E-46 pool rules", () => {
 
   it("reports Apify search errors and failed imports as fallback reasons instead of throwing", async () => {
     service.apifyDeps = { fetch: (async () => json({ error: { message: "nope" } }, 500)) as unknown as typeof fetch, sleep: async () => undefined };
-    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toEqual({ ok: false, reason: "apify_error:PROVIDER_UNAVAILABLE" });
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_error:PROVIDER_UNAVAILABLE" });
     service.apifyDeps = apifyStub([{ ...tiktokItem, id: "7002" }]);
     vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: false, reason: "fetch_failed" });
     expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_import_failed:VALIDATION_FAILED" });

@@ -696,6 +696,36 @@ export type MediaPlanSegmentDiagnostics = {
   fallbackReason?: string | null;
   /** VE2E-46: audit trail of an Apify-sourced segment (also stored on the imported asset). */
   apifyProvenance?: { platform: string; actorId: string; actorVersion: string; sourceUrl: string | null; author: string | null; fetchedAt: string } | null;
+  /** VE2E-51: candidate filtering + two-phase flow of this segment's Apify attempt (also recorded when it fell back to Pexels). */
+  apifyQuality?: MediaPlanApifyQuality | null;
+};
+
+/** VE2E-51: why Apify candidates were kept/rejected before download, and how the chosen clip was obtained. */
+export type MediaPlanApifyQuality = {
+  considered: number;
+  passed: number;
+  /** Reject reason -> count (e.g. `language_mismatch`, `ad_or_sponsored`, `template_or_greenscreen`, `too_short`). */
+  rejected: Record<string, number>;
+  /** A few rejected examples (video id + reasons) for debugging; max 5. */
+  rejectedExamples: Array<{ videoId: string; reasons: string[] }>;
+  twoPhase: boolean;
+  /** `not_used` = single-phase or nothing chosen; `ok` = phase 2 downloaded only the chosen post; `fallback_single_phase` = phase 2 failed and the classic download search was used. */
+  phase2: "not_used" | "ok" | "fallback_single_phase" | "failed";
+  /** The chosen clip was already imported in the project library (same TikTok video id): no download. */
+  reusedLibraryAsset: boolean;
+  /** The search result came from the shared TTL cache or another segment's identical search (no new Actor run). */
+  searchReused: boolean;
+};
+
+/** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
+export type MediaPlanApifyUsage = {
+  runs: number;
+  seconds: number;
+  usd: number | null;
+  /** Searches answered without a new run (cache or identical (platform, keyword) in the same job). */
+  searchesReused: number;
+  /** Segments whose clip came from an asset already in the library. */
+  libraryReuses: number;
 };
 
 export type MediaPlanResponse = {
@@ -705,6 +735,8 @@ export type MediaPlanResponse = {
   scenes: Array<{ sceneId: string; mediaAssetVersionId: string | null; segmentId: string | null; sourceStartMs: number | null; sourceDurationMs: number | null }>;
   segments: TimelineSegmentInput[];
   diagnostics: MediaPlanSegmentDiagnostics[];
+  /** VE2E-51 */
+  apifyUsage?: MediaPlanApifyUsage | null;
 };
 
 export type VideoProductionSubmitResponse = {
@@ -738,6 +770,8 @@ export type VideoProductionResponse = {
   backgroundSegments: BackgroundSegmentsResolvedResponse;
   /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */
   mediaSourcing: MediaPlanSegmentDiagnostics[] | null;
+  /** VE2E-51: Apify runs/seconds/USD of this job (from the `media_plan_diagnostics` StepRun); `null` when none recorded. */
+  apifyUsage?: MediaPlanApifyUsage | null;
   createdAt: string;
   updatedAt: string;
 };

@@ -34,6 +34,8 @@ import {
 } from "@lyonix/domain";
 import type {
   ErrorCode,
+  MediaPlanApifyQuality,
+  MediaPlanApifyUsage,
   MediaPlanResponse,
   MediaPlanSegmentDiagnostics,
   ScriptVisualPlanResponse,
@@ -42,7 +44,7 @@ import type {
 } from "@lyonix/contracts";
 import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
-import { ApifyService } from "./apify.service.js";
+import { ApifyJobContext, ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -78,19 +80,45 @@ export type SegmentSource = {
   /** VE2E-46: recorded when Apify was tried/skipped and the source came from the Pexels fallback. */
   fallbackReason?: string | null;
   apifyProvenance?: MediaPlanSegmentDiagnostics["apifyProvenance"];
+  /** VE2E-51: candidate filtering / two-phase details of the Apify attempt (kept when it fell back to Pexels). */
+  apifyQuality?: MediaPlanApifyQuality | null;
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
+
+/** Serialises async sections (used for the Pexels fallback so concurrent segments never pick the same stock clip). */
+class Mutex {
+  private tail: Promise<unknown> = Promise.resolve();
+  run<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(task, task);
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
+}
+
+const plainExternalId = (id: string) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id);
 
 /** Tracks what earlier segments of one plan already used - a new segment must never pick any of these. */
 export class SegmentSourceLedger {
   readonly externalIds = new Set<string>();
   readonly assetIds = new Set<string>();
+  /**
+   * VE2E-51: plain platform video ids (`apify:tiktok:<id>` -> `<id>`), a LIVE set shared with `ApifyService.autoImportForSegment`,
+   * which reserves the chosen id in it before any await so concurrently sourced segments cannot pick the same clip.
+   */
+  readonly apifyPlainIds = new Set<string>();
+  readonly pexelsLock = new Mutex();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
-    if (source.externalId) this.externalIds.add(source.externalId);
+    if (source.externalId) {
+      this.externalIds.add(source.externalId);
+      this.apifyPlainIds.add(plainExternalId(source.externalId));
+    }
   }
 }
+
+/** VE2E-51: at most this many segments are sourced at once. */
+export const MEDIA_PLAN_SOURCING_CONCURRENCY = 3;
 
 /** Pexels imports are registered as `pexels-<id>.<ext>` (pexels.service.ts `import`); that is the only place the external id survives on the asset row. */
 export const pexelsExternalIdFromFileName = (fileName: string): string | null => /^pexels-(\d+)\./.exec(fileName)?.[1] ?? null;
@@ -189,8 +217,8 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
-  ): Promise<{ source: SegmentSource } | { reason: string | null }> {
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
+  ): Promise<{ source: SegmentSource } | { reason: string | null; quality?: MediaPlanApifyQuality | null }> {
     if (!this.apify) return { reason: null };
     const keyword = apifyKeywordForSegment(input.script, input.segment);
     if (!keyword) return { reason: "no_ja_keywords" };
@@ -198,18 +226,24 @@ export class MediaPlanService {
       const account = await this.apify.findAccountForUser(userId, role);
       if (!account) return { reason: "no_apify_account" };
       const brief = this.segmentBrief(input.script, input.segment);
-      const usedExternalIds = new Set([...input.ledger.externalIds].map((id) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id)));
+      // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
+      const usedExternalIds = input.ledger.apifyPlainIds;
       const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {
         platform: apifyAutoPlatformFromEnv(),
         keyword,
         brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
         sceneId: input.segment.sceneIds[0]!,
         usedExternalIds,
+        scriptLanguage: input.script.language,
+        segmentDurationSeconds: input.segment.durationMs / 1000,
+        ...(input.job ? { job: input.job } : {}),
       });
-      if (!outcome.ok) return { reason: outcome.reason };
+      if (!outcome.ok) return { reason: outcome.reason, quality: outcome.quality ?? null };
       const asset = outcome.data.asset;
       if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
-        return { reason: "apify_duplicate_or_unsupported_source" };
+        // Release the reservation made by ApifyService (the ledger itself never held this clip).
+        if (!input.ledger.externalIds.has(outcome.data.ledgerId)) usedExternalIds.delete(outcome.data.externalId);
+        return { reason: "apify_duplicate_or_unsupported_source", quality: outcome.data.quality };
       }
       const provenance = outcome.data.provenance;
       return {
@@ -221,6 +255,7 @@ export class MediaPlanService {
           sourcing: "imported",
           provider: "apify",
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
+          apifyQuality: outcome.data.quality,
         },
       };
     } catch {
@@ -233,28 +268,101 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const apifyAttempt = await this.tryApify(projectId, userId, role, input);
     if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
     const fallbackReason = apifyAttempt.reason;
+    const apifyQuality = apifyAttempt.quality ?? null;
     const brief = this.segmentBrief(input.script, input.segment);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
-    const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
-      providerAccountId: input.providerAccountId,
-      sceneId: input.segment.sceneIds[0]!,
-      query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
-      sceneBrief: brief,
-      usedExternalIds: [...input.ledger.externalIds],
+    // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
+    return input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
+      const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
+        providerAccountId: input.providerAccountId,
+        sceneId: input.segment.sceneIds[0]!,
+        query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
+        sceneBrief: brief,
+        usedExternalIds: [...input.ledger.externalIds],
+      });
+      if (!outcome.ok) return outcome;
+      const asset = outcome.data.asset;
+      if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
+      if (input.ledger.assetIds.has(asset.id)) {
+        // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
+        return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
+      }
+      const source: SegmentSource = { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason, ...(apifyQuality ? { apifyQuality } : {}) };
+      input.ledger.add(source);
+      return { ok: true, data: source };
     });
-    if (!outcome.ok) return outcome;
-    const asset = outcome.data.asset;
-    if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
-    if (input.ledger.assetIds.has(asset.id)) {
-      // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
-      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
-    }
-    return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason } };
+  }
+
+  /**
+   * VE2E-51: sources every segment with bounded concurrency ({@link MEDIA_PLAN_SOURCING_CONCURRENCY} = 3), sharing one
+   * `ApifyJobContext` (identical (platform, keyword) searches share one Actor run; per-job usage is returned). Each segment first
+   * tries `findReusableSource` (retry/Studio idempotency), else `importSegmentSource` (optionally wrapped by `runImport`, which
+   * the Auto runner uses for its per-segment StepRun bookkeeping and may throw). A source is added to the ledger the moment it is
+   * known, so a later segment can never take it. `stopOnFailure` (Auto): after the first thrown failure no new segment starts,
+   * in-flight ones finish, and the failure with the lowest segment index is returned in `failure`. Results keep segment order.
+   */
+  async sourceSegments(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: {
+      providerAccountId: string;
+      script: MediaPlanScript;
+      segments: PlannedSegment[];
+      ledger: SegmentSourceLedger;
+      concurrency?: number;
+      stopOnFailure?: boolean;
+      runImport?: (segment: PlannedSegment, task: () => Promise<MediaPlanOutcome<SegmentSource>>) => Promise<MediaPlanOutcome<SegmentSource>>;
+    },
+  ): Promise<{ sourced: SourcedSegment[]; failure: { segment: PlannedSegment; error: unknown } | null; apifyUsage: MediaPlanApifyUsage | null }> {
+    const job = new ApifyJobContext();
+    const results: Array<SourcedSegment | undefined> = new Array(input.segments.length).fill(undefined);
+    let failure: { index: number; error: unknown } | null = null;
+    let next = 0;
+    const one = async (segment: PlannedSegment): Promise<SourcedSegment> => {
+      let source = await this.findReusableSource(projectId, segment, input.ledger);
+      let errorCode: string | null = null;
+      if (!source) {
+        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
+        const imported = await (input.runImport ? input.runImport(segment, task) : task());
+        if (imported.ok) source = imported.data;
+        else errorCode = imported.code;
+      }
+      if (source) input.ledger.add(source);
+      return { segment, source, errorCode };
+    };
+    const worker = async () => {
+      for (;;) {
+        if (input.stopOnFailure && failure) return;
+        const index = next++;
+        if (index >= input.segments.length) return;
+        const segment = input.segments[index]!;
+        try {
+          results[index] = await one(segment);
+        } catch (error) {
+          if (input.stopOnFailure) {
+            if (!failure || index < failure.index) failure = { index, error };
+          } else {
+            results[index] = { segment, source: null, errorCode: "PROVIDER_UNAVAILABLE" };
+          }
+        }
+      }
+    };
+    const width = Math.max(1, Math.min(input.concurrency ?? MEDIA_PLAN_SOURCING_CONCURRENCY, input.segments.length || 1));
+    await Promise.all(Array.from({ length: width }, () => worker()));
+    const u = job.usage;
+    const touched = u.runs > 0 || u.searchesReused > 0 || u.libraryReuses > 0;
+    const failed = failure as { index: number; error: unknown } | null;
+    return {
+      sourced: results.filter((entry): entry is SourcedSegment => entry !== undefined),
+      failure: failed ? { segment: input.segments[failed.index]!, error: failed.error } : null,
+      apifyUsage: touched ? { runs: u.runs, seconds: u.seconds, usd: u.usd, searchesReused: u.searchesReused, libraryReuses: u.libraryReuses } : null,
+    };
   }
 
   /** Per-scene bindings + timeline segments for the sourced segments (a segment without a source leaves its scenes unbound). */
@@ -288,6 +396,7 @@ export class MediaPlanService {
         ...(source?.provider ? { sourceProvider: source.provider } : {}),
         ...(source?.fallbackReason ? { fallbackReason: source.fallbackReason } : {}),
         ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
+        ...(source?.apifyQuality ? { apifyQuality: source.apifyQuality } : {}),
       });
     }
     return {
@@ -344,18 +453,7 @@ export class MediaPlanService {
     const totalSeconds = planScript.scenes.reduce((total, scene) => total + sceneDuration(scene), 0) / 1000;
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
-    const sourced: SourcedSegment[] = [];
-    for (const segment of this.planSegments(planScript, range)) {
-      let source = await this.findReusableSource(projectId, segment, ledger);
-      let errorCode: string | null = null;
-      if (!source) {
-        const imported = await this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segment, ledger });
-        if (imported.ok) source = imported.data;
-        else errorCode = imported.code;
-      }
-      if (source) ledger.add(source);
-      sourced.push({ segment, source, errorCode });
-    }
+    const { sourced, apifyUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger });
     const built = this.buildBindings(planScript, sourced);
     return {
       ok: true,
@@ -365,6 +463,7 @@ export class MediaPlanService {
         scenes: built.scenes.map(({ mediaKind: _mediaKind, ...scene }) => scene),
         segments: built.segments,
         diagnostics: built.diagnostics,
+        ...(apifyUsage ? { apifyUsage } : {}),
       },
     };
   }

@@ -17,15 +17,22 @@
  * (project, platform) single-flight guard and a 15-minute result cache avoid paying twice for the same query.
  */
 import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
+  APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
   APIFY_HOST_ALLOWLIST,
   ProviderError,
+  addApifyUsage,
+  emptyApifyUsage,
+  fetchApifyTikTokPost,
   hostMatchesSuffix,
   isLiveContentKind,
   moderateSceneCandidate,
   isApifyPlatform,
   searchApify,
+  type ApifyUsage,
   type ApifyCandidateResult,
   type ApifyDeps,
   type ApifyDownloadPlan,
@@ -43,11 +50,13 @@ import {
   decideMediaSelection,
   decideVisionModeration,
   rankMediaCandidates,
+  selectSocialCandidates,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
-import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode } from "@lyonix/contracts";
+import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality } from "@lyonix/contracts";
 import { GrantsService } from "./grants.service.js";
+import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
@@ -60,7 +69,47 @@ type MediaAssetVersionSummaryLike = ApifyImportResponse["asset"];
 export type ApifyOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
 const IMPORT_REF_TTL_MS = 30 * 60 * 1000;
-const RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
+/** VE2E-51: TTL of the shared search cache (memory + file, so the API process (Studio) and the worker process (Auto) share it). Env `APIFY_CACHE_TTL_MS`. */
+const DEFAULT_RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
+const resultCacheTtlMs = () => {
+  const value = Number(process.env.APIFY_CACHE_TTL_MS);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_RESULT_CACHE_TTL_MS;
+};
+/** VE2E-51: Actor runs allowed at once per (project, platform); segment sourcing runs at most 3 in parallel. */
+export const APIFY_MAX_CONCURRENT_RUNS = 3;
+/** VE2E-51: phase-1 result count and how many filtered candidates go on to vision moderation/ranking. */
+export const APIFY_SEARCH_LIMIT = 10;
+const MAX_FILTERED_POOL = 8;
+const flagOn = (value: string | undefined, fallback: boolean) => (value === undefined || value.trim() === "" ? fallback : !/^(0|false|off|no)$/i.test(value.trim()));
+/**
+ * `APIFY_TWO_PHASE` (default OFF until the Test agent's read-only probe confirms the `postURLs` input of
+ * `clockworks/tiktok-scraper`; see the VE2E-51 handoff): `1` = search without download, then download only the chosen post.
+ */
+export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, false);
+/** `APIFY_TWO_PHASE_FALLBACK` (default on): when phase 2 fails, fall back to the single-phase download search. */
+export const apifyTwoPhaseFallbackEnabled = () => flagOn(process.env.APIFY_TWO_PHASE_FALLBACK, true);
+
+/**
+ * VE2E-51: state of ONE sourcing job (Auto run or Studio media plan): accumulated Apify spend and the identical
+ * (platform, keyword) searches already made, so segments with the same keyword share one Actor run.
+ */
+export class ApifyJobContext {
+  readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
+  readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
+  addRun(usage: ApifyUsage) {
+    addApifyUsage(this.usage, usage);
+  }
+  snapshot() {
+    return { ...this.usage };
+  }
+}
+
+const emptyQuality = (twoPhase: boolean): MediaPlanApifyQuality => ({ considered: 0, passed: 0, rejected: {}, rejectedExamples: [], twoPhase, phase2: "not_used", reusedLibraryAsset: false, searchReused: false });
+
+export type AutoImportedAsset = Pick<MediaAssetVersionSummaryLike, "id" | "kind" | "durationMs">;
+export type AutoImportOutcome =
+  | { ok: true; data: { asset: AutoImportedAsset; externalId: string; ledgerId: string; provenance: MediaCandidate["provenance"]["apify"] | null; platform: ApifyPlatform; quality: MediaPlanApifyQuality } }
+  | { ok: false; reason: string; quality?: MediaPlanApifyQuality };
 /** Vision moderation spend guard per segment source (same bound as Pexels, VE2E-29). */
 const MAX_VISION_CANDIDATES_PER_SEGMENT = 5;
 const MAX_VISION_PREVIEW_BYTES = 4 * 1024 * 1024;
@@ -95,7 +144,10 @@ const extFor = (mime: string) => ({ "image/jpeg": "jpg", "image/png": "png", "im
 @Injectable()
 export class ApifyService {
   private readonly cache = new Map<string, { at: number; outcome: ApifySearchOutcome }>();
-  private readonly inflight = new Set<string>();
+  /** Identical searches already running (any job/Studio call) share one promise instead of paying twice. */
+  private readonly pending = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
+  /** Running Actor searches per `project:platform` (bounded by {@link APIFY_MAX_CONCURRENT_RUNS}). */
+  private readonly running = new Map<string, number>();
   /** Test seam: stubbed Apify API. Production leaves this undefined (global fetch). */
   apifyDeps: ApifyDeps | undefined;
 
@@ -128,28 +180,119 @@ export class ApifyService {
   async searchRaw(
     projectId: string,
     account: { id: string; encryptedSecret: string },
-    input: { platform: ApifyPlatform; keyword: string; lang: ApifyLang; limit?: number },
+    input: { platform: ApifyPlatform; keyword: string; lang: ApifyLang; limit?: number; download?: boolean; runTimeoutSecs?: number },
+    job?: ApifyJobContext,
   ): Promise<ApifyOutcome<ApifySearchOutcome>> {
+    return (await this.searchShared(projectId, account, input, job)).outcome;
+  }
+
+  private cacheDir() {
+    return join(mediaRoot(), "_apify_cache");
+  }
+
+  private async readFileCache(key: string, ttl: number): Promise<ApifySearchOutcome | null> {
+    try {
+      const path = join(this.cacheDir(), `${key}.json`);
+      const info = await stat(path);
+      if (Date.now() - info.mtimeMs >= ttl) return null;
+      const parsed = JSON.parse(await readFile(path, "utf8")) as ApifySearchOutcome;
+      return parsed && Array.isArray(parsed.results) && parsed.actor && typeof parsed.runId === "string" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeFileCache(key: string, outcome: ApifySearchOutcome, ttl: number): Promise<void> {
+    try {
+      const dir = this.cacheDir();
+      await mkdir(dir, { recursive: true });
+      const tmp = join(dir, `${key}.${process.pid}.tmp`);
+      await writeFile(tmp, JSON.stringify(outcome));
+      await rename(tmp, join(dir, `${key}.json`));
+      // Best-effort prune of expired entries (working files are short-lived, never kept for days).
+      for (const name of await readdir(dir)) {
+        const info = await stat(join(dir, name)).catch(() => null);
+        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, 60_000)) await unlink(join(dir, name)).catch(() => undefined);
+      }
+    } catch {
+      // The cache is an optimisation only.
+    }
+  }
+
+  /**
+   * VE2E-51 shared search: TTL cache (memory + file, shared by Studio and Auto), identical (platform, keyword) searches of one
+   * job reused, identical in-flight searches share one run, up to {@link APIFY_MAX_CONCURRENT_RUNS} distinct runs per
+   * (project, platform). A search-only request is also answered from a cached full-download result (superset).
+   */
+  private async searchShared(
+    projectId: string,
+    account: { id: string; encryptedSecret: string },
+    input: { platform: ApifyPlatform; keyword: string; lang: ApifyLang; limit?: number; download?: boolean; runTimeoutSecs?: number },
+    job?: ApifyJobContext,
+  ): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> {
     const limit = Math.min(Math.max(Math.floor(input.limit ?? 10), 1), 20);
     const keyword = input.keyword.trim().replace(/\s+/g, " ");
-    const cacheKey = createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.toLowerCase()].join("\u0000")).digest("hex");
-    const now = Date.now();
-    const cached = this.cache.get(cacheKey);
-    if (cached && now - cached.at < RESULT_CACHE_TTL_MS) return { ok: true, data: cached.outcome };
-    // One Actor run at a time per (project, platform): a second concurrent search is refused, not queued.
-    const flightKey = `${projectId}:${input.platform}`;
-    if (this.inflight.has(flightKey)) return { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Đang có một lượt tìm Apify cho nền tảng này, thử lại sau.", status: 429, retryable: true };
-    this.inflight.add(flightKey);
-    try {
-      const outcome = await searchApify(decryptSecret(account.encryptedSecret), { platform: input.platform, keyword, lang: input.lang, limit, providerAccountId: account.id }, this.apifyDeps);
-      this.cache.set(cacheKey, { at: now, outcome });
-      if (this.cache.size > 200) for (const [key, value] of this.cache) if (now - value.at >= RESULT_CACHE_TTL_MS) this.cache.delete(key);
-      return { ok: true, data: outcome };
-    } catch (error) {
-      return { ok: false, ...providerFailure(error) };
-    } finally {
-      this.inflight.delete(flightKey);
+    const download = input.download !== false;
+    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
+    const key = keyFor(download);
+    const altKey = download ? null : keyFor(true);
+    const ttl = resultCacheTtlMs();
+
+    const memo = job?.searches.get(key);
+    if (memo) {
+      job!.usage.searchesReused += 1;
+      return { outcome: await memo, reused: true };
     }
+    const work = (async (): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> => {
+      if (ttl > 0) {
+        const now = Date.now();
+        for (const candidate of altKey ? [key, altKey] : [key]) {
+          const hit = this.cache.get(candidate);
+          if (hit && now - hit.at < ttl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
+        }
+        for (const candidate of altKey ? [key, altKey] : [key]) {
+          const hit = await this.readFileCache(candidate, ttl);
+          if (hit) {
+            this.cache.set(candidate, { at: now, outcome: hit });
+            return { outcome: { ok: true, data: hit }, reused: true };
+          }
+        }
+      }
+      const inFlight = this.pending.get(key);
+      if (inFlight) return { outcome: await inFlight, reused: true };
+      const flightKey = `${projectId}:${input.platform}`;
+      if ((this.running.get(flightKey) ?? 0) >= APIFY_MAX_CONCURRENT_RUNS) {
+        return { outcome: { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Đang có quá nhiều lượt tìm Apify cho nền tảng này, thử lại sau.", status: 429, retryable: true }, reused: false };
+      }
+      this.running.set(flightKey, (this.running.get(flightKey) ?? 0) + 1);
+      const usage = emptyApifyUsage();
+      const run = (async (): Promise<ApifyOutcome<ApifySearchOutcome>> => {
+        try {
+          const outcome = await searchApify(
+            decryptSecret(account.encryptedSecret),
+            { platform: input.platform, keyword, lang: input.lang, limit, providerAccountId: account.id, download, usageSink: usage, ...(input.runTimeoutSecs ? { runTimeoutSecs: input.runTimeoutSecs } : {}) },
+            this.apifyDeps,
+          );
+          if (ttl > 0) {
+            const now = Date.now();
+            this.cache.set(key, { at: now, outcome });
+            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= ttl) this.cache.delete(k);
+            await this.writeFileCache(key, outcome, ttl);
+          }
+          return { ok: true, data: outcome };
+        } catch (error) {
+          return { ok: false, ...providerFailure(error) };
+        } finally {
+          job?.addRun(usage);
+          this.running.set(flightKey, Math.max(0, (this.running.get(flightKey) ?? 1) - 1));
+        }
+      })();
+      this.pending.set(key, run);
+      void run.then(() => { if (this.pending.get(key) === run) this.pending.delete(key); });
+      return { outcome: await run, reused: false };
+    })();
+    job?.searches.set(key, work.then((result) => result.outcome));
+    return work;
   }
 
   private seal(projectId: string, providerAccountId: string, platform: ApifyPlatform, result: ApifyCandidateResult): string | null {
@@ -306,24 +449,108 @@ export class ApifyService {
     return pool.map((c) => byId.get(c.candidateId) ?? c);
   }
 
+  /** VE2E-51: an asset of this project already imported from the same platform video (no second download). */
+  private async findLibraryAsset(projectId: string, platform: ApifyPlatform, externalId: string): Promise<AutoImportedAsset | null> {
+    const safeId = externalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+    if (!safeId) return null;
+    try {
+      const row = await this.prisma.mediaAssetVersion.findFirst({
+        where: { projectId, deletedAt: null, parentMediaAssetVersionId: null, kind: "video", originalFileName: { startsWith: `apify-${platform}-${safeId}.` } },
+        orderBy: { createdAt: "desc" },
+      });
+      return row ? { id: row.id, kind: row.kind as AutoImportedAsset["kind"], durationMs: row.durationMs } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Phase 2: run the primary TikTok Actor for ONE chosen post with download on; the result is import-ready. Usage goes to the job. */
+  private async fetchChosenPost(
+    account: { id: string; encryptedSecret: string },
+    chosen: ApifyCandidateResult,
+    job: ApifyJobContext,
+  ): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    const usage = emptyApifyUsage();
+    try {
+      const outcome = await fetchApifyTikTokPost(
+        decryptSecret(account.encryptedSecret),
+        {
+          postUrl: chosen.deferredPostUrl ?? "",
+          expectedVideoId: chosen.candidate.externalId,
+          lang: "ja",
+          providerAccountId: account.id,
+          runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+          usageSink: usage,
+          ...(process.env.APIFY_TIKTOK_POST_URL_FIELD ? { postUrlField: process.env.APIFY_TIKTOK_POST_URL_FIELD } : {}),
+        },
+        this.apifyDeps,
+      );
+      const result = outcome.results[0];
+      return result ? { ok: true, result } : { ok: false, code: "PROVIDER_SCHEMA_INVALID" };
+    } catch (error) {
+      return { ok: false, code: error instanceof ProviderError ? error.code : "PROVIDER_UNAVAILABLE" };
+    } finally {
+      job.addRun(usage);
+    }
+  }
+
   /**
-   * VE2E-46 Auto/Studio-auto-fill source for ONE segment: a single Apify search (one platform, the segment's `keywords.ja`),
-   * then the shared domain ranking + one vision pass + `decideMediaSelection`, then import of the winner. The pool only ever
-   * holds importable, auto-eligible candidates: Google video and preview-only (Pinterest HLS-only, TikTok without a stored file)
-   * candidates are dropped BEFORE ranking. Never throws; any failure is reported as `reason` so the caller can fall back to Pexels.
+   * VE2E-46/51 Auto/Studio-auto-fill source for ONE segment. For TikTok (default two-phase flow):
+   *  1. one search WITHOUT downloading (10 results; identical (platform, keyword) searches of a job and the shared TTL cache
+   *     are reused), 2. dataset-evidence filter + ranking (`selectSocialCandidates`: ja language, JP location, no ads/sponsored,
+   *     no template/greenscreen/CapCut, vertical, duration >= the segment, keyword overlap; reject reasons -> `quality`),
+   *     3. the shared vision pass + `decideMediaSelection` over the survivors, 4. the winner is taken from the project library
+   *     when its video id was already imported, else 5. the Actor runs for ONLY the chosen post URL with download on (falling
+   *     back to the classic download search when `APIFY_TWO_PHASE_FALLBACK` is on), then the KV-store import.
+   * Other platforms, and TikTok with `APIFY_TWO_PHASE=0`, keep the single-phase flow (download during the search).
+   * The chosen video id is reserved in `usedExternalIds` (the caller's live set) synchronously at decision time, so segments
+   * sourced concurrently can never pick the same clip. Google video and preview-only candidates never enter the pool.
+   * Never throws; any failure is a `reason` so the caller can fall back to Pexels.
    */
   async autoImportForSegment(
     projectId: string,
     userId: string,
     role: "admin" | "staff",
     account: { id: string; encryptedSecret: string },
-    input: { platform: ApifyPlatform; keyword: string; brief: SceneBrief; sceneId: string; usedExternalIds: ReadonlySet<string> },
-  ): Promise<{ ok: true; data: { asset: MediaAssetVersionSummaryLike; externalId: string; ledgerId: string; provenance: MediaCandidate["provenance"]["apify"] | null; platform: ApifyPlatform } } | { ok: false; reason: string }> {
+    input: {
+      platform: ApifyPlatform;
+      keyword: string;
+      brief: SceneBrief;
+      sceneId: string;
+      /** Plain platform video ids already used (live set: the chosen id is added here before any await). */
+      usedExternalIds: Set<string>;
+      /** Script language: `ja` scripts only accept Japanese-language, JP-located clips (else Pexels). Omitted = no language rule. */
+      scriptLanguage?: string;
+      /** The segment's duration: candidates shorter than this are rejected (they would loop). */
+      segmentDurationSeconds?: number;
+      job?: ApifyJobContext;
+    },
+  ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
-    const searched = await this.searchRaw(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: 10 });
-    if (!searched.ok) return { ok: false, reason: `apify_error:${searched.code}` };
-    const usable = searched.data.results.filter((r) => r.download !== null && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible);
-    if (usable.length === 0) return { ok: false, reason: "apify_no_usable_candidate" };
+    const job = input.job ?? new ApifyJobContext();
+    const twoPhase = input.platform === "tiktok" && apifyTwoPhaseEnabled();
+    const quality = emptyQuality(twoPhase);
+    const fail = (reason: string): AutoImportOutcome => ({ ok: false, reason, quality });
+    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
+    quality.searchReused = searched.reused;
+    if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
+    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds };
+    /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
+    const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
+      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible);
+      if (input.platform !== "tiktok") return eligible;
+      const selection = selectSocialCandidates(
+        eligible.filter((r) => r.social).map((r) => ({ ref: r, signals: r.social! })),
+        filterContext,
+      );
+      quality.considered = eligible.length;
+      quality.passed = selection.passed.length;
+      quality.rejected = selection.rejectCounts;
+      quality.rejectedExamples = selection.rejected.slice(0, 5).map((r) => ({ videoId: r.videoId, reasons: [...r.reasons] }));
+      return selection.passed.slice(0, MAX_FILTERED_POOL).map((p) => p.ref);
+    };
+    const usable = shortlist(searched.outcome.data.results);
+    if (usable.length === 0) return fail("apify_no_usable_candidate");
     const byCandidateId = new Map(usable.map((r) => [r.candidate.candidateId, r] as const));
     let pool = usable.map((r) => r.candidate);
     try {
@@ -332,14 +559,68 @@ export class ApifyService {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }
     const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: true });
-    if (decision.decision === "needs_input") return { ok: false, reason: `apify_abstained:${decision.reason}` };
+    if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
     const chosen = byCandidateId.get(decision.chosen.candidateId);
-    if (!chosen) return { ok: false, reason: "apify_no_usable_candidate" };
-    const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate: decision.chosen, download: chosen.download }, { sceneId: input.sceneId });
-    if (!imported.ok) return { ok: false, reason: `apify_import_failed:${imported.code}` };
+    if (!chosen) return fail("apify_no_usable_candidate");
+    const externalId = decision.chosen.externalId;
+    // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
+    input.usedExternalIds.add(externalId);
+    const release = () => input.usedExternalIds.delete(externalId);
+    const done = (asset: AutoImportedAsset, candidate: MediaCandidate): AutoImportOutcome => ({
+      ok: true,
+      data: { asset, externalId, ledgerId: `${decision.chosen.source}:${externalId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
+    });
+
+    const library = await this.findLibraryAsset(projectId, input.platform, externalId);
+    if (library) {
+      quality.reusedLibraryAsset = true;
+      job.usage.libraryReuses += 1;
+      return done(library, decision.chosen);
+    }
+
+    let toImport: ApifyCandidateResult | null = chosen.download ? chosen : null;
+    if (!toImport) {
+      const phase2 = await this.fetchChosenPost(account, chosen, job);
+      if (phase2.ok) {
+        quality.phase2 = "ok";
+        toImport = phase2.result;
+      } else if (!apifyTwoPhaseFallbackEnabled()) {
+        quality.phase2 = "failed";
+        release();
+        return fail(`apify_phase2_failed:${phase2.code}`);
+      } else {
+        // Classic single-phase flow: search WITH download (240 s), then take the same clip, else the best filtered one.
+        quality.phase2 = "fallback_single_phase";
+        const full = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: true, runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS }, job);
+        if (!full.outcome.ok) {
+          release();
+          return fail(`apify_phase2_failed:${full.outcome.code}`);
+        }
+        const withFile = full.outcome.data.results.filter((r) => r.download !== null);
+        toImport = withFile.find((r) => r.candidate.externalId === externalId) ?? null;
+        if (!toImport) {
+          input.usedExternalIds.delete(externalId);
+          const alternative = shortlist(withFile)[0] ?? null;
+          if (alternative) input.usedExternalIds.add(alternative.candidate.externalId);
+          toImport = alternative;
+        }
+        if (!toImport) {
+          release();
+          return fail("apify_phase2_failed:no_stored_file");
+        }
+      }
+    }
+    const importedId = toImport.candidate.externalId;
+    const candidate: MediaCandidate = { ...toImport.candidate, provenance: { ...toImport.candidate.provenance, query: input.keyword } };
+    const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
+    if (!imported.ok) {
+      input.usedExternalIds.delete(importedId);
+      release();
+      return fail(`apify_import_failed:${imported.code}`);
+    }
     return {
       ok: true,
-      data: { asset: imported.data.asset, externalId: decision.chosen.externalId, ledgerId: `${decision.chosen.source}:${decision.chosen.externalId}`, provenance: decision.chosen.provenance.apify ?? null, platform: input.platform },
+      data: { asset: imported.data.asset, externalId: importedId, ledgerId: `${candidate.source}:${importedId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
     };
   }
 
