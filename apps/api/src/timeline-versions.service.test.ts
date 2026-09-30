@@ -265,6 +265,41 @@ describe("TimelineVersionsService", () => {
     });
   });
 
+  describe("VE2E-44 default video ranges at approve", () => {
+    beforeEach(() => {
+      mediaRows.push({ id: "media-short", projectId, kind: "video", durationMs: 4200, deletedAt: null });
+      prisma.audioVersion.findMany = async ({ where }: any) => (where.id?.in ?? []).map((id: string) => ({ id, mediaAssetVersionId: "audio-media", durationMs: 4000, sceneDraftVersion: { scriptDraftVersion: { sourceVersion: { projectId } } } }));
+    });
+    const stored = () => timelineRows[0].scenes as any[];
+
+    it("persists [0, voice duration] for a video scene without a range; leaves image, short asset and existing ranges alone", async () => {
+      const saved = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null, templateSnapshotId: "template-1",
+        scenes: [
+          { sceneId: "long", mediaAssetVersionId: "media-1", audioVersionId: "a1" },
+          { sceneId: "img", mediaAssetVersionId: "media-2", audioVersionId: "a1" },
+          { sceneId: "short", mediaAssetVersionId: "media-short", audioVersionId: "a1" },
+          { sceneId: "ranged", mediaAssetVersionId: "media-1", audioVersionId: "a1", sourceStartMs: 7000, sourceDurationMs: 2000 },
+        ],
+      });
+      if (!saved.ok) throw new Error(JSON.stringify(saved));
+      const approved = await service.approve(saved.data.id, "user-1", "staff");
+      expect(approved.ok).toBe(true);
+      const byId = Object.fromEntries(stored().map((s) => [s.sceneId, s]));
+      expect(byId.long).toMatchObject({ sourceStartMs: 0, sourceDurationMs: 4000 });
+      expect(byId.img.sourceStartMs ?? null).toBeNull();
+      expect(byId.short.sourceStartMs ?? null).toBeNull();
+      expect(byId.ranged).toMatchObject({ sourceStartMs: 7000, sourceDurationMs: 2000 });
+    });
+
+    it("also persists on the Auto approved-write path", async () => {
+      const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", {
+        templateSnapshotId: "template-1", optionValues: {}, scenes: [{ sceneId: "long", mediaAssetVersionId: "media-1", audioVersionId: "a1" }],
+      });
+      expect(outcome).toMatchObject({ ok: true, data: { scenes: [{ sceneId: "long", sourceStartMs: 0, sourceDurationMs: 4000 }] } });
+    });
+  });
+
   describe("persistApprovedForWorkflowRun (VE2E-42 Auto path)", () => {
     const input = { templateSnapshotId: "template-1", scenes: [{ sceneId: "s1", mediaAssetVersionId: "media-1", screenTextOverride: "Narration 1" }], optionValues: {} };
 

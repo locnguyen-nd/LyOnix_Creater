@@ -790,6 +790,50 @@ describe("RenderJobsService", () => {
       expect(cut.worker.jobs[0]!.stripAudio).toBe(false);
     });
 
+    describe("VE2E-44 default range for legacy/manual timelines", () => {
+      const legacyScene = (overrides: Record<string, unknown> = {}) => rangedScene({ segmentId: null, sourceStartMs: null, sourceDurationMs: null, ...overrides });
+
+      it("template path: a video scene without a range is cut to [0, voice duration] instead of being sent whole", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        expect((await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
+        expect(cut.worker.jobs).toHaveLength(1);
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 0, durationMs: 4000, stripAudio: true });
+      });
+
+      it("dynamic path: same default range; a social (apify) parent stays audio-stripped", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives(undefined, "apify");
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        expect((await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 0, durationMs: 4000, stripAudio: true });
+      });
+
+      it("skips the cut when the asset is already about the scene length, and never touches an existing range", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 4300;
+        setTimeline([legacyScene()]);
+        await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+        expect(cut.worker.jobs).toHaveLength(0);
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([rangedScene()]);
+        await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 1000, durationMs: 4000 });
+      });
+
+      it("async enqueue counts the derived clip in clipsTotal", async () => {
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+        expect(queued).toMatchObject({ ok: true, data: { clipPreparation: { clipsTotal: 1 } } });
+      });
+    });
+
     it("template path: a social (apify) parent is always cut without audio, even with an explicit volume", async () => {
       okFetch();
       const cut = await withStubClipDerivatives(undefined, "apify");

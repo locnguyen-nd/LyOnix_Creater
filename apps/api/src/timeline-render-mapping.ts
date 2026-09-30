@@ -37,7 +37,39 @@ export type SceneBindingForMapping = StoredTimelineSceneBinding & {
   audioMediaAssetVersionId?: string | null;
   /** Falls back to the pinned script's own scene text when no `screenTextOverride` is set. */
   fallbackScreenText?: string | null;
+  /** VE2E-44: bound video asset's own duration (null when unknown) and the scene voice's duration. */
+  mediaDurationMs?: number | null;
+  audioDurationMs?: number | null;
 };
+
+/** VE2E-44: an asset within this much of the scene length is not worth cutting. */
+export const DEFAULT_RANGE_TOLERANCE_MS = 500;
+
+/**
+ * VE2E-44: default source range for a video scene that has none - `[0, min(voice duration, asset
+ * duration)]`. Returns null (leave the scene untouched) for images, scenes that already carry a
+ * range, unknown durations, or an asset already no longer than the scene + tolerance (it is sent
+ * whole, nothing to save). Pure - shared by render enqueue (legacy timelines) and approve/persist.
+ */
+export function deriveDefaultVideoRange(
+  scene: Pick<SceneBindingForMapping, "mediaKind" | "mediaAssetVersionId" | "sourceStartMs" | "sourceDurationMs" | "mediaDurationMs" | "audioDurationMs">,
+  toleranceMs = DEFAULT_RANGE_TOLERANCE_MS,
+): { sourceStartMs: number; sourceDurationMs: number } | null {
+  if (scene.mediaKind !== "video" || !scene.mediaAssetVersionId) return null;
+  if (typeof scene.sourceStartMs === "number" || typeof scene.sourceDurationMs === "number") return null;
+  const assetMs = scene.mediaDurationMs;
+  const sceneMs = scene.audioDurationMs;
+  if (typeof assetMs !== "number" || typeof sceneMs !== "number" || assetMs <= 0 || sceneMs <= 0) return null;
+  if (assetMs <= sceneMs + toleranceMs) return null;
+  return { sourceStartMs: 0, sourceDurationMs: Math.max(1, Math.min(Math.round(sceneMs), assetMs)) };
+}
+
+export function applyDefaultVideoRanges<T extends SceneBindingForMapping>(scenes: T[], toleranceMs = DEFAULT_RANGE_TOLERANCE_MS): T[] {
+  return scenes.map((scene) => {
+    const range = deriveDefaultVideoRange(scene, toleranceMs);
+    return range ? { ...scene, ...range } : scene;
+  });
+}
 
 export type BuiltTimelineAssignments = {
   assignments: RenderAssignmentInput[];
@@ -141,12 +173,14 @@ export async function resolveSceneBindingsForMapping(
   prisma: PrismaService,
   projectId: string,
   scenes: StoredTimelineSceneBinding[],
+  options: { fillDefaultVideoRanges?: boolean } = {},
 ): Promise<SceneBindingForMapping[]> {
   const audioIds = [...new Set(scenes.map((scene) => scene.audioVersionId).filter((id): id is string => Boolean(id)))];
   const audioRows = audioIds.length
-    ? await prisma.audioVersion.findMany({ where: { id: { in: audioIds } }, select: { id: true, mediaAssetVersionId: true } })
+    ? await prisma.audioVersion.findMany({ where: { id: { in: audioIds } }, select: { id: true, mediaAssetVersionId: true, durationMs: true } })
     : [];
   const audioAssetById = new Map(audioRows.map((row) => [row.id, row.mediaAssetVersionId]));
+  const audioDurationById = new Map(audioRows.map((row) => [row.id, row.durationMs]));
 
   const mediaIds = [
     ...new Set([
@@ -155,9 +189,10 @@ export async function resolveSceneBindingsForMapping(
     ]),
   ];
   const mediaRows = mediaIds.length
-    ? await prisma.mediaAssetVersion.findMany({ where: { id: { in: mediaIds }, projectId, deletedAt: null }, select: { id: true, kind: true } })
+    ? await prisma.mediaAssetVersion.findMany({ where: { id: { in: mediaIds }, projectId, deletedAt: null }, select: { id: true, kind: true, durationMs: true } })
     : [];
   const mediaKindById = new Map(mediaRows.map((row) => [row.id, row.kind]));
+  const mediaDurationById = new Map(mediaRows.map((row) => [row.id, row.durationMs]));
 
   const sceneIds = [...new Set(scenes.map((scene) => scene.sceneId))];
   const sceneDraftRows = sceneIds.length
@@ -172,7 +207,7 @@ export async function resolveSceneBindingsForMapping(
     if (!screenTextBySceneId.has(row.sceneId)) screenTextBySceneId.set(row.sceneId, row.screenText);
   }
 
-  return scenes.map((scene): SceneBindingForMapping => {
+  const mapped = scenes.map((scene): SceneBindingForMapping => {
     const kind = scene.mediaAssetVersionId ? mediaKindById.get(scene.mediaAssetVersionId) : undefined;
     const audioAssetId = scene.audioVersionId ? audioAssetById.get(scene.audioVersionId) ?? null : null;
     const audioBelongsToProject = audioAssetId ? mediaKindById.has(audioAssetId) : false;
@@ -181,6 +216,9 @@ export async function resolveSceneBindingsForMapping(
       mediaKind: kind === "video" ? "video" : kind === "image" ? "image" : null,
       audioMediaAssetVersionId: audioBelongsToProject ? audioAssetId : null,
       fallbackScreenText: screenTextBySceneId.get(scene.sceneId) ?? null,
+      mediaDurationMs: scene.mediaAssetVersionId ? mediaDurationById.get(scene.mediaAssetVersionId) ?? null : null,
+      audioDurationMs: scene.audioVersionId ? audioDurationById.get(scene.audioVersionId) ?? null : null,
     };
   });
+  return options.fillDefaultVideoRanges ? applyDefaultVideoRanges(mapped) : mapped;
 }

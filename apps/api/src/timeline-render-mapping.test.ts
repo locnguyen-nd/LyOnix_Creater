@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TemplateModificationSlotResponse } from "@lyonix/contracts";
-import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { buildRenderAssignmentsFromTimeline, deriveDefaultVideoRange, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 
 const slots: TemplateModificationSlotResponse[] = [
   { key: "Video-1.source", kind: "video", label: "Video-1.source", required: true },
@@ -133,5 +133,27 @@ describe("resolveSceneBindingsForMapping", () => {
     const resolved = await resolveSceneBindingsForMapping(prisma, "project-1", scenes);
     expect(resolved[0]!.fallbackScreenText).toBe("Script default for s1");
     expect(resolved[1]!.fallbackScreenText).toBeNull();
+  });
+});
+
+describe("deriveDefaultVideoRange (VE2E-44)", () => {
+  const video = (overrides: Partial<SceneBindingForMapping> = {}) => scene({ mediaKind: "video", mediaAssetVersionId: "m1", mediaDurationMs: 60_000, audioDurationMs: 4000, ...overrides });
+
+  it("derives [0, voice duration] for a long video without a range", () => {
+    expect(deriveDefaultVideoRange(video())).toEqual({ sourceStartMs: 0, sourceDurationMs: 4000 });
+  });
+  it("caps at the asset duration (never longer than the source)", () => {
+    expect(deriveDefaultVideoRange(video({ mediaDurationMs: 4300, audioDurationMs: 9000 }))).toBeNull(); // asset shorter than scene: sent whole
+    expect(deriveDefaultVideoRange(video({ mediaDurationMs: 8000, audioDurationMs: 9000 }))).toBeNull();
+  });
+  it("skips an asset already <= scene duration + tolerance", () => {
+    expect(deriveDefaultVideoRange(video({ mediaDurationMs: 4400 }))).toBeNull();
+    expect(deriveDefaultVideoRange(video({ mediaDurationMs: 4501 }))).toEqual({ sourceStartMs: 0, sourceDurationMs: 4000 });
+  });
+  it("leaves images, existing ranges and unknown durations untouched", () => {
+    expect(deriveDefaultVideoRange(video({ mediaKind: "image" }))).toBeNull();
+    expect(deriveDefaultVideoRange(video({ sourceStartMs: 2000, sourceDurationMs: 1000 }))).toBeNull();
+    expect(deriveDefaultVideoRange(video({ mediaDurationMs: null }))).toBeNull();
+    expect(deriveDefaultVideoRange(video({ audioDurationMs: null }))).toBeNull();
   });
 });

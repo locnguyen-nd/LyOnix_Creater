@@ -381,7 +381,7 @@ export class RenderJobsService {
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
     const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
-    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
     let built = buildRenderAssignmentsFromTimeline(slots, resolved, optionValues);
     if (built.missingRequiredModificationKeys.length > 0) {
@@ -457,7 +457,7 @@ export class RenderJobsService {
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
 
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
-    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     const audioVersionIds = [...new Set(resolved.map((scene) => scene.audioVersionId).filter((sceneId): sceneId is string => Boolean(sceneId)))];
     const audioRows = audioVersionIds.length
       ? await this.prisma.audioVersion.findMany({ where: { id: { in: audioVersionIds } }, select: { id: true, durationMs: true } })
@@ -650,7 +650,7 @@ export class RenderJobsService {
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
     if (!snapshot || snapshot.providerAccountId !== input.providerAccountId) return { ok: false, code: "VALIDATION_FAILED", message: "Template không thuộc tài khoản render đã chọn" };
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
-    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
