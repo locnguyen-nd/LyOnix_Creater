@@ -9,6 +9,7 @@ import {
   probeCreatomateAccount,
   probeElevenLabsAccount,
   probePexelsAccount,
+  probeApifyAccount,
   probePinterestAccount,
   probeYouTubeAccount,
   resolveContentModel,
@@ -24,7 +25,7 @@ import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 /** `elevenlabs`/`tts` is the only supported non-content provider account today (VE2E-02). Omni remains B08-blocked. */
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
 /** `pexels`/`youtube`/`pinterest` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest is a manual-review-only candidate source with no reliable rights signal (see `packages/providers/src/pinterest.ts`). Google is still evaluated but not implemented (VE2E-15b) and stays unsupported here. */
-const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest");
+const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest" || provider === "apify");
 /** `creatomate`/`render` (VE2E-05) — render provider account. */
 const isSupportedRenderAccount = (provider: string, role: ProviderRole) => provider === "creatomate" && role === "render";
 const isSupportedAccount = (provider: string, role: ProviderRole) =>
@@ -194,6 +195,7 @@ export class ProviderAccountsService {
     if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) {
       if (row.provider === "youtube") return this.verifyYouTube(row);
       if (row.provider === "pinterest") return this.verifyPinterest(row);
+      if (row.provider === "apify") return this.verifyApify(row);
       return this.verifyPexels(row);
     }
     if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row);
@@ -336,6 +338,19 @@ export class ProviderAccountsService {
   private async verifyYouTube(row: { id: string; model: string; encryptedSecret: string }) {
     try {
       await probeYouTubeAccount(decryptSecret(row.encryptedSecret));
+      return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
+    } catch (error) {
+      const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
+      const publicRow = publicAccount(failed);
+      if (error instanceof ProviderError) return { account: publicRow, code: error.code, message: error.message };
+      return { account: publicRow, code: "PROVIDER_UNAVAILABLE" as const, message: error instanceof Error ? error.message : undefined };
+    }
+  }
+
+  /** Apify account preflight (VE2E-45): read-only `GET /v2/users/me`; never starts an Actor run. */
+  private async verifyApify(row: { id: string; model: string; encryptedSecret: string }) {
+    try {
+      await probeApifyAccount(decryptSecret(row.encryptedSecret));
       return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
