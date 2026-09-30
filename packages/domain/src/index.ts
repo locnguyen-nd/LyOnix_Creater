@@ -100,6 +100,8 @@ export {
 } from "./auto-render-assignments.js";
 export {
   visionModerationDecisions,
+  isRightsUsableForAuto,
+  type ApifyCandidateProvenance,
   type MediaCandidateType,
   type MediaAccessMethod,
   type MediaRightsStatus,

@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "creatomate", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "apify", "creatomate", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -232,6 +232,30 @@ export {
   type DynamicSceneStyle,
   type DynamicImageAnimation,
 } from "./creatomate-dynamic.js";
+export {
+  probeApifyAccount,
+  searchApify,
+  normalizeApifyItems,
+  buildActorInput,
+  hostMatchesSuffix,
+  isApifyPlatform,
+  apifyPlatforms,
+  APIFY_ACTOR_ALLOWLIST,
+  APIFY_HOST_ALLOWLIST,
+  APIFY_MAX_RESULTS,
+  APIFY_MAX_VIDEO_BYTES,
+  APIFY_MAX_IMAGE_BYTES,
+  APIFY_RUN_TIMEOUT_SECS,
+  type ApifyPlatform,
+  type ApifyLang,
+  type ApifyActorPin,
+  type ApifyDeps,
+  type ApifyDownloadPlan,
+  type ApifyCandidateResult,
+  type ApifySearchOutcome,
+  type ApifySearchInput,
+} from "./apify.js";
+
 export {
   probeYouTubeAccount,
   searchYouTubeVideos,

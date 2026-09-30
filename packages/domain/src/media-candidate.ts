@@ -22,7 +22,14 @@ export type MediaAccessMethod = "api_download" | "api_embed" | "discovery_only";
  * just "the provider let us fetch metadata". Only `cleared` candidates may ever be auto-applied;
  * `unclear`/`restricted` route to Studio human review (VE2E-15a §5, VE2E-15b B12).
  */
-export type MediaRightsStatus = "cleared" | "unclear" | "restricted";
+export type MediaRightsStatus = "cleared" | "unclear" | "restricted" | "owner_accepted_risk";
+
+/**
+ * True when a candidate's rights state permits unattended (Auto) use. `owner_accepted_risk`
+ * (VE2E-34, DEC-2026-09-29-JP-ONESHOT-MEDIA #1) is distinct from `cleared` but the project owner
+ * has accepted the risk for allowlisted Apify social sources; it never means the rights are clear.
+ */
+export const isRightsUsableForAuto = (status: MediaRightsStatus): boolean => status === "cleared" || status === "owner_accepted_risk";
 
 export type MediaAttribution = {
   name: string;
@@ -37,6 +44,20 @@ export type MediaProvenance = {
   queriedAt: string;
   /** Ranking/catalog logic version active when this candidate was produced, for cache/evaluation stability. */
   catalogVersion?: string;
+  /** VE2E-34: audit trail for candidates fetched through an allowlisted Apify Actor (platform, pinned Actor id/version, run, source page, author, fetch time). */
+  apify?: ApifyCandidateProvenance;
+};
+
+export type ApifyCandidateProvenance = {
+  platform: string;
+  actorId: string;
+  actorVersion: string;
+  actorRole: "primary" | "backup";
+  runId: string | null;
+  datasetItemIndex: number;
+  sourceUrl: string | null;
+  author: string | null;
+  fetchedAt: string;
 };
 
 /**

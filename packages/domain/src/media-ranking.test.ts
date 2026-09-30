@@ -265,6 +265,11 @@ describe("canAutoApplyMediaCandidate", () => {
     expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "unclear" }))).toBe(false);
     expect(canAutoApplyMediaCandidate(candidate({ eligibility: { autoEligible: false, reason: "discovery_only_no_import_capability" } }))).toBe(false);
     expect(canAutoApplyMediaCandidate(candidate({ moderationDecision: "accepted" }))).toBe(true);
+    // VE2E-34: owner_accepted_risk (allowlisted Apify social sources) is usable, but discovery-only / rejected / restricted still are not.
+    expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "owner_accepted_risk" }))).toBe(true);
+    expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "owner_accepted_risk", eligibility: { autoEligible: false, reason: "google_video_discovery_only" } }))).toBe(false);
+    expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "owner_accepted_risk", moderationDecision: "rejected" }))).toBe(false);
+    expect(canAutoApplyMediaCandidate(candidate({ rightsStatus: "restricted" }))).toBe(false);
   });
 });
 

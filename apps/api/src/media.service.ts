@@ -38,6 +38,8 @@ export type RegisterAssetInput = {
   sceneId?: string | null;
   /** Only meaningful for `origin==="pexels"` — merged into the stored `provenance` JSON, never dropped. */
   attribution?: PexelsAttribution | null;
+  /** VE2E-34: server-built provenance (Apify platform/Actor/source URL/author/fetchedAt, rightsStatus). Merged into the stored `provenance` JSON; never taken from a client. */
+  serverProvenance?: Record<string, unknown> | null;
 };
 
 const KIND_PREFIX: Record<MediaAssetKind, string> = { image: "image/", video: "video/", audio: "audio/", document: "" };
@@ -217,6 +219,7 @@ export class MediaService {
           origin: input.origin,
           registeredBy: userId,
           ...(input.attribution ? { attribution: input.attribution } : {}),
+          ...(input.serverProvenance ? { ...input.serverProvenance } : {}),
         } as Prisma.InputJsonValue,
         reusable,
         retentionClass,

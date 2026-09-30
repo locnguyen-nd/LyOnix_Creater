@@ -62,6 +62,10 @@ export class MediaController {
     if (!body.quarantineToken || !body.kind || !body.originalFileName?.trim() || !body.mimeType?.trim() || !body.checksumSha256 || !body.bytes || !body.origin) {
       throw normalizedError("VALIDATION_FAILED", "Thiếu dữ liệu asset", requestId(response));
     }
+    // VE2E-34: `apify` provenance is written only by the server-side Apify import path; a client can never claim it.
+    if (body.origin === "apify") {
+      throw normalizedError("VALIDATION_FAILED", "origin apify chỉ do server đặt (import Apify)", requestId(response), 400);
+    }
     const result = await this.media.registerAsset(projectId, user.id, user.role, {
       quarantineToken: body.quarantineToken,
       kind: body.kind,
@@ -100,7 +104,7 @@ export class MediaController {
     if (result === "unsupported_media") throw normalizedError("UNSUPPORTED_MEDIA", "MIME không khớp loại asset", requestId(response), 415);
     if (result === "quarantine_missing") throw normalizedError("VALIDATION_FAILED", "Không thể lưu file đã tải về", requestId(response), 409);
     if (result === "ssrf_blocked") throw normalizedError("SSRF_BLOCKED", "URL bị chặn bởi SSRF guard", requestId(response), 400);
-    if (result === "fetch_failed" || result === "too_large" || result === "too_many_redirects" || result === "domain_not_allowed") {
+    if (result === "fetch_failed" || result === "mime_not_allowed" || result === "too_large" || result === "too_many_redirects" || result === "domain_not_allowed") {
       throw normalizedError("VALIDATION_FAILED", "Không thể tải file từ URL đã cho", requestId(response), 502);
     }
     return success(result, requestId(response));

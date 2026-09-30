@@ -12,12 +12,12 @@ export type BinaryFetchResponse = {
   body: AsyncIterable<Uint8Array>;
   destroy?: () => void;
 };
-export type BinaryFetchLike = (url: string, init: { redirect: "manual"; signal: AbortSignal }, pinnedAddress: string) => Promise<BinaryFetchResponse>;
+export type BinaryFetchLike = (url: string, init: { redirect: "manual"; signal: AbortSignal; headers?: Record<string, string> }, pinnedAddress: string) => Promise<BinaryFetchResponse>;
 export type LookupLike = (hostname: string) => Promise<{ address: string }[]>;
 
 export type SafeBinaryFetchResult =
   | { ok: true; buffer: Buffer; mimeType: string; finalUrl: string }
-  | { ok: false; reason: "ssrf_blocked" | "fetch_failed" | "too_large" | "too_many_redirects" | "domain_not_allowed" };
+  | { ok: false; reason: "ssrf_blocked" | "fetch_failed" | "too_large" | "too_many_redirects" | "domain_not_allowed" | "mime_not_allowed" };
 
 const MAX_REDIRECTS = 5;
 const FETCH_TIMEOUT_MS = 30_000;
@@ -37,7 +37,7 @@ const defaultFetch: BinaryFetchLike = async (rawUrl, init, pinnedAddress) => new
     if (typeof options === "object" && options.all) callback(null, [{ address: pinnedAddress, family }]);
     else callback(null, pinnedAddress, family);
   }) as LookupFunction;
-  const request = transport(url, { method: "GET", signal: init.signal, lookup: pinnedLookup }, (response) => {
+  const request = transport(url, { method: "GET", signal: init.signal, lookup: pinnedLookup, ...(init.headers ? { headers: init.headers } : {}) }, (response) => {
     resolve({
       status: response.statusCode ?? 0,
       headers: { get: (name) => {
@@ -69,7 +69,16 @@ const resolvePinnedAddress = async (raw: string, lookup: LookupLike) => {
 /** Each redirect hop is DNS-validated and that exact validated IP is pinned to the socket. */
 export async function fetchBinarySafely(
   originalUrl: string,
-  options: { maxBytes: number; allowedHostSuffix?: string; deps?: { fetch?: BinaryFetchLike; lookup?: LookupLike } },
+  options: {
+    maxBytes: number;
+    allowedHostSuffix?: string;
+    /** VE2E-34: whole-DNS-label host allowlist (`pinimg.com` matches `i.pinimg.com`, not `evilpinimg.com`); checked on every redirect hop. */
+    allowedHostSuffixes?: readonly string[];
+    /** VE2E-34: reject the download unless the response Content-Type starts with one of these (e.g. `image/`). */
+    allowedMimePrefixes?: readonly string[];
+    /** VE2E-34: header sent ONLY to requests whose current-hop host equals `host` (dropped on a redirect to any other host). */
+    hostScopedHeaders?: { host: string; headers: Record<string, string> };
+    deps?: { fetch?: BinaryFetchLike; lookup?: LookupLike } },
 ): Promise<SafeBinaryFetchResult> {
   const doFetch = options.deps?.fetch ?? defaultFetch;
   const doLookup = options.deps?.lookup ?? defaultLookup;
@@ -81,9 +90,14 @@ export async function fetchBinarySafely(
       const host = new URL(currentUrl).hostname.toLowerCase();
       if (!host.endsWith(options.allowedHostSuffix)) return { ok: false, reason: "domain_not_allowed" };
     }
+    if (options.allowedHostSuffixes) {
+      const host = new URL(currentUrl).hostname.toLowerCase().replace(/\.$/, "");
+      if (!options.allowedHostSuffixes.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) return { ok: false, reason: "domain_not_allowed" };
+    }
+    const scoped = options.hostScopedHeaders && new URL(currentUrl).hostname.toLowerCase() === options.hostScopedHeaders.host ? options.hostScopedHeaders.headers : undefined;
     let response: BinaryFetchResponse;
     try {
-      response = await doFetch(currentUrl, { redirect: "manual", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) }, pinnedAddress);
+      response = await doFetch(currentUrl, { redirect: "manual", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), ...(scoped ? { headers: scoped } : {}) }, pinnedAddress);
     } catch {
       return { ok: false, reason: "fetch_failed" };
     }
@@ -101,6 +115,13 @@ export async function fetchBinarySafely(
       response.destroy?.();
       return { ok: false, reason: "too_large" };
     }
+    if (options.allowedMimePrefixes) {
+      const declared = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+      if (!options.allowedMimePrefixes.some((prefix) => declared.startsWith(prefix))) {
+        response.destroy?.();
+        return { ok: false, reason: "mime_not_allowed" };
+      }
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     try {
@@ -117,6 +138,7 @@ export async function fetchBinarySafely(
       return { ok: false, reason: "fetch_failed" };
     }
     const mimeType = (response.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    if (options.allowedMimePrefixes && !options.allowedMimePrefixes.some((prefix) => mimeType.startsWith(prefix))) return { ok: false, reason: "mime_not_allowed" };
     return { ok: true, buffer: Buffer.concat(chunks, size), mimeType, finalUrl: currentUrl };
   }
   return { ok: false, reason: "too_many_redirects" };

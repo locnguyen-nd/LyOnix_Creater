@@ -274,6 +274,69 @@ export type PexelsImportResponse = {
   asset: MediaAssetVersionSummary;
 };
 
+// --- VE2E-34: Apify social/web media search + import (DEC-2026-09-29-JP-ONESHOT-MEDIA #1/#5/#10-#16) ---
+
+export const apifyPlatformIds = ["tiktok", "pinterest", "x", "google_image", "google_video"] as const;
+export type ApifyPlatformId = (typeof apifyPlatformIds)[number];
+
+/** `POST /projects/:projectId/apify/search` (CSRF; runs a paid, allowlisted Actor - the Actor is chosen by the server from `platform`, never by the client). */
+export type ApifySearchRequest = {
+  /** Verified `visual` Apify provider account. */
+  providerAccountId: string;
+  platform: ApifyPlatformId;
+  query: string;
+  /** Keyword language (Japanese-market first). Defaults to `ja`. */
+  lang?: "ja" | "en";
+  /** 1..20 (server cap). */
+  limit?: number;
+};
+
+export type ApifyCandidateResponse = {
+  candidateId: string;
+  platform: ApifyPlatformId;
+  mediaType: "video" | "photo";
+  /** False = preview/discovery only (Google video, Pinterest HLS-only, TikTok without an Apify-stored file). */
+  importable: boolean;
+  /** Machine-readable reason when not importable. */
+  previewOnlyReason: string | null;
+  /** Only a host-allowlisted (CDN/gstatic) preview URL, or "" - never a download URL and never a URL carrying a token. */
+  previewUrl: string;
+  durationSeconds: number | null;
+  widthPx: number | null;
+  heightPx: number | null;
+  title: string;
+  author: string | null;
+  sourcePageUrl: string | null;
+  /** Always `owner_accepted_risk` (DEC #1): the owner accepted the social-media rights risk; NOT `cleared`. */
+  rightsStatus: "owner_accepted_risk";
+  /** Opaque server-sealed reference (encrypted + authenticated, expires) used by the import endpoint; `null` when not importable. */
+  importRef: string | null;
+};
+
+export type ApifySearchResponse = {
+  platform: ApifyPlatformId;
+  query: string;
+  lang: "ja" | "en";
+  actor: { actorId: string; version: string; role: "primary" | "backup" };
+  fetchedAt: string;
+  /** Set when the primary Actor failed and the pinned backup produced these results. */
+  primaryError: { code: string; message: string } | null;
+  candidates: ApifyCandidateResponse[];
+};
+
+/** `POST /projects/:projectId/apify/import` (CSRF). Only a sealed `importRef` from a search - never a client-supplied URL. */
+export type ApifyImportRequest = {
+  providerAccountId: string;
+  importRef: string;
+  folderId?: string | null;
+  reusable?: boolean;
+  sceneId?: string | null;
+};
+
+export type ApifyImportResponse = {
+  asset: MediaAssetVersionSummary;
+};
+
 // --- VE2E-02: ElevenLabs voices, consented clone and TTS-with-timestamps ---
 
 export type ElevenLabsVoiceSummaryResponse = {
@@ -608,6 +671,12 @@ export type MediaPlanSegmentDiagnostics = {
   looped: boolean;
   /** A single scene longer than the whole source clip (its range is the whole clip, shorter than the voice). */
   short: boolean;
+  /** VE2E-46: where the segment's source came from (`null`/absent when sourcing failed). */
+  sourceProvider?: "apify" | "pexels" | null;
+  /** VE2E-46: why Apify was skipped/not used before falling back to Pexels (e.g. `apify_no_usable_candidate`, `apify_error:PROVIDER_TIMEOUT`, `no_ja_keywords`); `null` when Apify was not involved or succeeded. */
+  fallbackReason?: string | null;
+  /** VE2E-46: audit trail of an Apify-sourced segment (also stored on the imported asset). */
+  apifyProvenance?: { platform: string; actorId: string; actorVersion: string; sourceUrl: string | null; author: string | null; fetchedAt: string } | null;
 };
 
 export type MediaPlanResponse = {
