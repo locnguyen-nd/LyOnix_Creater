@@ -213,7 +213,6 @@ export {
   type TemplateTtsElement,
   submitCreatomateRender,
   submitCreatomateSourceRender,
-  resolveCreatomateRenderScale,
   getCreatomateRender,
   normalizeCreatomateStatus,
   type CreatomateTemplateSummary,

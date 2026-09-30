@@ -947,16 +947,13 @@ describe("RenderJobsService", () => {
       expect(renderJobRows.get(id).modificationsPayload).toMatchObject({ mode: "dynamic" });
       await service.processNextPreparation();
       const body = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
-      expect(body.render_scale).toBe(1);
       const composed = body.source.elements.filter((el: any) => el.type === "composition");
       expect(composed).toHaveLength(14);
       expect(composed.map((scene: any) => scene.name)).toEqual(Array.from({ length: 14 }, (_, i) => `Scene-${i + 1}`));
       expect(body.source.elements.filter((el: any) => el.name === "Badge-BreakingNews")).toHaveLength(1);
       expect(composed[13].elements.find((el: any) => el.type === "text").text).toBe("Cảnh 14");
       expect(JSON.stringify(body.source)).not.toContain("elevenlabs");
-      const row = renderJobRows.get(id);
-      expect(row.status).toBe("queued");
-      expect(row.renderOutput).toMatchObject({ requestedScale: 1, expectedWidth: 1080, expectedHeight: 1920, width: 1080, height: 1920, renderScale: 1 });
+      expect(renderJobRows.get(id).status).toBe("queued");
     });
 
     it("3 scenes on the 5-slot Top 5 template also use the generator (fewer scenes, rank badges renumbered)", async () => {
@@ -998,18 +995,6 @@ describe("RenderJobsService", () => {
       const submitted = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body)).source;
       const names = (source: any) => source.elements.map((el: any) => [el.name, el.duration]);
       expect(names(submitted)).toEqual(names(preview.ok ? preview.data.source : null));
-    });
-
-    it("records the size Creatomate reports and flags output below the template resolution", async () => {
-      pinTemplate(newsRecapJpTemplate());
-      setTimeline(14);
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_small", status: "planned" }]), { status: 200 })));
-      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
-      expect(outcome.ok && outcome.data.output).toMatchObject({ requestedScale: 1, expectedWidth: 1080, belowTemplateResolution: false });
-      const row = [...renderJobRows.values()][0]!;
-      await service.handleWebhook(row.webhookToken, { id: "rnd_small", status: "succeeded", url: "https://cdn.creatomate.com/r.mp4", width: 270, height: 480, render_scale: 0.25 });
-      const done = await service.get(row.id, "user-1", "staff");
-      expect(done.ok && done.data.output).toMatchObject({ width: 270, height: 480, renderScale: 0.25, expectedWidth: 1080, expectedHeight: 1920, belowTemplateResolution: true });
     });
 
     it("VE2E-47 guard still fires on the fixed-slot path when a template TTS slot is unfilled", async () => {

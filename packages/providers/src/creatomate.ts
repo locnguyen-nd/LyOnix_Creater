@@ -193,10 +193,6 @@ export type CreatomateRenderResult = {
   renderDurationMs: number | null;
   /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
   snapshotUrl: string | null;
-  /** VE2E-52: output size/scale Creatomate reports for the render (null when the response omits them). */
-  width: number | null;
-  height: number | null;
-  renderScale: number | null;
 };
 
 const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult => ({
@@ -207,30 +203,13 @@ const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult =>
   errorMessage: typeof row.error_message === "string" ? row.error_message : null,
   renderDurationMs: typeof row.render_duration === "number" ? Math.round(row.render_duration * 1000) : null,
   snapshotUrl: typeof row.snapshot_url === "string" ? row.snapshot_url : null,
-  width: typeof row.width === "number" ? row.width : null,
-  height: typeof row.height === "number" ? row.height : null,
-  renderScale: typeof row.render_scale === "number" ? row.render_scale : null,
 });
-
-/**
- * VE2E-52: every final render sends an explicit `render_scale` (Creatomate otherwise picks its own,
- * observed 0.25 = 270x480 on the owner account). `CREATOMATE_RENDER_SCALE` (default 1 = full template
- * resolution); an invalid/out-of-range value falls back to 1 instead of failing a paid render.
- */
-export function resolveCreatomateRenderScale(env: Record<string, string | undefined> = process.env): number {
-  const raw = env.CREATOMATE_RENDER_SCALE?.trim();
-  if (!raw) return 1;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0.1 && value <= 1 ? value : 1;
-}
 
 export type SubmitRenderInput = {
   templateId: string;
   modifications: Record<string, string>;
   webhookUrl: string;
   outputFormat?: "mp4" | "mov" | "gif";
-  /** Defaults to `resolveCreatomateRenderScale()`. */
-  renderScale?: number;
 };
 
 /**
@@ -249,7 +228,6 @@ export async function submitCreatomateRender(apiKey: string, input: SubmitRender
         template_id: input.templateId,
         modifications: input.modifications,
         webhook_url: input.webhookUrl,
-        render_scale: input.renderScale ?? resolveCreatomateRenderScale(),
         ...(input.outputFormat ? { output_format: input.outputFormat } : {}),
       }),
     },
@@ -261,14 +239,14 @@ export async function submitCreatomateRender(apiKey: string, input: SubmitRender
   return toRenderResult(first);
 }
 
-export type SubmitSourceRenderInput = { source: Record<string, unknown>; webhookUrl: string; renderScale?: number };
+export type SubmitSourceRenderInput = { source: Record<string, unknown>; webhookUrl: string };
 
 /** Same `POST /v2/renders` endpoint as `submitCreatomateRender`, but with a fully dynamic `source` document instead of `template_id`+`modifications` — see `creatomate-dynamic.ts`. */
 export async function submitCreatomateSourceRender(apiKey: string, input: SubmitSourceRenderInput): Promise<CreatomateRenderResult> {
   const body = await call(
     "/renders",
     apiKey,
-    { method: "POST", body: JSON.stringify({ source: input.source, webhook_url: input.webhookUrl, render_scale: input.renderScale ?? resolveCreatomateRenderScale() }) },
+    { method: "POST", body: JSON.stringify({ source: input.source, webhook_url: input.webhookUrl }) },
     submitTimeoutMs,
   );
   const rows = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [body as Record<string, unknown>];

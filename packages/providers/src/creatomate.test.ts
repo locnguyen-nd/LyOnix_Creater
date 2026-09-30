@@ -7,9 +7,7 @@ import {
   listCreatomateTemplates,
   normalizeCreatomateStatus,
   probeCreatomateAccount,
-  resolveCreatomateRenderScale,
   submitCreatomateRender,
-  submitCreatomateSourceRender,
 } from "./creatomate.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -126,32 +124,10 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const result = await submitCreatomateRender("key", { templateId: "tpl_1", modifications: { "Text-1.text": "hello" }, webhookUrl: "https://lyonix.local/hooks/abc" });
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null, snapshotUrl: null, width: null, height: null, renderScale: null });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null, snapshotUrl: null });
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(String(call[0])).toContain("/renders");
-    expect(JSON.parse(String(call[1].body))).toMatchObject({ template_id: "tpl_1", webhook_url: "https://lyonix.local/hooks/abc", render_scale: 1 });
-  });
-
-  it("VE2E-52: sends the configured render_scale on both submit paths and reports the returned output size", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_2", status: "planned", width: 270, height: 480, render_scale: 0.25 }]), { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("CREATOMATE_RENDER_SCALE", "0.5");
-    try {
-      const templated = await submitCreatomateRender("key", { templateId: "tpl_1", modifications: {}, webhookUrl: "https://x" });
-      expect(templated).toMatchObject({ width: 270, height: 480, renderScale: 0.25 });
-      await submitCreatomateSourceRender("key", { source: { elements: [] }, webhookUrl: "https://x" });
-      await submitCreatomateSourceRender("key", { source: { elements: [] }, webhookUrl: "https://x", renderScale: 1 });
-    } finally {
-      vi.unstubAllEnvs();
-    }
-    const scales = fetchMock.mock.calls.map((call) => JSON.parse(String((call as unknown as [string, RequestInit])[1].body)).render_scale);
-    expect(scales).toEqual([0.5, 0.5, 1]);
-  });
-
-  it("VE2E-52: render scale defaults to 1 and ignores invalid env values", () => {
-    expect(resolveCreatomateRenderScale({})).toBe(1);
-    expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "0.75" })).toBe(0.75);
-    for (const bad of ["abc", "0", "2", "-1"]) expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: bad })).toBe(1);
+    expect(JSON.parse(String(call[1].body))).toMatchObject({ template_id: "tpl_1", webhook_url: "https://lyonix.local/hooks/abc" });
   });
 
   it("throws PROVIDER_SCHEMA_INVALID when Creatomate returns no render id", async () => {
@@ -167,7 +143,7 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
   it("gets render status by id", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", render_duration: 4.2, snapshot_url: "https://cdn.creatomate.com/rnd_1.jpg" }), { status: 200 })));
     const result = await getCreatomateRender("key", "rnd_1");
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg", width: null, height: null, renderScale: null });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg" });
   });
 });
 

@@ -728,8 +728,6 @@ model RenderJob {
   clipsTotal           Int                @default(0)
   clipsReady           Int                @default(0)
   clipFailures         Json?
-  // VE2E-52: requested render_scale + expected template size + the width/height/render_scale Creatomate reported back.
-  renderOutput         Json?
   preparationLeaseUntil DateTime?
   resultUrl            String?
   // VE2E-19: Creatomate's own render-frame preview image (`snapshot_url`), captured whenever the
