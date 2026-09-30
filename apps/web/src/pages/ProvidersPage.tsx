@@ -68,6 +68,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [editing, setEditing] = useState<ApiProvider | null>(null);
   const [editName, setEditName] = useState("");
   const [editModel, setEditModel] = useState("");
+  const [editVisionModel, setEditVisionModel] = useState("");
   const [replacementSecret, setReplacementSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -108,7 +109,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const beginEdit = (row: ApiProvider) => {
-    setEditing(row); setEditName(row.name); setEditModel(row.model); setReplacementSecret(""); setError(null);
+    setEditing(row); setEditName(row.name); setEditModel(row.model); setEditVisionModel(row.visionModel ?? ""); setReplacementSecret(""); setError(null);
   };
 
   const saveEdit = async () => {
@@ -118,7 +119,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       await api<ApiProvider>(`/provider-accounts/${editing.id}`, {
         method: "PATCH",
         headers: { ...(await csrfHeaders()), "If-Match": `\"${editing.version}\"` },
-        body: JSON.stringify({ name: editName, model: editModel, ...(replacementSecret ? { secret: replacementSecret } : {}) }),
+        body: JSON.stringify({ name: editName, model: editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
       });
       await refresh(); setEditing(null); setReplacementSecret(""); setNotice(t("providers.updated"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
@@ -241,6 +242,12 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                 </Select>
               </Field>
             ) : null}
+            {editing.role === "content" ? <Field label={t("providers.visionModel", { defaultValue: "Model kiểm duyệt ảnh" })}>
+              <Select value={editVisionModel} onChange={(e) => setEditVisionModel(e.target.value)}>
+                <option value="">{t("providers.visionModelAuto", { defaultValue: "Tự chọn model tiết kiệm" })}</option>
+                {modelOptionsFor(editing).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(editing, item)}</option>)}
+              </Select>
+            </Field> : null}
             <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>

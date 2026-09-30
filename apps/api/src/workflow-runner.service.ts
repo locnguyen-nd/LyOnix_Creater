@@ -25,7 +25,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage } from "@lyonix/contracts";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -125,6 +125,8 @@ export type RunUsageEntry = {
   costCurrency: string | null;
   /** TTS only: characters sent to the provider. */
   characters?: number;
+  /** VE2E-57: number of provider requests this entry stands for (vision moderation batches all of a job's calls into one entry). */
+  calls?: number;
   at: string;
 };
 
@@ -229,8 +231,8 @@ export class WorkflowRunnerService {
   }
 
   /** VE2E-48: persists per-segment sourceProvider + fallbackReason as the `media_plan_diagnostics` StepRun outputRef (read by GET /video-productions/:id). VE2E-51: per-job Apify spend (runs, seconds, USD) rides along. */
-  private saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[], apifyUsage: MediaPlanApifyUsage | null = null): Promise<void> {
-    return this.saveStepDiagnostics(run, "media_plan_diagnostics", { segments, ...(apifyUsage ? { apifyUsage } : {}) });
+  private saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[], apifyUsage: MediaPlanApifyUsage | null = null, visionUsage: MediaPlanVisionUsage | null = null): Promise<void> {
+    return this.saveStepDiagnostics(run, "media_plan_diagnostics", { segments, ...(apifyUsage ? { apifyUsage } : {}), ...(visionUsage ? { visionUsage } : {}) });
   }
 
   /**
@@ -544,11 +546,14 @@ export class WorkflowRunnerService {
     const sourced: SourcedSegment[] = sourcing.sourced;
     if (sourcing.failure) {
       // VE2E-48: keep the per-segment sourcing decisions made before the failing segment visible on the run.
-      await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage);
+      await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
       throw sourcing.failure.error;
     }
     const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
-    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage);
+    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
+    if (sourcing.visionUsage) {
+      await this.appendRunUsage(run, { step: "vision_moderation", kind: "content", provider: null, modelId: sourcing.visionUsage.modelId, inputTokens: null, outputTokens: null, costAmount: null, costCurrency: null, calls: sourcing.visionUsage.calls, at: new Date().toISOString() });
+    }
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 

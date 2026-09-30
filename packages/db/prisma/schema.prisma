@@ -263,6 +263,8 @@ model ProviderAccount {
   ownerUserId        String?                   @db.Uuid
   status             ProviderStatus            @default(unverified)
   model              String
+  /// VE2E-57: optional vision model on this content account; null uses a cheaper discovered alternative.
+  visionModel        String?
   availableModels    String[]                  @default([])
   /// V00-10: account-scoped model freshness snapshot, e.g. `[{modelId,status,checkedAt,source,reason?}]`.
   /// JSON (not a separate table) because it is small, always read/written as one unit per account,

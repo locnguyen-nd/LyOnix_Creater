@@ -45,6 +45,7 @@ export type PublicProviderAccount = {
   ownerUserId: string | null;
   status: "unverified" | "verified" | "failed";
   model: string;
+  visionModel: string | null;
   /** Real per-model verification status for content accounts (V00-10 freshness snapshot). Empty for non-content roles or before the first verify. */
   modelSnapshot: PublicModelSnapshotEntry[];
   availableModels: string[];
@@ -60,7 +61,7 @@ const toPublicSnapshot = (raw: unknown): PublicModelSnapshotEntry[] => {
     .map((entry) => ({ modelId: entry.modelId, status: entry.status, checkedAt: entry.checkedAt, source: entry.source, fresh: isFreshCheckedAt(entry.checkedAt), ...(entry.reason ? { reason: entry.reason } : {}) }));
 };
 
-const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; availableModels?: string[]; modelSnapshot?: unknown; isFake: boolean; version: number }): PublicProviderAccount => ({
+const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; visionModel?: string | null; availableModels?: string[]; modelSnapshot?: unknown; isFake: boolean; version: number }): PublicProviderAccount => ({
   id: row.id,
   name: row.name,
   provider: row.provider,
@@ -69,6 +70,7 @@ const publicAccount = (row: { id: string; name: string; provider: string; role: 
   ownerUserId: row.ownerUserId,
   status: row.status === "verified" || row.status === "failed" ? row.status : "unverified",
   model: row.model,
+  visionModel: row.visionModel ?? null,
   modelSnapshot: toPublicSnapshot(row.modelSnapshot),
   // Pre-verify suggestion only (account not yet checked against any real endpoint) - once `availableModels`
   // is populated by a real verify() it always comes from account-scoped discovery/probe, never this fallback.
@@ -404,7 +406,7 @@ export class ProviderAccountsService {
     userId: string,
     role: "admin" | "staff",
     expectedVersion: number,
-    input: { name?: string; model?: string; secret?: string },
+    input: { name?: string; model?: string; visionModel?: string | null; secret?: string },
   ) {
     const row = await this.manageable(id, userId, role);
     if (!row || row === "forbidden") return row;
@@ -413,6 +415,8 @@ export class ProviderAccountsService {
     const model = input.model === undefined ? row.model : input.model.trim();
     if (!name || !model) return "invalid" as const;
     if (input.model !== undefined && row.availableModels.length > 0 && !row.availableModels.includes(model)) return "model_unavailable" as const;
+    const visionModel = input.visionModel === undefined ? row.visionModel : input.visionModel?.trim() || null;
+    if (visionModel && (!isLiveContentKind(row.provider) || !row.availableModels.includes(visionModel))) return "model_unavailable" as const;
     const secret = input.secret?.trim();
     let modelSnapshotUpdate: ContentModelSnapshotEntry[] | undefined;
     // V00-10: a content model switch is an explicit user action - reject unknown/retired/unsupported
@@ -429,6 +433,7 @@ export class ProviderAccountsService {
       data: {
         name,
         model,
+        visionModel,
         version: { increment: 1 },
         ...(modelSnapshotUpdate ? { modelSnapshot: modelSnapshotUpdate as unknown as object } : {}),
         ...(secret ? { encryptedSecret: encryptSecret(secret), status: "unverified", availableModels: [], modelSnapshot: [] } : {}),

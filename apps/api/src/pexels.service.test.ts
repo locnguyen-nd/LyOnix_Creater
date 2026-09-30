@@ -352,7 +352,7 @@ describe("PexelsService", () => {
         expect(media.registerAsset).not.toHaveBeenCalled();
       });
 
-      it("never fans out vision calls beyond MAX_VISION_CANDIDATES_PER_SCENE, no matter how large the candidate pool is", async () => {
+      it("stops after the first accepted candidate, even when the pool is larger than the per-segment cap", async () => {
         providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
         // 7 candidates, strictly decreasing quality (heightPx) so pre-vision metadata ranking is deterministic: id "1" is always the best-fit winner.
         const photos = Array.from({ length: 7 }, (_, i) => ({
@@ -383,8 +383,8 @@ describe("PexelsService", () => {
         });
         const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-12", query: "person outside" });
         expect(outcome).toMatchObject({ ok: true });
-        // Each vision-checked candidate makes 2 calls (capability probe + real moderation) - capped at 5 candidates, never all 7.
-        expect(visionCallCount).toBe(5 * 2);
+        // The accepted first candidate needs one capability probe and one moderation request.
+        expect(visionCallCount).toBe(2);
         expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/v1/photos/6"))).toBe(false);
         expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/v1/photos/7"))).toBe(false);
       });

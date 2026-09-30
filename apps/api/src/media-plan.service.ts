@@ -38,6 +38,7 @@ import type {
   ErrorCode,
   MediaPlanApifyQuality,
   MediaPlanApifyUsage,
+  MediaPlanVisionUsage,
   MediaPlanResponse,
   MediaPlanSegmentDiagnostics,
   ScriptVisualPlanResponse,
@@ -86,6 +87,8 @@ export type SegmentSource = {
   apifyProvenance?: MediaPlanSegmentDiagnostics["apifyProvenance"];
   /** VE2E-51: candidate filtering / two-phase details of the Apify attempt (kept when it fell back to Pexels). */
   apifyQuality?: MediaPlanApifyQuality | null;
+  /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
+  visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
@@ -345,6 +348,7 @@ export class MediaPlanService {
         query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
         sceneBrief: brief,
         usedExternalIds: [...input.ledger.externalIds],
+        ...(input.job ? { visionBudget: input.job.vision } : {}),
       });
       if (!outcome.ok) return outcome;
       const asset = outcome.data.asset;
@@ -387,7 +391,7 @@ export class MediaPlanService {
       beforeSourcing?: (pending: PlannedSegment[]) => Promise<string | null | void>;
       runImport?: (segment: PlannedSegment, task: () => Promise<MediaPlanOutcome<SegmentSource>>) => Promise<MediaPlanOutcome<SegmentSource>>;
     },
-  ): Promise<{ sourced: SourcedSegment[]; failure: { segment: PlannedSegment; error: unknown } | null; apifyUsage: MediaPlanApifyUsage | null }> {
+  ): Promise<{ sourced: SourcedSegment[]; failure: { segment: PlannedSegment; error: unknown } | null; apifyUsage: MediaPlanApifyUsage | null; visionUsage: MediaPlanVisionUsage | null }> {
     let extractionReason: string | null = null;
     if (input.beforeSourcing) {
       const pending: PlannedSegment[] = [];
@@ -410,6 +414,8 @@ export class MediaPlanService {
           if (extractionReason && source.provider === "pexels" && source.fallbackReason === "no_ja_keywords") source = { ...source, fallbackReason: extractionReason };
         } else errorCode = imported.code;
       }
+      const visionSkip = job.vision.skipReasonFor(segment.sceneIds[0] ?? "");
+      if (source && visionSkip) source = { ...source, visionSkipped: visionSkip };
       if (source) input.ledger.add(source);
       return { segment, source, errorCode };
     };
@@ -438,6 +444,7 @@ export class MediaPlanService {
     return {
       sourced: results.filter((entry): entry is SourcedSegment => entry !== undefined),
       failure: failed ? { segment: input.segments[failed.index]!, error: failed.error } : null,
+      visionUsage: job.vision.usage(),
       apifyUsage: touched ? { runs: u.runs, seconds: u.seconds, usd: u.usd, searchesReused: u.searchesReused, libraryReuses: u.libraryReuses } : null,
     };
   }
@@ -484,6 +491,7 @@ export class MediaPlanService {
         ...(source?.fallbackReason ? { fallbackReason: source.fallbackReason } : {}),
         ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
         ...(source?.apifyQuality ? { apifyQuality: source.apifyQuality } : {}),
+        ...(source?.visionSkipped ? { visionSkipped: source.visionSkipped } : {}),
       });
     }
     return {
@@ -540,7 +548,7 @@ export class MediaPlanService {
     const totalSeconds = planScript.scenes.reduce((total, scene) => total + sceneDuration(scene), 0) / 1000;
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
-    const { sourced, apifyUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger, beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
+    const { sourced, apifyUsage, visionUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger, beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
     const built = this.buildBindings(planScript, sourced);
     return {
       ok: true,
@@ -551,6 +559,7 @@ export class MediaPlanService {
         segments: built.segments,
         diagnostics: built.diagnostics,
         ...(apifyUsage ? { apifyUsage } : {}),
+        ...(visionUsage ? { visionUsage } : {}),
       },
     };
   }

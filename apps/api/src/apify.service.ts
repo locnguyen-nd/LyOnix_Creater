@@ -29,7 +29,6 @@ import {
   fetchApifyTikTokPost,
   hostMatchesSuffix,
   isLiveContentKind,
-  moderateSceneCandidate,
   isApifyPlatform,
   searchApify,
   type ApifyUsage,
@@ -39,22 +38,20 @@ import {
   type ApifyLang,
   type ApifyPlatform,
   type ApifySearchOutcome,
-  type LiveContentKind,
   type VisionModerationFrame,
   type VisionModerationSceneContext,
 } from "@lyonix/providers";
 import {
-  applyVisionFindings,
   canAccessProject,
   canWriteProjectResource,
   decideMediaSelection,
-  decideVisionModeration,
   rankMediaCandidates,
   selectSocialCandidates,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality } from "@lyonix/contracts";
+import { VisionBudget, moderatePoolWithBudget, resolveVisionModel, type ModelAvailability } from "./vision-budget.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
@@ -96,6 +93,8 @@ export const apifyTwoPhaseFallbackEnabled = () => flagOn(process.env.APIFY_TWO_P
 export class ApifyJobContext {
   readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
+  /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
+  readonly vision = new VisionBudget();
   addRun(usage: ApifyUsage) {
     addApifyUsage(this.usage, usage);
   }
@@ -111,7 +110,7 @@ export type AutoImportOutcome =
   | { ok: true; data: { asset: AutoImportedAsset; externalId: string; ledgerId: string; provenance: MediaCandidate["provenance"]["apify"] | null; platform: ApifyPlatform; quality: MediaPlanApifyQuality } }
   | { ok: false; reason: string; quality?: MediaPlanApifyQuality };
 /** Vision moderation spend guard per segment source (same bound as Pexels, VE2E-29). */
-const MAX_VISION_CANDIDATES_PER_SEGMENT = 5;
+// VE2E-57: candidates per segment and calls per job now come from VisionBudget (VISION_MAX_CANDIDATES_PER_SEGMENT / VISION_MAX_CALLS_PER_JOB).
 const MAX_VISION_PREVIEW_BYTES = 4 * 1024 * 1024;
 const APIFY_PREVIEW_SUFFIXES = [...APIFY_HOST_ALLOWLIST.tiktok, ...APIFY_HOST_ALLOWLIST.pinterest, ...APIFY_HOST_ALLOWLIST.x, ...APIFY_HOST_ALLOWLIST.googlePreview];
 const APIFY_LICENSE = "Apify-sourced social/web media - owner_accepted_risk (not rights-cleared); audio always stripped";
@@ -426,27 +425,28 @@ export class ApifyService {
    * (cover image; never the video itself). Candidates whose preview cannot be fetched, or when no vision-capable
    * content account exists, keep their metadata-only score - moderation only ever strengthens evidence / rejects.
    */
-  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>): Promise<MediaCandidate[]> {
+  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<MediaCandidate[]> {
     if (!this.providerAccounts) return pool;
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-    const apiKey = decryptSecret(account.encryptedSecret);
-    const kind = account.provider as LiveContentKind;
     const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
-    const order = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SEGMENT).map((r) => r.candidate.candidateId);
-    const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
-    for (const candidateId of order) {
-      const candidate = byId.get(candidateId);
-      if (!candidate?.previewUrl) continue;
-      const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
-      if (!frame.ok) continue;
-      const visionFrame: VisionModerationFrame = { mimeType: frame.mimeType || "image/jpeg", base64: frame.buffer.toString("base64") };
-      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId: account.model, operation: "image_moderation", sceneContext, frames: [visionFrame] });
-      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: account.model, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
-      byId.set(candidateId, applyVisionFindings(candidate, findings));
-    }
-    return pool.map((c) => byId.get(c.candidateId) ?? c);
+    return moderatePoolWithBudget({
+      pool,
+      brief,
+      usedExternalIds,
+      scopeKey,
+      budget,
+      account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: resolveVisionModel(account.model, account.availableModels, account.visionModel) },
+      sceneContext,
+      availability: this.providerAccounts as unknown as ModelAvailability,
+      fetchFrame: async (candidate) => {
+        const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
+        if (!frame.ok) return null;
+        const visionFrame: VisionModerationFrame = { mimeType: frame.mimeType || "image/jpeg", base64: frame.buffer.toString("base64") };
+        return visionFrame;
+      },
+    });
   }
 
   /** VE2E-51: an asset of this project already imported from the same platform video (no second download). */
@@ -554,7 +554,7 @@ export class ApifyService {
     const byCandidateId = new Map(usable.map((r) => [r.candidate.candidateId, r] as const));
     let pool = usable.map((r) => r.candidate);
     try {
-      pool = await this.moderatePool(pool, input.brief, userId, role, input.usedExternalIds);
+      pool = await this.moderatePool(pool, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
     } catch {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }

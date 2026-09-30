@@ -7,7 +7,7 @@ import { CURATED_CONTENT_MODELS, CURATED_ELEVENLABS_MODELS } from "@lyonix/provi
 import { ProviderAccountsService, type ProviderRole, type ProviderScope } from "./provider-accounts.service.js";
 
 type CreateBody = { name?: string; provider?: string; role?: ProviderRole; scope?: ProviderScope; model?: string; secret?: string };
-type UpdateBody = { name?: string; model?: string; secret?: string };
+type UpdateBody = { name?: string; model?: string; visionModel?: string | null; secret?: string };
 
 const expectedVersion = (raw: string | undefined) => {
   const match = raw?.trim().match(/^(?:W\/)?"?(\d+)"?$/);
@@ -84,7 +84,8 @@ export class ProviderAccountsController {
     requireCsrf(request, response, session);
     const version = expectedVersion(ifMatch);
     if (version === null) throw normalizedError("VALIDATION_FAILED", "Thiếu If-Match phiên bản tài khoản", requestId(response));
-    if (body.name === undefined && body.model === undefined && body.secret === undefined) throw normalizedError("VALIDATION_FAILED", "Không có thay đổi tài khoản", requestId(response));
+    if (body.name === undefined && body.model === undefined && body.visionModel === undefined && body.secret === undefined) throw normalizedError("VALIDATION_FAILED", "Không có thay đổi tài khoản", requestId(response));
+    if (body.visionModel !== undefined && body.visionModel !== null && typeof body.visionModel !== "string") throw normalizedError("VALIDATION_FAILED", "Model kiểm duyệt ảnh không hợp lệ", requestId(response));
     const account = await this.accounts.update(id, user.id, user.role, version, body);
     if (!account) throw normalizedError("NOT_FOUND", "Không tìm thấy tài khoản provider", requestId(response), 404);
     if (account === "forbidden") throw normalizedError("FORBIDDEN", "Không có quyền sửa tài khoản provider này", requestId(response), 403);

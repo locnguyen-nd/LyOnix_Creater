@@ -733,7 +733,12 @@ export type MediaPlanSegmentDiagnostics = {
   apifyProvenance?: { platform: string; actorId: string; actorVersion: string; sourceUrl: string | null; author: string | null; fetchedAt: string } | null;
   /** VE2E-51: candidate filtering + two-phase flow of this segment's Apify attempt (also recorded when it fell back to Pexels). */
   apifyQuality?: MediaPlanApifyQuality | null;
+  /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
+  visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
 };
+
+/** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
+export type MediaPlanVisionUsage = { calls: number; moderated: number; skippedSegments: number; maxCalls: number; modelId: string | null };
 
 /** VE2E-51: why Apify candidates were kept/rejected before download, and how the chosen clip was obtained. */
 export type MediaPlanApifyQuality = {
@@ -772,6 +777,8 @@ export type MediaPlanResponse = {
   diagnostics: MediaPlanSegmentDiagnostics[];
   /** VE2E-51 */
   apifyUsage?: MediaPlanApifyUsage | null;
+  /** VE2E-57 */
+  visionUsage?: MediaPlanVisionUsage | null;
 };
 
 export type VideoProductionSubmitResponse = {
@@ -807,6 +814,8 @@ export type VideoProductionResponse = {
   mediaSourcing: MediaPlanSegmentDiagnostics[] | null;
   /** VE2E-51: Apify runs/seconds/USD of this job (from the `media_plan_diagnostics` StepRun); `null` when none recorded. */
   apifyUsage?: MediaPlanApifyUsage | null;
+  /** VE2E-57: vision-moderation requests of this job. */
+  visionUsage?: MediaPlanVisionUsage | null;
   /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
   durationBudget: DurationBudgetDiagnostics | null;
   createdAt: string;
