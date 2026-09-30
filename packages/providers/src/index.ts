@@ -232,7 +232,29 @@ export {
   type DynamicSceneStyle,
   type DynamicImageAnimation,
 } from "./creatomate-dynamic.js";
-export { probeApifyAccount } from "./apify.js";
+export {
+  probeApifyAccount,
+  searchApify,
+  normalizeApifyItems,
+  buildActorInput,
+  hostMatchesSuffix,
+  isApifyPlatform,
+  apifyPlatforms,
+  APIFY_ACTOR_ALLOWLIST,
+  APIFY_HOST_ALLOWLIST,
+  APIFY_MAX_RESULTS,
+  APIFY_MAX_VIDEO_BYTES,
+  APIFY_MAX_IMAGE_BYTES,
+  APIFY_RUN_TIMEOUT_SECS,
+  type ApifyPlatform,
+  type ApifyLang,
+  type ApifyActorPin,
+  type ApifyDeps,
+  type ApifyDownloadPlan,
+  type ApifyCandidateResult,
+  type ApifySearchOutcome,
+  type ApifySearchInput,
+} from "./apify.js";
 
 export {
   probeYouTubeAccount,

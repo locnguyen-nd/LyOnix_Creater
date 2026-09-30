@@ -22,6 +22,7 @@
  * (the raw `visualQuery`/`screenText` strings are preserved verbatim, never translated), but the
  * `entities`/`action`/`setting`/`mood` buckets stay coarse (see `bucketize`) for ja/ko.
  */
+import { isRightsUsableForAuto } from "./media-candidate.js";
 import type {
   MediaCandidate,
   MediaCandidateType,
@@ -446,7 +447,7 @@ export function decideMediaSelection(ranked: readonly RankedMediaCandidate[], op
       sawBelowThreshold = true;
       continue;
     }
-    if (entry.candidate.rightsStatus !== "cleared") {
+    if (!isRightsUsableForAuto(entry.candidate.rightsStatus)) {
       sawRightsUnresolved = true;
       continue;
     }
@@ -515,7 +516,7 @@ export function buildMediaCandidateCacheKey(input: {
  */
 export function canAutoApplyMediaCandidate(candidate: MediaCandidate): boolean {
   if (candidate.moderationDecision === "rejected") return false;
-  if (candidate.rightsStatus !== "cleared") return false;
+  if (!isRightsUsableForAuto(candidate.rightsStatus)) return false;
   if (!candidate.eligibility.autoEligible) return false;
   return true;
 }

@@ -35,6 +35,8 @@ import { MediaPlanController } from "./media-plan.controller.js";
 import { MediaPlanService } from "./media-plan.service.js";
 import { PexelsController } from "./pexels.controller.js";
 import { PexelsService } from "./pexels.service.js";
+import { ApifyController } from "./apify.controller.js";
+import { ApifyService } from "./apify.service.js";
 import { CreatomateTemplatesController } from "./creatomate-templates.controller.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderJobsController } from "./render-jobs.controller.js";
@@ -75,6 +77,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptGenerationController,
     ElevenLabsVoiceController,
     PexelsController,
+    ApifyController,
     MediaPlanController,
     CreatomateTemplatesController,
     RenderJobsController,
@@ -102,6 +105,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptGenerationService,
     ElevenLabsVoiceService,
     PexelsService,
+    ApifyService,
     MediaPlanService,
     CreatomateTemplatesService,
     RenderJobsService,
