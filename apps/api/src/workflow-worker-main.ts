@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { NestFactory } from "@nestjs/core";
 import { WorkflowWorkerModule } from "./workflow-worker.module.js";
 import { WorkflowRunnerService } from "./workflow-runner.service.js";
+import { RenderJobsService } from "./render-jobs.service.js";
 
 config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env") });
@@ -20,6 +21,7 @@ config({ path: resolve(process.cwd(), ".env.local"), override: true });
 const bootstrap = async () => {
   const app = await NestFactory.createApplicationContext(WorkflowWorkerModule, { logger: ["error", "warn", "log"] });
   const runner = app.get(WorkflowRunnerService);
+  const renders = app.get(RenderJobsService);
   console.info("LyOnix video-production workflow worker started (PostgreSQL durable WorkflowRun queue)");
   let stopping = false;
   const stop = () => { stopping = true; };
@@ -27,8 +29,9 @@ const bootstrap = async () => {
   process.once("SIGTERM", stop);
   while (!stopping) {
     try {
+      const prepared = await renders.processNextPreparation();
       const processed = await runner.processNext();
-      if (!processed) await new Promise((resolveSleep) => setTimeout(resolveSleep, 1000));
+      if (!processed && !prepared) await new Promise((resolveSleep) => setTimeout(resolveSleep, 1000));
     } catch (error) {
       console.error("Workflow worker loop failed; run state remains durable", error instanceof Error ? error.message : "unknown error");
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 2000));

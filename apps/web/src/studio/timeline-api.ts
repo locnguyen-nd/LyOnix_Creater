@@ -112,13 +112,10 @@ export async function getTemplateSnapshot(id: string): Promise<TemplateSnapshotR
 export async function submitRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
 ): Promise<RenderJobResponse> {
-  // No client-generated idempotencyKey here on purpose: the server's own requestFingerprint
-  // is already derived from the stable (projectId, templateSnapshotId, providerAccountId,
-  // assignments) tuple. Inventing a fresh key per call (e.g. from Date.now()) would defeat
-  // that dedupe instead of reinforcing it - an accidental duplicate submit of the same
-  // approved timeline must resolve to the existing job, not call Creatomate twice.
+  // The server deduplicates identical requests; a caller can supply a fresh key for an
+  // intentional retry after a failed job.
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/render-jobs`, {
     method: "POST",
     headers: await csrfHeaders(),
@@ -130,7 +127,7 @@ export async function submitRenderFromTimeline(
 export async function submitDynamicRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif" },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
 ): Promise<RenderJobResponse> {
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/dynamic-render-jobs`, {
     method: "POST",

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { LazyThumb } from "../components/LazyThumb";
+import { RenderProgress } from "../components/RenderProgress";
 import { Button, Select, TextArea } from "../components/ui";
 import { api, ApiError } from "../api";
 import type { ApiProvider } from "../jobs-api";
@@ -772,7 +773,11 @@ export function StudioProPage() {
     if (!context || !baseVersionId || !renderAccountId || dirty) return;
     setRenderSubmitting(true);
     try {
-      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, { providerAccountId: renderAccountId });
+      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, {
+        providerAccountId: renderAccountId,
+        // Only a deliberate submit after a failed job creates a new attempt.
+        ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}),
+      });
       setRenderJob(job);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -959,11 +964,7 @@ export function StudioProPage() {
         </Banner>
       ) : null}
       {preview && !preview.ready ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
-      {renderJob ? (
-        <Banner variant={renderJob.status === "failed" ? "danger" : "info"}>
-          {t("studioPro.renderStatusLabel", { status: renderJob.status })}
-        </Banner>
-      ) : null}
+      {renderJob ? <RenderProgress job={renderJob} /> : null}
       </div>
 
       {/* VE2E-13: resultUrl plays only here, inside Studio - never as direct autoplay from a

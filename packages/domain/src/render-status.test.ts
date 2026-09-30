@@ -3,6 +3,7 @@ import { isTerminalRenderStatus, nextRenderJobStatus } from "./render-status.js"
 
 describe("nextRenderJobStatus", () => {
   it("moves forward through the progress stages", () => {
+    expect(nextRenderJobStatus("preparing_clips", "queued")).toBe("queued");
     expect(nextRenderJobStatus("accepted", "queued")).toBe("queued");
     expect(nextRenderJobStatus("queued", "rendering")).toBe("rendering");
     expect(nextRenderJobStatus("rendering", "verifying")).toBe("verifying");

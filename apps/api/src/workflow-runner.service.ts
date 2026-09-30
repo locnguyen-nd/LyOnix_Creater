@@ -443,7 +443,7 @@ export class WorkflowRunnerService {
       "submit_render",
       { role: "render", operation: "render_submit", providerAccountId: renderConfig.providerAccountId },
       async () => {
-        const outcome = await this.renderJobs.submitFromTimelineVersion(
+        const outcome = await this.renderJobs.enqueueTimelineRender(
           run.projectId,
           timeline.id,
           userId,
@@ -453,6 +453,7 @@ export class WorkflowRunnerService {
             idempotencyKey: run.requestFingerprint,
             ...(renderConfig.outputFormat ? { outputFormat: renderConfig.outputFormat } : {}),
           },
+          "template",
           run.id,
         );
         if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);

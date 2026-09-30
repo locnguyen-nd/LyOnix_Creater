@@ -30,6 +30,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AudioVersionsService } from "./audio-versions.service.js";
+import { ClipDerivativesService } from "./clip-derivatives.service.js";
+import { startStubMediaWorker } from "./clip-derivatives.test-helpers.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
 import { GrantsService } from "./grants.service.js";
@@ -317,8 +319,9 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
   let pexelsVideosById: Record<string, ReturnType<typeof pexelsVideoRow>>;
 
   let runner: WorkflowRunnerService;
+  let renderJobsService: RenderJobsService;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     previousBaseUrl = process.env.PUBLIC_BASE_URL;
     process.env.PUBLIC_BASE_URL = "https://api.lyonix.test";
 
@@ -423,7 +426,10 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     const pexels = new PexelsService(fake.prisma as never, grants, media, providerAccounts);
     const templates = new CreatomateTemplatesService(fake.prisma as never);
     const mediaDelivery = new MediaDeliveryService(fake.prisma as never, grants);
-    const renderJobsService = new RenderJobsService(fake.prisma as never, grants, templates, mediaDelivery);
+    const clipWorker = await startStubMediaWorker();
+    const clipDerivatives = new ClipDerivativesService(fake.prisma as never, clipWorker.client);
+    clipDerivatives.log = () => undefined;
+    renderJobsService = new RenderJobsService(fake.prisma as never, grants, templates, mediaDelivery, clipDerivatives);
 
     const timelines = new TimelineVersionsService(fake.prisma as never, grants);
 
@@ -442,6 +448,9 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
   it("runs one Auto WorkflowRun through real source→script→voice→media→timeline→render wiring to a completed RenderJob, with a full StepRun/ProviderOperation trail", async () => {
     const processed = await runner.processNext();
     expect(processed).toBe(true);
+    expect(fake.tables.renderJobs[0]?.status).toBe("preparing_clips");
+    await renderJobsService.processNextPreparation();
+    await runner.processNext();
 
     // No unrouted/unexpected provider call slipped through - every real HTTP call this run
     // made was one of the 4 explicitly-stubbed providers, nothing silently hit the network
@@ -490,11 +499,12 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     expect(fake.tables.audioVersions).toHaveLength(2);
     expect(fake.tables.audioVersions.every((a) => a.status === "current")).toBe(true);
     expect(fake.tables.subtitleVersions).toHaveLength(2);
-    expect(fake.tables.mediaAssetVersions.filter((m) => m.kind === "video")).toHaveLength(2);
+    expect(fake.tables.mediaAssetVersions.filter((m) => m.kind === "video" && !m.parentMediaAssetVersionId)).toHaveLength(2);
+    expect(fake.tables.mediaAssetVersions.filter((m) => m.kind === "video" && m.parentMediaAssetVersionId)).toHaveLength(2);
     expect(fake.tables.mediaAssetVersions.filter((m) => m.kind === "audio")).toHaveLength(2);
     // Two distinct scenes must resolve to two distinct imported video assets, never the same
     // one twice (would indicate the per-scene sceneId wiring collapsed to a single scene).
-    const videoAssetIds = new Set(fake.tables.mediaAssetVersions.filter((m) => m.kind === "video").map((m) => m.id));
+    const videoAssetIds = new Set(fake.tables.mediaAssetVersions.filter((m) => m.kind === "video" && !m.parentMediaAssetVersionId).map((m) => m.id));
     expect(videoAssetIds.size).toBe(2);
 
     // --- the render job actually completed with a real (stubbed) result URL --------------

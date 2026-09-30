@@ -123,6 +123,7 @@ enum ProviderOperationStatus {
 
 enum RenderJobStatus {
   accepted
+  preparing_clips
   queued
   rendering
   verifying
@@ -724,6 +725,10 @@ model RenderJob {
   // Actual Creatomate modifications object this job submitted (or will submit) — server-built, never client-supplied raw JSON.
   modificationsPayload Json
   progress             Int?
+  clipsTotal           Int                @default(0)
+  clipsReady           Int                @default(0)
+  clipFailures         Json?
+  preparationLeaseUntil DateTime?
   resultUrl            String?
   // VE2E-19: Creatomate's own render-frame preview image (`snapshot_url`), captured whenever the
   // provider reports one (webhook/reconcile), for the per-channel finished-video library thumbnail.
@@ -747,6 +752,7 @@ model RenderJob {
   webhookEvents        RenderWebhookEvent[]
 
   @@index([projectId, status])
+  @@index([status, preparationLeaseUntil])
   @@index([externalJobId])
 }
 
