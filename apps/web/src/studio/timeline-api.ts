@@ -5,6 +5,9 @@
  */
 import { api, csrfHeaders } from "../api";
 import type {
+  ApifyImportRequest,
+  ApifySearchRequest,
+  ApifySearchResponse,
   AudioVersionResponse,
   CreatomatePreviewConfigResponse,
   CreatomateTemplateSummaryResponse,
@@ -60,6 +63,16 @@ export async function importPexels(projectId: string, input: { providerAccountId
     headers: await csrfHeaders(),
     body: JSON.stringify(input),
   });
+}
+
+/** VE2E-34: runs a server-pinned Apify Actor for one platform (CSRF POST; the server picks the Actor, the client only names the platform). */
+export async function searchApify(projectId: string, input: ApifySearchRequest): Promise<ApifySearchResponse> {
+  return api<ApifySearchResponse>(`/projects/${projectId}/apify/search`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
+}
+
+/** VE2E-34: imports a candidate by its server-sealed `importRef` - the client never supplies a URL. */
+export async function importApify(projectId: string, input: ApifyImportRequest): Promise<{ asset: MediaAssetVersionSummary }> {
+  return api<{ asset: MediaAssetVersionSummary }>(`/projects/${projectId}/apify/import`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
 }
 
 export async function listProjectMedia(projectId: string): Promise<MediaAssetVersionSummary[]> {

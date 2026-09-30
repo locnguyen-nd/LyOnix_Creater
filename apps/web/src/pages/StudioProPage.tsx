@@ -56,6 +56,7 @@ import {
   submitDynamicRenderFromTimeline,
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
+import { ApifyMediaTab } from "../studio/ApifyMediaTab";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
@@ -305,7 +306,7 @@ export function StudioProPage() {
 
   useEffect(() => {
     if (providers.length === 0) return;
-    setVisualAccountId((current) => current || usableAccounts(providers, "visual")[0]?.id || "");
+    setVisualAccountId((current) => current || usableAccounts(providers, "visual").find((row) => row.provider === "pexels")?.id || "");
     setVoiceAccountId((current) => current || usableAccounts(providers, "tts")[0]?.id || "");
     setRenderAccountId((current) => current || usableAccounts(providers, "render")[0]?.id || "");
   }, [providers]);
@@ -870,7 +871,9 @@ export function StudioProPage() {
   if (error && !context) return <Banner variant="danger">{error}</Banner>;
   if (!context) return <Banner variant="info">{t("common.loading")}</Banner>;
 
-  const visualAccounts = usableAccounts(providers, "visual");
+  // Pexels feeds the auto-fill/search box; Apify (VE2E-34) has its own tab. Other visual providers (YouTube/Pinterest) are not selectable here.
+  const visualAccounts = usableAccounts(providers, "visual").filter((row) => row.provider === "pexels");
+  const apifyAccountId = usableAccounts(providers, "visual").find((row) => row.provider === "apify")?.id ?? null;
   const voiceAccounts = usableAccounts(providers, "tts");
   const renderAccounts = usableAccounts(providers, "render");
   const workspaceGridClass = leftCollapsed && rightCollapsed
@@ -1087,6 +1090,21 @@ export function StudioProPage() {
                   {selectedScene.visualQuery}
                 </button>
               ) : null}
+              <details className="rounded-[4px] border border-lyx-border p-2">
+                <summary className="cursor-pointer text-[11px] font-medium">{t("studioPro.apifyTab")}</summary>
+                <div className="mt-2">
+                  <ApifyMediaTab
+                    projectId={context.projectId}
+                    accountId={apifyAccountId}
+                    visualPlan={context.visualPlan}
+                    selectedSceneId={selectedSceneId}
+                    onImported={(asset, label) => {
+                      setMediaLibrary((prev) => [asset, ...prev]);
+                      assignMediaToSelectedScene({ id: asset.id, label });
+                    }}
+                  />
+                </div>
+              </details>
               <Button variant="secondary" disabled title={t("common.comingSoon")} onClick={() => fileInputRef.current?.click()}>
                 {t("studioPro.uploadReplace")}
               </Button>

@@ -83,7 +83,7 @@ export function JobNewPage() {
 
   const contentAccounts = providers.filter((item) => item.role === "content" && (item.isFake || item.status === "verified"));
   const voiceAccounts = usableAccounts(providers, "tts");
-  const mediaAccounts = usableAccounts(providers, "visual");
+  const mediaAccounts = usableAccounts(providers, "visual").filter((item) => item.provider === "pexels");
   const renderAccounts = usableAccounts(providers, "render");
   const preflight = [
     { key: "content", ok: contentAccounts.length > 0 },
