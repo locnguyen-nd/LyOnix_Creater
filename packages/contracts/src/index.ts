@@ -155,6 +155,12 @@ export type ScriptDraftV2Response = {
 export type ScriptDraftV2GenerationResponse = {
   sourceId: string;
   draft: ScriptDraftV2Response;
+  /** VE2E-50 (optional, additive): why the visualPlan is missing/invalid and whether the strict schema was rejected; consumed by the Auto runner diagnostics only. */
+  diagnostics?: {
+    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[] };
+    schemaRejection: string | null;
+    repaired: boolean;
+  };
   providerPin: {
     accountId: string;
     provider: string;
@@ -522,6 +528,12 @@ export type RenderJobResponse = {
   resultUrl: string | null;
   /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
   snapshotUrl: string | null;
+  /** VE2E-52b: actual Creatomate output (render_scale/width/height) and the template canvas; null on older jobs / before the provider reports. */
+  outputRenderScale?: number | null;
+  outputWidth?: number | null;
+  outputHeight?: number | null;
+  canvasWidth?: number | null;
+  canvasHeight?: number | null;
   resultExpiresAt: string | null;
   attempts: number;
   requestFingerprint: string;
@@ -679,6 +691,25 @@ export type MediaPlanRequest = {
   backgroundSegments?: BackgroundSegmentsSetting;
 };
 
+/** VE2E-54: total-duration check stored as the `duration_budget` StepRun outputRef. */
+export type DurationBudgetDiagnostics = {
+  targetSec: number;
+  totalSec: number;
+  toleranceSec: number;
+  minSec: number;
+  maxSec: number;
+  inBand: boolean;
+  /** Signed seconds outside the band (0 when inside). */
+  deviationSec: number;
+  sceneCount: number;
+  /** Scenes whose audio duration was unknown (total is then a lower bound). */
+  unknownScenes: number;
+  /** Set to `duration_out_of_band` when the real total is outside target +- tolerance. */
+  flag: "duration_out_of_band" | null;
+  charsPerSecond: number | null;
+  calibrationSource: "history" | "default" | null;
+};
+
 export type MediaPlanSegmentDiagnostics = {
   segmentId: string;
   origin: "visual_plan" | "fallback";
@@ -690,12 +721,46 @@ export type MediaPlanSegmentDiagnostics = {
   looped: boolean;
   /** A single scene longer than the whole source clip (its range is the whole clip, shorter than the voice). */
   short: boolean;
+  /** VE2E-53: apify source window (inside start/end guards) cannot cover every scene; caller should take a second source (no overlapping loop). */
+  needsSecondSource?: boolean;
+  /** VE2E-53: ms of voice covered by the chosen source window (only set for apify sources). */
+  coveredMs?: number;
   /** VE2E-46: where the segment's source came from (`null`/absent when sourcing failed). */
   sourceProvider?: "apify" | "pexels" | null;
   /** VE2E-46: why Apify was skipped/not used before falling back to Pexels (e.g. `apify_no_usable_candidate`, `apify_error:PROVIDER_TIMEOUT`, `no_ja_keywords`); `null` when Apify was not involved or succeeded. */
   fallbackReason?: string | null;
   /** VE2E-46: audit trail of an Apify-sourced segment (also stored on the imported asset). */
   apifyProvenance?: { platform: string; actorId: string; actorVersion: string; sourceUrl: string | null; author: string | null; fetchedAt: string } | null;
+  /** VE2E-51: candidate filtering + two-phase flow of this segment's Apify attempt (also recorded when it fell back to Pexels). */
+  apifyQuality?: MediaPlanApifyQuality | null;
+};
+
+/** VE2E-51: why Apify candidates were kept/rejected before download, and how the chosen clip was obtained. */
+export type MediaPlanApifyQuality = {
+  considered: number;
+  passed: number;
+  /** Reject reason -> count (e.g. `language_mismatch`, `ad_or_sponsored`, `template_or_greenscreen`, `too_short`). */
+  rejected: Record<string, number>;
+  /** A few rejected examples (video id + reasons) for debugging; max 5. */
+  rejectedExamples: Array<{ videoId: string; reasons: string[] }>;
+  twoPhase: boolean;
+  /** `not_used` = single-phase or nothing chosen; `ok` = phase 2 downloaded only the chosen post; `fallback_single_phase` = phase 2 failed and the classic download search was used. */
+  phase2: "not_used" | "ok" | "fallback_single_phase" | "failed";
+  /** The chosen clip was already imported in the project library (same TikTok video id): no download. */
+  reusedLibraryAsset: boolean;
+  /** The search result came from the shared TTL cache or another segment's identical search (no new Actor run). */
+  searchReused: boolean;
+};
+
+/** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
+export type MediaPlanApifyUsage = {
+  runs: number;
+  seconds: number;
+  usd: number | null;
+  /** Searches answered without a new run (cache or identical (platform, keyword) in the same job). */
+  searchesReused: number;
+  /** Segments whose clip came from an asset already in the library. */
+  libraryReuses: number;
 };
 
 export type MediaPlanResponse = {
@@ -705,6 +770,8 @@ export type MediaPlanResponse = {
   scenes: Array<{ sceneId: string; mediaAssetVersionId: string | null; segmentId: string | null; sourceStartMs: number | null; sourceDurationMs: number | null }>;
   segments: TimelineSegmentInput[];
   diagnostics: MediaPlanSegmentDiagnostics[];
+  /** VE2E-51 */
+  apifyUsage?: MediaPlanApifyUsage | null;
 };
 
 export type VideoProductionSubmitResponse = {
@@ -738,6 +805,10 @@ export type VideoProductionResponse = {
   backgroundSegments: BackgroundSegmentsResolvedResponse;
   /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */
   mediaSourcing: MediaPlanSegmentDiagnostics[] | null;
+  /** VE2E-51: Apify runs/seconds/USD of this job (from the `media_plan_diagnostics` StepRun); `null` when none recorded. */
+  apifyUsage?: MediaPlanApifyUsage | null;
+  /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
+  durationBudget: DurationBudgetDiagnostics | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -908,6 +979,8 @@ export type TimelineDynamicPreviewResponse = {
   renderableSceneCount: number;
   totalSceneCount: number;
   missingReason: string | null;
+  /** VE2E-52: how the preview/final source was composed from the pinned template. */
+  layout?: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] } | undefined;
 };
 
 /** VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured server-side (B10/B11-gated) - never the render API secret. */
@@ -941,6 +1014,8 @@ export type StudioContextResponse = {
   sourceVersionId: string;
   scriptDraftVersionId: string;
   scenes: StudioSceneContextResponse[];
+  /** VE2E-54: intake target duration in seconds (Auto-run Studio); absent for legacy jobs (Studio assumes 60). */
+  targetDurationSec?: number;
   latestTimelineVersion: TimelineVersionResponse | null;
   /** VE2E-38: the bridged script version's `visualPlan` (segments + ja/en keywords to prefill Studio search), `null` when none. */
   visualPlan: ScriptVisualPlanResponse | null;

@@ -189,6 +189,12 @@ export {
   chooseFallbackSegmentCount,
   groupScenesByDuration,
   computeSegmentSourceRanges,
+  computeSocialWindowRanges,
+  socialWindowOptionsFromEnv,
+  SOCIAL_CLIP_START_GUARD_MS,
+  SOCIAL_CLIP_END_GUARD_MS,
+  type SocialWindowPlan,
+  type SocialWindowOptions,
   MEDIA_PLAN_POLICY_VERSION,
   MEDIA_PLAN_MIN_SEGMENT_MS,
   MEDIA_PLAN_MAX_SEGMENT_MS,
@@ -198,3 +204,28 @@ export {
   type SegmentCountRange,
   type SceneSourceRange,
 } from "./media-plan.js";
+
+export {
+  JAPAN_GEONAMES_ID,
+  evaluateSocialCandidate,
+  isJapanCountry,
+  keywordOverlap,
+  selectSocialCandidates,
+  type SocialCandidateSignals,
+  type SocialEvaluation,
+  type SocialFilterContext,
+  type SocialRejectReason,
+  type SocialSelection,
+} from "./social-candidate-filter.js";
+export {
+  DEFAULT_DURATION_TOLERANCE_SEC,
+  DEFAULT_CHARS_PER_SECOND,
+  defaultCharsPerSecond,
+  calibrateCharsPerSecond,
+  buildNarrationBudget,
+  checkDurationBand,
+  buildDurationBudgetPromptLines,
+  type DurationSample,
+  type NarrationBudget,
+  type DurationBandCheck,
+} from "./duration-budget.js";

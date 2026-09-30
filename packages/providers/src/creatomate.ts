@@ -193,7 +193,40 @@ export type CreatomateRenderResult = {
   renderDurationMs: number | null;
   /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
   snapshotUrl: string | null;
+  /** VE2E-52b: what Creatomate actually rendered (`render_scale`/`width`/`height` of the render object); null when not reported. */
+  renderScale: number | null;
+  width: number | null;
+  height: number | null;
 };
+
+const finiteNumber = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * VE2E-52b: explicit `render_scale` sent on every final render. Creatomate silently applied 0.25 (270x480)
+ * on the owner's account when none was sent, so LyOnix always states it. Env `CREATOMATE_RENDER_SCALE`
+ * (default 1, valid 0.1..1; anything else falls back to 1).
+ */
+export function resolveCreatomateRenderScale(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.CREATOMATE_RENDER_SCALE?.trim();
+  if (!raw) return 1;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0.1 && value <= 1 ? value : 1;
+}
+
+/** Canvas (`width`/`height`) declared by a Creatomate template/source document, or null when absent. */
+export function readCreatomateCanvas(rawTemplate: unknown): { width: number; height: number } | null {
+  if (!rawTemplate || typeof rawTemplate !== "object") return null;
+  const record = rawTemplate as Record<string, unknown>;
+  const width = finiteNumber(record.width);
+  const height = finiteNumber(record.height);
+  return width && height && width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** True when the rendered output is smaller than the template canvas (e.g. render_scale 0.25 -> 270x480 of 1080x1920). */
+export function isRenderOutputBelowCanvas(output: { width: number | null; height: number | null } | null, canvas: { width: number | null; height: number | null } | null): boolean {
+  if (!output || !canvas || !output.width || !output.height || !canvas.width || !canvas.height) return false;
+  return output.width < canvas.width || output.height < canvas.height;
+}
 
 const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult => ({
   externalJobId: String(row.id ?? ""),
@@ -203,6 +236,9 @@ const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult =>
   errorMessage: typeof row.error_message === "string" ? row.error_message : null,
   renderDurationMs: typeof row.render_duration === "number" ? Math.round(row.render_duration * 1000) : null,
   snapshotUrl: typeof row.snapshot_url === "string" ? row.snapshot_url : null,
+  renderScale: finiteNumber(row.render_scale),
+  width: finiteNumber(row.width),
+  height: finiteNumber(row.height),
 });
 
 export type SubmitRenderInput = {
@@ -228,6 +264,7 @@ export async function submitCreatomateRender(apiKey: string, input: SubmitRender
         template_id: input.templateId,
         modifications: input.modifications,
         webhook_url: input.webhookUrl,
+        render_scale: resolveCreatomateRenderScale(),
         ...(input.outputFormat ? { output_format: input.outputFormat } : {}),
       }),
     },
@@ -246,7 +283,7 @@ export async function submitCreatomateSourceRender(apiKey: string, input: Submit
   const body = await call(
     "/renders",
     apiKey,
-    { method: "POST", body: JSON.stringify({ source: input.source, webhook_url: input.webhookUrl }) },
+    { method: "POST", body: JSON.stringify({ source: input.source, webhook_url: input.webhookUrl, render_scale: resolveCreatomateRenderScale() }) },
     submitTimeoutMs,
   );
   const rows = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [body as Record<string, unknown>];

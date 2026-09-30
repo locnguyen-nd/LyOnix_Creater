@@ -24,7 +24,7 @@ import {
   resolveBackgroundSegmentRange,
   type BackgroundSegmentCountBounds,
 } from "@lyonix/domain";
-import type { ErrorCode, MediaPlanSegmentDiagnostics, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -343,8 +343,12 @@ export class VideoProductionsService {
       ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId }, select: { durationSec: true } })
       : null;
     const sourcingSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "media_plan_diagnostics" }, orderBy: [{ attempt: "desc" }], take: 1 });
-    const sourcingOutput = sourcingSteps[0]?.outputRef as { segments?: unknown } | null | undefined;
+    const sourcingOutput = sourcingSteps[0]?.outputRef as { segments?: unknown; apifyUsage?: unknown } | null | undefined;
     const mediaSourcing = Array.isArray(sourcingOutput?.segments) ? (sourcingOutput!.segments as MediaPlanSegmentDiagnostics[]) : null;
+    const apifyUsage = sourcingOutput?.apifyUsage && typeof sourcingOutput.apifyUsage === "object" ? (sourcingOutput.apifyUsage as MediaPlanApifyUsage) : null;
+    const budgetSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "duration_budget" }, orderBy: [{ attempt: "desc" }], take: 1 });
+    const budgetOutput = budgetSteps?.[0]?.outputRef as Record<string, unknown> | null | undefined;
+    const durationBudget = budgetOutput && typeof budgetOutput.targetSec === "number" ? (budgetOutput as unknown as DurationBudgetDiagnostics) : null;
     return {
       ok: true,
       data: {
@@ -360,6 +364,8 @@ export class VideoProductionsService {
         lastError: (run.lastError as VideoProductionResponse["lastError"]) ?? null,
         backgroundSegments: { setting: backgroundSetting, range: resolveBackgroundSegmentRange(backgroundSetting, profile?.durationSec ?? null) },
         mediaSourcing,
+        apifyUsage,
+        durationBudget,
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       },

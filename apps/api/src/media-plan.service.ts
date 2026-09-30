@@ -25,6 +25,8 @@ import {
   MEDIA_PLAN_POLICY_VERSION,
   canWriteProjectResource,
   computeSegmentSourceRanges,
+  computeSocialWindowRanges,
+  socialWindowOptionsFromEnv,
   deriveSceneBrief,
   planBackgroundSegments,
   type MediaPlanScene,
@@ -34,15 +36,19 @@ import {
 } from "@lyonix/domain";
 import type {
   ErrorCode,
+  MediaPlanApifyQuality,
+  MediaPlanApifyUsage,
   MediaPlanResponse,
   MediaPlanSegmentDiagnostics,
   ScriptVisualPlanResponse,
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
-import { ApifyService } from "./apify.service.js";
+import { randomUUID } from "node:crypto";
+import { ScriptGenerationService } from "./script-generation.service.js";
+import { ApifyJobContext, ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -78,19 +84,45 @@ export type SegmentSource = {
   /** VE2E-46: recorded when Apify was tried/skipped and the source came from the Pexels fallback. */
   fallbackReason?: string | null;
   apifyProvenance?: MediaPlanSegmentDiagnostics["apifyProvenance"];
+  /** VE2E-51: candidate filtering / two-phase details of the Apify attempt (kept when it fell back to Pexels). */
+  apifyQuality?: MediaPlanApifyQuality | null;
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
+
+/** Serialises async sections (used for the Pexels fallback so concurrent segments never pick the same stock clip). */
+class Mutex {
+  private tail: Promise<unknown> = Promise.resolve();
+  run<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(task, task);
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
+}
+
+const plainExternalId = (id: string) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id);
 
 /** Tracks what earlier segments of one plan already used - a new segment must never pick any of these. */
 export class SegmentSourceLedger {
   readonly externalIds = new Set<string>();
   readonly assetIds = new Set<string>();
+  /**
+   * VE2E-51: plain platform video ids (`apify:tiktok:<id>` -> `<id>`), a LIVE set shared with `ApifyService.autoImportForSegment`,
+   * which reserves the chosen id in it before any await so concurrently sourced segments cannot pick the same clip.
+   */
+  readonly apifyPlainIds = new Set<string>();
+  readonly pexelsLock = new Mutex();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
-    if (source.externalId) this.externalIds.add(source.externalId);
+    if (source.externalId) {
+      this.externalIds.add(source.externalId);
+      this.apifyPlainIds.add(plainExternalId(source.externalId));
+    }
   }
 }
+
+/** VE2E-51: at most this many segments are sourced at once. */
+export const MEDIA_PLAN_SOURCING_CONCURRENCY = 3;
 
 /** Pexels imports are registered as `pexels-<id>.<ext>` (pexels.service.ts `import`); that is the only place the external id survives on the asset row. */
 export const pexelsExternalIdFromFileName = (fileName: string): string | null => /^pexels-(\d+)\./.exec(fileName)?.[1] ?? null;
@@ -107,28 +139,31 @@ export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
   return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
 };
 
-/** Apify search rejects queries over 200 chars; stay well below. */
-export const APIFY_FALLBACK_KEYWORD_MAX_CHARS = 100;
-
 /**
- * VE2E-48: the Japanese Apify keyword of a segment. `keywords.ja` from the plan wins; otherwise, for a
- * `ja` script (whose scene `visualQuery` is already Japanese) the first 1-2 distinct scene queries are
- * joined within {@link APIFY_FALLBACK_KEYWORD_MAX_CHARS}. Non-ja scripts without keywords get `null`
- * (English is never invented) -> Pexels with reason `no_ja_keywords`.
+ * The Japanese Apify keyword of a segment (VE2E-50): only `segment.keywords.ja` when it is a real short
+ * Japanese search phrase (kana/kanji, see `isValidJaSearchKeyword`). The scene `visualQuery` is NEVER
+ * used (VE2E-48's fallback was wrong: for a ja script it is a long English shot description that returns
+ * global template/greenscreen TikToks). No valid keyword -> `null` -> Pexels with reason `no_ja_keywords`.
  */
-export const apifyKeywordForSegment = (script: MediaPlanScript, segment: PlannedSegment): string | null => {
+export const apifyKeywordForSegment = (segment: PlannedSegment): string | null => {
   const planned = segment.keywords?.ja.trim();
-  if (planned) return planned;
-  if (!/^ja($|[-_])/i.test(script.language.trim())) return null;
-  const distinct: string[] = [];
-  for (const sceneId of segment.sceneIds) {
-    const query = script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery.replace(/\s+/g, " ").trim();
-    if (query && !distinct.some((existing) => existing.toLowerCase() === query.toLowerCase())) distinct.push(query);
-    if (distinct.length >= 2) break;
+  return planned && isValidJaSearchKeyword(planned) ? planned : null;
+};
+
+/** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
+export const segmentsNeedingKeywords = (segments: readonly PlannedSegment[]): PlannedSegment[] => segments.filter((segment) => apifyKeywordForSegment(segment) === null);
+
+/** Narration of a segment's scenes in script order (the only text the keyword extraction sees). */
+export const segmentNarration = (script: MediaPlanScript, segment: PlannedSegment): string =>
+  segment.sceneIds.map((sceneId) => script.scenes.find((scene) => scene.sceneId === sceneId)?.narration.trim() ?? "").filter(Boolean).join(" ");
+
+/** Applies extracted keywords to the planned segments in place; `en` from the plan wins, extracted `en` only fills a gap. */
+export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extracted: Readonly<Record<string, { ja: string; en: string }>>): void => {
+  for (const segment of segments) {
+    const found = extracted[segment.segmentId];
+    if (!found || !isValidJaSearchKeyword(found.ja)) continue;
+    segment.keywords = { ja: found.ja.trim(), en: segment.keywords?.en.trim() || found.en.trim() };
   }
-  if (distinct.length === 0) return null;
-  const joined = distinct.length === 2 && `${distinct[0]} ${distinct[1]}`.length <= APIFY_FALLBACK_KEYWORD_MAX_CHARS ? `${distinct[0]} ${distinct[1]}` : distinct[0]!;
-  return joined.slice(0, APIFY_FALLBACK_KEYWORD_MAX_CHARS).trim() || null;
 };
 
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
@@ -141,7 +176,61 @@ export class MediaPlanService {
     @Inject(PexelsService) private readonly pexels: PexelsService,
     /** VE2E-46: Apify-first sourcing. Absent (older 3-argument construction) = unchanged Pexels-only behaviour. */
     @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
+    /** VE2E-55: keyword extraction for Studio plans. Absent = no extraction (segments without a ja keyword go to Pexels). */
+    @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
   ) {}
+
+  /**
+   * VE2E-55: Studio counterpart of the Auto runner's extraction. One call for all given segments lacking a valid ja
+   * keyword; applies the result in place. Returns the reason to record when segments stay without a keyword
+   * (`no_content_account` | `extraction_failed`), else null. Never throws; the call is recorded as a ProviderOperation.
+   */
+  private async extractKeywordsForStudio(userId: string, role: "admin" | "staff", script: MediaPlanScript, segments: PlannedSegment[]): Promise<string | null> {
+    const needing = segmentsNeedingKeywords(segments);
+    if (needing.length === 0 || !this.scriptGeneration) return null;
+    if (!(await this.apifyAvailable(userId, role))) return null;
+    let accountId: string | null = null;
+    try {
+      accountId = await this.scriptGeneration.resolveContentAccountId(userId, role);
+    } catch {
+      accountId = null;
+    }
+    if (!accountId) return "no_content_account";
+    const record = async (status: "succeeded" | "failed", errorCode: string | null, requestId: string | null) => {
+      try {
+        await this.prisma.providerOperation.create({ data: { providerAccountId: accountId, role: "content", operation: "extract_keywords", status, correlationId: randomUUID(), errorCode, externalRequestId: requestId } });
+      } catch {
+        // Bookkeeping is best-effort.
+      }
+    };
+    try {
+      const outcome = await this.scriptGeneration.extractSegmentKeywords(userId, role, {
+        providerAccountId: accountId,
+        language: script.language,
+        segments: needing.map((segment) => ({ segmentId: segment.segmentId, narration: segmentNarration(script, segment) })),
+      });
+      if (!outcome.ok) {
+        await record("failed", outcome.code, null);
+        return "extraction_failed";
+      }
+      await record("succeeded", null, outcome.usage.providerRequestId);
+      applyExtractedKeywords(segments, outcome.keywords);
+      return null;
+    } catch {
+      await record("failed", "PROVIDER_UNAVAILABLE", null);
+      return "extraction_failed";
+    }
+  }
+
+  /** VE2E-50: whether the user can run an Apify search at all (the runner only pays for keyword extraction when it can). */
+  async apifyAvailable(userId: string, role: "admin" | "staff"): Promise<boolean> {
+    if (!this.apify) return false;
+    try {
+      return Boolean(await this.apify.findAccountForUser(userId, role));
+    } catch {
+      return false;
+    }
+  }
 
   planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
     const scenes: MediaPlanScene[] = script.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: sceneDuration(scene) }));
@@ -189,27 +278,33 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
-  ): Promise<{ source: SegmentSource } | { reason: string | null }> {
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
+  ): Promise<{ source: SegmentSource } | { reason: string | null; quality?: MediaPlanApifyQuality | null }> {
     if (!this.apify) return { reason: null };
-    const keyword = apifyKeywordForSegment(input.script, input.segment);
+    const keyword = apifyKeywordForSegment(input.segment);
     if (!keyword) return { reason: "no_ja_keywords" };
     try {
       const account = await this.apify.findAccountForUser(userId, role);
       if (!account) return { reason: "no_apify_account" };
       const brief = this.segmentBrief(input.script, input.segment);
-      const usedExternalIds = new Set([...input.ledger.externalIds].map((id) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id)));
+      // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
+      const usedExternalIds = input.ledger.apifyPlainIds;
       const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {
         platform: apifyAutoPlatformFromEnv(),
         keyword,
         brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
         sceneId: input.segment.sceneIds[0]!,
         usedExternalIds,
+        scriptLanguage: input.script.language,
+        segmentDurationSeconds: input.segment.durationMs / 1000,
+        ...(input.job ? { job: input.job } : {}),
       });
-      if (!outcome.ok) return { reason: outcome.reason };
+      if (!outcome.ok) return { reason: outcome.reason, quality: outcome.quality ?? null };
       const asset = outcome.data.asset;
       if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
-        return { reason: "apify_duplicate_or_unsupported_source" };
+        // Release the reservation made by ApifyService (the ledger itself never held this clip).
+        if (!input.ledger.externalIds.has(outcome.data.ledgerId)) usedExternalIds.delete(outcome.data.externalId);
+        return { reason: "apify_duplicate_or_unsupported_source", quality: outcome.data.quality };
       }
       const provenance = outcome.data.provenance;
       return {
@@ -221,6 +316,7 @@ export class MediaPlanService {
           sourcing: "imported",
           provider: "apify",
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
+          apifyQuality: outcome.data.quality,
         },
       };
     } catch {
@@ -233,28 +329,117 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const apifyAttempt = await this.tryApify(projectId, userId, role, input);
     if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
     const fallbackReason = apifyAttempt.reason;
+    const apifyQuality = apifyAttempt.quality ?? null;
     const brief = this.segmentBrief(input.script, input.segment);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
-    const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
-      providerAccountId: input.providerAccountId,
-      sceneId: input.segment.sceneIds[0]!,
-      query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
-      sceneBrief: brief,
-      usedExternalIds: [...input.ledger.externalIds],
+    // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
+    return input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
+      const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
+        providerAccountId: input.providerAccountId,
+        sceneId: input.segment.sceneIds[0]!,
+        query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
+        sceneBrief: brief,
+        usedExternalIds: [...input.ledger.externalIds],
+      });
+      if (!outcome.ok) return outcome;
+      const asset = outcome.data.asset;
+      if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
+      if (input.ledger.assetIds.has(asset.id)) {
+        // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
+        return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
+      }
+      const source: SegmentSource = { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason, ...(apifyQuality ? { apifyQuality } : {}) };
+      input.ledger.add(source);
+      return { ok: true, data: source };
     });
-    if (!outcome.ok) return outcome;
-    const asset = outcome.data.asset;
-    if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
-    if (input.ledger.assetIds.has(asset.id)) {
-      // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
-      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
+  }
+
+  /**
+   * VE2E-51: sources every segment with bounded concurrency ({@link MEDIA_PLAN_SOURCING_CONCURRENCY} = 3), sharing one
+   * `ApifyJobContext` (identical (platform, keyword) searches share one Actor run; per-job usage is returned). Each segment first
+   * tries `findReusableSource` (retry/Studio idempotency), else `importSegmentSource` (optionally wrapped by `runImport`, which
+   * the Auto runner uses for its per-segment StepRun bookkeeping and may throw). A source is added to the ledger the moment it is
+   * known, so a later segment can never take it. `stopOnFailure` (Auto): after the first thrown failure no new segment starts,
+   * in-flight ones finish, and the failure with the lowest segment index is returned in `failure`. Results keep segment order.
+   */
+  async sourceSegments(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: {
+      providerAccountId: string;
+      script: MediaPlanScript;
+      segments: PlannedSegment[];
+      ledger: SegmentSourceLedger;
+      concurrency?: number;
+      stopOnFailure?: boolean;
+      /**
+       * VE2E-50/55 x VE2E-51: called ONCE, before the concurrent sourcing starts, with the segments that need a NEW source
+       * (not reusable from the project library). Runs the single keyword-extraction call for all of them and may mutate the
+       * planned segments' keywords in place. A returned string is the reason recorded on segments that still fall back to
+       * Pexels for lack of a ja keyword (replaces the generic `no_ja_keywords`).
+       */
+      beforeSourcing?: (pending: PlannedSegment[]) => Promise<string | null | void>;
+      runImport?: (segment: PlannedSegment, task: () => Promise<MediaPlanOutcome<SegmentSource>>) => Promise<MediaPlanOutcome<SegmentSource>>;
+    },
+  ): Promise<{ sourced: SourcedSegment[]; failure: { segment: PlannedSegment; error: unknown } | null; apifyUsage: MediaPlanApifyUsage | null }> {
+    let extractionReason: string | null = null;
+    if (input.beforeSourcing) {
+      const pending: PlannedSegment[] = [];
+      for (const segment of input.segments) if (!(await this.findReusableSource(projectId, segment, input.ledger))) pending.push(segment);
+      if (pending.length > 0) extractionReason = (await input.beforeSourcing(pending)) ?? null;
     }
-    return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason } };
+    const job = new ApifyJobContext();
+    const results: Array<SourcedSegment | undefined> = new Array(input.segments.length).fill(undefined);
+    let failure: { index: number; error: unknown } | null = null;
+    let next = 0;
+    const one = async (segment: PlannedSegment): Promise<SourcedSegment> => {
+      let source = await this.findReusableSource(projectId, segment, input.ledger);
+      let errorCode: string | null = null;
+      if (!source) {
+        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
+        const imported = await (input.runImport ? input.runImport(segment, task) : task());
+        if (imported.ok) {
+          source = imported.data;
+          // Refine the generic reason with why extraction did not help this segment.
+          if (extractionReason && source.provider === "pexels" && source.fallbackReason === "no_ja_keywords") source = { ...source, fallbackReason: extractionReason };
+        } else errorCode = imported.code;
+      }
+      if (source) input.ledger.add(source);
+      return { segment, source, errorCode };
+    };
+    const worker = async () => {
+      for (;;) {
+        if (input.stopOnFailure && failure) return;
+        const index = next++;
+        if (index >= input.segments.length) return;
+        const segment = input.segments[index]!;
+        try {
+          results[index] = await one(segment);
+        } catch (error) {
+          if (input.stopOnFailure) {
+            if (!failure || index < failure.index) failure = { index, error };
+          } else {
+            results[index] = { segment, source: null, errorCode: "PROVIDER_UNAVAILABLE" };
+          }
+        }
+      }
+    };
+    const width = Math.max(1, Math.min(input.concurrency ?? MEDIA_PLAN_SOURCING_CONCURRENCY, input.segments.length || 1));
+    await Promise.all(Array.from({ length: width }, () => worker()));
+    const u = job.usage;
+    const touched = u.runs > 0 || u.searchesReused > 0 || u.libraryReuses > 0;
+    const failed = failure as { index: number; error: unknown } | null;
+    return {
+      sourced: results.filter((entry): entry is SourcedSegment => entry !== undefined),
+      failure: failed ? { segment: input.segments[failed.index]!, error: failed.error } : null,
+      apifyUsage: touched ? { runs: u.runs, seconds: u.seconds, usd: u.usd, searchesReused: u.searchesReused, libraryReuses: u.libraryReuses } : null,
+    };
   }
 
   /** Per-scene bindings + timeline segments for the sourced segments (a segment without a source leaves its scenes unbound). */
@@ -268,12 +453,21 @@ export class MediaPlanService {
     const diagnostics: MediaPlanSegmentDiagnostics[] = [];
     for (const { segment, source, errorCode } of sourced) {
       let ranges: SceneSourceRange[] | null = null;
+      let socialWindow: { needsSecondSource: boolean; coveredMs: number } | null = null;
       if (source) {
         const sceneDurations = segment.sceneIds.map((sceneId) => {
           const scene = script.scenes.find((s) => s.sceneId === sceneId);
           return { sceneId, durationMs: scene ? sceneDuration(scene) : 1 };
         });
         ranges = source.kind === "video" ? computeSegmentSourceRanges(sceneDurations, source.durationMs) : null;
+        if (source.kind === "video" && source.provider === "apify") {
+          // VE2E-53: social clips - guard-bounded, non-looping window; a second source (sourcing agent) covers what is left.
+          const plan = computeSocialWindowRanges(sceneDurations, source.durationMs, socialWindowOptionsFromEnv());
+          if (plan) {
+            ranges = plan.ranges;
+            socialWindow = { needsSecondSource: plan.needsSecondSource, coveredMs: plan.coveredMs };
+          }
+        }
         for (const sceneId of segment.sceneIds) bySceneId.set(sceneId, { segmentId: segment.segmentId, source, range: ranges?.find((r) => r.sceneId === sceneId) ?? null });
         segments.push({ segmentId: segment.segmentId, sceneIds: [...segment.sceneIds], mediaAssetVersionId: source.mediaAssetVersionId, subject: segment.subject, priority: segment.priority });
       }
@@ -285,9 +479,11 @@ export class MediaPlanService {
         durationMs: segment.durationMs,
         looped: Boolean(ranges?.some((r) => r.looped)),
         short: Boolean(ranges?.some((r) => r.short)),
+        ...(socialWindow ?? {}),
         ...(source?.provider ? { sourceProvider: source.provider } : {}),
         ...(source?.fallbackReason ? { fallbackReason: source.fallbackReason } : {}),
         ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
+        ...(source?.apifyQuality ? { apifyQuality: source.apifyQuality } : {}),
       });
     }
     return {
@@ -344,18 +540,7 @@ export class MediaPlanService {
     const totalSeconds = planScript.scenes.reduce((total, scene) => total + sceneDuration(scene), 0) / 1000;
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
-    const sourced: SourcedSegment[] = [];
-    for (const segment of this.planSegments(planScript, range)) {
-      let source = await this.findReusableSource(projectId, segment, ledger);
-      let errorCode: string | null = null;
-      if (!source) {
-        const imported = await this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segment, ledger });
-        if (imported.ok) source = imported.data;
-        else errorCode = imported.code;
-      }
-      if (source) ledger.add(source);
-      sourced.push({ segment, source, errorCode });
-    }
+    const { sourced, apifyUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger, beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
     const built = this.buildBindings(planScript, sourced);
     return {
       ok: true,
@@ -365,6 +550,7 @@ export class MediaPlanService {
         scenes: built.scenes.map(({ mediaKind: _mediaKind, ...scene }) => scene),
         segments: built.segments,
         diagnostics: built.diagnostics,
+        ...(apifyUsage ? { apifyUsage } : {}),
       },
     };
   }

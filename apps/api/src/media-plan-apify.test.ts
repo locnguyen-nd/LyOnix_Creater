@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APIFY_FALLBACK_KEYWORD_MAX_CHARS, MediaPlanService, SegmentSourceLedger, apifyAutoPlatformFromEnv, apifyKeywordForSegment, apifyLedgerIdFromFileName, type MediaPlanScript } from "./media-plan.service.js";
+import { MediaPlanService, SegmentSourceLedger, apifyAutoPlatformFromEnv, apifyKeywordForSegment, apifyLedgerIdFromFileName, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript } from "./media-plan.service.js";
 import type { ApifyService } from "./apify.service.js";
 import type { PexelsService } from "./pexels.service.js";
 
@@ -101,39 +101,62 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     expect(service.buildBindings(s, [{ segment, source: outcome.data, errorCode: null }]).diagnostics[0]).toMatchObject({ sourceProvider: "pexels", fallbackReason: "no_apify_account" });
   });
 
-  // VE2E-48: scripts without a visualPlan (every script generated before VE2E-38) still use Apify for language=ja.
+  // VE2E-50: scene visualQuery is NEVER an Apify keyword (VE2E-48's fallback removed).
   const noPlan = (language: string): MediaPlanScript => ({ ...script(), language, visualPlan: null });
+  const englishShotDescriptions = (s: MediaPlanScript) => {
+    s.scenes[0]!.visualQuery = "Flashy news intro, breaking news graphic, urgent atmosphere";
+    s.scenes[1]!.visualQuery = "Boxing ring center, empty ring, focus on the ropes";
+    return s;
+  };
 
-  it("ja script without visualPlan: Apify is tried with the scenes' visualQuery as keyword and Pexels query is unchanged", async () => {
-    const s = noPlan("ja");
-    s.scenes[0]!.visualQuery = "東京 夜景";
-    s.scenes[1]!.visualQuery = "ラーメン店";
+  it("ja script without visualPlan and English visualQuery: visualQuery is never sent to Apify, Pexels with no_ja_keywords", async () => {
+    const s = englishShotDescriptions(noPlan("ja"));
     const segment = firstSegment(service, s);
     expect(segment.keywords).toBeNull();
+    expect(apifyKeywordForSegment(segment)).toBeNull();
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment, ledger: new SegmentSourceLedger() });
-    expect(outcome).toMatchObject({ ok: true, data: { provider: "apify" } });
-    expect(apify.autoImportForSegment.mock.calls[0]![4]).toMatchObject({ keyword: "東京 夜景 ラーメン店" });
-    expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "no_ja_keywords" } });
+    expect(apify.autoImportForSegment).not.toHaveBeenCalled();
+    expect(apify.findAccountForUser).not.toHaveBeenCalled();
   });
 
-  it("derives a single deduped keyword within the length limit", () => {
-    const s = noPlan("ja");
-    s.scenes[0]!.visualQuery = "東京 夜景";
-    s.scenes[1]!.visualQuery = "東京  夜景";
+  it("a ja keyword without kana/kanji (English) is rejected and not sent to Apify", async () => {
+    const s = englishShotDescriptions({ ...script("Flashy news intro breaking news") });
     const segment = firstSegment(service, s);
-    expect(apifyKeywordForSegment(s, segment)).toBe("東京 夜景");
-    s.scenes[0]!.visualQuery = "あ".repeat(150);
-    expect(apifyKeywordForSegment(s, segment)!.length).toBe(APIFY_FALLBACK_KEYWORD_MAX_CHARS);
-    s.scenes[0]!.visualQuery = "あ".repeat(60);
-    s.scenes[1]!.visualQuery = "い".repeat(60);
-    expect(apifyKeywordForSegment(s, segment)).toBe("あ".repeat(60));
+    expect(apifyKeywordForSegment(segment)).toBeNull();
+    const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment, ledger: new SegmentSourceLedger() });
+    expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "no_ja_keywords" } });
+    expect(apify.autoImportForSegment).not.toHaveBeenCalled();
   });
 
-  it("ja script without visualPlan falls back to Pexels with the Apify reason when Apify has no usable result", async () => {
-    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_no_usable_candidate" });
-    const s = noPlan("ja");
-    const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
-    expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_no_usable_candidate" } });
+  it("keywords extracted from the narration (applyExtractedKeywords) are what Apify receives; English visualQuery still never is", async () => {
+    const s = englishShotDescriptions(noPlan("ja"));
+    const segments = service.planSegments(s, { min: 1, max: 1 });
+    expect(segmentsNeedingKeywords(segments)).toHaveLength(1);
+    expect(segmentNarration(s, segments[0]!)).toBe("一つ目。 二つ目。");
+    applyExtractedKeywords(segments, { [segments[0]!.segmentId]: { ja: "ボクシング 試合", en: "boxing match" }, unknown: { ja: "x", en: "y" } });
+    expect(segmentsNeedingKeywords(segments)).toHaveLength(0);
+    const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: segments[0]!, ledger: new SegmentSourceLedger() });
+    expect(outcome).toMatchObject({ ok: true, data: { provider: "apify" } });
+    expect(apify.autoImportForSegment.mock.calls[0]![4].keyword).toBe("ボクシング 試合");
+    // only "keyword" is the search query sent to the Actor (the brief is used locally for ranking/moderation)
+    expect(apify.autoImportForSegment.mock.calls[0]![4].brief.phrases[0]).toBe("ボクシング 試合");
+  });
+
+  it("applyExtractedKeywords rejects an invalid ja and keeps the plan's own en", () => {
+    const s = script("Broken english");
+    const segments = service.planSegments(s, { min: 1, max: 1 });
+    applyExtractedKeywords(segments, { g1: { ja: "still english", en: "x" } });
+    expect(segments[0]!.keywords).toEqual({ ja: "Broken english", en: "tokyo night" });
+    applyExtractedKeywords(segments, { g1: { ja: "東京 夜景", en: "other" } });
+    expect(segments[0]!.keywords).toEqual({ ja: "東京 夜景", en: "tokyo night" });
+  });
+
+  it("reports whether Apify can be searched at all", async () => {
+    expect(await service.apifyAvailable(userId, "staff")).toBe(true);
+    apify.findAccountForUser.mockResolvedValueOnce(null);
+    expect(await service.apifyAvailable(userId, "staff")).toBe(false);
+    expect(await new MediaPlanService(prisma, grants, pexels as unknown as PexelsService).apifyAvailable(userId, "staff")).toBe(false);
   });
 
   it("non-ja script without keywords: Pexels with reason no_ja_keywords (English is never invented)", async () => {
@@ -163,8 +186,10 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     ledger.add({ mediaAssetVersionId: "earlier", kind: "video", durationMs: 1, externalId: "apify:tiktok:7001", sourcing: "imported" });
     ledger.add({ mediaAssetVersionId: "earlier-2", kind: "video", durationMs: 1, externalId: "555", sourcing: "imported" });
     const s = script();
+    let seen: string[] = [];
+    apify.autoImportForSegment.mockImplementationOnce(async (...args: any[]) => { seen = [...args[4].usedExternalIds].sort(); return apifyOk; });
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger });
-    expect([...apify.autoImportForSegment.mock.calls[0]![4].usedExternalIds].sort()).toEqual(["555", "7001"]);
+    expect(seen).toEqual(["555", "7001"]);
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_duplicate_or_unsupported_source" } });
   });
 

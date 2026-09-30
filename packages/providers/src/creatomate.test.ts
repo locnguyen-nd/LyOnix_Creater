@@ -8,6 +8,10 @@ import {
   normalizeCreatomateStatus,
   probeCreatomateAccount,
   submitCreatomateRender,
+  submitCreatomateSourceRender,
+  resolveCreatomateRenderScale,
+  readCreatomateCanvas,
+  isRenderOutputBelowCanvas,
 } from "./creatomate.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -124,10 +128,21 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const result = await submitCreatomateRender("key", { templateId: "tpl_1", modifications: { "Text-1.text": "hello" }, webhookUrl: "https://lyonix.local/hooks/abc" });
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null, snapshotUrl: null });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "planned", url: null, progress: null, errorMessage: null, renderDurationMs: null, snapshotUrl: null, renderScale: null, width: null, height: null });
     const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(String(call[0])).toContain("/renders");
-    expect(JSON.parse(String(call[1].body))).toMatchObject({ template_id: "tpl_1", webhook_url: "https://lyonix.local/hooks/abc" });
+    expect(JSON.parse(String(call[1].body))).toMatchObject({ template_id: "tpl_1", webhook_url: "https://lyonix.local/hooks/abc", render_scale: 1 });
+  });
+
+  it("VE2E-52b: env override is sent as render_scale on template and source submits", async () => {
+    vi.stubEnv("CREATOMATE_RENDER_SCALE", "0.5");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned", render_scale: 0.5, width: 540, height: 960 }]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const a = await submitCreatomateRender("key", { templateId: "t", modifications: {}, webhookUrl: "https://x" });
+    await submitCreatomateSourceRender("key", { source: { output_format: "mp4" }, webhookUrl: "https://x" });
+    for (const c of fetchMock.mock.calls as unknown as Array<[string, RequestInit]>) expect(JSON.parse(String(c[1].body)).render_scale).toBe(0.5);
+    expect(a).toMatchObject({ renderScale: 0.5, width: 540, height: 960 });
+    vi.unstubAllEnvs();
   });
 
   it("throws PROVIDER_SCHEMA_INVALID when Creatomate returns no render id", async () => {
@@ -143,7 +158,30 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
   it("gets render status by id", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", render_duration: 4.2, snapshot_url: "https://cdn.creatomate.com/rnd_1.jpg" }), { status: 200 })));
     const result = await getCreatomateRender("key", "rnd_1");
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg" });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg", renderScale: null, width: null, height: null });
+  });
+
+  it("VE2E-52b: parses render_scale/width/height from the render response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", render_scale: 0.25, width: 270, height: 480 }), { status: 200 })));
+    expect(await getCreatomateRender("key", "rnd_1")).toMatchObject({ renderScale: 0.25, width: 270, height: 480 });
+  });
+});
+
+describe("VE2E-52b render scale / canvas helpers", () => {
+  it("resolveCreatomateRenderScale defaults to 1, accepts 0.1..1, rejects out of range", () => {
+    expect(resolveCreatomateRenderScale({})).toBe(1);
+    expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "0.5" })).toBe(0.5);
+    expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "0.05" })).toBe(1);
+    expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "2" })).toBe(1);
+    expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "abc" })).toBe(1);
+  });
+  it("readCreatomateCanvas + isRenderOutputBelowCanvas", () => {
+    expect(readCreatomateCanvas({ width: 1080, height: 1920 })).toEqual({ width: 1080, height: 1920 });
+    expect(readCreatomateCanvas({})).toBeNull();
+    expect(isRenderOutputBelowCanvas({ width: 270, height: 480 }, { width: 1080, height: 1920 })).toBe(true);
+    expect(isRenderOutputBelowCanvas({ width: 1080, height: 1920 }, { width: 1080, height: 1920 })).toBe(false);
+    expect(isRenderOutputBelowCanvas({ width: null, height: null }, { width: 1080, height: 1920 })).toBe(false);
+    expect(isRenderOutputBelowCanvas({ width: 270, height: 480 }, null)).toBe(false);
   });
 });
 

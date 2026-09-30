@@ -4,12 +4,18 @@
  * Pure logic only — no network I/O, no provider secret handling. See `live-script-v2.ts`
  * for the orchestration that calls a live content provider with this schema.
  */
-import { resolveBackgroundSegmentRange, splitIntoSentences } from "@lyonix/domain";
-import { SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA, normalizeScriptVisualPlanV2, type ScriptVisualPlanV2 } from "./script-visual-plan.js";
+import { buildDurationBudgetPromptLines, resolveBackgroundSegmentRange, splitIntoSentences, type NarrationBudget } from "@lyonix/domain";
+import {
+  SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA,
+  diagnoseScriptVisualPlanV2,
+  sanitizeVisualPlanJaKeywords,
+  type ScriptVisualPlanV2,
+  type VisualPlanRejectionReason,
+} from "./script-visual-plan.js";
 
 export const SCRIPT_DRAFT_V2_SCHEMA_VERSION = "script-draft.v2" as const;
-/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. */
-export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.1" as const;
+/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. v2.2 (VE2E-50): short real 2-4 word ja/en search phrases. */
+export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.2" as const;
 
 export const contentLanguagesV2 = ["vi", "en", "ja", "ko"] as const;
 export type ContentLanguageV2 = (typeof contentLanguagesV2)[number];
@@ -49,6 +55,12 @@ export type ScriptDraftV2 = {
   visualPlan?: ScriptVisualPlanV2 | null;
 };
 
+/** VE2E-54: max scenes per draft (was hard-coded 14); scene count is free, the template scales. Env `SCRIPT_V2_MAX_SCENES` (default 30, clamped 1-60). */
+export const SCRIPT_V2_MAX_SCENES = (() => {
+  const raw = Number(process.env.SCRIPT_V2_MAX_SCENES);
+  return Number.isInteger(raw) && raw >= 1 ? Math.min(60, raw) : 30;
+})();
+
 export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -64,7 +76,7 @@ export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
     scenes: {
       type: "array",
       minItems: 1,
-      maxItems: 14,
+      maxItems: SCRIPT_V2_MAX_SCENES,
       items: {
         type: "object",
         additionalProperties: false,
@@ -111,7 +123,7 @@ const sceneDuration = (value: unknown, fallback: number) => {
 
 const MIN_SPLIT_SCENE_DURATION_MS = 1000;
 /** Hard ceiling on how many scenes one narration-splitting pass can ever produce, regardless of how many sentences a single scene's narration contains - a bounded, documented safety net against a pathological/garbled input producing dozens of near-empty scenes. */
-const MAX_SCENES_AFTER_SPLIT = 24;
+const MAX_SCENES_AFTER_SPLIT = Math.max(24, SCRIPT_V2_MAX_SCENES);
 
 /**
  * Auto-cuts a scene whose narration packs 2+ full sentences into one visual into one scene
@@ -165,9 +177,24 @@ const expandOverlongScenes = (scenes: readonly ScriptDraftSceneV2[]): { scenes: 
   return { scenes: expanded, childrenById };
 };
 
+/** VE2E-50: what happened to the model's `visualPlan` while parsing (logged in the run diagnostics). */
+export type VisualPlanParseDiagnostics = {
+  status: "ok" | "missing" | "rejected";
+  /** Why the plan was dropped (`status: "rejected"|"missing"`), or `null`. */
+  reason: VisualPlanRejectionReason | null;
+  detail?: string;
+  /** Segments whose `keywords.ja` was blank/invalid (no kana/kanji, too long, sentence) and was blanked; they need the keyword extraction. */
+  invalidJaSegmentIds: string[];
+};
+
 export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2): ScriptDraftV2 | null {
+  return parseScriptDraftV2WithDiagnostics(value, language).draft;
+}
+
+export function parseScriptDraftV2WithDiagnostics(value: unknown, language: ContentLanguageV2): { draft: ScriptDraftV2 | null; visualPlan: VisualPlanParseDiagnostics } {
+  const none: VisualPlanParseDiagnostics = { status: "missing", reason: "absent", invalidJaSegmentIds: [] };
   const root = asRecord(extractJsonObjectV2(value));
-  if (!root) return null;
+  if (!root) return { draft: null, visualPlan: none };
   const nested = asRecord(root.script) ?? root;
   const scenesRaw = Array.isArray(nested.scenes) ? nested.scenes : [];
   const scenes = scenesRaw
@@ -184,7 +211,7 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
     })
     .filter((scene) => scene.narration || scene.screenText || scene.visualQuery);
   const title = text(nested.title) || text(nested.hook);
-  if (!title && scenes.length === 0) return null;
+  if (!title && scenes.length === 0) return { draft: null, visualPlan: none };
   const seen = new Set<string>();
   // VE2E-38: the model's own scene id -> the unique id it kept (first occurrence wins on a duplicate).
   const uniqueIdByRawId = new Map<string, string>();
@@ -202,17 +229,32 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
   // split never changes the full spoken transcript, only how it's carved into scenes.
   const { scenes: finalScenes, childrenById } = expandOverlongScenes(uniqueScenes);
   // VE2E-38: tolerant - any problem with the plan yields null and never affects the script itself.
-  const visualPlan = finalScenes.length
-    ? normalizeScriptVisualPlanV2(
-        nested.visualPlan,
-        finalScenes.map((scene) => scene.sceneId),
-        (rawId) => {
-          const uniqueId = uniqueIdByRawId.get(rawId);
-          return uniqueId ? childrenById.get(uniqueId) ?? [] : [];
-        },
-      )
-    : null;
-  return {
+  // VE2E-50: the reason is kept, and a ja keyword that is not a real Japanese search phrase is blanked.
+  let visualPlan: ScriptVisualPlanV2 | null = null;
+  let planDiagnostics: VisualPlanParseDiagnostics = none;
+  if (finalScenes.length) {
+    const diagnosis = diagnoseScriptVisualPlanV2(
+      nested.visualPlan,
+      finalScenes.map((scene) => scene.sceneId),
+      (rawId) => {
+        const uniqueId = uniqueIdByRawId.get(rawId);
+        return uniqueId ? childrenById.get(uniqueId) ?? [] : [];
+      },
+    );
+    if (diagnosis.plan) {
+      const sanitized = sanitizeVisualPlanJaKeywords(diagnosis.plan);
+      visualPlan = sanitized.plan;
+      planDiagnostics = { status: "ok", reason: null, invalidJaSegmentIds: sanitized.invalidJaSegmentIds };
+    } else {
+      planDiagnostics = {
+        status: diagnosis.reason === "absent" || diagnosis.reason === "null" ? "missing" : "rejected",
+        reason: diagnosis.reason,
+        ...(diagnosis.detail ? { detail: diagnosis.detail } : {}),
+        invalidJaSegmentIds: [],
+      };
+    }
+  }
+  const draft: ScriptDraftV2 = {
     schemaVersion: SCRIPT_DRAFT_V2_SCHEMA_VERSION,
     language: isContentLanguageV2(text(nested.language)) ? (nested.language as ContentLanguageV2) : language,
     title: title || "Kịch bản",
@@ -225,6 +267,7 @@ export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2):
       : [{ sceneId: "s01", narration: body, screenText: title || body, visualQuery: title || body, durationHintMs: 5000 }],
     visualPlan,
   };
+  return { draft, visualPlan: planDiagnostics };
 }
 
 export type ScriptDraftV2ValidationFailure = { ok: false; reason: "schema" | "duration" | "visual_query" };
@@ -238,7 +281,7 @@ export function validateScriptDraftV2(draft: ScriptDraftV2): { ok: true } | Scri
   if (draft.scenes.some((scene) => !scene.narration || !scene.screenText)) return { ok: false, reason: "schema" };
   if (draft.scenes.some((scene) => !scene.visualQuery)) return { ok: false, reason: "visual_query" };
   const total = draft.scenes.reduce((sum, scene) => sum + scene.durationHintMs, 0);
-  if (total < 30_000 || total > 90_000) return { ok: false, reason: "duration" };
+  if (total < 30_000 || total > 150_000) return { ok: false, reason: "duration" };
   return { ok: true };
 }
 
@@ -277,6 +320,12 @@ export const clipForPromptV2 = (value: string, max = 6000) => {
   return `${trimmed.slice(0, max)}\n…[truncated ${trimmed.length - max} chars]`;
 };
 
+/** VE2E-54: separate hook - the duration/length instruction line (budget-driven when the caller supplies one). */
+const durationTargetLine = (budget?: NarrationBudget | null): string =>
+  budget
+    ? `${buildDurationBudgetPromptLines(budget)} Total durationHintMs must sum to about ${budget.targetSec * 1000}.`
+    : "Target spoken length: 55-65 seconds. 10-14 scenes. Total durationHintMs between 30000 and 90000.";
+
 /** `sourceText` must already be the SourceVersion's extracted/raw text — this function never
  * fetches or extracts anything itself (see `apps/api/src/source-extract.ts` for article_url). */
 export function buildScriptV2PromptPackage(input: {
@@ -291,6 +340,8 @@ export function buildScriptV2PromptPackage(input: {
    * length (55-65s -> 3-5 segments).
    */
   backgroundSegmentRange?: { min: number; max: number } | null;
+  /** VE2E-54: narration budget from the intake target (chars + scene range). Absent = legacy 55-65 s / 10-14 scenes line. */
+  durationBudget?: NarrationBudget | null;
 }): ScriptPromptPackageV2 {
   const language: ContentLanguageV2 = isContentLanguageV2(input.language) ? input.language : "vi";
   const sourceType = isScriptSourceKind(input.sourceType) ? input.sourceType : "topic";
@@ -305,7 +356,7 @@ Prompt template: ${SCRIPT_PROMPT_TEMPLATE_V2_VERSION}
 Spoken short-form TikTok script in ${languageName[language]}.
 ${sourceInstruction[sourceType]}
 Creative direction / requested changes: ${direction}
-Target spoken length: 55-65 seconds. 10-14 scenes. Total durationHintMs between 30000 and 90000.
+${durationTargetLine(input.durationBudget)}
 Required keys: schemaVersion, language, title, hook, body, cta, caption, scenes.
 Each scene: sceneId, narration (spoken), screenText (on-screen, no HTML/URLs), visualQuery (short media search query/framing brief, non-empty), durationHintMs.
 Each scene's narration must be exactly ONE sentence (one visual per sentence, so the video cuts to a new shot every sentence) - never pack 2+ sentences into a single scene's narration; split a long thought across multiple scenes instead.
@@ -315,7 +366,8 @@ visualPlan (whole-video background plan, decided after writing all scenes): spli
 - segments: in script order, covering every sceneId exactly once, each segment a run of consecutive sceneIds.
 - Keep all scenes about the same subject (person, place or event) in the same segment - never split one subject across segments; the segment showing the video's main subject gets priority 1 and the most scenes; other segments priority 2+.
 - subject: short label of what that segment shows.
-- keywords.ja: natural Japanese search keywords a Japanese creator would use to find that footage (native wording, not a literal translation); keywords.en: a concrete English stock-footage search phrase for the same shot. At least one must be non-empty.
+- keywords.ja: a SHORT real Japanese search phrase (2-4 words, written in Japanese kana/kanji, separated by spaces) that a Japanese TikTok user would type to find footage of the topic's real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点", "新宿 ラーメン"). NEVER a camera direction, mood, shot description, sentence or English text, and never a copy of a scene visualQuery. keywords.en: a 2-4 word English search phrase for the same entity/place/event (example: "tokyo night skyline"). Both are required for every segment, even when the script language is not Japanese.
+- Always return a visualPlan object (not null) unless the script truly has no consistent subject.
 - styleHints (setting, timeOfDay, lighting, palette): short phrases; keep them consistent across segments unless the story really changes place or time.
 If you cannot produce a valid plan, set visualPlan to null.
 Do not invent music beds or render steps. Do not wrap JSON in markdown.

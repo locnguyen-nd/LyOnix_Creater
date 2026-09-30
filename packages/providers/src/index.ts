@@ -127,7 +127,9 @@ export {
   isContentLanguageV2,
   isScriptSourceKind,
   parseScriptDraftV2,
+  parseScriptDraftV2WithDiagnostics,
   validateScriptDraftV2,
+  type VisualPlanParseDiagnostics,
   clipForPromptV2,
   scriptSourceKinds,
   type ContentLanguageV2,
@@ -142,6 +144,13 @@ export {
   VISUAL_PLAN_PRIORITY_MIN,
   VISUAL_PLAN_PRIORITY_MAX,
   normalizeScriptVisualPlanV2,
+  diagnoseScriptVisualPlanV2,
+  sanitizeVisualPlanJaKeywords,
+  isValidJaSearchKeyword,
+  isValidEnSearchKeyword,
+  containsJapaneseChars,
+  type VisualPlanRejectionReason,
+  type VisualPlanDiagnosis,
   findVisualSegmentForScene,
   mediaSearchQueryForScene,
   type ScriptVisualPlanV2,
@@ -149,7 +158,17 @@ export {
   type ScriptVisualKeywordsV2,
   type ScriptVisualStyleHintsV2,
 } from "./script-visual-plan.js";
-export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result } from "./live-script-v2.js";
+export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result, type ScriptGenerationDiagnostics } from "./live-script-v2.js";
+export {
+  SEGMENT_KEYWORDS_PROMPT_VERSION,
+  SEGMENT_KEYWORDS_JSON_SCHEMA,
+  buildSegmentKeywordsPrompt,
+  parseSegmentKeywords,
+  extractSegmentKeywords,
+  type SegmentKeywordsInput,
+  type ExtractedSegmentKeywords,
+  type ExtractSegmentKeywordsResult,
+} from "./segment-keywords.js";
 export {
   SCRIPT_DRAFT_SCHEMA_VERSION,
   SCRIPT_DRAFT_V1_JSON_SCHEMA,
@@ -212,6 +231,9 @@ export {
   TTS_PROVIDER_DISABLED_VALUE,
   type TemplateTtsElement,
   submitCreatomateRender,
+  resolveCreatomateRenderScale,
+  readCreatomateCanvas,
+  isRenderOutputBelowCanvas,
   submitCreatomateSourceRender,
   getCreatomateRender,
   normalizeCreatomateStatus,
@@ -227,6 +249,10 @@ export {
 export {
   extractDynamicStyleFromTemplate,
   buildDynamicComposition,
+  buildDynamicCompositionWithWarnings,
+  extractTemplateSceneLayout,
+  countTemplateSceneSlots,
+  templateResolution,
   applyDynamicStyleOverrides,
   isDynamicStyleOptionKey,
   isValidDynamicStyleOptionValue,
@@ -235,7 +261,12 @@ export {
   type DynamicSceneInput,
   type DynamicSceneStyle,
   type DynamicImageAnimation,
+  type TemplateSceneLayout,
+  type TemplateScaleWarning,
+  type DynamicCompositionResult,
 } from "./creatomate-dynamic.js";
+/** VE2E-52: structures of the two real pinned templates, shared by provider and API tests (not used at runtime). */
+export { newsRecapJpTemplate, top5CountdownTemplate } from "./fixtures/creatomate-templates.js";
 export {
   probeApifyAccount,
   searchApify,
@@ -250,6 +281,15 @@ export {
   APIFY_MAX_VIDEO_BYTES,
   APIFY_MAX_IMAGE_BYTES,
   APIFY_RUN_TIMEOUT_SECS,
+  APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+  APIFY_TIKTOK_POST_URL_FIELD,
+  fetchApifyTikTokPost,
+  buildTikTokPostInput,
+  emptyApifyUsage,
+  addApifyUsage,
+  type ApifyUsage,
+  type ApifySearchRunOptions,
+  type ApifyPostFetchInput,
   type ApifyPlatform,
   type ApifyLang,
   type ApifyActorPin,

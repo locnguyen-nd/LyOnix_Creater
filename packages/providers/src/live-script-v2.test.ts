@@ -58,7 +58,24 @@ describe("generateScriptDraftV2", () => {
     const result = await generateScriptDraftV2("openai", "sk-test", "gpt-4o-mini", { sourceType: "topic", sourceText: "Messi", language: "vi", backgroundSegmentRange: { min: 2, max: 3 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.draft.visualPlan?.segments.map((s) => s.sceneIds)).toEqual([["s01", "s02"], ["s03"]]);
-    expect(result.promptTemplateVersion).toBe("script-prompt.v2.1");
+    expect(result.promptTemplateVersion).toBe("script-prompt.v2.2");
+    expect(result.diagnostics).toMatchObject({ visualPlan: { status: "ok", reason: null, invalidJaSegmentIds: ["g2"] }, schemaRejection: null, repaired: false });
+  });
+
+  it("VE2E-50: records that the strict schema was rejected and the call repeated without it, and why the plan is missing", async () => {
+    let call = 0;
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      call += 1;
+      const body = JSON.parse(String(init.body)) as { text?: unknown };
+      if (call === 1) return new Response(JSON.stringify({ error: { message: "Invalid schema for response_format" } }), { status: 400 });
+      expect(body.text).toBeUndefined();
+      return new Response(JSON.stringify({ output_text: draftJson() }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await generateScriptDraftV2("openai", "sk-test", "gpt-4o-mini", { sourceType: "topic", sourceText: "Messi", language: "vi" });
+    expect(result.diagnostics.schemaRejection).toContain("Provider rejected the generate payload");
+    expect(result.diagnostics.visualPlan).toMatchObject({ status: "missing", reason: "absent" });
+    expect(result.draft.visualPlan).toBeNull();
   });
 
   it("retries once with a repair prompt when the first reply fails semantic validation", async () => {

@@ -25,17 +25,22 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import type { MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
+  buildNarrationBudget,
+  calibrateCharsPerSecond,
+  checkDurationBand,
+  type NarrationBudget,
   readBackgroundSegmentsSetting,
   resolveBackgroundSegmentRange,
+  type PlannedSegment,
   type AutoSceneMedia,
   type AutoTemplateSlot,
 } from "@lyonix/domain";
 import { AudioVersionsService } from "./audio-versions.service.js";
-import { MediaPlanService, SegmentSourceLedger, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
+import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
@@ -107,6 +112,21 @@ const classify = (code: string): "blocked_provider" | "needs_input" | "retry" =>
 const DEFAULT_MAX_ATTEMPTS = 2;
 
 type ProviderStepMeta = { role: "content" | "tts" | "visual" | "render"; operation: string; providerAccountId: string };
+
+/** VE2E-50/54: one paid call recorded in the run-level `run_usage` ledger. */
+export type RunUsageEntry = {
+  step: string;
+  kind: "content" | "tts";
+  provider: string | null;
+  modelId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costAmount: string | null;
+  costCurrency: string | null;
+  /** TTS only: characters sent to the provider. */
+  characters?: number;
+  at: string;
+};
 
 @Injectable()
 export class WorkflowRunnerService {
@@ -193,14 +213,106 @@ export class WorkflowRunnerService {
     }
   }
 
-  /** VE2E-48: persists per-segment sourceProvider + fallbackReason as the `media_plan_diagnostics` StepRun outputRef (no migration; read by GET /video-productions/:id). Best-effort. */
-  private async saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[]): Promise<void> {
+  /** Persists a diagnostics blob as a succeeded StepRun outputRef (no migration). Best-effort: diagnostics must never fail the pipeline. */
+  private async saveStepDiagnostics(run: WorkflowRunRow, stepKey: string, value: unknown): Promise<void> {
     try {
-      const output = { segments } as unknown as Prisma.InputJsonValue;
+      const output = value as Prisma.InputJsonValue;
       const now = new Date();
       await this.prisma.stepRun.upsert({
-        where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "media_plan_diagnostics", attempt: run.attempts } },
-        create: { workflowRunId: run.id, stepKey: "media_plan_diagnostics", attempt: run.attempts, status: "succeeded", startedAt: now, endedAt: now, outputRef: output },
+        where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey, attempt: run.attempts } },
+        create: { workflowRunId: run.id, stepKey, attempt: run.attempts, status: "succeeded", startedAt: now, endedAt: now, outputRef: output },
+        update: { status: "succeeded", endedAt: now, outputRef: output },
+      });
+    } catch {
+      // Diagnostics must never fail the pipeline.
+    }
+  }
+
+  /** VE2E-48: persists per-segment sourceProvider + fallbackReason as the `media_plan_diagnostics` StepRun outputRef (read by GET /video-productions/:id). VE2E-51: per-job Apify spend (runs, seconds, USD) rides along. */
+  private saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[], apifyUsage: MediaPlanApifyUsage | null = null): Promise<void> {
+    return this.saveStepDiagnostics(run, "media_plan_diagnostics", { segments, ...(apifyUsage ? { apifyUsage } : {}) });
+  }
+
+  /**
+   * VE2E-50/54: run-level usage ledger (`run_usage` StepRun outputRef): one entry per paid call
+   * (script generation, keyword extraction, script regeneration, TTS) so the spend of a run,
+   * including the bounded corrections, is countable in one place. Best-effort.
+   */
+  private async appendRunUsage(run: WorkflowRunRow, entry: RunUsageEntry): Promise<void> {
+    try {
+      const existing = await this.prisma.stepRun.findUnique({ where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "run_usage", attempt: run.attempts } } });
+      const previous = (existing?.outputRef as { entries?: RunUsageEntry[] } | null)?.entries;
+      await this.saveStepDiagnostics(run, "run_usage", { entries: [...(Array.isArray(previous) ? previous : []), entry] });
+    } catch {
+      // Best-effort.
+    }
+  }
+
+  /**
+   * VE2E-50: the dedicated keyword-extraction call. For every not-yet-sourced segment without a valid
+   * Japanese search keyword (plan missing, or ja failed validation) ONE cheap content call derives ja+en
+   * keywords from the narration (never from `visualQuery`), cost-tracked in `run_usage`. Only runs when
+   * the user can actually search Apify. Never throws: on any failure the segments keep no keyword and
+   * sourcing falls back to Pexels with reason `no_ja_keywords`.
+   */
+  private async extractMissingKeywords(
+    run: WorkflowRunRow,
+    ctx: { userId: string; role: "admin" | "staff"; contentAccountId: string; script: MediaPlanScript; title: string; segments: PlannedSegment[] },
+  ): Promise<void> {
+    const needing = segmentsNeedingKeywords(ctx.segments);
+    if (needing.length === 0) return;
+    if (!(await this.mediaPlans.apifyAvailable(ctx.userId, ctx.role))) return;
+    const requested = needing.map((segment) => segment.segmentId);
+    try {
+      const outcome = await this.recordStep(
+        run,
+        "extract_keywords",
+        { role: "content", operation: "extract_keywords", providerAccountId: ctx.contentAccountId },
+        async () => {
+          const result = await this.scriptGeneration.extractSegmentKeywords(ctx.userId, ctx.role, {
+            providerAccountId: ctx.contentAccountId,
+            language: ctx.script.language,
+            title: ctx.title,
+            segments: needing.map((segment) => ({ segmentId: segment.segmentId, narration: segmentNarration(ctx.script, segment) })),
+          });
+          if (!result.ok) throw new WorkflowStepFailure(result.code, result.message);
+          return result;
+        },
+      );
+      applyExtractedKeywords(ctx.segments, outcome.keywords);
+      await this.appendRunUsage(run, { step: "extract_keywords", kind: "content", provider: outcome.provider, modelId: outcome.modelId, inputTokens: outcome.usage.inputTokens, outputTokens: outcome.usage.outputTokens, costAmount: outcome.usage.costAmount, costCurrency: outcome.usage.costCurrency, at: new Date().toISOString() });
+      await this.saveStepDiagnostics(run, "keyword_extraction_diagnostics", { requested, extracted: Object.keys(outcome.keywords), rejected: outcome.rejectedSegmentIds, modelId: outcome.modelId });
+    } catch (error) {
+      await this.saveStepDiagnostics(run, "keyword_extraction_diagnostics", { requested, extracted: [], failed: error instanceof Error ? error.message.slice(0, 200) : "error", reason: "no_ja_keywords" });
+    }
+  }
+
+  /** VE2E-54: chars/sec from this voice's (and model's) historical scene audio in the run's language -> narration budget for the script prompt. Best-effort: any failure falls back to the language default. */
+  private async resolveNarrationBudget(targetSec: number, language: string, voiceId: string, modelId?: string): Promise<{ budget: NarrationBudget; calibrationSource: "history" | "default" }> {
+    let samples: Array<{ chars: number; durationMs: number }> = [];
+    try {
+      const rows = await this.prisma.audioVersion.findMany({
+        where: { externalVoiceId: voiceId, ...(modelId ? { modelId } : {}), sceneDraftVersion: { scriptDraftVersion: { language } } },
+        orderBy: { createdAt: "desc" },
+        take: 80,
+        select: { durationMs: true, sceneDraftVersion: { select: { narration: true } } },
+      });
+      samples = (rows ?? []).map((row) => ({ chars: row.sceneDraftVersion.narration.length, durationMs: row.durationMs }));
+    } catch {
+      samples = [];
+    }
+    const calibration = calibrateCharsPerSecond(samples, language);
+    return { budget: buildNarrationBudget({ targetSec, charsPerSecond: calibration.charsPerSecond }), calibrationSource: calibration.source };
+  }
+
+  /** VE2E-54: persists target vs real total scene voice duration as the `duration_budget` StepRun outputRef (read by GET /video-productions/:id). Best-effort; never fails the pipeline. */
+  private async saveDurationBudget(run: WorkflowRunRow, diagnostics: DurationBudgetDiagnostics): Promise<void> {
+    try {
+      const output = diagnostics as unknown as Prisma.InputJsonValue;
+      const now = new Date();
+      await this.prisma.stepRun.upsert({
+        where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "duration_budget", attempt: run.attempts } },
+        create: { workflowRunId: run.id, stepKey: "duration_budget", attempt: run.attempts, status: "succeeded", startedAt: now, endedAt: now, outputRef: output },
         update: { status: "succeeded", endedAt: now, outputRef: output },
       });
     } catch {
@@ -276,6 +388,8 @@ export class WorkflowRunnerService {
     // media plan's segment count, so a retry that reuses the approved script plans the same count.
     const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
     let approved = existingApproved;
+    // VE2E-54: narration budget (targetChars + scene range) from the intake target, calibrated on this voice's history.
+    const { budget: durationBudget, calibrationSource } = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
@@ -289,6 +403,7 @@ export class WorkflowRunnerService {
             language: profile.locale,
             direction,
             ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+            durationBudget,
           });
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
@@ -296,6 +411,20 @@ export class WorkflowRunnerService {
           return outcome.response;
         },
       );
+
+      // VE2E-50: keep WHY the visualPlan is missing/invalid (and whether the strict schema was rejected) instead of a silent null.
+      if (generation.diagnostics) await this.saveStepDiagnostics(run, "script_visual_plan_diagnostics", generation.diagnostics);
+      await this.appendRunUsage(run, {
+        step: "generate_script",
+        kind: "content",
+        provider: generation.providerPin.provider,
+        modelId: generation.providerPin.modelId,
+        inputTokens: generation.providerPin.usage?.inputTokens ?? null,
+        outputTokens: generation.providerPin.usage?.outputTokens ?? null,
+        costAmount: generation.providerPin.usage?.costAmount ?? null,
+        costCurrency: generation.providerPin.usage?.costCurrency ?? null,
+        at: new Date().toISOString(),
+      });
 
       // --- 3. persist + zero-human-gate auto-approve (§4: "Auto mode không dùng awaiting_* làm human gate") ---
       await this.setStatus(run.id, "awaiting_script_approval");
@@ -354,6 +483,18 @@ export class WorkflowRunnerService {
         durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
       });
     }
+    // VE2E-54: real total of all scene voice durations vs the intake target (+-10 s). No correction loop yet:
+    // outside the band the run continues but is flagged `duration_out_of_band` with the real total (never silent).
+    const knownDurations = approved.scenes.map((scene) => audioByScene.get(scene.sceneId)?.durationMs).filter((ms): ms is number => typeof ms === "number");
+    const band = checkDurationBand({ targetSec: profile.durationSec, totalMs: knownDurations.reduce((sum, ms) => sum + ms, 0) });
+    await this.saveDurationBudget(run, {
+      ...band,
+      sceneCount: approved.scenes.length,
+      unknownScenes: approved.scenes.length - knownDurations.length,
+      flag: band.inBand ? null : "duration_out_of_band",
+      charsPerSecond: durationBudget.charsPerSecond,
+      calibrationSource,
+    });
     // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
     await this.setStatus(run.id, "aligning");
 
@@ -379,32 +520,35 @@ export class WorkflowRunnerService {
       visualPlan: approved.visualPlan ?? null,
     };
     const ledger = new SegmentSourceLedger();
-    const sourced: SourcedSegment[] = [];
-    const persistSourcing = () => this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics);
-    try {
-      for (const segment of this.mediaPlans.planSegments(planScript, backgroundSegmentRange)) {
-        const source =
-          (await this.mediaPlans.findReusableSource(run.projectId, segment, ledger)) ??
-          (await this.recordStep(
-            run,
-            `import_media_${segment.segmentId}`,
-            { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
-            async () => {
-              const outcome = await this.mediaPlans.importSegmentSource(run.projectId, userId, role, { providerAccountId: mediaConfig.providerAccountId, script: planScript, segment, ledger });
-              if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-              return outcome.data;
-            },
-          ));
-        ledger.add(source);
-        sourced.push({ segment, source, errorCode: null });
-      }
-    } catch (error) {
+    // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
+    const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {
+      providerAccountId: mediaConfig.providerAccountId,
+      script: planScript,
+      segments: this.mediaPlans.planSegments(planScript, backgroundSegmentRange),
+      ledger,
+      stopOnFailure: true,
+      // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
+      beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script: planScript, title: approved.title, segments: pending }),
+      runImport: (segment, task) =>
+        this.recordStep(
+          run,
+          `import_media_${segment.segmentId}`,
+          { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+          async () => {
+            const outcome = await task();
+            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+            return outcome;
+          },
+        ),
+    });
+    const sourced: SourcedSegment[] = sourcing.sourced;
+    if (sourcing.failure) {
       // VE2E-48: keep the per-segment sourcing decisions made before the failing segment visible on the run.
-      await persistSourcing();
-      throw error;
+      await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage);
+      throw sourcing.failure.error;
     }
     const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
-    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics);
+    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage);
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 
