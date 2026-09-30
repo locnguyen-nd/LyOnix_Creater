@@ -204,7 +204,12 @@ export class WorkflowRunnerService {
     try {
       const value = await fn();
       await this.prisma.stepRun.update({ where: { id: stepRun.id }, data: { status: "succeeded", endedAt: new Date() } });
-      if (operationId) await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "succeeded" } });
+      if (operationId) {
+        const record = value && typeof value === "object" ? value as Record<string, unknown> : null;
+        const pin = record?.providerPin && typeof record.providerPin === "object" ? record.providerPin as Record<string, unknown> : null;
+        const modelId = typeof pin?.modelId === "string" ? pin.modelId : typeof record?.modelId === "string" ? record.modelId : null;
+        await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "succeeded", ...(modelId ? { modelId } : {}) } });
+      }
       return value;
     } catch (error) {
       const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";

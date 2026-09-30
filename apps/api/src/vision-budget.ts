@@ -1,5 +1,6 @@
 import { applyVisionFindings, decideVisionModeration, rankMediaCandidates, type MediaCandidate, type SceneBrief } from "@lyonix/domain";
-import { moderateSceneCandidate, type LiveContentKind, type SceneModerationOutcome, type VisionModerationFrame, type VisionModerationSceneContext } from "@lyonix/providers";
+import { ProviderError, moderateSceneCandidate, type LiveContentKind, type SceneModerationOutcome, type VisionModerationFrame, type VisionModerationSceneContext } from "@lyonix/providers";
+import { callContentWithModelFailover, type ModelFailoverAccounts } from "./content-model-failover.js";
 
 /**
  * VE2E-57: per-job vision-moderation budget. One instance per workflow run / media-plan request (created in
@@ -19,27 +20,20 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 export const visionMaxCallsPerJob = (env: NodeJS.ProcessEnv = process.env) => positiveInt(env.VISION_MAX_CALLS_PER_JOB, DEFAULT_VISION_MAX_CALLS_PER_JOB);
 export const visionMaxCandidatesPerSegment = (env: NodeJS.ProcessEnv = process.env) => positiveInt(env.VISION_MAX_CANDIDATES_PER_SEGMENT, DEFAULT_VISION_MAX_CANDIDATES_PER_SEGMENT);
 
-/**
- * VE2E-57 x VE2E-56 hook. `ProviderAccountsService` gains these two methods in VE2E-56; both are optional here so this
- * code works (always available) before that lands.
- */
-export type ModelAvailability = {
-  getModelAvailability?: (accountId: string, modelId: string) => Promise<{ available: boolean; retryAt: Date | null }>;
-  markModelLimited?: (accountId: string, modelId: string, retryAfterMs?: number, reason?: string) => Promise<unknown> | unknown;
-};
+export type ModelAvailability = ModelFailoverAccounts;
 
 export type VisionSkipReason = "vision_skipped_budget" | "vision_skipped_quota";
 
 /** Pick only from models discovered for this key. The explicit account setting wins; otherwise prefer a cheap
  * alternative to the script model. The real adapter still probes vision capability before moderation. */
-export const resolveVisionModel = (pinnedModel: string, availableModels: readonly string[] = [], configuredModel?: string | null, env: NodeJS.ProcessEnv = process.env): string => {
+export const resolveVisionModels = (pinnedModel: string, availableModels: readonly string[] = [], configuredModel?: string | null, env: NodeJS.ProcessEnv = process.env): string[] => {
   const candidates = [...new Set(availableModels.length ? availableModels : [pinnedModel])];
-  if (configuredModel && candidates.includes(configuredModel)) return configuredModel;
-  const preferred = (env.VISION_MODEL_PREFERENCE ?? "").split(",").map((m) => m.trim()).find((m) => candidates.includes(m));
-  if (preferred) return preferred;
+  const preferred = (env.VISION_MODEL_PREFERENCE ?? "").split(",").map((m) => m.trim()).filter((m) => candidates.includes(m));
   const cheap = candidates.filter((m) => m !== pinnedModel && /flash-lite|4o-mini|4\.1-mini|grok-4-fast|grok-3-mini/i.test(m));
-  return cheap[0] ?? candidates.find((m) => m !== pinnedModel) ?? pinnedModel;
+  return [...new Set([...(configuredModel && candidates.includes(configuredModel) ? [configuredModel] : []), ...preferred, ...cheap, ...candidates.filter((m) => m !== pinnedModel), pinnedModel])];
 };
+export const resolveVisionModel = (pinnedModel: string, availableModels: readonly string[] = [], configuredModel?: string | null, env: NodeJS.ProcessEnv = process.env): string =>
+  resolveVisionModels(pinnedModel, availableModels, configuredModel, env)[0] ?? pinnedModel;
 
 export class VisionBudget {
   readonly maxCalls: number;
@@ -112,11 +106,11 @@ export type BudgetedModerationInput = {
   /** Scene/segment key the skip reason is recorded under. */
   scopeKey: string;
   budget: VisionBudget;
-  account: { id: string; provider: string; apiKey: string; model: string };
+  account: { id: string; provider: string; apiKey: string; model: string; models?: readonly string[] };
   sceneContext: VisionModerationSceneContext;
   /** Returns the cover frame for a candidate, or null when it cannot be fetched (candidate keeps its metadata score). */
   fetchFrame: (candidate: MediaCandidate) => Promise<VisionModerationFrame | null>;
-  availability?: ModelAvailability | null;
+  availability: ModelAvailability;
   /** Test seam; defaults to the real adapter. */
   moderate?: typeof moderateSceneCandidate;
 };
@@ -129,74 +123,48 @@ export type BudgetedModerationInput = {
 export async function moderatePoolWithBudget(input: BudgetedModerationInput): Promise<MediaCandidate[]> {
   const { pool, budget, account } = input;
   const moderate = input.moderate ?? moderateSceneCandidate;
-  const modelKey = `${account.id}:${account.model}`;
   budget.setModel(account.model);
   const order = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }).slice(0, budget.maxCandidatesPerSegment).map((r) => r.candidate.candidateId);
   const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
   for (const candidateId of order) {
     const candidate = byId.get(candidateId);
     if (!candidate?.previewUrl) continue;
-    if (budget.isLimited(modelKey)) {
-      budget.note(input.scopeKey, "vision_skipped_quota");
-      break;
-    }
-    const availability = input.availability;
-    if (availability && typeof availability.getModelAvailability === "function") {
-      try {
-        const state = await availability.getModelAvailability(account.id, account.model);
-        if (!state.available) {
-          budget.markLimited(modelKey);
-          budget.note(input.scopeKey, "vision_skipped_quota");
-          break;
-        }
-      } catch {
-        // Availability is advisory; a failing lookup never blocks moderation.
-      }
-    }
-    const cachedCapability = budget.capabilityFor(modelKey);
-    const cost = cachedCapability ? 1 : 2; // no fresh capability evidence => the adapter also sends a probe request
-    if (budget.calls + cost > budget.maxCalls) {
+    if (budget.calls >= budget.maxCalls) {
       budget.note(input.scopeKey, "vision_skipped_budget");
       break;
     }
     const frame = await input.fetchFrame(candidate);
     if (!frame) continue;
-    if (!budget.reserve(cost)) {
-      budget.note(input.scopeKey, "vision_skipped_budget");
-      break;
-    }
-    let outcome: SceneModerationOutcome;
-    try {
-      outcome = await moderate({
+    const selected = await callContentWithModelFailover(input.availability, account.id, account.models ?? [account.model], async (modelId) => {
+      const modelKey = `${account.id}:${modelId}`;
+      const cachedCapability = budget.capabilityFor(modelKey);
+      const cost = cachedCapability ? 1 : 2;
+      if (!budget.reserve(cost)) throw new VisionBudgetExhausted();
+      const outcome: SceneModerationOutcome = await moderate({
         kind: account.provider as LiveContentKind,
         apiKey: account.apiKey,
-        modelId: account.model,
+        modelId,
         operation: "image_moderation",
         sceneContext: input.sceneContext,
         frames: [frame],
         ...(cachedCapability ? { capabilityEvidence: { verifiedAt: cachedCapability } } : {}),
       });
-    } catch {
-      // A transport failure still consumed the reservation; keep the candidate's metadata evidence.
-      continue;
-    }
-    budget.moderated += 1;
-    if (outcome.capabilityVerifiedAt) budget.setCapability(modelKey, outcome.capabilityVerifiedAt);
-    if (outcome.failureCode === "PROVIDER_RATE_LIMITED" || outcome.failureCode === "PROVIDER_QUOTA_EXHAUSTED") {
-      budget.markLimited(modelKey);
-      budget.note(input.scopeKey, "vision_skipped_quota");
-      if (availability && typeof availability.markModelLimited === "function") {
-        try {
-          await availability.markModelLimited(account.id, account.model, outcome.retryAfterMs, `vision:${outcome.failureCode}`);
-        } catch {
-          // best effort
-        }
-      }
+      if (outcome.capabilityVerifiedAt) budget.setCapability(modelKey, outcome.capabilityVerifiedAt);
+      if (outcome.failureCode) throw new ProviderError(outcome.failureCode, "Vision model unavailable", true, outcome.retryAfterMs, outcome.quotaScope);
+      budget.moderated += 1;
+      return outcome;
+    }, { markCapabilityUnusable: false });
+    if (!selected.ok) {
+      if (selected.thrown instanceof VisionBudgetExhausted) budget.note(input.scopeKey, "vision_skipped_budget");
+      else if (selected.limited.length > 0 || selected.error?.code === "PROVIDER_RATE_LIMITED" || selected.error?.code === "PROVIDER_QUOTA_EXHAUSTED") budget.note(input.scopeKey, "vision_skipped_quota");
       break;
     }
-    const findings = decideVisionModeration({ raw: outcome.raw, provider: account.provider, model: account.model, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
+    budget.setModel(selected.modelId);
+    const findings = decideVisionModeration({ raw: selected.value.raw, provider: account.provider, model: selected.modelId, operation: "image_moderation", evidenceRefs: selected.value.evidenceRefs });
     byId.set(candidateId, applyVisionFindings(candidate, findings));
     if (findings.decision === "accepted") break;
   }
   return pool.map((c) => byId.get(c.candidateId) ?? c);
 }
+
+class VisionBudgetExhausted extends Error {}

@@ -69,6 +69,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [editName, setEditName] = useState("");
   const [editModel, setEditModel] = useState("");
   const [editVisionModel, setEditVisionModel] = useState("");
+  const [editPreferredModels, setEditPreferredModels] = useState("");
   const [replacementSecret, setReplacementSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -79,6 +80,8 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   /** V00-10: for an existing account, only show models the account itself proved usable/listed - never re-add the static catalog. */
   const modelOptionsFor = (row: ApiProvider) => (row.availableModels.length ? row.availableModels : [row.model]);
   const modelStatusLabel = (row: ApiProvider, modelId: string) => {
+    const cooldown = row.modelCooldowns?.find((item) => item.modelId === modelId);
+    if (cooldown) return `${t("providers.modelCooldown", { defaultValue: "Giới hạn đến" })} ${new Date(cooldown.cooldownUntil).toLocaleString()}`;
     const entry = row.modelSnapshot?.find((item) => item.modelId === modelId);
     if (!entry) return t("providers.modelUnverified");
     if (entry.status === "usable" && entry.fresh) return t("providers.modelUsable");
@@ -109,7 +112,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const beginEdit = (row: ApiProvider) => {
-    setEditing(row); setEditName(row.name); setEditModel(row.model); setEditVisionModel(row.visionModel ?? ""); setReplacementSecret(""); setError(null);
+    setEditing(row); setEditName(row.name); setEditModel(row.model); setEditVisionModel(row.visionModel ?? ""); setEditPreferredModels((row.preferredModels ?? []).join(", ")); setReplacementSecret(""); setError(null);
   };
 
   const saveEdit = async () => {
@@ -119,7 +122,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       await api<ApiProvider>(`/provider-accounts/${editing.id}`, {
         method: "PATCH",
         headers: { ...(await csrfHeaders()), "If-Match": `\"${editing.version}\"` },
-        body: JSON.stringify({ name: editName, model: editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
+        body: JSON.stringify({ name: editName, model: editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null, preferredModels: editPreferredModels.split(",").map((item) => item.trim()).filter(Boolean) } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
       });
       await refresh(); setEditing(null); setReplacementSecret(""); setNotice(t("providers.updated"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
@@ -194,6 +197,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                           {modelOptionsFor(row).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(row, item)}</option>)}
                         </Select>
                       </Field>
+                      {row.role === "content" ? <div className="mt-2 space-y-1 text-[11px] text-lyx-fg-muted">{modelOptionsFor(row).map((item) => <p key={item}>{item}: {modelStatusLabel(row, item)}</p>)}</div> : null}
                     </div>
                   ) : null}
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -248,6 +252,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                 {modelOptionsFor(editing).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(editing, item)}</option>)}
               </Select>
             </Field> : null}
+            {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })} hint={modelOptionsFor(editing).join(", ")}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
             <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>

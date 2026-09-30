@@ -146,13 +146,14 @@ export type SceneModerationOutcome = {
   raw: VisionModerationRawResult | null;
   capabilityVerifiedAt: string | null;
   evidenceRefs: string[];
-  /** VE2E-57: set when the call failed with a provider error (e.g. PROVIDER_RATE_LIMITED / PROVIDER_QUOTA_EXHAUSTED) so callers can cool the model down; `raw` stays null. */
-  failureCode?: string;
+  failureCode?: ProviderError["code"];
   retryAfterMs?: number;
+  quotaScope?: ProviderError["quotaScope"];
 };
 
-const failureOf = (error: unknown): { failureCode?: string; retryAfterMs?: number } =>
-  error instanceof ProviderError ? { failureCode: error.code, ...(error.retryAfterMs ? { retryAfterMs: error.retryAfterMs } : {}) } : {};
+const failureOf = (error: unknown) => error instanceof ProviderError
+  ? { failureCode: error.code, ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}), ...(error.quotaScope ? { quotaScope: error.quotaScope } : {}) }
+  : {};
 
 /**
  * Single entry point a caller (e.g. a future apps/api moderation service) should use instead of

@@ -51,7 +51,7 @@ import {
   type SceneBrief,
 } from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality } from "@lyonix/contracts";
-import { VisionBudget, moderatePoolWithBudget, resolveVisionModel, type ModelAvailability } from "./vision-budget.js";
+import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
@@ -431,13 +431,14 @@ export class ApifyService {
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
     const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
       brief,
       usedExternalIds,
       scopeKey,
       budget,
-      account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: resolveVisionModel(account.model, account.availableModels, account.visionModel) },
+      account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: models[0] ?? account.model, models },
       sceneContext,
       availability: this.providerAccounts as unknown as ModelAvailability,
       fetchFrame: async (candidate) => {

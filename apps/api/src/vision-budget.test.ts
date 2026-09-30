@@ -18,6 +18,14 @@ const base = (budget: VisionBudget, scopeKey: string) => ({
   account: { id: "account", provider: "gemini", apiKey: "test", model: "gemini-2.5-flash-lite" },
   sceneContext: { beat: brief.beat, entities: [], action: [], setting: [], mood: [], exclusions: [] },
   fetchFrame: async () => ({ mimeType: "image/jpeg", base64: "AAAA" }),
+  availability: {
+    acquireContentRequestSlot: vi.fn(async () => true),
+    releaseContentRequestSlot: vi.fn(async () => undefined),
+    cooldownContentAccount: vi.fn(async () => new Date()),
+    markModelUnusable: vi.fn(async () => undefined),
+    markModelLimited: vi.fn(async () => new Date()),
+    getModelAvailability: vi.fn(async () => ({ available: true, retryAt: null as Date | null })),
+  },
 });
 
 describe("vision job budget", () => {
@@ -40,10 +48,23 @@ describe("vision job budget", () => {
   it("skips a cooling vision model without spending a call", async () => {
     const budget = new VisionBudget();
     const moderate = vi.fn();
-    const availability = { getModelAvailability: vi.fn(async () => ({ available: false, retryAt: new Date(Date.now() + 60_000) })) };
+    const availability = { ...base(budget, "one").availability, getModelAvailability: vi.fn(async () => ({ available: false, retryAt: new Date(Date.now() + 60_000) })) };
     await moderatePoolWithBudget({ ...base(budget, "one"), moderate, availability });
     expect(moderate).not.toHaveBeenCalled();
     expect(budget.calls).toBe(0);
     expect(budget.skipReasonFor("one")).toBe("vision_skipped_quota");
+  });
+
+  it("rotates vision to another model on the same key without cooling script generation", async () => {
+    const budget = new VisionBudget({ maxCalls: 4 });
+    const input = base(budget, "one");
+    const moderate = vi.fn(async ({ modelId }: { modelId: string }) => modelId === "a"
+      ? { raw: null, capabilityVerifiedAt: null, evidenceRefs: [], failureCode: "PROVIDER_RATE_LIMITED" as const, quotaScope: "minute" as const }
+      : { raw: null, capabilityVerifiedAt: null, evidenceRefs: [] });
+    await moderatePoolWithBudget({ ...input, account: { ...input.account, model: "a", models: ["a", "b"] }, moderate });
+    expect(moderate.mock.calls.map(([call]) => call.modelId)).toEqual(["a", "b"]);
+    expect(input.availability.markModelLimited).toHaveBeenCalledWith("account", "a", 60_000, "PROVIDER_RATE_LIMITED");
+    expect(input.availability.cooldownContentAccount).not.toHaveBeenCalled();
+    expect(budget.calls).toBe(4);
   });
 });
