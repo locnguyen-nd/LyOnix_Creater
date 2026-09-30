@@ -45,9 +45,12 @@ export type PublicProviderAccount = {
   ownerUserId: string | null;
   status: "unverified" | "verified" | "failed";
   model: string;
+  visionModel: string | null;
   /** Real per-model verification status for content accounts (V00-10 freshness snapshot). Empty for non-content roles or before the first verify. */
   modelSnapshot: PublicModelSnapshotEntry[];
   availableModels: string[];
+  preferredModels: string[];
+  modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   quota: { status: "unknown"; remaining: null; unit: null };
   isFake: boolean;
   version: number;
@@ -60,7 +63,7 @@ const toPublicSnapshot = (raw: unknown): PublicModelSnapshotEntry[] => {
     .map((entry) => ({ modelId: entry.modelId, status: entry.status, checkedAt: entry.checkedAt, source: entry.source, fresh: isFreshCheckedAt(entry.checkedAt), ...(entry.reason ? { reason: entry.reason } : {}) }));
 };
 
-const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; availableModels?: string[]; modelSnapshot?: unknown; isFake: boolean; version: number }): PublicProviderAccount => ({
+const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; visionModel?: string | null; availableModels?: string[]; preferredModels?: string[]; modelSnapshot?: unknown; isFake: boolean; version: number }): PublicProviderAccount => ({
   id: row.id,
   name: row.name,
   provider: row.provider,
@@ -69,7 +72,10 @@ const publicAccount = (row: { id: string; name: string; provider: string; role: 
   ownerUserId: row.ownerUserId,
   status: row.status === "verified" || row.status === "failed" ? row.status : "unverified",
   model: row.model,
+  visionModel: row.visionModel ?? null,
   modelSnapshot: toPublicSnapshot(row.modelSnapshot),
+  preferredModels: row.preferredModels ?? [],
+  modelCooldowns: [],
   // Pre-verify suggestion only (account not yet checked against any real endpoint) - once `availableModels`
   // is populated by a real verify() it always comes from account-scoped discovery/probe, never this fallback.
   availableModels: row.availableModels?.length
@@ -91,7 +97,12 @@ export class ProviderAccountsService {
         : { deletedAt: null, OR: [{ scope: "organization" }, { ownerUserId: userId }] },
       orderBy: { createdAt: "desc" },
     });
-    return rows.map(publicAccount);
+    const ids = rows.filter((row) => row.role === "content").map((row) => row.id);
+    const cooldowns = ids.length ? await this.prisma.providerModelCooldown.findMany({
+      where: { providerAccountId: { in: ids }, cooldownUntil: { gt: new Date() } },
+      select: { providerAccountId: true, modelId: true, cooldownUntil: true },
+    }) : [];
+    return rows.map((row) => ({ ...publicAccount(row), modelCooldowns: cooldowns.filter((item) => item.providerAccountId === row.id).map((item) => ({ modelId: item.modelId, cooldownUntil: item.cooldownUntil.toISOString() })) }));
   }
 
   /** Candidates use the same account visibility rules as GET /provider-accounts; one org is the current tenant boundary. */
@@ -145,6 +156,36 @@ export class ProviderAccountsService {
     const cooldownUntil = new Date(now.getTime() + Math.min(24 * 60 * 60_000, Math.max(1_000, retryAfterMs ?? fallbackMs)));
     await this.prisma.providerAccount.updateMany({ where: { id: accountId, deletedAt: null }, data: { cooldownUntil } } as any);
     return cooldownUntil;
+  }
+
+  /**
+   * VE2E-56: per-(account, model) cooldown. Provider quotas (Gemini free tier, OpenAI per-model RPM) are per
+   * model, so a model-level 429/quota only benches that model; the account stays usable for its other models.
+   */
+  async markModelLimited(accountId: string, modelId: string, retryAfterMs?: number, reason?: string, now = new Date()): Promise<Date> {
+    const cooldownUntil = new Date(now.getTime() + Math.min(24 * 60 * 60_000, Math.max(1_000, retryAfterMs ?? 60_000)));
+    const trimmed = reason ? reason.slice(0, 300) : null;
+    await this.prisma.providerModelCooldown.upsert({
+      where: { providerAccountId_modelId: { providerAccountId: accountId, modelId } },
+      create: { providerAccountId: accountId, modelId, cooldownUntil, reason: trimmed },
+      update: { cooldownUntil, reason: trimmed },
+    });
+    return cooldownUntil;
+  }
+
+  async getModelAvailability(accountId: string, modelId: string, now = new Date()): Promise<{ available: boolean; retryAt: Date | null }> {
+    const row = await this.prisma.providerModelCooldown.findUnique({ where: { providerAccountId_modelId: { providerAccountId: accountId, modelId } } });
+    if (!row || row.cooldownUntil.getTime() <= now.getTime()) return { available: true, retryAt: null };
+    return { available: false, retryAt: row.cooldownUntil };
+  }
+
+  /** Active (not yet expired) model cooldowns for one account, earliest retry first. */
+  async listModelCooldowns(accountId: string, now = new Date()): Promise<Array<{ modelId: string; cooldownUntil: Date; reason: string | null }>> {
+    const rows = await this.prisma.providerModelCooldown.findMany({
+      where: { providerAccountId: accountId, cooldownUntil: { gt: now } },
+      orderBy: { cooldownUntil: "asc" },
+    });
+    return rows.map((row) => ({ modelId: row.modelId, cooldownUntil: row.cooldownUntil, reason: row.reason }));
   }
 
   private async manageable(id: string, userId: string, role: "admin" | "staff") {
@@ -404,7 +445,7 @@ export class ProviderAccountsService {
     userId: string,
     role: "admin" | "staff",
     expectedVersion: number,
-    input: { name?: string; model?: string; secret?: string },
+    input: { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string },
   ) {
     const row = await this.manageable(id, userId, role);
     if (!row || row === "forbidden") return row;
@@ -413,6 +454,10 @@ export class ProviderAccountsService {
     const model = input.model === undefined ? row.model : input.model.trim();
     if (!name || !model) return "invalid" as const;
     if (input.model !== undefined && row.availableModels.length > 0 && !row.availableModels.includes(model)) return "model_unavailable" as const;
+    const visionModel = input.visionModel === undefined ? row.visionModel : input.visionModel?.trim() || null;
+    if (visionModel && (!isLiveContentKind(row.provider) || !row.availableModels.includes(visionModel))) return "model_unavailable" as const;
+    const preferredModels = input.preferredModels === undefined ? (row.preferredModels ?? []) : [...new Set(input.preferredModels.map((item) => item.trim()))];
+    if (preferredModels.some((item) => !item || !row.availableModels.includes(item))) return "model_unavailable" as const;
     const secret = input.secret?.trim();
     let modelSnapshotUpdate: ContentModelSnapshotEntry[] | undefined;
     // V00-10: a content model switch is an explicit user action - reject unknown/retired/unsupported
@@ -429,9 +474,11 @@ export class ProviderAccountsService {
       data: {
         name,
         model,
+        visionModel,
+        preferredModels,
         version: { increment: 1 },
         ...(modelSnapshotUpdate ? { modelSnapshot: modelSnapshotUpdate as unknown as object } : {}),
-        ...(secret ? { encryptedSecret: encryptSecret(secret), status: "unverified", availableModels: [], modelSnapshot: [] } : {}),
+        ...(secret ? { encryptedSecret: encryptSecret(secret), status: "unverified", availableModels: [], modelSnapshot: [], visionModel: null, preferredModels: [] } : {}),
       },
     });
     if (!result.count) return "conflict" as const;

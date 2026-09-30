@@ -146,7 +146,14 @@ export type SceneModerationOutcome = {
   raw: VisionModerationRawResult | null;
   capabilityVerifiedAt: string | null;
   evidenceRefs: string[];
+  failureCode?: ProviderError["code"];
+  retryAfterMs?: number;
+  quotaScope?: ProviderError["quotaScope"];
 };
+
+const failureOf = (error: unknown) => error instanceof ProviderError
+  ? { failureCode: error.code, ...(error.retryAfterMs !== undefined ? { retryAfterMs: error.retryAfterMs } : {}), ...(error.quotaScope ? { quotaScope: error.quotaScope } : {}) }
+  : {};
 
 /**
  * Single entry point a caller (e.g. a future apps/api moderation service) should use instead of
@@ -166,15 +173,15 @@ export async function moderateSceneCandidate(input: SceneModerationInput): Promi
     try {
       const probed = await probeVisionCapability(input.kind, input.apiKey, input.modelId, inputKind);
       capabilityVerifiedAt = probed.verifiedAt;
-    } catch {
-      return { raw: null, capabilityVerifiedAt: null, evidenceRefs: [] };
+    } catch (error) {
+      return { raw: null, capabilityVerifiedAt: null, evidenceRefs: [], ...failureOf(error) };
     }
   }
   try {
     const result = await moderateMediaWithVision({ kind: input.kind, apiKey: input.apiKey, modelId: input.modelId, operation: input.operation, sceneContext: input.sceneContext, frames: input.frames });
     const evidenceRefs = [...(result.requestId ? [`request:${result.requestId}`] : []), ...result.sampledTimestampsMs.map((ms) => `frame_ts_ms:${ms}`)];
     return { raw: result.raw, capabilityVerifiedAt, evidenceRefs };
-  } catch {
-    return { raw: null, capabilityVerifiedAt, evidenceRefs: [] };
+  } catch (error) {
+    return { raw: null, capabilityVerifiedAt, evidenceRefs: [], ...failureOf(error) };
   }
 }

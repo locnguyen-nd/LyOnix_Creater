@@ -15,28 +15,25 @@ import {
   getPexelsPhoto,
   getPexelsVideo,
   isLiveContentKind,
-  moderateSceneCandidate,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
   searchPexelsPhotos,
   searchPexelsVideos,
-  type LiveContentKind,
   type VisionModerationFrame,
   type VisionModerationSceneContext,
 } from "@lyonix/providers";
 import {
-  applyVisionFindings,
   buildBoundedQueryVariants,
   canAccessProject,
   decideMediaSelection,
-  decideVisionModeration,
   deriveSceneBrief,
   detectScriptLanguageHeuristic,
   rankMediaCandidates,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
+import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
 import type {
   ErrorCode,
   MediaAssetKind,
@@ -68,7 +65,7 @@ const MEDIA_SEARCH_POOL_SIZE = 10;
  * `workflow-runner.service.ts`'s own header comment) - so this fixed, documented, auditable bound
  * is the real guard against unbounded vision spend per scene.
  */
-const MAX_VISION_CANDIDATES_PER_SCENE = 5;
+// VE2E-57: candidates per scene / calls per job come from VisionBudget (VISION_MAX_CANDIDATES_PER_SEGMENT / VISION_MAX_CALLS_PER_JOB).
 
 /** Generous headroom over a compressed Pexels preview JPEG, comfortably under `vision-moderation.ts`'s own per-frame base64 egress cutoff after encoding. */
 const MAX_VISION_PREVIEW_DOWNLOAD_BYTES = 4 * 1024 * 1024;
@@ -114,6 +111,8 @@ export type AutoImportForSceneInput = {
   sceneBrief?: SceneBrief;
   /** External ids already assigned to another scene in the same run - continuity gate, same contract as `usedExternalIds` in `apps/web/src/studio/media-selection.ts`. */
   usedExternalIds?: readonly string[];
+  /** VE2E-57: job-level vision budget shared with the other segments of the same run (a fresh one per scene when omitted). */
+  visionBudget?: VisionBudget;
 };
 
 @Injectable()
@@ -317,30 +316,28 @@ export class PexelsService {
    * must only ever strengthen Auto's relevance evidence, never block/replace the existing
    * abstention gate when vision isn't available.
    */
-  private async applyVisionModerationToPhotoPool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>): Promise<MediaCandidate[]> {
+  private async applyVisionModerationToPhotoPool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<MediaCandidate[]> {
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-
-    const apiKey = decryptSecret(account.encryptedSecret);
-    const kind = account.provider as LiveContentKind;
-    const modelId = account.model;
     const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
-
-    const priorityOrder = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SCENE).map((r) => r.candidate.candidateId);
-    const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
-
-    for (const candidateId of priorityOrder) {
-      const candidate = byId.get(candidateId);
-      if (!candidate) continue;
-      const downloaded = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_DOWNLOAD_BYTES, allowedHostSuffix: ".pexels.com" });
-      if (!downloaded.ok) continue;
-      const frame: VisionModerationFrame = { mimeType: downloaded.mimeType || "image/jpeg", base64: downloaded.buffer.toString("base64") };
-      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId, operation: "image_moderation", sceneContext, frames: [frame] });
-      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: modelId, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
-      byId.set(candidateId, applyVisionFindings(candidate, findings));
-    }
-    return pool.map((c) => byId.get(c.candidateId) ?? c);
+    const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
+    return moderatePoolWithBudget({
+      pool,
+      brief,
+      usedExternalIds,
+      scopeKey,
+      budget,
+      account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: models[0] ?? account.model, models },
+      sceneContext,
+      availability: this.providerAccounts as unknown as ModelAvailability,
+      fetchFrame: async (candidate) => {
+        const downloaded = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_DOWNLOAD_BYTES, allowedHostSuffix: ".pexels.com" });
+        if (!downloaded.ok) return null;
+        const frame: VisionModerationFrame = { mimeType: downloaded.mimeType || "image/jpeg", base64: downloaded.buffer.toString("base64") };
+        return frame;
+      },
+    });
   }
 
   /**
@@ -388,7 +385,7 @@ export class PexelsService {
 
     // VE2E-29: attach real vision-verified relevance/eligibility to the photo pool BEFORE ranking/decideMediaSelection, so an accepted photo carries actual evidence instead of the blind metadata-only neutral score. Video stays exempt (see the method's own doc comment).
     if (isPhotoPool) {
-      pool = await this.applyVisionModerationToPhotoPool(pool, brief, userId, role, usedExternalIds);
+      pool = await this.applyVisionModerationToPhotoPool(pool, brief, userId, role, usedExternalIds, input.visionBudget ?? new VisionBudget(), input.sceneId);
     }
 
     const ranked = rankMediaCandidates(pool, brief, { usedExternalIds });

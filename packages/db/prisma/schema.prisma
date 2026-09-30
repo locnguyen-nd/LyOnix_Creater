@@ -263,7 +263,10 @@ model ProviderAccount {
   ownerUserId        String?                   @db.Uuid
   status             ProviderStatus            @default(unverified)
   model              String
+  /// VE2E-57: optional vision model on this content account; null uses a cheaper discovered alternative.
+  visionModel        String?
   availableModels    String[]                  @default([])
+  preferredModels    String[]                  @default([])
   /// V00-10: account-scoped model freshness snapshot, e.g. `[{modelId,status,checkedAt,source,reason?}]`.
   /// JSON (not a separate table) because it is small, always read/written as one unit per account,
   /// and never queried by field - see @lyonix/providers ContentModelSnapshotEntry.
@@ -280,6 +283,7 @@ model ProviderAccount {
   deletedAt          DateTime?
   owner              User?                     @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
   voiceCloneConsents VoiceCloneConsentRecord[]
+  modelCooldowns     ProviderModelCooldown[]
   templateSnapshots  TemplateSnapshot[]
   renderJobs         RenderJob[]
   audioVersions      AudioVersion[]
@@ -622,6 +626,8 @@ model ProviderOperation {
   costAmount        Decimal?                @db.Decimal(12, 4)
   costCurrency      String?
   errorCode         String?
+  /// VE2E-56: the model actually used (or last tried) for content operations.
+  modelId           String?
   createdAt         DateTime                @default(now())
   updatedAt         DateTime                @updatedAt
   workflowRun       WorkflowRun?            @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
@@ -999,4 +1005,19 @@ model TimelineVersion {
   @@unique([projectId, version])
   @@index([projectId, status])
   @@index([workflowRunId])
+}
+
+/// VE2E-56: per-(account, model) cooldown. Provider quotas (e.g. Gemini free tier) are per model, so a
+/// model-level 429/quota must not cool down the whole account.
+model ProviderModelCooldown {
+  id                String          @id @default(uuid()) @db.Uuid
+  providerAccountId String          @db.Uuid
+  modelId           String
+  cooldownUntil     DateTime
+  reason            String?
+  updatedAt         DateTime        @updatedAt
+  providerAccount   ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([providerAccountId, modelId])
+  @@index([cooldownUntil])
 }

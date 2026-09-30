@@ -9,8 +9,11 @@ export type ApiProvider = {
   scope: "personal" | "organization";
   status: "unverified" | "verified" | "failed";
   model: string;
+  visionModel: string | null;
   availableModels: string[];
   modelSnapshot: ApiProviderModelSnapshotEntry[];
+  preferredModels: string[];
+  modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   isFake: boolean;
   version: number;
 };

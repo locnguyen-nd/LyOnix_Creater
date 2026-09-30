@@ -14,6 +14,7 @@ import type { NarrationBudget } from "@lyonix/domain";
 import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
+import { callContentWithModelFailover, describeLimitedModels, type LimitedModel } from "./content-model-failover.js";
 
 export type GenerateScriptDraftInput = {
   providerAccountId?: string;
@@ -82,6 +83,7 @@ export class ScriptGenerationService {
     if (accounts.length === 0) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Chưa có tài khoản content đã verify và được phép sử dụng", status: 503 };
 
     let lastError: ProviderError | null = null;
+    const limited: LimitedModel[] = [];
     for (const account of accounts) {
       if (account.role !== "content" || !isLiveContentKind(account.provider)) continue;
       const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
@@ -89,54 +91,36 @@ export class ScriptGenerationService {
       const snapshots = Array.isArray(account.modelSnapshot) ? account.modelSnapshot as Array<{ modelId: string; status: string }> : [];
       const unavailable = new Set(snapshots.filter((entry) => entry.status === "retired" || entry.status === "unsupported").map((entry) => entry.modelId));
       const ranked = rankContentModels(account.provider, account.availableModels ?? []).filter((modelId) => !unavailable.has(modelId));
-      const models = [
-        ...(ranked.includes(account.model) ? [account.model] : []),
-        ...ranked.filter((modelId) => modelId !== account.model),
-      ];
+      const preferred = (account.preferredModels ?? []).filter((modelId) => ranked.includes(modelId));
+      const models = [...new Set([...preferred, ...(ranked.includes(account.model) ? [account.model] : []), ...ranked])];
       if (models.length === 0) continue;
 
-      const acquired = await this.providerAccounts.acquireContentRequestSlot(account.id);
-      if (!acquired) {
-        lastError = new ProviderError("PROVIDER_RATE_LIMITED", "Tài khoản đang trong cooldown hoặc đã đạt concurrency tối đa", true, 1_000);
-        continue;
-      }
-      try {
-        const apiKey = decryptSecret(account.encryptedSecret);
-        for (const modelId of models) {
-          try {
-            const result = await generateScriptDraftV2(account.provider, apiKey, modelId, {
-              sourceType: source.type,
-              sourceText,
-              originRef: source.originRef,
-              language,
-              ...(input.direction ? { direction: input.direction } : {}),
-              ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
-              ...(input.durationBudget ? { durationBudget: input.durationBudget } : {}),
-            });
-            if (result.modelId !== account.model) {
-              await this.providerAccounts.repinModel(account.id, result.modelId).catch(() => undefined);
-            }
-            return { ok: true, response: this.buildResponse(sourceId, account, result, input.providerAccountId ? "preferred_account" : "automatic_preference") };
-          } catch (error) {
-            if (!(error instanceof ProviderError)) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi provider; chưa tự gửi lại request mơ hồ", status: 502 };
-            lastError = error;
-            if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE") {
-              await this.providerAccounts.markModelUnusable(account.id, modelId, error.message).catch(() => undefined);
-            }
-            if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE" || error.code === "PROVIDER_SCHEMA_INVALID") continue;
-            if (error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_QUOTA_EXHAUSTED" || error.code === "PROVIDER_AUTH_INVALID") {
-              const defaultCooldownMs = error.code === "PROVIDER_QUOTA_EXHAUSTED" ? 15 * 60_000 : error.code === "PROVIDER_AUTH_INVALID" ? 5 * 60_000 : 60_000;
-              await this.providerAccounts.cooldownContentAccount(account.id, error.retryAfterMs ?? defaultCooldownMs).catch(() => undefined);
-            }
-            break;
-          }
+      const apiKey = decryptSecret(account.encryptedSecret);
+      const provider = account.provider;
+      const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => generateScriptDraftV2(provider, apiKey, modelId, {
+        sourceType: source.type,
+        sourceText,
+        originRef: source.originRef,
+        language,
+        ...(input.direction ? { direction: input.direction } : {}),
+        ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
+        ...(input.durationBudget ? { durationBudget: input.durationBudget } : {}),
+      }));
+      limited.push(...result.limited);
+      if (result.ok) {
+        if (result.value.modelId !== account.model) {
+          await this.providerAccounts.repinModel(account.id, result.value.modelId).catch(() => undefined);
         }
-      } finally {
-        await this.providerAccounts.releaseContentRequestSlot(account.id).catch(() => undefined);
+        return { ok: true, response: this.buildResponse(sourceId, account, result.value, input.providerAccountId ? "preferred_account" : "automatic_preference") };
       }
-      // A quota/auth/429 account is now persisted in cooldown, so this moves only to another
-      // verified account visible to this actor; no further model calls are made on the failed key.
-      if (lastError && !["PROVIDER_RATE_LIMITED", "PROVIDER_QUOTA_EXHAUSTED", "PROVIDER_AUTH_INVALID"].includes(lastError.code)) break;
+      if (result.thrown !== undefined) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi provider; chưa tự gửi lại request mơ hồ", status: 502 };
+      if (result.error) lastError = result.error;
+      // Rate/quota/auth (account or model level) only moves on to the next verified account; anything else stops.
+      if (result.error && !["PROVIDER_RATE_LIMITED", "PROVIDER_QUOTA_EXHAUSTED", "PROVIDER_AUTH_INVALID"].includes(result.error.code)) break;
+    }
+    const limitedMessage = describeLimitedModels(limited);
+    if (limitedMessage && (!lastError || lastError.code === "PROVIDER_RATE_LIMITED" || lastError.code === "PROVIDER_QUOTA_EXHAUSTED")) {
+      return { ok: false, code: lastError?.code ?? "PROVIDER_RATE_LIMITED", message: limitedMessage, status: 429, retryable: true };
     }
     if (!lastError) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Không có model khả dụng trên các tài khoản content được phép dùng", status: 503 };
     const error = lastError;
@@ -182,44 +166,27 @@ export class ScriptGenerationService {
     const snapshots = Array.isArray(account.modelSnapshot) ? account.modelSnapshot as Array<{ modelId: string; status: string }> : [];
     const unavailable = new Set(snapshots.filter((entry) => entry.status === "retired" || entry.status === "unsupported").map((entry) => entry.modelId));
     const ranked = rankContentModels(account.provider, account.availableModels ?? []).filter((modelId) => !unavailable.has(modelId));
-    const models = [...(ranked.includes(account.model) ? [account.model] : []), ...ranked.filter((modelId) => modelId !== account.model)];
+    const preferred = (account.preferredModels ?? []).filter((modelId) => ranked.includes(modelId));
+    const models = [...new Set([...preferred, ...(ranked.includes(account.model) ? [account.model] : []), ...ranked])];
     if (models.length === 0) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Không có model khả dụng" };
-    const acquired = await this.providerAccounts.acquireContentRequestSlot(account.id);
-    if (!acquired) return { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Tài khoản đang trong cooldown hoặc đã đạt concurrency tối đa" };
-    try {
-      const apiKey = decryptSecret(account.encryptedSecret);
-      let lastError: ProviderError | null = null;
-      for (const modelId of models) {
-        try {
-          const result = await extractSegmentKeywords(account.provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments });
-          return {
-            ok: true,
-            keywords: result.keywords,
-            rejectedSegmentIds: result.rejectedSegmentIds,
-            usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, costAmount: result.usage.cost.amount, costCurrency: result.usage.cost.currency, providerRequestId: result.usage.providerRequestId },
-            modelId: result.modelId,
-            provider: account.provider,
-            promptTemplateVersion: result.promptTemplateVersion,
-          };
-        } catch (error) {
-          if (!(error instanceof ProviderError)) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi trích từ khóa" };
-          lastError = error;
-          if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE") {
-            await this.providerAccounts.markModelUnusable(account.id, modelId, error.message).catch(() => undefined);
-            continue;
-          }
-          if (error.code === "PROVIDER_SCHEMA_INVALID") continue;
-          if (error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_QUOTA_EXHAUSTED" || error.code === "PROVIDER_AUTH_INVALID") {
-            const defaultCooldownMs = error.code === "PROVIDER_QUOTA_EXHAUSTED" ? 15 * 60_000 : error.code === "PROVIDER_AUTH_INVALID" ? 5 * 60_000 : 60_000;
-            await this.providerAccounts.cooldownContentAccount(account.id, error.retryAfterMs ?? defaultCooldownMs).catch(() => undefined);
-          }
-          break;
-        }
-      }
-      return { ok: false, code: lastError?.code ?? "PROVIDER_UNAVAILABLE", message: lastError?.message ?? "Trích từ khóa thất bại" };
-    } finally {
-      await this.providerAccounts.releaseContentRequestSlot(account.id).catch(() => undefined);
+    const apiKey = decryptSecret(account.encryptedSecret);
+    const provider = account.provider;
+    const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => extractSegmentKeywords(provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments }));
+    if (result.ok) {
+      const value = result.value;
+      return {
+        ok: true,
+        keywords: value.keywords,
+        rejectedSegmentIds: value.rejectedSegmentIds,
+        usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens, costAmount: value.usage.cost.amount, costCurrency: value.usage.cost.currency, providerRequestId: value.usage.providerRequestId },
+        modelId: value.modelId,
+        provider: account.provider,
+        promptTemplateVersion: value.promptTemplateVersion,
+      };
     }
+    if (result.thrown !== undefined) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi trích từ khóa" };
+    const limitedMessage = result.error?.code === "PROVIDER_AUTH_INVALID" ? null : describeLimitedModels(result.limited);
+    return { ok: false, code: result.error?.code ?? (limitedMessage ? "PROVIDER_RATE_LIMITED" : "PROVIDER_UNAVAILABLE"), message: limitedMessage ?? result.error?.message ?? "Trích từ khóa thất bại" };
   }
 
   private buildResponse(

@@ -144,6 +144,13 @@ export function VideoProductionPage() {
               {run.apifyUsage.searchesReused > 0 || run.apifyUsage.libraryReuses > 0 ? ` · ${t("studioPro.apifyUsageReuse", { searches: run.apifyUsage.searchesReused, library: run.apifyUsage.libraryReuses })}` : ""}
             </p>
           ) : null}
+          {run.visionUsage ? (
+            <p className="mt-1 text-[11.5px] text-lyx-fg-muted" data-testid="vision-usage">
+              <span className="font-semibold">{t("studioPro.visionUsageTitle")}: </span>
+              {t("studioPro.visionUsageLine", { calls: run.visionUsage.calls, max: run.visionUsage.maxCalls })}
+              {run.visionUsage.skippedSegments > 0 ? ` · ${t("studioPro.visionUsageSkipped", { count: run.visionUsage.skippedSegments })}` : ""}
+            </p>
+          ) : null}
         </div>
       ) : null}
 
