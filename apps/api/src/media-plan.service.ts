@@ -25,6 +25,8 @@ import {
   MEDIA_PLAN_POLICY_VERSION,
   canWriteProjectResource,
   computeSegmentSourceRanges,
+  computeSocialWindowRanges,
+  socialWindowOptionsFromEnv,
   deriveSceneBrief,
   planBackgroundSegments,
   type MediaPlanScene,
@@ -268,12 +270,21 @@ export class MediaPlanService {
     const diagnostics: MediaPlanSegmentDiagnostics[] = [];
     for (const { segment, source, errorCode } of sourced) {
       let ranges: SceneSourceRange[] | null = null;
+      let socialWindow: { needsSecondSource: boolean; coveredMs: number } | null = null;
       if (source) {
         const sceneDurations = segment.sceneIds.map((sceneId) => {
           const scene = script.scenes.find((s) => s.sceneId === sceneId);
           return { sceneId, durationMs: scene ? sceneDuration(scene) : 1 };
         });
         ranges = source.kind === "video" ? computeSegmentSourceRanges(sceneDurations, source.durationMs) : null;
+        if (source.kind === "video" && source.provider === "apify") {
+          // VE2E-53: social clips - guard-bounded, non-looping window; a second source (sourcing agent) covers what is left.
+          const plan = computeSocialWindowRanges(sceneDurations, source.durationMs, socialWindowOptionsFromEnv());
+          if (plan) {
+            ranges = plan.ranges;
+            socialWindow = { needsSecondSource: plan.needsSecondSource, coveredMs: plan.coveredMs };
+          }
+        }
         for (const sceneId of segment.sceneIds) bySceneId.set(sceneId, { segmentId: segment.segmentId, source, range: ranges?.find((r) => r.sceneId === sceneId) ?? null });
         segments.push({ segmentId: segment.segmentId, sceneIds: [...segment.sceneIds], mediaAssetVersionId: source.mediaAssetVersionId, subject: segment.subject, priority: segment.priority });
       }
@@ -285,6 +296,7 @@ export class MediaPlanService {
         durationMs: segment.durationMs,
         looped: Boolean(ranges?.some((r) => r.looped)),
         short: Boolean(ranges?.some((r) => r.short)),
+        ...(socialWindow ?? {}),
         ...(source?.provider ? { sourceProvider: source.provider } : {}),
         ...(source?.fallbackReason ? { fallbackReason: source.fallbackReason } : {}),
         ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
