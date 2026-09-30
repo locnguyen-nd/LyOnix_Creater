@@ -497,6 +497,52 @@ describe("RenderJobsService", () => {
       expect(renderJobRows.get(id)).toMatchObject({ status: "queued", clipsReady: 1, clipFailures: [] });
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
+
+    const plainTimeline = () => ({
+      id: "timeline-plain", projectId, status: "approved", templateSnapshotId,
+      scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null }],
+      optionValues: {},
+    });
+
+    it("P1-1: a reclaimed second worker (INVALID_STATE) never fails a job the first worker already submitted", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      // While worker 2 has claimed the (reclaimed) lease, worker 1 finishes its provider submit.
+      prisma.user.findUnique = vi.fn(async () => {
+        renderJobRows.set(id, { ...renderJobRows.get(id), status: "queued", externalJobId: "rnd_first", submittedAt: new Date() });
+        return { role: "staff" };
+      });
+      expect(await service.processNextPreparation()).toBe(true);
+      expect(renderJobRows.get(id)).toMatchObject({ status: "queued", externalJobId: "rnd_first" });
+      expect(renderJobRows.get(id).lastError).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("P1-1: an exception after the provider accepted the render does not mark the job failed", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_ok", status: "planned" }]), { status: 200 })));
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      const original = service.submitFromTimelineVersion.bind(service);
+      vi.spyOn(service, "submitFromTimelineVersion").mockImplementation(async (...args) => {
+        await original(...args);
+        throw new Error("db connection lost after provider success");
+      });
+      await service.processNextPreparation();
+      expect(renderJobRows.get(id)).toMatchObject({ status: "queued", externalJobId: "rnd_ok" });
+    });
+
+    it("P1-1: a genuine preparation failure still marks a preparing_clips job failed", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      vi.spyOn(service, "submitFromTimelineVersion").mockRejectedValue(new Error("boom"));
+      await service.processNextPreparation();
+      expect(renderJobRows.get(id)).toMatchObject({ status: "failed", lastError: { code: "MEDIA_PREPARE_FAILED", retryable: true } });
+    });
   });
 
   describe("submitDynamicFromTimeline", () => {

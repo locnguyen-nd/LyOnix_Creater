@@ -110,7 +110,6 @@ const toJobResponse = (row: {
 
 @Injectable()
 export class RenderJobsService {
-  private activePreparationJobId: string | null = null;
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
@@ -147,12 +146,13 @@ export class RenderJobsService {
     userId: string,
     scenes: SceneBindingForMapping[],
     requests: ClipDerivativeRequest[],
+    preparationJobId?: string,
   ): Promise<RenderOutcome<SceneBindingForMapping[]>> {
     if (requests.length === 0) return { ok: true, data: scenes };
     if (!this.clipDerivatives) {
       return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Media worker chưa được nối vào render — không cắt được clip", status: 503, retryable: false };
     }
-    const jobId = this.activePreparationJobId;
+    const jobId = preparationJobId;
     let failureWrite = Promise.resolve();
     const prepared = await this.clipDerivatives.prepare(projectId, userId, requests, jobId ? async (ready) => {
       void ready;
@@ -290,9 +290,12 @@ export class RenderJobsService {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
     try {
       if (params.queuedJobId) {
-        const queued = await this.prisma.renderJob.findUnique({ where: { id: params.queuedJobId } });
-        if (!queued || queued.status !== "preparing_clips") return { ok: false, code: "INVALID_STATE", message: "Render job không còn ở trạng thái chuẩn bị clip", status: 409 };
-        job = await this.prisma.renderJob.update({ where: { id: queued.id }, data: { status: "accepted", modificationsPayload: params.payload as Prisma.InputJsonValue, preparationLeaseUntil: null } });
+        // Compare-and-set: only one worker may move preparing_clips -> accepted (and so call the provider).
+        const claimedQueued = await this.prisma.renderJob.updateMany({ where: { id: params.queuedJobId, status: "preparing_clips" }, data: { status: "accepted", modificationsPayload: params.payload as Prisma.InputJsonValue, preparationLeaseUntil: null } });
+        if (claimedQueued.count !== 1) return { ok: false, code: "INVALID_STATE", message: "Render job không còn ở trạng thái chuẩn bị clip", status: 409 };
+        const claimedRow = await this.prisma.renderJob.findUnique({ where: { id: params.queuedJobId } });
+        if (!claimedRow) return { ok: false, code: "INVALID_STATE", message: "Render job không còn ở trạng thái chuẩn bị clip", status: 409 };
+        job = claimedRow;
       } else {
       job = await this.prisma.renderJob.create({
         data: {
@@ -399,7 +402,7 @@ export class RenderJobsService {
       const account = await this.templates.usableAccount(input.providerAccountId);
       if (!account.ok) return account;
       if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
-      const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests);
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests, queuedJobId);
       if (!withDerivatives.ok) return withDerivatives;
       built = buildRenderAssignmentsFromTimeline(slots, withDerivatives.data, optionValues);
     }
@@ -437,7 +440,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     outputFormat?: "mp4" | "mov" | "gif",
-    options: { prepareClipDerivatives?: boolean } = {},
+    options: { prepareClipDerivatives?: boolean; preparationJobId?: string } = {},
   ): Promise<
     RenderOutcome<{
       templateSnapshotId: string;
@@ -491,7 +494,7 @@ export class RenderJobsService {
         durationMs: scene.sourceDurationMs!,
         stripAudio: true,
       }));
-      const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests);
+      const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests, options.preparationJobId);
       if (!withDerivatives.ok) return withDerivatives;
       renderable = withDerivatives.data;
     }
@@ -559,7 +562,7 @@ export class RenderJobsService {
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
 
-    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true });
+    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}) });
     if (!resolvedComposition.ok) return resolvedComposition;
     const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
 
@@ -697,7 +700,6 @@ export class RenderJobsService {
     const claimed = await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips", preparationLeaseUntil: candidate.preparationLeaseUntil }, data: { preparationLeaseUntil: new Date(Date.now() + 10 * 60_000), clipsReady: 0, clipFailures: [] } });
     if (claimed.count !== 1) return true;
     const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null };
-    this.activePreparationJobId = candidate.id;
     try {
       const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}) };
       const actor = await this.prisma.user.findUnique({ where: { id: candidate.createdByUserId }, select: { role: true } });
@@ -708,13 +710,16 @@ export class RenderJobsService {
         : await this.submitFromTimelineVersion(candidate.projectId, payload.timelineVersionId, candidate.createdByUserId, role, input, candidate.workflowRunId ?? undefined, candidate.id);
       if (!outcome.ok) {
         const current = await this.prisma.renderJob.findUnique({ where: { id: candidate.id } });
-        if (current?.status !== "failed") await this.prisma.renderJob.update({ where: { id: candidate.id }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: outcome.code, message: outcome.message, retryable: outcome.retryable ?? false }, clipFailures: Array.isArray(current?.clipFailures) && current.clipFailures.length ? current.clipFailures as Prisma.InputJsonValue : [{ sceneId: "", code: outcome.code, message: outcome.message }] } });
+        const clipFailures = Array.isArray(current?.clipFailures) && current.clipFailures.length ? current.clipFailures as Prisma.InputJsonValue : [{ sceneId: "", code: outcome.code, message: outcome.message }];
+        // Compare-and-set: a job another worker already moved past preparing_clips (accepted/queued/
+        // rendering/completed, with or without externalJobId) is never overwritten from here.
+        await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: outcome.code, message: outcome.message, retryable: outcome.retryable ?? false }, clipFailures } });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Render preparation failed";
-      await this.prisma.renderJob.update({ where: { id: candidate.id }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: "MEDIA_PREPARE_FAILED", message, retryable: true }, clipFailures: [{ sceneId: "", code: "MEDIA_PREPARE_FAILED", message }] } });
-    } finally {
-      this.activePreparationJobId = null;
+      // Same guard: an exception after the provider call succeeded must not fail a submitted job
+      // (an `accepted` job with unknown outcome is settled by the PROVIDER_SUBMIT_UNKNOWN sweep instead).
+      await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: "MEDIA_PREPARE_FAILED", message, retryable: true }, clipFailures: [{ sceneId: "", code: "MEDIA_PREPARE_FAILED", message }] } });
     }
     return true;
   }
