@@ -155,6 +155,12 @@ export type ScriptDraftV2Response = {
 export type ScriptDraftV2GenerationResponse = {
   sourceId: string;
   draft: ScriptDraftV2Response;
+  /** VE2E-50 (optional, additive): why the visualPlan is missing/invalid and whether the strict schema was rejected; consumed by the Auto runner diagnostics only. */
+  diagnostics?: {
+    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[] };
+    schemaRejection: string | null;
+    repaired: boolean;
+  };
   providerPin: {
     accountId: string;
     provider: string;

@@ -127,7 +127,9 @@ export {
   isContentLanguageV2,
   isScriptSourceKind,
   parseScriptDraftV2,
+  parseScriptDraftV2WithDiagnostics,
   validateScriptDraftV2,
+  type VisualPlanParseDiagnostics,
   clipForPromptV2,
   scriptSourceKinds,
   type ContentLanguageV2,
@@ -142,6 +144,13 @@ export {
   VISUAL_PLAN_PRIORITY_MIN,
   VISUAL_PLAN_PRIORITY_MAX,
   normalizeScriptVisualPlanV2,
+  diagnoseScriptVisualPlanV2,
+  sanitizeVisualPlanJaKeywords,
+  isValidJaSearchKeyword,
+  isValidEnSearchKeyword,
+  containsJapaneseChars,
+  type VisualPlanRejectionReason,
+  type VisualPlanDiagnosis,
   findVisualSegmentForScene,
   mediaSearchQueryForScene,
   type ScriptVisualPlanV2,
@@ -149,7 +158,17 @@ export {
   type ScriptVisualKeywordsV2,
   type ScriptVisualStyleHintsV2,
 } from "./script-visual-plan.js";
-export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result } from "./live-script-v2.js";
+export { generateScriptDraftV2, type GenerateScriptDraftV2Input, type GenerateScriptDraftV2Result, type ScriptGenerationDiagnostics } from "./live-script-v2.js";
+export {
+  SEGMENT_KEYWORDS_PROMPT_VERSION,
+  SEGMENT_KEYWORDS_JSON_SCHEMA,
+  buildSegmentKeywordsPrompt,
+  parseSegmentKeywords,
+  extractSegmentKeywords,
+  type SegmentKeywordsInput,
+  type ExtractedSegmentKeywords,
+  type ExtractSegmentKeywordsResult,
+} from "./segment-keywords.js";
 export {
   SCRIPT_DRAFT_SCHEMA_VERSION,
   SCRIPT_DRAFT_V1_JSON_SCHEMA,

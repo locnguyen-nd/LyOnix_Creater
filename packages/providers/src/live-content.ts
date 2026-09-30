@@ -276,13 +276,17 @@ export async function generateVisionStructuredOnce<T>(kind: LiveContentKind, api
  * replacement model (same retry shape as `generateLiveStructured`, kept as a separate
  * function so the existing ScriptDraftV1 chat-completions path is untouched).
  */
-export async function generateContentStructuredV2<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
+export async function generateContentStructuredV2<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T> & { schemaRejection?: string }> {
   const resolved = resolveContentModel(kind as ContentKind, modelId);
   try {
     return await generateContentOnce<T>(kind, apiKey, resolved, prompt, schema);
   } catch (error) {
     if (schema && error instanceof ProviderError && error.code === "PROVIDER_SCHEMA_INVALID") {
-      return generateContentOnce<T>(kind, apiKey, resolved, prompt);
+      // VE2E-50: the strict schema was rejected (HTTP 400 / unparsable structured text) and the call is repeated WITHOUT
+      // it - the model then only follows the prompt, which is a known way for the optional visualPlan to go missing.
+      // Surface it so the run diagnostics can say so instead of hiding it.
+      const retried = await generateContentOnce<T>(kind, apiKey, resolved, prompt);
+      return { ...retried, schemaRejection: error.message.slice(0, 200) };
     }
     const hinted = error instanceof ProviderError ? suggestedModelFromError(error.message) : null;
     if (error instanceof ProviderError && error.code === "PROVIDER_CAPABILITY_UNAVAILABLE" && hinted && hinted !== resolved) {

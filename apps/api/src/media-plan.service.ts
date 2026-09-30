@@ -40,9 +40,11 @@ import type {
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
+import { randomUUID } from "node:crypto";
 import { ApifyService } from "./apify.service.js";
+import { ScriptGenerationService } from "./script-generation.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -107,28 +109,31 @@ export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
   return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
 };
 
-/** Apify search rejects queries over 200 chars; stay well below. */
-export const APIFY_FALLBACK_KEYWORD_MAX_CHARS = 100;
-
 /**
- * VE2E-48: the Japanese Apify keyword of a segment. `keywords.ja` from the plan wins; otherwise, for a
- * `ja` script (whose scene `visualQuery` is already Japanese) the first 1-2 distinct scene queries are
- * joined within {@link APIFY_FALLBACK_KEYWORD_MAX_CHARS}. Non-ja scripts without keywords get `null`
- * (English is never invented) -> Pexels with reason `no_ja_keywords`.
+ * The Japanese Apify keyword of a segment (VE2E-50): only `segment.keywords.ja` when it is a real short
+ * Japanese search phrase (kana/kanji, see `isValidJaSearchKeyword`). The scene `visualQuery` is NEVER
+ * used (VE2E-48's fallback was wrong: for a ja script it is a long English shot description that returns
+ * global template/greenscreen TikToks). No valid keyword -> `null` -> Pexels with reason `no_ja_keywords`.
  */
-export const apifyKeywordForSegment = (script: MediaPlanScript, segment: PlannedSegment): string | null => {
+export const apifyKeywordForSegment = (segment: PlannedSegment): string | null => {
   const planned = segment.keywords?.ja.trim();
-  if (planned) return planned;
-  if (!/^ja($|[-_])/i.test(script.language.trim())) return null;
-  const distinct: string[] = [];
-  for (const sceneId of segment.sceneIds) {
-    const query = script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery.replace(/\s+/g, " ").trim();
-    if (query && !distinct.some((existing) => existing.toLowerCase() === query.toLowerCase())) distinct.push(query);
-    if (distinct.length >= 2) break;
+  return planned && isValidJaSearchKeyword(planned) ? planned : null;
+};
+
+/** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
+export const segmentsNeedingKeywords = (segments: readonly PlannedSegment[]): PlannedSegment[] => segments.filter((segment) => apifyKeywordForSegment(segment) === null);
+
+/** Narration of a segment's scenes in script order (the only text the keyword extraction sees). */
+export const segmentNarration = (script: MediaPlanScript, segment: PlannedSegment): string =>
+  segment.sceneIds.map((sceneId) => script.scenes.find((scene) => scene.sceneId === sceneId)?.narration.trim() ?? "").filter(Boolean).join(" ");
+
+/** Applies extracted keywords to the planned segments in place; `en` from the plan wins, extracted `en` only fills a gap. */
+export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extracted: Readonly<Record<string, { ja: string; en: string }>>): void => {
+  for (const segment of segments) {
+    const found = extracted[segment.segmentId];
+    if (!found || !isValidJaSearchKeyword(found.ja)) continue;
+    segment.keywords = { ja: found.ja.trim(), en: segment.keywords?.en.trim() || found.en.trim() };
   }
-  if (distinct.length === 0) return null;
-  const joined = distinct.length === 2 && `${distinct[0]} ${distinct[1]}`.length <= APIFY_FALLBACK_KEYWORD_MAX_CHARS ? `${distinct[0]} ${distinct[1]}` : distinct[0]!;
-  return joined.slice(0, APIFY_FALLBACK_KEYWORD_MAX_CHARS).trim() || null;
 };
 
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
@@ -141,7 +146,61 @@ export class MediaPlanService {
     @Inject(PexelsService) private readonly pexels: PexelsService,
     /** VE2E-46: Apify-first sourcing. Absent (older 3-argument construction) = unchanged Pexels-only behaviour. */
     @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
+    /** VE2E-55: keyword extraction for Studio plans. Absent = no extraction (segments without a ja keyword go to Pexels). */
+    @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
   ) {}
+
+  /**
+   * VE2E-55: Studio counterpart of the Auto runner's extraction. One call for all given segments lacking a valid ja
+   * keyword; applies the result in place. Returns the reason to record when segments stay without a keyword
+   * (`no_content_account` | `extraction_failed`), else null. Never throws; the call is recorded as a ProviderOperation.
+   */
+  private async extractKeywordsForStudio(userId: string, role: "admin" | "staff", script: MediaPlanScript, segments: PlannedSegment[]): Promise<string | null> {
+    const needing = segmentsNeedingKeywords(segments);
+    if (needing.length === 0 || !this.scriptGeneration) return null;
+    if (!(await this.apifyAvailable(userId, role))) return null;
+    let accountId: string | null = null;
+    try {
+      accountId = await this.scriptGeneration.resolveContentAccountId(userId, role);
+    } catch {
+      accountId = null;
+    }
+    if (!accountId) return "no_content_account";
+    const record = async (status: "succeeded" | "failed", errorCode: string | null, requestId: string | null) => {
+      try {
+        await this.prisma.providerOperation.create({ data: { providerAccountId: accountId, role: "content", operation: "extract_keywords", status, correlationId: randomUUID(), errorCode, externalRequestId: requestId } });
+      } catch {
+        // Bookkeeping is best-effort.
+      }
+    };
+    try {
+      const outcome = await this.scriptGeneration.extractSegmentKeywords(userId, role, {
+        providerAccountId: accountId,
+        language: script.language,
+        segments: needing.map((segment) => ({ segmentId: segment.segmentId, narration: segmentNarration(script, segment) })),
+      });
+      if (!outcome.ok) {
+        await record("failed", outcome.code, null);
+        return "extraction_failed";
+      }
+      await record("succeeded", null, outcome.usage.providerRequestId);
+      applyExtractedKeywords(segments, outcome.keywords);
+      return null;
+    } catch {
+      await record("failed", "PROVIDER_UNAVAILABLE", null);
+      return "extraction_failed";
+    }
+  }
+
+  /** VE2E-50: whether the user can run an Apify search at all (the runner only pays for keyword extraction when it can). */
+  async apifyAvailable(userId: string, role: "admin" | "staff"): Promise<boolean> {
+    if (!this.apify) return false;
+    try {
+      return Boolean(await this.apify.findAccountForUser(userId, role));
+    } catch {
+      return false;
+    }
+  }
 
   planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
     const scenes: MediaPlanScene[] = script.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: sceneDuration(scene) }));
@@ -192,7 +251,7 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
   ): Promise<{ source: SegmentSource } | { reason: string | null }> {
     if (!this.apify) return { reason: null };
-    const keyword = apifyKeywordForSegment(input.script, input.segment);
+    const keyword = apifyKeywordForSegment(input.segment);
     if (!keyword) return { reason: "no_ja_keywords" };
     try {
       const account = await this.apify.findAccountForUser(userId, role);
@@ -345,13 +404,24 @@ export class MediaPlanService {
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
     const sourced: SourcedSegment[] = [];
-    for (const segment of this.planSegments(planScript, range)) {
+    const plannedSegments = this.planSegments(planScript, range);
+    let extractionReason: string | null = null;
+    let extractionDone = false;
+    for (const segment of plannedSegments) {
       let source = await this.findReusableSource(projectId, segment, ledger);
       let errorCode: string | null = null;
       if (!source) {
+        if (!extractionDone) {
+          // VE2E-55: lazily, once, only when a segment needs a NEW source (same rule as the Auto runner).
+          extractionDone = true;
+          extractionReason = await this.extractKeywordsForStudio(userId, role, planScript, plannedSegments.slice(plannedSegments.indexOf(segment)));
+        }
         const imported = await this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segment, ledger });
-        if (imported.ok) source = imported.data;
-        else errorCode = imported.code;
+        if (imported.ok) {
+          source = imported.data;
+          // Refine the generic reason with why extraction did not help this segment.
+          if (extractionReason && source.provider === "pexels" && source.fallbackReason === "no_ja_keywords") source = { ...source, fallbackReason: extractionReason };
+        } else errorCode = imported.code;
       }
       if (source) ledger.add(source);
       sourced.push({ segment, source, errorCode });

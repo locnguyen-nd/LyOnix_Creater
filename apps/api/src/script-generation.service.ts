@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
   ProviderError,
+  extractSegmentKeywords,
   generateScriptDraftV2,
   isContentLanguageV2,
   isLiveContentKind,
@@ -24,6 +25,19 @@ export type GenerateScriptDraftInput = {
 export type GenerateScriptDraftOutcome =
   | { ok: true; response: ScriptDraftV2GenerationResponse }
   | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
+
+/** VE2E-50: outcome of the dedicated keyword-extraction call. */
+export type SegmentKeywordsOutcome =
+  | {
+      ok: true;
+      keywords: Record<string, { ja: string; en: string }>;
+      rejectedSegmentIds: string[];
+      usage: { inputTokens: number | null; outputTokens: number | null; costAmount: string | null; costCurrency: string | null; providerRequestId: string | null };
+      modelId: string;
+      provider: string;
+      promptTemplateVersion: string;
+    }
+  | { ok: false; code: ErrorCode; message: string };
 
 const providerErrorMessage: Record<string, string> = {
   PROVIDER_AUTH_INVALID: "Khóa API bị từ chối. Verify lại tài khoản content provider.",
@@ -138,6 +152,72 @@ export class ScriptGenerationService {
     };
   }
 
+  /** VE2E-55: the verified content account the caller may use (same candidate list/order as {@link generate}), or null. */
+  async resolveContentAccountId(userId: string, role: "admin" | "staff"): Promise<string | null> {
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
+    const account = accounts.find((candidate) => candidate.role === "content" && isLiveContentKind(candidate.provider) && (candidate.isFake ? process.env.NODE_ENV === "test" : candidate.status === "verified"));
+    return account?.id ?? null;
+  }
+
+  /**
+   * VE2E-50: ONE cheap content call that returns ja+en search keywords for every given segment from
+   * the narration only (never from `visualQuery`). Same account/model selection, rate-limit slot and
+   * cooldown handling as {@link generate}; no retry loop over models beyond the schema/capability
+   * fallbacks. Returns the usage so the caller can record it like any other content call. Never
+   * throws: a failure is `{ ok: false }` and the caller falls back to Pexels (`no_ja_keywords`).
+   */
+  async extractSegmentKeywords(
+    userId: string,
+    role: "admin" | "staff",
+    input: { providerAccountId: string; language: string; title?: string; segments: Array<{ segmentId: string; narration: string }> },
+  ): Promise<SegmentKeywordsOutcome> {
+    if (input.segments.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Không có segment nào để trích từ khóa" };
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role, input.providerAccountId);
+    const account = accounts.find((candidate) => candidate.id === input.providerAccountId && candidate.role === "content" && isLiveContentKind(candidate.provider));
+    if (!account || !isLiveContentKind(account.provider)) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản content không khả dụng cho trích từ khóa" };
+    const snapshots = Array.isArray(account.modelSnapshot) ? account.modelSnapshot as Array<{ modelId: string; status: string }> : [];
+    const unavailable = new Set(snapshots.filter((entry) => entry.status === "retired" || entry.status === "unsupported").map((entry) => entry.modelId));
+    const ranked = rankContentModels(account.provider, account.availableModels ?? []).filter((modelId) => !unavailable.has(modelId));
+    const models = [...(ranked.includes(account.model) ? [account.model] : []), ...ranked.filter((modelId) => modelId !== account.model)];
+    if (models.length === 0) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Không có model khả dụng" };
+    const acquired = await this.providerAccounts.acquireContentRequestSlot(account.id);
+    if (!acquired) return { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Tài khoản đang trong cooldown hoặc đã đạt concurrency tối đa" };
+    try {
+      const apiKey = decryptSecret(account.encryptedSecret);
+      let lastError: ProviderError | null = null;
+      for (const modelId of models) {
+        try {
+          const result = await extractSegmentKeywords(account.provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments });
+          return {
+            ok: true,
+            keywords: result.keywords,
+            rejectedSegmentIds: result.rejectedSegmentIds,
+            usage: { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens, costAmount: result.usage.cost.amount, costCurrency: result.usage.cost.currency, providerRequestId: result.usage.providerRequestId },
+            modelId: result.modelId,
+            provider: account.provider,
+            promptTemplateVersion: result.promptTemplateVersion,
+          };
+        } catch (error) {
+          if (!(error instanceof ProviderError)) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi trích từ khóa" };
+          lastError = error;
+          if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE") {
+            await this.providerAccounts.markModelUnusable(account.id, modelId, error.message).catch(() => undefined);
+            continue;
+          }
+          if (error.code === "PROVIDER_SCHEMA_INVALID") continue;
+          if (error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_QUOTA_EXHAUSTED" || error.code === "PROVIDER_AUTH_INVALID") {
+            const defaultCooldownMs = error.code === "PROVIDER_QUOTA_EXHAUSTED" ? 15 * 60_000 : error.code === "PROVIDER_AUTH_INVALID" ? 5 * 60_000 : 60_000;
+            await this.providerAccounts.cooldownContentAccount(account.id, error.retryAfterMs ?? defaultCooldownMs).catch(() => undefined);
+          }
+          break;
+        }
+      }
+      return { ok: false, code: lastError?.code ?? "PROVIDER_UNAVAILABLE", message: lastError?.message ?? "Trích từ khóa thất bại" };
+    } finally {
+      await this.providerAccounts.releaseContentRequestSlot(account.id).catch(() => undefined);
+    }
+  }
+
   private buildResponse(
     sourceId: string,
     account: { id: string; provider: string; configVersion: number },
@@ -147,6 +227,7 @@ export class ScriptGenerationService {
     return {
       sourceId,
       draft: result.draft,
+      diagnostics: result.diagnostics,
       providerPin: {
         accountId: account.id,
         provider: account.provider,
