@@ -16,6 +16,7 @@ import {
   type VisualPlanParseDiagnostics,
 } from "./script-draft-v2.js";
 import { normalizeModelId } from "./content-models.js";
+import type { NarrationBudget } from "@lyonix/domain";
 
 export type GenerateScriptDraftV2Input = {
   sourceType: ScriptSourceKind;
@@ -26,6 +27,8 @@ export type GenerateScriptDraftV2Input = {
   direction?: string;
   /** VE2E-38/40: target background segment count for the draft's `visualPlan` (see `buildScriptV2PromptPackage`). */
   backgroundSegmentRange?: { min: number; max: number } | null;
+  /** VE2E-54: narration budget (targetChars + scene range) derived from the intake target. */
+  durationBudget?: NarrationBudget | null;
 };
 
 /** VE2E-50: why the draft's `visualPlan` is (not) there, and whether the structured-output schema was rejected. */

@@ -217,3 +217,15 @@ export {
   type SocialRejectReason,
   type SocialSelection,
 } from "./social-candidate-filter.js";
+export {
+  DEFAULT_DURATION_TOLERANCE_SEC,
+  DEFAULT_CHARS_PER_SECOND,
+  defaultCharsPerSecond,
+  calibrateCharsPerSecond,
+  buildNarrationBudget,
+  checkDurationBand,
+  buildDurationBudgetPromptLines,
+  type DurationSample,
+  type NarrationBudget,
+  type DurationBandCheck,
+} from "./duration-budget.js";

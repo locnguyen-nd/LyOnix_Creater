@@ -4,7 +4,7 @@
  * Pure logic only — no network I/O, no provider secret handling. See `live-script-v2.ts`
  * for the orchestration that calls a live content provider with this schema.
  */
-import { resolveBackgroundSegmentRange, splitIntoSentences } from "@lyonix/domain";
+import { buildDurationBudgetPromptLines, resolveBackgroundSegmentRange, splitIntoSentences, type NarrationBudget } from "@lyonix/domain";
 import {
   SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA,
   diagnoseScriptVisualPlanV2,
@@ -55,6 +55,12 @@ export type ScriptDraftV2 = {
   visualPlan?: ScriptVisualPlanV2 | null;
 };
 
+/** VE2E-54: max scenes per draft (was hard-coded 14); scene count is free, the template scales. Env `SCRIPT_V2_MAX_SCENES` (default 30, clamped 1-60). */
+export const SCRIPT_V2_MAX_SCENES = (() => {
+  const raw = Number(process.env.SCRIPT_V2_MAX_SCENES);
+  return Number.isInteger(raw) && raw >= 1 ? Math.min(60, raw) : 30;
+})();
+
 export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -70,7 +76,7 @@ export const SCRIPT_DRAFT_V2_JSON_SCHEMA = {
     scenes: {
       type: "array",
       minItems: 1,
-      maxItems: 14,
+      maxItems: SCRIPT_V2_MAX_SCENES,
       items: {
         type: "object",
         additionalProperties: false,
@@ -117,7 +123,7 @@ const sceneDuration = (value: unknown, fallback: number) => {
 
 const MIN_SPLIT_SCENE_DURATION_MS = 1000;
 /** Hard ceiling on how many scenes one narration-splitting pass can ever produce, regardless of how many sentences a single scene's narration contains - a bounded, documented safety net against a pathological/garbled input producing dozens of near-empty scenes. */
-const MAX_SCENES_AFTER_SPLIT = 24;
+const MAX_SCENES_AFTER_SPLIT = Math.max(24, SCRIPT_V2_MAX_SCENES);
 
 /**
  * Auto-cuts a scene whose narration packs 2+ full sentences into one visual into one scene
@@ -275,7 +281,7 @@ export function validateScriptDraftV2(draft: ScriptDraftV2): { ok: true } | Scri
   if (draft.scenes.some((scene) => !scene.narration || !scene.screenText)) return { ok: false, reason: "schema" };
   if (draft.scenes.some((scene) => !scene.visualQuery)) return { ok: false, reason: "visual_query" };
   const total = draft.scenes.reduce((sum, scene) => sum + scene.durationHintMs, 0);
-  if (total < 30_000 || total > 90_000) return { ok: false, reason: "duration" };
+  if (total < 30_000 || total > 150_000) return { ok: false, reason: "duration" };
   return { ok: true };
 }
 
@@ -314,6 +320,12 @@ export const clipForPromptV2 = (value: string, max = 6000) => {
   return `${trimmed.slice(0, max)}\n…[truncated ${trimmed.length - max} chars]`;
 };
 
+/** VE2E-54: separate hook - the duration/length instruction line (budget-driven when the caller supplies one). */
+const durationTargetLine = (budget?: NarrationBudget | null): string =>
+  budget
+    ? `${buildDurationBudgetPromptLines(budget)} Total durationHintMs must sum to about ${budget.targetSec * 1000}.`
+    : "Target spoken length: 55-65 seconds. 10-14 scenes. Total durationHintMs between 30000 and 90000.";
+
 /** `sourceText` must already be the SourceVersion's extracted/raw text — this function never
  * fetches or extracts anything itself (see `apps/api/src/source-extract.ts` for article_url). */
 export function buildScriptV2PromptPackage(input: {
@@ -328,6 +340,8 @@ export function buildScriptV2PromptPackage(input: {
    * length (55-65s -> 3-5 segments).
    */
   backgroundSegmentRange?: { min: number; max: number } | null;
+  /** VE2E-54: narration budget from the intake target (chars + scene range). Absent = legacy 55-65 s / 10-14 scenes line. */
+  durationBudget?: NarrationBudget | null;
 }): ScriptPromptPackageV2 {
   const language: ContentLanguageV2 = isContentLanguageV2(input.language) ? input.language : "vi";
   const sourceType = isScriptSourceKind(input.sourceType) ? input.sourceType : "topic";
@@ -342,7 +356,7 @@ Prompt template: ${SCRIPT_PROMPT_TEMPLATE_V2_VERSION}
 Spoken short-form TikTok script in ${languageName[language]}.
 ${sourceInstruction[sourceType]}
 Creative direction / requested changes: ${direction}
-Target spoken length: 55-65 seconds. 10-14 scenes. Total durationHintMs between 30000 and 90000.
+${durationTargetLine(input.durationBudget)}
 Required keys: schemaVersion, language, title, hook, body, cta, caption, scenes.
 Each scene: sceneId, narration (spoken), screenText (on-screen, no HTML/URLs), visualQuery (short media search query/framing brief, non-empty), durationHintMs.
 Each scene's narration must be exactly ONE sentence (one visual per sentence, so the video cuts to a new shot every sentence) - never pack 2+ sentences into a single scene's narration; split a long thought across multiple scenes instead.

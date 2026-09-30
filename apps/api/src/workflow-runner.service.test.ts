@@ -329,6 +329,23 @@ describe("WorkflowRunnerService", () => {
     });
   });
 
+  it("VE2E-54: passes a narration budget to the script call and flags duration_out_of_band with the real total", async () => {
+    audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: id === "scene-db-1" ? 4200 : 3100, subtitleVersion: null } as any }));
+    await service.processNext();
+    const input = (scriptGeneration.generate as any).mock.calls[0][3];
+    expect(input.durationBudget).toMatchObject({ targetSec: expect.any(Number), targetChars: expect.any(Number) });
+    const diag = stepRuns.find((s) => s.stepKey === "duration_budget");
+    expect(diag.outputRef).toMatchObject({ totalSec: 7.3, sceneCount: 2, inBand: false, flag: "duration_out_of_band", calibrationSource: "default" });
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("VE2E-54: an in-band total carries no flag", async () => {
+    audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 15000, subtitleVersion: null } as any }));
+    await service.processNext();
+    const diag = stepRuns.find((s) => s.stepKey === "duration_budget");
+    expect(diag.outputRef).toMatchObject({ totalSec: 30, inBand: true, flag: null });
+  });
+
   it("VE2E-42: title/caption fill leftover template text slots through the timeline optionValues, same as the old raw-assignment path", async () => {
     const slotsWithTitle = [...templateSlots, { key: "Title.text", kind: "text", label: "Title.text", required: true }, { key: "Caption.text", kind: "text", label: "Caption.text", required: false }];
     prisma.templateSnapshot.findUnique = vi.fn(async () => ({ id: templateSnapshotId, providerAccountId: "render-acc", modifications: slotsWithTitle }));
