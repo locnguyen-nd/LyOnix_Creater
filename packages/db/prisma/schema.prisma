@@ -733,6 +733,12 @@ model RenderJob {
   // VE2E-19: Creatomate's own render-frame preview image (`snapshot_url`), captured whenever the
   // provider reports one (webhook/reconcile), for the per-channel finished-video library thumbnail.
   snapshotUrl          String?
+  // VE2E-52b: what Creatomate actually rendered (render_scale/width/height) + the template canvas it should match.
+  outputRenderScale    Float?
+  outputWidth          Int?
+  outputHeight         Int?
+  canvasWidth          Int?
+  canvasHeight         Int?
   resultExpiresAt      DateTime?
   attempts             Int                  @default(1)
   lastError            Json?

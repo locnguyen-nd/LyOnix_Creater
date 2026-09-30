@@ -19,6 +19,7 @@ import {
   extractDynamicStyleFromTemplate,
   getCreatomateRender,
   normalizeCreatomateStatus,
+  readCreatomateCanvas,
   submitCreatomateRender,
   submitCreatomateSourceRender,
   type CreatomateRenderResult,
@@ -83,12 +84,25 @@ const stableStringify = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+/** VE2E-52b: persists what Creatomate reports it actually rendered (only fields present in the response). */
+const outputResolutionData = (r: { renderScale?: number | null; width?: number | null; height?: number | null }) => ({
+  ...(r.renderScale != null ? { outputRenderScale: r.renderScale } : {}),
+  ...(r.width != null ? { outputWidth: Math.round(r.width) } : {}),
+  ...(r.height != null ? { outputHeight: Math.round(r.height) } : {}),
+});
+
 const toJobResponse = (row: {
   id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
   clipsTotal?: number; clipsReady?: number; clipFailures?: unknown;
   resultUrl: string | null; snapshotUrl?: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
+  outputRenderScale?: number | null; outputWidth?: number | null; outputHeight?: number | null; canvasWidth?: number | null; canvasHeight?: number | null;
 }): RenderJobResponse => ({
+  outputRenderScale: row.outputRenderScale ?? null,
+  outputWidth: row.outputWidth ?? null,
+  outputHeight: row.outputHeight ?? null,
+  canvasWidth: row.canvasWidth ?? null,
+  canvasHeight: row.canvasHeight ?? null,
   id: row.id,
   projectId: row.projectId,
   templateSnapshotId: row.templateSnapshotId,
@@ -282,7 +296,7 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId },
+      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId, canvas: readCreatomateCanvas(snapshot.rawTemplate) },
       (webhookUrl) =>
         submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
           templateId: snapshot.externalTemplateId,
@@ -304,7 +318,7 @@ export class RenderJobsService {
    * never the actual request if that would embed a volatile signed media-delivery URL.
    */
   private async createAndSubmitRenderJob(
-    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined },
+    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined; canvas?: { width: number; height: number } | null | undefined },
     callProvider: (webhookUrl: string) => Promise<CreatomateRenderResult>,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
@@ -359,6 +373,8 @@ export class RenderJobsService {
           submittedAt: new Date(),
           ...(nextStatus ? { status: nextStatus, progress: submitted.progress } : {}),
           ...(submitted.snapshotUrl ? { snapshotUrl: submitted.snapshotUrl } : {}),
+          ...outputResolutionData(submitted),
+          ...(params.canvas ? { canvasWidth: Math.round(params.canvas.width), canvasHeight: Math.round(params.canvas.height) } : {}),
         },
       });
     } catch (error) {
@@ -618,7 +634,7 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId },
+      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId, canvas: readCreatomateCanvas(source) },
       (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
     );
   }
@@ -777,13 +793,14 @@ export class RenderJobsService {
   }
 
   /** Applies the monotonic status guard and persists a Creatomate-reported result. Never lets a terminal state regress. */
-  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null; snapshotUrl?: string | null }) {
+  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null; snapshotUrl?: string | null; renderScale?: number | null; width?: number | null; height?: number | null }) {
     const nextStatus = nextRenderJobStatus(current, incoming.status);
     if (!nextStatus) return null; // stale/out-of-order/duplicate — no-op, current row already reflects the latest applied state.
     const data: Prisma.RenderJobUpdateInput = { status: nextStatus };
     if (incoming.progress !== undefined && incoming.progress !== null) data.progress = incoming.progress;
     // VE2E-19: Creatomate can report a preview frame before the render is fully complete — capture it whenever present, not only at completion.
     if (incoming.snapshotUrl) data.snapshotUrl = incoming.snapshotUrl;
+    Object.assign(data, outputResolutionData(incoming));
     if (nextStatus === "completed") {
       data.resultUrl = incoming.url ?? null;
       data.completedAt = new Date();
@@ -813,6 +830,9 @@ export class RenderJobsService {
         errorMessage: remote.errorMessage,
         renderDurationMs: remote.renderDurationMs,
         snapshotUrl: remote.snapshotUrl,
+        renderScale: remote.renderScale,
+        width: remote.width,
+        height: remote.height,
       });
       return { ok: true, data: toJobResponse(updated ?? row) };
     } catch {
@@ -865,6 +885,9 @@ export class RenderJobsService {
             errorMessage: typeof record.error_message === "string" ? record.error_message : null,
             renderDurationMs: typeof record.render_duration === "number" ? Math.round(record.render_duration * 1000) : null,
             snapshotUrl: typeof record.snapshot_url === "string" ? record.snapshot_url : null,
+            renderScale: typeof record.render_scale === "number" ? record.render_scale : null,
+            width: typeof record.width === "number" ? record.width : null,
+            height: typeof record.height === "number" ? record.height : null,
           };
       const updated = await this.applyStatus(job.id, job.status as RenderJobStatus, outcome);
       await this.prisma.renderWebhookEvent.updateMany({ where: { renderJobId: job.id, eventFingerprint }, data: { appliedStatus: updated?.status ?? null } });
