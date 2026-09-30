@@ -17,11 +17,13 @@
  * (project, platform) single-flight guard and a 15-minute result cache avoid paying twice for the same query.
  */
 import { createHash } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APIFY_HOST_ALLOWLIST,
   ProviderError,
   hostMatchesSuffix,
+  isLiveContentKind,
+  moderateSceneCandidate,
   isApifyPlatform,
   searchApify,
   type ApifyCandidateResult,
@@ -30,20 +32,39 @@ import {
   type ApifyLang,
   type ApifyPlatform,
   type ApifySearchOutcome,
+  type LiveContentKind,
+  type VisionModerationFrame,
+  type VisionModerationSceneContext,
 } from "@lyonix/providers";
-import { canAccessProject, canWriteProjectResource } from "@lyonix/domain";
+import {
+  applyVisionFindings,
+  canAccessProject,
+  canWriteProjectResource,
+  decideMediaSelection,
+  decideVisionModeration,
+  rankMediaCandidates,
+  type MediaCandidate,
+  type SceneBrief,
+} from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode } from "@lyonix/contracts";
 import { GrantsService } from "./grants.service.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
+
+type MediaAssetVersionSummaryLike = ApifyImportResponse["asset"];
 
 export type ApifyOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
 const IMPORT_REF_TTL_MS = 30 * 60 * 1000;
 const RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
+/** Vision moderation spend guard per segment source (same bound as Pexels, VE2E-29). */
+const MAX_VISION_CANDIDATES_PER_SEGMENT = 5;
+const MAX_VISION_PREVIEW_BYTES = 4 * 1024 * 1024;
+const APIFY_PREVIEW_SUFFIXES = [...APIFY_HOST_ALLOWLIST.tiktok, ...APIFY_HOST_ALLOWLIST.pinterest, ...APIFY_HOST_ALLOWLIST.x, ...APIFY_HOST_ALLOWLIST.googlePreview];
 const APIFY_LICENSE = "Apify-sourced social/web media - owner_accepted_risk (not rights-cleared); audio always stripped";
 
 /** Everything the import step needs, sealed inside `importRef` (never trusted from the client). */
@@ -82,6 +103,8 @@ export class ApifyService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(MediaService) private readonly media: MediaService,
+    /** Only needed for the Auto vision-moderation pass (VE2E-46); omitted in unit tests that do not exercise it. */
+    @Optional() @Inject(ProviderAccountsService) private readonly providerAccounts?: ProviderAccountsService,
   ) {}
 
   private async access(projectId: string, userId: string, role: "admin" | "staff", write: boolean) {
@@ -232,6 +255,92 @@ export class ApifyService {
       },
       { ...options, reusable: true },
     );
+  }
+
+
+  /**
+   * VE2E-46: the project's verified Apify account visible to this user (org-scoped, or the user's own personal one;
+   * admins see all), or `null`. Same visibility rules as `GET /provider-accounts`.
+   */
+  async findAccountForUser(userId: string, role: "admin" | "staff"): Promise<{ id: string; encryptedSecret: string } | null> {
+    const row = await this.prisma.providerAccount.findFirst({
+      where: {
+        provider: "apify",
+        role: "visual",
+        deletedAt: null,
+        ...(process.env.NODE_ENV === "test" ? {} : { status: "verified", isFake: false }),
+        ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    if (!row) return null;
+    const usable = await this.usableAccount(row.id);
+    return usable.ok ? usable.data : null;
+  }
+
+  /**
+   * VE2E-46: one vision-moderation pass per segment source over the top-ranked candidates' preview frames
+   * (cover image; never the video itself). Candidates whose preview cannot be fetched, or when no vision-capable
+   * content account exists, keep their metadata-only score - moderation only ever strengthens evidence / rejects.
+   */
+  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>): Promise<MediaCandidate[]> {
+    if (!this.providerAccounts) return pool;
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
+    const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
+    if (!account) return pool;
+    const apiKey = decryptSecret(account.encryptedSecret);
+    const kind = account.provider as LiveContentKind;
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    const order = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SEGMENT).map((r) => r.candidate.candidateId);
+    const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
+    for (const candidateId of order) {
+      const candidate = byId.get(candidateId);
+      if (!candidate?.previewUrl) continue;
+      const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
+      if (!frame.ok) continue;
+      const visionFrame: VisionModerationFrame = { mimeType: frame.mimeType || "image/jpeg", base64: frame.buffer.toString("base64") };
+      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId: account.model, operation: "image_moderation", sceneContext, frames: [visionFrame] });
+      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: account.model, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
+      byId.set(candidateId, applyVisionFindings(candidate, findings));
+    }
+    return pool.map((c) => byId.get(c.candidateId) ?? c);
+  }
+
+  /**
+   * VE2E-46 Auto/Studio-auto-fill source for ONE segment: a single Apify search (one platform, the segment's `keywords.ja`),
+   * then the shared domain ranking + one vision pass + `decideMediaSelection`, then import of the winner. The pool only ever
+   * holds importable, auto-eligible candidates: Google video and preview-only (Pinterest HLS-only, TikTok without a stored file)
+   * candidates are dropped BEFORE ranking. Never throws; any failure is reported as `reason` so the caller can fall back to Pexels.
+   */
+  async autoImportForSegment(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    account: { id: string; encryptedSecret: string },
+    input: { platform: ApifyPlatform; keyword: string; brief: SceneBrief; sceneId: string; usedExternalIds: ReadonlySet<string> },
+  ): Promise<{ ok: true; data: { asset: MediaAssetVersionSummaryLike; externalId: string; ledgerId: string; provenance: MediaCandidate["provenance"]["apify"] | null; platform: ApifyPlatform } } | { ok: false; reason: string }> {
+    if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
+    const searched = await this.searchRaw(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: 10 });
+    if (!searched.ok) return { ok: false, reason: `apify_error:${searched.code}` };
+    const usable = searched.data.results.filter((r) => r.download !== null && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible);
+    if (usable.length === 0) return { ok: false, reason: "apify_no_usable_candidate" };
+    const byCandidateId = new Map(usable.map((r) => [r.candidate.candidateId, r] as const));
+    let pool = usable.map((r) => r.candidate);
+    try {
+      pool = await this.moderatePool(pool, input.brief, userId, role, input.usedExternalIds);
+    } catch {
+      // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
+    }
+    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: true });
+    if (decision.decision === "needs_input") return { ok: false, reason: `apify_abstained:${decision.reason}` };
+    const chosen = byCandidateId.get(decision.chosen.candidateId);
+    if (!chosen) return { ok: false, reason: "apify_no_usable_candidate" };
+    const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate: decision.chosen, download: chosen.download }, { sceneId: input.sceneId });
+    if (!imported.ok) return { ok: false, reason: `apify_import_failed:${imported.code}` };
+    return {
+      ok: true,
+      data: { asset: imported.data.asset, externalId: decision.chosen.externalId, ledgerId: `${decision.chosen.source}:${decision.chosen.externalId}`, provenance: decision.chosen.provenance.apify ?? null, platform: input.platform },
+    };
   }
 
   private async download(account: { encryptedSecret: string }, plan: ApifyDownloadPlan): Promise<SafeBinaryFetchResult | "plan_invalid"> {

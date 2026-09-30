@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaAssetVersionSummary } from "@lyonix/contracts";
 import type { ApifyDeps } from "@lyonix/providers";
+import { deriveSceneBrief } from "@lyonix/domain";
 import { ApifyService } from "./apify.service.js";
 import type { MediaService } from "./media.service.js";
 import { encryptSecret } from "./secret-crypto.js";
@@ -178,5 +179,86 @@ describe("ApifyService - VE2E-34", () => {
     const outcome = await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "pinterest", query: "夜景" });
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_SCHEMA_INVALID" });
     if (!outcome.ok) expect(outcome.message).toContain("Actor build not found");
+  });
+});
+
+describe("ApifyService.autoImportForSegment - VE2E-46 pool rules", () => {
+  let root: string;
+  let prevRoot: string | undefined;
+  let prevKey: string | undefined;
+  let media: { registerAsset: ReturnType<typeof vi.fn> };
+  let service: ApifyService;
+  const account = () => ({ id: "acct-1", encryptedSecret: encryptSecret(TOKEN) });
+  const brief = () => deriveSceneBrief({ language: "ja", scenes: [{ sceneId: "s1", narration: "", screenText: "", visualQuery: "東京 夜景", durationHintMs: 5000 }] }, 0);
+  const input = (platform: "tiktok" | "pinterest" | "google_video" = "tiktok") => ({ platform, keyword: "東京 夜景", brief: brief(), sceneId: "s1", usedExternalIds: new Set<string>() });
+
+  beforeEach(async () => {
+    prevKey = process.env.PERSISTENCE_ENCRYPTION_KEY;
+    process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
+    root = await mkdtemp(join(tmpdir(), "lyonix-apify-auto-"));
+    prevRoot = process.env.MEDIA_ROOT;
+    process.env.MEDIA_ROOT = root;
+    media = { registerAsset: vi.fn(async () => fakeAsset) };
+    const prisma: any = { project: { findUnique: async () => ({ id: projectId }) }, providerAccount: { findFirst: async () => null } };
+    service = new ApifyService(prisma, { forUser: async () => ({ projectIds: [projectId] }) } as any, media as unknown as MediaService);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    process.env.PERSISTENCE_ENCRYPTION_KEY = prevKey;
+    if (prevRoot === undefined) delete process.env.MEDIA_ROOT; else process.env.MEDIA_ROOT = prevRoot;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("imports the best importable candidate with the ja keyword and returns ledger id + provenance", async () => {
+    service.apifyDeps = apifyStub([tiktokItem]);
+    vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: true, buffer: MP4, mimeType: "video/mp4", finalUrl: "x" });
+    const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), input());
+    expect(outcome).toMatchObject({ ok: true, data: { ledgerId: "apify:tiktok:7001", externalId: "7001", platform: "tiktok", provenance: { actorId: "clockworks/tiktok-scraper", author: "creator" } } });
+    expect(media.registerAsset.mock.calls[0]![3]).toMatchObject({ origin: "apify", sceneId: "s1" });
+  });
+
+  it("drops preview-only candidates before ranking (TikTok without a stored file never enters the pool)", async () => {
+    service.apifyDeps = apifyStub([{ ...tiktokItem, mediaUrls: [] }]);
+    const fetchSpy = vi.spyOn(safeBinaryFetch, "fetchBinarySafely");
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toEqual({ ok: false, reason: "apify_no_usable_candidate" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Pinterest HLS-only pins never enter the pool", async () => {
+    service.apifyDeps = apifyStub([{ id: "p2", pin: { is_video: true }, media: { video: { hls_url: "https://v1.pinimg.com/videos/a.m3u8", thumbnail: "https://i.pinimg.com/x.jpg" } } }]);
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input("pinterest"))).toEqual({ ok: false, reason: "apify_no_usable_candidate" });
+  });
+
+  it("refuses google_video outright without calling Apify", async () => {
+    const deps = apifyStub([]);
+    service.apifyDeps = deps;
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input("google_video"))).toEqual({ ok: false, reason: "platform_not_importable" });
+    expect(deps.starts).toHaveLength(0);
+  });
+
+  it("reports Apify search errors and failed imports as fallback reasons instead of throwing", async () => {
+    service.apifyDeps = { fetch: (async () => json({ error: { message: "nope" } }, 500)) as unknown as typeof fetch, sleep: async () => undefined };
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toEqual({ ok: false, reason: "apify_error:PROVIDER_UNAVAILABLE" });
+    service.apifyDeps = apifyStub([{ ...tiktokItem, id: "7002" }]);
+    vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: false, reason: "fetch_failed" });
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_import_failed:VALIDATION_FAILED" });
+  });
+
+  it("excludes sources an earlier segment already used", async () => {
+    service.apifyDeps = apifyStub([tiktokItem]);
+    const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), { ...input(), usedExternalIds: new Set(["7001"]) });
+    expect(outcome.ok).toBe(false);
+  });
+
+  it("findAccountForUser only returns a usable Apify account visible to the user", async () => {
+    const seen: any[] = [];
+    const prisma: any = { providerAccount: { findFirst: vi.fn(async (args: any) => { seen.push(args); return args.where.provider === "apify" || args.where.id ? { id: "acct-1", provider: "apify", role: "visual", status: "verified", isFake: false, deletedAt: null, encryptedSecret: "enc" } : null; }) } };
+    const svc = new ApifyService(prisma, {} as any, media as unknown as MediaService);
+    expect(await svc.findAccountForUser("u1", "staff")).toEqual({ id: "acct-1", encryptedSecret: "enc" });
+    expect(seen[0].where.OR).toEqual([{ scope: "organization" }, { scope: "personal", ownerUserId: "u1" }]);
+    expect(seen[0].where).toMatchObject({ provider: "apify", role: "visual", deletedAt: null });
+    const empty = new ApifyService({ providerAccount: { findFirst: async () => null } } as any, {} as any, media as unknown as MediaService);
+    expect(await empty.findAccountForUser("u1", "admin")).toBeNull();
   });
 });

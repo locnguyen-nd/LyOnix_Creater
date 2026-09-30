@@ -669,6 +669,12 @@ export type MediaPlanSegmentDiagnostics = {
   looped: boolean;
   /** A single scene longer than the whole source clip (its range is the whole clip, shorter than the voice). */
   short: boolean;
+  /** VE2E-46: where the segment's source came from (`null`/absent when sourcing failed). */
+  sourceProvider?: "apify" | "pexels" | null;
+  /** VE2E-46: why Apify was skipped/not used before falling back to Pexels (e.g. `apify_no_usable_candidate`, `apify_error:PROVIDER_TIMEOUT`, `no_ja_keywords`); `null` when Apify was not involved or succeeded. */
+  fallbackReason?: string | null;
+  /** VE2E-46: audit trail of an Apify-sourced segment (also stored on the imported asset). */
+  apifyProvenance?: { platform: string; actorId: string; actorVersion: string; sourceUrl: string | null; author: string | null; fetchedAt: string } | null;
 };
 
 export type MediaPlanResponse = {
