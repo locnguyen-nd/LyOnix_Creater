@@ -979,6 +979,8 @@ export type TimelineDynamicPreviewResponse = {
   renderableSceneCount: number;
   totalSceneCount: number;
   missingReason: string | null;
+  /** VE2E-52: how the preview/final source was composed from the pinned template. */
+  layout?: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] } | undefined;
 };
 
 /** VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured server-side (B10/B11-gated) - never the render API secret. */

@@ -15,11 +15,13 @@ import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type Ren
 import {
   ProviderError,
   applyDynamicStyleOverrides,
-  buildDynamicComposition,
+  buildDynamicCompositionWithWarnings,
+  countTemplateSceneSlots,
   extractDynamicStyleFromTemplate,
   getCreatomateRender,
   normalizeCreatomateStatus,
   readCreatomateCanvas,
+  templateResolution,
   submitCreatomateRender,
   submitCreatomateSourceRender,
   type CreatomateRenderResult,
@@ -488,6 +490,8 @@ export class RenderJobsService {
       style: ReturnType<typeof applyDynamicStyleOverrides>;
       renderable: Awaited<ReturnType<typeof resolveSceneBindingsForMapping>>;
       totalSceneCount: number;
+      /** VE2E-52: how the source was composed, for the preview response and the job record. */
+      layout: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] };
     }>
   > {
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -575,8 +579,11 @@ export class RenderJobsService {
     // call this exact same method with the exact same saved timeline row.
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? (timeline.optionValues as Record<string, string>) : {});
     const style = applyDynamicStyleOverrides(extractDynamicStyleFromTemplate(snapshot.rawTemplate), optionValues);
-    const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat });
-    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source, style, renderable, totalSceneCount: scenes.length } };
+    // VE2E-52: one generator for Auto, Studio final render and Studio preview - clones the pinned template's own Scene layout to exactly N scenes.
+    const resolution = templateResolution(snapshot.rawTemplate) ?? { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT };
+    const composed = buildDynamicCompositionWithWarnings(dynamicScenes, style, { width: resolution.width, height: resolution.height, ...(outputFormat ? { outputFormat } : {}) });
+    const layout = { mode: style.layout ? ("template_scaled" as const) : ("style_only" as const), templateSceneSlots: style.layout?.scenes.length ?? 0, warnings: composed.warnings as string[] };
+    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source: composed.source, style, renderable, totalSceneCount: scenes.length, layout } };
   }
 
   /**
@@ -605,6 +612,7 @@ export class RenderJobsService {
     const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}) });
     if (!resolvedComposition.ok) return resolvedComposition;
     const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
+    const { layout: templateLayout, ...styleWithoutLayout } = style;
 
     // Fingerprint from each included scene's stable identifiers (never the resolved signed
     // delivery URLs, which mint a fresh random token every call — see `submit`'s own comment
@@ -622,7 +630,9 @@ export class RenderJobsService {
           timelineVersionId,
           providerAccountId: input.providerAccountId,
           outputFormat: input.outputFormat ?? null,
-          style,
+          style: styleWithoutLayout,
+          // VE2E-52: the layout itself is large; the pinned snapshot id + generator version identify it.
+          generator: templateLayout ? `template-scaled-v1:${templateSnapshotId}` : "style-only",
           scenes: renderable.map((scene) => ({
             sceneId: scene.sceneId,
             mediaAssetVersionId: scene.mediaAssetVersionId,
@@ -653,7 +663,7 @@ export class RenderJobsService {
     timelineVersionId: string,
     userId: string,
     role: "admin" | "staff",
-  ): Promise<RenderOutcome<{ ready: boolean; source: Record<string, unknown> | null; renderableSceneCount: number; totalSceneCount: number; missingReason: string | null }>> {
+  ): Promise<RenderOutcome<{ ready: boolean; source: Record<string, unknown> | null; renderableSceneCount: number; totalSceneCount: number; missingReason: string | null; layout?: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] } }>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const resolved = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role);
     if (!resolved.ok) {
@@ -673,12 +683,13 @@ export class RenderJobsService {
         renderableSceneCount: resolved.data.renderable.length,
         totalSceneCount: resolved.data.totalSceneCount,
         missingReason: null,
+        layout: resolved.data.layout,
       },
     };
   }
 
   /** Durable render queue shared by Studio and Auto. The HTTP path never waits for media-worker or Creatomate. */
-  async enqueueTimelineRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff", input: RenderSubmitFromTimelineRequest, mode: "template" | "dynamic", workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+  async enqueueTimelineRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff", input: RenderSubmitFromTimelineRequest, requestedMode: "template" | "dynamic", workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
@@ -692,6 +703,11 @@ export class RenderJobsService {
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
+    // VE2E-52: the fixed-slot (modification) path only when the scene count equals the template's Scene slots;
+    // any other count (fewer or more) is composed by the template-scaled generator so no scene/narration is dropped.
+    const includedSceneCount = resolved.filter((scene) => !scene.excluded).length;
+    const slotCount = countTemplateSceneSlots(snapshot.rawTemplate);
+    const mode: "template" | "dynamic" = requestedMode === "template" && slotCount > 0 && includedSceneCount !== slotCount ? "dynamic" : requestedMode;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
       if (!composition.ok) return composition;

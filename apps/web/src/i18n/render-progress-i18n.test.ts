@@ -28,4 +28,11 @@ describe("VE2E-43 render progress translations", () => {
     expect(isOutputBelowCanvas({ outputWidth: 1080, outputHeight: 1920, canvasWidth: 1080, canvasHeight: 1920 })).toBe(false);
     expect(isOutputBelowCanvas({})).toBe(false);
   });
+  it("VE2E-52: template layout notes in every locale", () => {
+    for (const locale of ["vi", "en", "ja", "ko"] as const) {
+      const strings = locales[locale].studioPro;
+      expect(strings.layoutFallbackWarning).toBeTruthy();
+      expect(strings.rankBadgesRenumbered).toContain("{{count}}");
+    }
+  });
 });

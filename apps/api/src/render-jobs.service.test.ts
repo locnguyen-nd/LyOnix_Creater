@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@lyonix/db";
-import { DYNAMIC_STYLE_OPTION_KEYS } from "@lyonix/providers";
+import { DYNAMIC_STYLE_OPTION_KEYS, deriveTemplateModifications, newsRecapJpTemplate, top5CountdownTemplate } from "@lyonix/providers";
 import { RenderJobsService } from "./render-jobs.service.js";
 import type { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import type { MediaDeliveryService } from "./media-delivery.service.js";
@@ -922,6 +922,86 @@ describe("RenderJobsService", () => {
         expect(cut.worker.jobs).toHaveLength(0);
         expect(JSON.stringify(preview.ok && preview.data.source)).toContain("media-delivery/asset-1");
       });
+    });
+  });
+
+  describe("VE2E-52 scalable template composition", () => {
+    const timelineVersionId = "timeline-scale-1";
+    const scenesFor = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({ sceneId: `s${index + 1}`, orderIndex: index, mediaAssetVersionId: "asset-1", audioVersionId: "audio-1", subtitleVersionId: null, screenTextOverride: `Cảnh ${index + 1}`, annotation: null, excluded: false }));
+    const pinTemplate = (raw: unknown) => {
+      const derived = deriveTemplateModifications(raw);
+      prisma.templateSnapshot.findUnique = async ({ where }: any) => (where.id === templateSnapshotId ? { ...snapshotRow, modifications: derived, rawTemplate: raw } : null);
+    };
+    const setTimeline = (count: number) => timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: scenesFor(count), optionValues: {} });
+    const okFetch = () => vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_scale", status: "planned", width: 1080, height: 1920, render_scale: 1 }]), { status: 200 }));
+
+    it("Auto/Studio with 14 scenes on the 10-slot JP template: switches to the template-scaled generator, keeps all 14 scenes, sends render_scale 1", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      setTimeline(14);
+      const fetchMock = okFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued.ok).toBe(true);
+      const id = queued.ok ? queued.data.id : "";
+      expect(renderJobRows.get(id).modificationsPayload).toMatchObject({ mode: "dynamic" });
+      await service.processNextPreparation();
+      const body = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const composed = body.source.elements.filter((el: any) => el.type === "composition");
+      expect(composed).toHaveLength(14);
+      expect(composed.map((scene: any) => scene.name)).toEqual(Array.from({ length: 14 }, (_, i) => `Scene-${i + 1}`));
+      expect(body.source.elements.filter((el: any) => el.name === "Badge-BreakingNews")).toHaveLength(1);
+      expect(composed[13].elements.find((el: any) => el.type === "text").text).toBe("Cảnh 14");
+      expect(JSON.stringify(body.source)).not.toContain("elevenlabs");
+      expect(renderJobRows.get(id).status).toBe("queued");
+    });
+
+    it("3 scenes on the 5-slot Top 5 template also use the generator (fewer scenes, rank badges renumbered)", async () => {
+      pinTemplate(top5CountdownTemplate());
+      setTimeline(3);
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued.ok && renderJobRows.get(queued.data.id).modificationsPayload).toMatchObject({ mode: "dynamic" });
+      const preview = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(preview).toMatchObject({ ok: true, data: { ready: true, layout: { mode: "template_scaled", templateSceneSlots: 5, warnings: ["rank_badges_renumbered"] } } });
+      const source = preview.ok ? (preview.data.source as any) : null;
+      const badges = source.elements.filter((el: any) => el.type === "composition").map((scene: any) => scene.elements.find((el: any) => String(el.name).startsWith("RankBadge")).text);
+      expect(badges).toEqual(["第3位", "第2位", "第1位"]);
+    });
+
+    it("N equal to the template's scene slots keeps the fixed-slot modification path", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      setTimeline(10);
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued.ok).toBe(true);
+      expect(queued.ok && renderJobRows.get(queued.data.id).modificationsPayload).toMatchObject({ mode: "template" });
+    });
+
+    it("a template without a repeatable Scene structure keeps the template path and never switches silently", async () => {
+      pinTemplate({ width: 1080, height: 1920, elements: [{ name: "Video-1", type: "video", dynamic: true }, { name: "Subtitles-1", type: "text", dynamic: true }] });
+      setTimeline(1);
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued.ok && renderJobRows.get(queued.data.id).modificationsPayload).toMatchObject({ mode: "template" });
+      const preview = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(preview).toMatchObject({ ok: true, data: { layout: { mode: "style_only", warnings: ["template_layout_fallback"] } } });
+    });
+
+    it("preview and final render use the same generator: identical structure for the same timeline", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      setTimeline(14);
+      const preview = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      const fetchMock = okFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      const submitted = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body)).source;
+      const names = (source: any) => source.elements.map((el: any) => [el.name, el.duration]);
+      expect(names(submitted)).toEqual(names(preview.ok ? preview.data.source : null));
+    });
+
+    it("VE2E-47 guard still fires on the fixed-slot path when a template TTS slot is unfilled", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: scenesFor(10).map((scene) => ({ ...scene, audioVersionId: null })), optionValues: {} });
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued).toMatchObject({ ok: false, code: "TEMPLATE_TTS_CONFLICT" });
     });
   });
 

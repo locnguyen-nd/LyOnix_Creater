@@ -65,6 +65,17 @@ export type DynamicSceneStyle = {
     colorOverlay?: string | undefined;
     animation?: DynamicImageAnimation | undefined;
   };
+  /**
+   * VE2E-52: the pinned template's own scene layout (prototype Scene compositions + root-level
+   * extras such as a badge/logo). Present only when the template has a repeatable Scene
+   * composition; `buildDynamicComposition` then clones it to exactly N scenes instead of drawing
+   * the generic style-only composition.
+   */
+  layout?: TemplateSceneLayout | undefined;
+  /** VE2E-52: set when a template was supplied but has no repeatable Scene composition (generic style-only composition is used instead). */
+  layoutFallbackReason?: "no_scene_composition" | undefined;
+  /** VE2E-52: Studio overrides that must be applied on top of the cloned template layout. */
+  layoutOverrides?: { captionFontFamily?: string; captionFillColor?: string; disablePan?: boolean } | undefined;
 };
 
 export const DEFAULT_DYNAMIC_SCENE_STYLE: DynamicSceneStyle = {
@@ -197,7 +208,388 @@ export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSc
     };
   }
 
-  return { text, image };
+  const layoutResult = extractTemplateSceneLayout(rawTemplate);
+  return {
+    text,
+    image,
+    ...(layoutResult.layout ? { layout: layoutResult.layout } : {}),
+    ...(layoutResult.fallbackReason ? { layoutFallbackReason: layoutResult.fallbackReason } : {}),
+  };
+}
+
+// --- VE2E-52: template-driven scalable composition ---------------------------------------
+
+/**
+ * A pinned template's own repeatable structure. `scenes` are the template's Scene compositions in
+ * order (the prototypes); scene i of an N-scene render clones `scenes[i % scenes.length]`, so the
+ * template's own alternating variants (subtitle colors, transitions, overlays) cycle naturally.
+ * `rootProps` are non-element root properties (fill_color, frame_rate, fonts ...). `rootBefore` /
+ * `rootAfter` are non-scene root elements (badge, logo ...) kept around the scenes.
+ */
+export type TemplateSceneLayout = {
+  width: number | null;
+  height: number | null;
+  rootProps: RawNode;
+  rootBefore: RawNode[];
+  rootAfter: RawNode[];
+  scenes: RawNode[];
+  /** Sum of the prototype scenes' own durations in seconds, when they are all numeric (null otherwise). */
+  templateSeconds: number | null;
+  /** Static (non-dynamic) text elements whose text differs between the template's scenes (e.g. Top 5 rank badges). */
+  staticTextSeries: Record<string, "desc" | "asc" | "varying">;
+};
+
+export type TemplateScaleWarning = "template_layout_fallback" | "rank_badges_renumbered" | "static_text_not_scalable" | "no_caption_element";
+
+const isNode = (value: unknown): value is RawNode => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const typeOf = (el: RawNode): string => (typeof el.type === "string" ? el.type.toLowerCase() : "");
+const nameOf = (el: RawNode): string => (typeof el.name === "string" ? el.name.trim() : "");
+const isDynamicFlag = (el: RawNode): boolean => el.dynamic === true || (Array.isArray(el.dynamic) && el.dynamic.length > 0);
+const kidsOf = (el: RawNode): RawNode[] => (Array.isArray(el.elements) ? el.elements.filter(isNode) : []);
+const isMediaType = (el: RawNode): boolean => typeOf(el) === "video" || typeOf(el) === "image";
+
+/** Creatomate lengths may be numbers or strings like "3 s" / "3"; anything else (percent, "media") is not a plain second count. */
+const toSeconds = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const match = /^\s*(\d+(?:\.\d+)?)\s*s?\s*$/i.exec(value);
+    if (match) return Number(match[1]);
+  }
+  return null;
+};
+
+const clone = <T>(value: T): T => structuredClone(value);
+
+/** Removes everything that would make Creatomate re-derive content itself: dynamic flags, auto-transcription, template TTS provider. */
+function sanitizeNode(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) sanitizeNode(item);
+    return;
+  }
+  if (!isNode(node)) return;
+  delete node.dynamic;
+  for (const key of Object.keys(node)) if (key.startsWith("transcript_")) delete node[key];
+  if (typeOf(node) === "audio") delete node.provider;
+  for (const value of Object.values(node)) sanitizeNode(value);
+}
+
+/** Which direct children of a Scene composition play which role. Indexes into `kidsOf(scene)`, -1 when absent. */
+function classifySceneChildren(scene: RawNode): { kids: RawNode[]; media: number; caption: number; voice: number } {
+  const kids = kidsOf(scene);
+  const find = (predicate: (kid: RawNode) => boolean) => kids.findIndex(predicate);
+  let media = find((kid) => isMediaType(kid) && isDynamicFlag(kid));
+  if (media < 0) media = find((kid) => isMediaType(kid) && /^(video|image|clip|photo|media)/i.test(nameOf(kid)));
+  if (media < 0) media = find(isMediaType);
+  let caption = find((kid) => typeOf(kid) === "text" && /subtitle|caption/i.test(nameOf(kid)));
+  if (caption < 0) caption = find((kid) => typeOf(kid) === "text" && isDynamicFlag(kid));
+  if (caption < 0) caption = find((kid) => typeOf(kid) === "text" && /text/i.test(nameOf(kid)));
+  let voice = find((kid) => typeOf(kid) === "audio" && /voice|narrat|speech/i.test(nameOf(kid)));
+  if (voice < 0) voice = find((kid) => typeOf(kid) === "audio" && isDynamicFlag(kid));
+  if (voice < 0) voice = find((kid) => typeOf(kid) === "audio");
+  return { kids, media, caption, voice };
+}
+
+/** Same element across the template's scenes: name without its trailing scene number (`RankBadge-3` -> `rankbadge`), or its position when unnamed. */
+const staticKey = (name: string, index: number): string => (name ? name.replace(/[\s_-]*\d+$/, "").toLowerCase() || name.toLowerCase() : `#${index}`);
+
+function detectStaticTextSeries(scenes: RawNode[]): TemplateSceneLayout["staticTextSeries"] {
+  const series: TemplateSceneLayout["staticTextSeries"] = {};
+  if (scenes.length < 2) return series;
+  const perScene = scenes.map((scene) => {
+    const { kids, media, caption, voice } = classifySceneChildren(scene);
+    const found = new Map<string, string>();
+    kids.forEach((kid, index) => {
+      if (index === media || index === caption || index === voice || typeOf(kid) !== "text" || typeof kid.text !== "string") return;
+      const key = staticKey(nameOf(kid), index);
+      if (!found.has(key)) found.set(key, kid.text);
+    });
+    return found;
+  });
+  for (const key of perScene[0]!.keys()) {
+    if (!perScene.every((found) => found.has(key))) continue;
+    const texts = perScene.map((found) => found.get(key)!);
+    if (texts.every((text) => text === texts[0])) continue;
+    const ints = texts.map((text) => /\d+/.exec(text)?.[0]).map((digits) => (digits === undefined ? NaN : Number(digits)));
+    const strictlyDesc = ints.every((value, i) => Number.isFinite(value) && (i === 0 || value < ints[i - 1]!));
+    const strictlyAsc = ints.every((value, i) => Number.isFinite(value) && (i === 0 || value > ints[i - 1]!));
+    series[key] = strictlyDesc ? "desc" : strictlyAsc ? "asc" : "varying";
+  }
+  return series;
+}
+
+/**
+ * Finds the template's repeatable scene structure. Scenes are the root-level compositions named
+ * like `Scene-N`; a template with no such name but two or more root compositions that each
+ * hold a media + text element is treated the same way. Anything else (flat templates, a single
+ * unnamed composition) has no repeatable structure and gets `fallbackReason`.
+ */
+export function extractTemplateSceneLayout(rawTemplate: unknown): { layout?: TemplateSceneLayout; fallbackReason?: "no_scene_composition" } {
+  const root: { props: RawNode; elements: unknown[] } | null = Array.isArray(rawTemplate)
+    ? { props: {}, elements: rawTemplate }
+    : isNode(rawTemplate) && Array.isArray(rawTemplate.elements)
+      ? { props: rawTemplate, elements: rawTemplate.elements }
+      : null;
+  if (!root) return {};
+  const elements = root.elements.filter(isNode);
+  const compositions = elements.filter((el) => typeOf(el) === "composition");
+  let scenes = compositions.filter((el) => /scene/i.test(nameOf(el)));
+  if (scenes.length === 0 && compositions.length >= 2) {
+    const shaped = compositions.filter((el) => kidsOf(el).some(isMediaType) && kidsOf(el).some((kid) => typeOf(kid) === "text"));
+    if (shaped.length === compositions.length) scenes = compositions;
+  }
+  if (scenes.length === 0) return elements.length > 0 ? { fallbackReason: "no_scene_composition" } : {};
+
+  const firstSceneIndex = elements.indexOf(scenes[0]!);
+  const others = elements.filter((el) => !scenes.includes(el));
+  const rootBefore = others.filter((el) => elements.indexOf(el) < firstSceneIndex).map(clone);
+  const rootAfter = others.filter((el) => elements.indexOf(el) > firstSceneIndex).map(clone);
+  const rootProps = clone(root.props);
+  for (const key of ["elements", "duration", "output_format", "width", "height", "dynamic"]) delete rootProps[key];
+  sanitizeNode(rootProps);
+
+  const sceneSeconds = scenes.map((scene) => toSeconds(scene.duration));
+  const templateSeconds = sceneSeconds.every((value) => value !== null) ? sceneSeconds.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null;
+  const width = toSeconds(root.props.width);
+  const height = toSeconds(root.props.height);
+  return {
+    layout: {
+      width: width !== null && width > 0 ? width : null,
+      height: height !== null && height > 0 ? height : null,
+      rootProps,
+      rootBefore,
+      rootAfter,
+      scenes: scenes.map(clone),
+      templateSeconds,
+      staticTextSeries: detectStaticTextSeries(scenes),
+    },
+  };
+}
+
+/** Template scene slots a fixed-slot (modification) render has: 0 when the template has no repeatable Scene structure. */
+export const countTemplateSceneSlots = (rawTemplate: unknown): number => extractTemplateSceneLayout(rawTemplate).layout?.scenes.length ?? 0;
+
+/** Template resolution in pixels (root `width`/`height`), null when the template does not state it. */
+export function templateResolution(rawTemplate: unknown): { width: number; height: number } | null {
+  if (!isNode(rawTemplate)) return null;
+  const width = toSeconds(rawTemplate.width);
+  const height = toSeconds(rawTemplate.height);
+  return width && height ? { width, height } : null;
+}
+
+/** Real voice-timed caption blocks for a scene (VE2E-32); one static block for the whole scene when none are usable. */
+function captionBlocks(scene: DynamicSceneInput, durationSeconds: number): Array<{ text: string; time: number; duration: number }> {
+  const usable = (scene.captionSegments ?? []).filter((s) => s.text.trim() && s.endMs > s.startMs);
+  if (usable.length === 0) return [{ text: scene.text, time: 0, duration: durationSeconds }];
+  return usable.map((segment) => {
+    const start = Math.min(durationSeconds, Math.max(0, segment.startMs / 1000));
+    const end = Math.min(durationSeconds, Math.max(start + 0.05, segment.endMs / 1000));
+    return { text: segment.text, time: start, duration: end - start };
+  });
+}
+
+const sceneSeconds = (scene: DynamicSceneInput): number => Math.max(0.1, scene.audioDurationMs / 1000);
+
+/** `Video-1` -> `Video-<n>`; a name without a trailing number gets `-<n>` appended so names stay unique per scene. */
+const renameForScene = (name: string, n: number, fallback: string): string => {
+  if (!name) return `${fallback}-${n}`;
+  return /\d+$/.test(name) ? name.replace(/\d+$/, String(n)) : `${name}-${n}`;
+};
+
+/** Sets time/duration of a decorative child relative to the new scene length: a full-length child stays full-length, a shorter one keeps its own length (capped). */
+function fitChildTiming(child: RawNode, protoSceneSeconds: number | null, durationSeconds: number): void {
+  const time = toSeconds(child.time) ?? 0;
+  const original = toSeconds(child.duration);
+  if (time >= durationSeconds) {
+    child.time = 0;
+  }
+  if (original === null) return;
+  const start = toSeconds(child.time) ?? 0;
+  const remaining = Math.max(0.1, durationSeconds - start);
+  const fullLength = protoSceneSeconds === null || original >= protoSceneSeconds * 0.9;
+  child.duration = fullLength ? remaining : Math.min(original, remaining);
+}
+
+export type DynamicCompositionResult = { source: Record<string, unknown>; warnings: TemplateScaleWarning[] };
+
+/**
+ * VE2E-52 template-driven scalable composition. Emits exactly `scenes.length` Scene compositions,
+ * scene i cloned from the template's prototype `layout.scenes[i % S]` (layout, fonts, stroke,
+ * animations, transition, decorative elements all inherited), with names Scene-i/Video-i/Subtitles-i/
+ * Voiceover-i. Audio drives duration. Root-level extras (badge/logo) and root properties are kept.
+ */
+function buildTemplateScaledComposition(
+  scenes: DynamicSceneInput[],
+  style: DynamicSceneStyle,
+  layout: TemplateSceneLayout,
+  options: { width: number; height: number; outputFormat?: "mp4" | "mov" | "gif" | undefined },
+): DynamicCompositionResult {
+  const warnings = new Set<TemplateScaleWarning>();
+  const overrides = style.layoutOverrides ?? {};
+  const total = scenes.length;
+  const sceneTrack = toSeconds(layout.scenes[0]!.track) ?? 1;
+  let cursor = 0;
+
+  const sceneNodes = scenes.map((scene, index) => {
+    const n = index + 1;
+    const protoScene = layout.scenes[index % layout.scenes.length]!;
+    const durationSeconds = sceneSeconds(scene);
+    const protoSeconds = toSeconds(protoScene.duration);
+    const time = cursor;
+    cursor += durationSeconds;
+    const { kids, media, caption, voice } = classifySceneChildren(protoScene);
+    const children: RawNode[] = [];
+    let usedTrackMax = 0;
+    const noteTrack = (node: RawNode) => { usedTrackMax = Math.max(usedTrackMax, toSeconds(node.track) ?? 0); };
+
+    kids.forEach((rawKid, kidIndex) => {
+      const kid = clone(rawKid);
+      sanitizeNode(kid);
+      if (kidIndex === media) {
+        kid.type = scene.mediaKind;
+        kid.name = renameForScene(nameOf(rawKid), n, scene.mediaKind === "video" ? "Video" : "Image");
+        kid.source = scene.mediaUrl;
+        kid.time = 0;
+        kid.duration = durationSeconds;
+        delete kid.trim_start;
+        delete kid.trim_duration;
+        if (scene.mediaKind === "video") {
+          kid.volume = "0%";
+          if (scene.sourceStartMs != null && scene.sourceDurationMs != null) {
+            kid.trim_start = scene.sourceStartMs / 1000;
+            kid.trim_duration = scene.sourceDurationMs / 1000;
+          }
+        } else {
+          delete kid.volume;
+        }
+        if (kid.fit === undefined) kid.fit = "cover";
+        if (overrides.disablePan && Array.isArray(kid.animations)) {
+          const kept = (kid.animations as RawNode[]).filter((animation) => !looksLikePanZoomAnimation(animation));
+          if (kept.length) kid.animations = kept; else delete kid.animations;
+        }
+        children.push(kid);
+      } else if (kidIndex === caption) {
+        captionBlocks(scene, durationSeconds).forEach((block, blockIndex) => {
+          if (!block.text.trim()) return;
+          const node = clone(kid);
+          const base = renameForScene(nameOf(rawKid), n, "Subtitles");
+          node.name = blockIndex === 0 ? base : `${base}-${blockIndex + 1}`;
+          node.text = block.text;
+          node.time = block.time;
+          node.duration = block.duration;
+          if (overrides.captionFontFamily) node.font_family = overrides.captionFontFamily;
+          if (overrides.captionFillColor) node.fill_color = overrides.captionFillColor;
+          children.push(node);
+        });
+      } else if (kidIndex === voice) {
+        kid.name = renameForScene(nameOf(rawKid), n, "Voiceover");
+        kid.source = scene.audioUrl;
+        kid.time = 0;
+        kid.duration = durationSeconds;
+        children.push(kid);
+      } else if (typeOf(kid) === "audio") {
+        // A second audio element: keep fixed background audio, never one that would call a TTS provider (sanitize removed `provider`, so use the raw flag).
+        if (typeof rawKid.provider === "string" && rawKid.provider.trim()) return;
+        kid.name = renameForScene(nameOf(rawKid), n, "Audio");
+        fitChildTiming(kid, protoSeconds, durationSeconds);
+        children.push(kid);
+      } else {
+        if (typeOf(kid) === "text" && typeof kid.text === "string") {
+          const key = staticKey(nameOf(rawKid), kidIndex);
+          const direction = layout.staticTextSeries[key];
+          if (direction === "desc" || direction === "asc") {
+            if (/\d+/.test(kid.text)) {
+              kid.text = kid.text.replace(/\d+/, String(direction === "desc" ? total - index : index + 1));
+              warnings.add("rank_badges_renumbered");
+            }
+          } else if (direction === "varying" && index >= layout.scenes.length) {
+            warnings.add("static_text_not_scalable");
+            return;
+          }
+        }
+        kid.name = renameForScene(nameOf(rawKid), n, "Element");
+        fitChildTiming(kid, protoSeconds, durationSeconds);
+        children.push(kid);
+      }
+      noteTrack(kid);
+    });
+
+    // Never drop narration / media / captions because a prototype lacks the element for it.
+    if (voice < 0) {
+      children.push({ name: `Voiceover-${n}`, type: "audio", track: usedTrackMax + 1, time: 0, duration: durationSeconds, source: scene.audioUrl });
+      usedTrackMax += 1;
+    }
+    if (media < 0) {
+      children.unshift({ name: `Video-${n}`, type: scene.mediaKind, track: 1, time: 0, duration: durationSeconds, source: scene.mediaUrl, fit: "cover", ...(scene.mediaKind === "video" ? { volume: "0%" } : {}) });
+    }
+    if (caption < 0) {
+      warnings.add("no_caption_element");
+      captionBlocks(scene, durationSeconds).forEach((block, blockIndex) => {
+        if (!block.text.trim()) return;
+        children.push({
+          name: blockIndex === 0 ? `Subtitles-${n}` : `Subtitles-${n}-${blockIndex + 1}`, type: "text", track: usedTrackMax + 1, time: block.time, duration: block.duration, text: block.text,
+          font_family: overrides.captionFontFamily ?? style.text.fontFamily, font_size: style.text.fontSize, font_weight: style.text.fontWeight,
+          fill_color: overrides.captionFillColor ?? style.text.fillColor, stroke_color: style.text.strokeColor, stroke_width: style.text.strokeWidth,
+          x_alignment: style.text.xAlignment, y_alignment: style.text.yAlignment, width: style.text.width, height: style.text.height,
+        });
+      });
+    }
+
+    const node = clone(protoScene);
+    sanitizeNode(node);
+    delete node.dynamic;
+    return {
+      ...node,
+      name: `Scene-${n}`,
+      type: "composition",
+      track: sceneTrack,
+      time,
+      duration: durationSeconds,
+      elements: children,
+    };
+  });
+
+  const extras = (list: RawNode[]) =>
+    list.map((el) => {
+      const copy = clone(el);
+      sanitizeNode(copy);
+      const original = toSeconds(el.duration);
+      // A root extra that spanned the template's whole timeline must span the (re-sized) whole timeline too.
+      if (original !== null && layout.templateSeconds !== null && original >= layout.templateSeconds * 0.9) delete copy.duration;
+      return copy;
+    });
+
+  return {
+    source: {
+      ...layout.rootProps,
+      output_format: options.outputFormat ?? "mp4",
+      width: layout.width ?? options.width,
+      height: layout.height ?? options.height,
+      elements: [...extras(layout.rootBefore), ...sceneNodes, ...extras(layout.rootAfter)],
+    },
+    warnings: [...warnings],
+  };
+}
+
+/**
+ * Single entry point for every Creatomate composition LyOnix generates from a timeline (Auto,
+ * Studio final render, Studio preview): template-scaled when the pinned template has a repeatable
+ * Scene structure, the generic style-only composition otherwise (with `template_layout_fallback`).
+ */
+export function buildDynamicCompositionWithWarnings(
+  scenes: DynamicSceneInput[],
+  style: DynamicSceneStyle,
+  options: { width: number; height: number; outputFormat?: "mp4" | "mov" | "gif" | undefined },
+): DynamicCompositionResult {
+  if (style.layout) return buildTemplateScaledComposition(scenes, style, style.layout, options);
+  return { source: buildStyleOnlyComposition(scenes, style, options), warnings: style.layoutFallbackReason ? ["template_layout_fallback"] : [] };
+}
+
+export function buildDynamicComposition(
+  scenes: DynamicSceneInput[],
+  style: DynamicSceneStyle,
+  options: { width: number; height: number; outputFormat?: "mp4" | "mov" | "gif" | undefined },
+): Record<string, unknown> {
+  return buildDynamicCompositionWithWarnings(scenes, style, options).source;
 }
 
 /**
@@ -208,7 +600,7 @@ export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSc
  * caller's responsibility to have already excluded — this function assumes every input scene
  * is renderable.
  */
-export function buildDynamicComposition(
+function buildStyleOnlyComposition(
   scenes: DynamicSceneInput[],
   style: DynamicSceneStyle,
   options: { width: number; height: number; outputFormat?: "mp4" | "mov" | "gif" | undefined },
@@ -366,7 +758,15 @@ export function applyDynamicStyleOverrides(base: DynamicSceneStyle, optionValues
   const fontFamily = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily];
   const fillColor = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFillColor];
   const imageAnimation = optionValues[DYNAMIC_STYLE_OPTION_KEYS.imageAnimation];
+  const layoutOverrides: NonNullable<DynamicSceneStyle["layoutOverrides"]> = {
+    ...(fontFamily && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily) ? { captionFontFamily: fontFamily } : {}),
+    ...(fillColor && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFillColor, fillColor) ? { captionFillColor: fillColor } : {}),
+    ...(imageAnimation === "none" ? { disablePan: true } : {}),
+  };
   return {
+    ...(base.layout ? { layout: base.layout } : {}),
+    ...(base.layoutFallbackReason ? { layoutFallbackReason: base.layoutFallbackReason } : {}),
+    ...(Object.keys(layoutOverrides).length ? { layoutOverrides } : {}),
     text: {
       ...base.text,
       ...(fontFamily && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily) ? { fontFamily } : {}),
