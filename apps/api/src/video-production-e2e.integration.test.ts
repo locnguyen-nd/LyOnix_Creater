@@ -121,6 +121,7 @@ function table<T extends Record<string, unknown>>(rows: T[], prefix: string) {
       const matched = sortRows(rows.filter((r) => matchesWhere(r, where)), orderBy);
       return select ? matched.map((r) => pick(r, select)) : matched;
     },
+    count: async ({ where }: { where?: Record<string, unknown> } = {}) => rows.filter((r) => matchesWhere(r, where)).length,
     findUnique: async ({ where }: { where: { id: string } }) => rows.find((r) => r.id === where.id) ?? null,
     create: async ({ data }: { data: Record<string, unknown> }) => {
       const row = { id: `${prefix}-${++seq}`, createdAt: new Date(), updatedAt: new Date(), ...data } as unknown as T;
