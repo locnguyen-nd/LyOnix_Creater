@@ -56,7 +56,12 @@ export type ErrorCode =
   | "MEDIA_RIGHTS_UNRESOLVED"
   // VE2E-37: media-worker could not cut/deliver a derivative clip for render (timeout, broker down,
   // retryable worker error). Retryable; render never falls back to the full source file.
-  | "MEDIA_PREPARE_FAILED";
+  | "MEDIA_PREPARE_FAILED"
+  // VE2E-47: the pinned Creatomate template has an audio element with its own TTS `provider`
+  // (Creatomate would synthesize + bill voice itself). CONFLICT = LyOnix refused to render;
+  // FAILED = Creatomate-side TTS (ElevenLabs integration/quota) failed during the render.
+  | "TEMPLATE_TTS_CONFLICT"
+  | "TEMPLATE_TTS_FAILED";
 
 export type ErrorEnvelope = {
   error: {
@@ -437,6 +442,16 @@ export type TemplateModificationSlotResponse = {
   kind: ModificationKind;
   label: string;
   required: boolean;
+  /** VE2E-47: set on an audio `.source` slot whose template element carries a Creatomate-side TTS `provider` (e.g. "elevenlabs model_id=... voice_id=..."). */
+  ttsProvider?: string;
+};
+
+export type TemplateSnapshotWarning = {
+  code: "TEMPLATE_TTS_PROVIDER";
+  elementName: string;
+  /** The `<name>.source` slot key when the element is dynamic (LyOnix fills it); null for a fixed element. */
+  slotKey: string | null;
+  provider: string;
 };
 
 export type CreatomateTemplateSummaryResponse = {
@@ -453,6 +468,8 @@ export type TemplateSnapshotResponse = {
   previewUrl: string | null;
   modifications: TemplateModificationSlotResponse[];
   capturedAt: string;
+  /** VE2E-47: non-blocking template problems (currently: audio elements with a Creatomate TTS provider). Omitted/empty when clean. */
+  warnings?: TemplateSnapshotWarning[];
 };
 
 /**
@@ -476,6 +493,8 @@ export type RenderSubmitRequest = {
   outputFormat?: "mp4" | "mov" | "gif";
   /** Optional client-supplied idempotency token (e.g. one generated per "Render" button click) folded into the server-computed request fingerprint. */
   idempotencyKey?: string;
+  /** VE2E-47: explicit opt-in to let Creatomate run its own (billed) TTS for template audio slots LyOnix leaves without voice. Default false = fail closed. */
+  allowTemplateTts?: boolean;
 };
 
 export const renderJobStatuses = [
@@ -870,6 +889,8 @@ export type RenderSubmitFromTimelineRequest = {
   providerAccountId: string;
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
+  /** VE2E-47: see `RenderSubmitRequest.allowTemplateTts`. */
+  allowTemplateTts?: boolean;
 };
 
 /**

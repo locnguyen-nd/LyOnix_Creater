@@ -13,6 +13,7 @@ type SubmitBody = {
   assignments?: RenderAssignmentInput[];
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
+  allowTemplateTts?: boolean;
 };
 
 @Controller()
@@ -35,6 +36,7 @@ export class RenderJobsController {
       assignments: body.assignments,
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+      ...(body.allowTemplateTts === true ? { allowTemplateTts: true } : {}),
     });
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     return success(outcome.data, requestId(response));
@@ -56,6 +58,7 @@ export class RenderJobsController {
       providerAccountId: body.providerAccountId,
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+      ...(body.allowTemplateTts === true ? { allowTemplateTts: true } : {}),
     }, "template");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     response.status(202);
