@@ -213,6 +213,7 @@ export {
   type TemplateTtsElement,
   submitCreatomateRender,
   submitCreatomateSourceRender,
+  resolveCreatomateRenderScale,
   getCreatomateRender,
   normalizeCreatomateStatus,
   type CreatomateTemplateSummary,
@@ -227,6 +228,10 @@ export {
 export {
   extractDynamicStyleFromTemplate,
   buildDynamicComposition,
+  buildDynamicCompositionWithWarnings,
+  extractTemplateSceneLayout,
+  countTemplateSceneSlots,
+  templateResolution,
   applyDynamicStyleOverrides,
   isDynamicStyleOptionKey,
   isValidDynamicStyleOptionValue,
@@ -235,6 +240,9 @@ export {
   type DynamicSceneInput,
   type DynamicSceneStyle,
   type DynamicImageAnimation,
+  type TemplateSceneLayout,
+  type TemplateScaleWarning,
+  type DynamicCompositionResult,
 } from "./creatomate-dynamic.js";
 export {
   probeApifyAccount,
