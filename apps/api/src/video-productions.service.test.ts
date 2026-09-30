@@ -230,6 +230,15 @@ describe("VideoProductionsService", () => {
       expect(outcome).toMatchObject({ ok: true, data: { scriptDraftVersionId: "script-1", renderJobId: "render-1", resultUrl: "https://cdn.example/video.mp4" } });
     });
 
+    it("returns the persisted per-segment sourcing diagnostics of the latest media step (VE2E-48)", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected ok");
+      expect(await service.get(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { mediaSourcing: null } });
+      const segments = [{ segmentId: "seg-1", sourcing: "imported", sourceProvider: "pexels", fallbackReason: "no_apify_account" }];
+      prisma.stepRun.findMany = async () => [{ stepKey: "media_plan_diagnostics", attempt: 1, outputRef: { segments } }];
+      expect(await service.get(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { mediaSourcing: segments } });
+    });
+
     it("hides a run outside the caller's project grants as not-found", async () => {
       const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
       if (!submitted.ok) throw new Error("expected ok");

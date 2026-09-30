@@ -60,6 +60,7 @@ import {
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
 import { ApifyMediaTab } from "../studio/ApifyMediaTab";
+import { SourceBadge } from "../studio/SourceBadge";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
@@ -669,12 +670,14 @@ export function StudioProPage() {
   // VE2E-41: Studio calls the server-side MediaPlanService that Auto uses, keeping media
   // source selection and segment ranges consistent across both entry points.
   const autoFillAllMedia = async () => {
-    if (!context || !visualAccountId || scenes.length === 0) return;
+    // VE2E-48: the server picks the user's Apify account itself; the client only needs *an* account id (Pexels preferred, else Apify).
+    const planAccountId = visualAccountId || apifyAccountId;
+    if (!context || !planAccountId || scenes.length === 0) return;
     setError(null);
     setMediaPlanBusy(true);
     try {
       const backgroundSegments = segmentCount === "auto" ? { mode: "auto" as const } : { mode: "fixed" as const, count: Number(segmentCount) };
-      const plan = await planProjectMedia(context.projectId, { scriptDraftVersionId: context.scriptDraftVersionId, providerAccountId: visualAccountId, backgroundSegments });
+      const plan = await planProjectMedia(context.projectId, { scriptDraftVersionId: context.scriptDraftVersionId, providerAccountId: planAccountId, backgroundSegments });
       setMediaPlanDiagnostics(plan.diagnostics);
       setDraft((prev) => {
         undoStack.current.push(prev);
@@ -1084,7 +1087,7 @@ export function StudioProPage() {
                   {[1, 2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{t("studioPro.backgroundSegmentsFixed", { count })}</option>)}
                 </Select>
               </label>
-              <Button disabled={!visualAccountId || mediaPlanBusy} onClick={() => void autoFillAllMedia()}>
+              <Button disabled={(!visualAccountId && !apifyAccountId) || mediaPlanBusy} onClick={() => void autoFillAllMedia()}>
                 {mediaPlanBusy ? t("studioPro.mediaPlanning") : t("studioPro.autoFillMedia")}
               </Button>
               <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.autoFillMediaHint")}</p>
@@ -1116,6 +1119,7 @@ export function StudioProPage() {
                         </div>
                         {source ? <p className="mt-1 truncate text-lyx-fg-muted">{source.origin === "apify" ? `⚠ ${t("studioPro.ownerAcceptedRisk")}` : source.originalFileName}</p> : null}
                         {diagnostic?.sourcing === "failed" ? <p className="mt-1 text-lyx-danger">{t("studioPro.segmentSourceMissing")}</p> : null}
+                        {diagnostic ? <SourceBadge diagnostic={diagnostic} /> : null}
                         {(() => {
                           const shortfall = selectedInSegment && source?.kind === "video" ? inPointShortfall(draft.scenes, segment, source.durationMs, segmentInPoints[segment.segmentId] ?? 0) : null;
                           return shortfall ? <p role="alert" className="mt-1 text-amber-500">⚠ {t("studioPro.inPointShortfall", { seconds: (shortfall.shortByMs / 1000).toFixed(1) })}</p> : null;
@@ -1539,6 +1543,11 @@ export function StudioProPage() {
               <p className="mb-3 text-[11px] text-lyx-fg-muted">
                 {template ? `${t("studioPro.templateLabel")}: ${template.name}` : t("studioPro.noTemplate")}
               </p>
+              {template?.warnings?.length ? (
+                <p role="alert" className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-300">
+                  {t("studioPro.templateTtsWarning", { names: template.warnings.map((warning) => warning.elementName).join(", ") })}
+                </p>
+              ) : null}
 
               <div className="mb-3 flex gap-1">
                 <button type="button" title={t("studioPro.moveEarlier")} disabled={selectedSceneIndex <= 0} className="lyx-btn lyx-btn-ghost h-8 flex-1 text-[11px] disabled:opacity-30" onClick={() => moveScene(selectedScene.sceneId, -1)}>◀</button>

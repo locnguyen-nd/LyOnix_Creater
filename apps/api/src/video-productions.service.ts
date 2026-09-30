@@ -24,7 +24,7 @@ import {
   resolveBackgroundSegmentRange,
   type BackgroundSegmentCountBounds,
 } from "@lyonix/domain";
-import type { ErrorCode, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type { ErrorCode, MediaPlanSegmentDiagnostics, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -342,6 +342,9 @@ export class VideoProductionsService {
     const profile = run.automationProfileVersionId
       ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId }, select: { durationSec: true } })
       : null;
+    const sourcingSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "media_plan_diagnostics" }, orderBy: [{ attempt: "desc" }], take: 1 });
+    const sourcingOutput = sourcingSteps[0]?.outputRef as { segments?: unknown } | null | undefined;
+    const mediaSourcing = Array.isArray(sourcingOutput?.segments) ? (sourcingOutput!.segments as MediaPlanSegmentDiagnostics[]) : null;
     return {
       ok: true,
       data: {
@@ -356,6 +359,7 @@ export class VideoProductionsService {
         resultUrl: renderJob?.resultUrl ?? null,
         lastError: (run.lastError as VideoProductionResponse["lastError"]) ?? null,
         backgroundSegments: { setting: backgroundSetting, range: resolveBackgroundSegmentRange(backgroundSetting, profile?.durationSec ?? null) },
+        mediaSourcing,
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       },

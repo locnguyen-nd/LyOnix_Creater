@@ -165,13 +165,20 @@ export function buildActorInput(actorId: string, keyword: string, lang: ApifyLan
 const actorPath = (actorId: string) => actorId.replace("/", "~");
 const TERMINAL_FAILURES = new Set(["FAILED", "ABORTED", "ABORTING", "TIMED-OUT"]);
 
+/**
+ * Actors for which the `maxItems` run query param (Apify max-charge cap) is verified to work (live probe 2026-09-30).
+ * Pay-per-event Actors reject it (fatihtahta: HTTP 400 "Maximum cost per run ... minimum of $1.00"), so for every
+ * other Actor the result count is bounded only through the Actor INPUT (see buildActorInput) plus `limit` on the dataset read.
+ */
+export const APIFY_MAX_ITEMS_QUERY_ACTORS: ReadonlySet<string> = new Set(["clockworks/tiktok-scraper"]);
+
 type RunResult = { runId: string; items: unknown[] };
 
 /** Runs one pinned Actor asynchronously (start -> poll <=120 s -> read dataset). Aborts the run if it overruns. */
 async function runActorOnce(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, deps?: ApifyDeps): Promise<RunResult> {
   const now = deps?.now ?? Date.now;
   const sleep = deps?.sleep ?? defaultSleep;
-  const start = await apifyFetch(deps, `/v2/acts/${actorPath(pin.actorId)}/runs?build=${encodeURIComponent(pin.version)}&timeout=${APIFY_RUN_TIMEOUT_SECS}&maxItems=${limit}`, token, { method: "POST", body: input });
+  const start = await apifyFetch(deps, `/v2/acts/${actorPath(pin.actorId)}/runs?build=${encodeURIComponent(pin.version)}&timeout=${APIFY_RUN_TIMEOUT_SECS}${APIFY_MAX_ITEMS_QUERY_ACTORS.has(pin.actorId) ? `&maxItems=${limit}` : ""}`, token, { method: "POST", body: input });
   if (!start.ok) return failFromResponse(start, token);
   const started = ((await start.json().catch(() => ({}))) as { data?: Record<string, unknown> }).data ?? {};
   const runId = typeof started.id === "string" ? started.id : "";
@@ -278,6 +285,18 @@ const parseDuration = (v: unknown): number | null => {
 
 const PREVIEW_HOSTS = { tiktok: [...APIFY_HOST_ALLOWLIST.tiktok, "tiktokv.com"], pinterest: APIFY_HOST_ALLOWLIST.pinterest, x: APIFY_HOST_ALLOWLIST.x, google: APIFY_HOST_ALLOWLIST.googlePreview } as const;
 
+/**
+ * With shouldDownloadCovers the Actor rewrites `videoMeta.coverUrl` to a token-protected api.apify.com KV URL that a browser
+ * cannot load. Prefer `originalCoverUrl` (signed public CDN); `coverUrl` counts only if its host is a preview CDN.
+ */
+const tiktokPreview = (item: Json): string => {
+  for (const raw of [at(item, "videoMeta", "originalCoverUrl"), at(item, "videoMeta", "coverUrl"), at(item, "video", "cover"), at(item, "video", "thumbnail")]) {
+    const url = safeUrl(raw, PREVIEW_HOSTS.tiktok);
+    if (url) return url;
+  }
+  return "";
+};
+
 function normalizeTikTok(item: Json): Normalized | null {
   if (item.error || item.errorCode) return null;
   const externalId = clip(item.id, 64) || clip(at(item, "video", "id"), 64) || clip(item.postPage, 200);
@@ -289,7 +308,7 @@ function normalizeTikTok(item: Json): Normalized | null {
   return {
     externalId,
     mediaType: "video",
-    previewUrl: safeUrl(at(item, "videoMeta", "coverUrl") ?? at(item, "video", "cover") ?? at(item, "video", "thumbnail"), PREVIEW_HOSTS.tiktok),
+    previewUrl: tiktokPreview(item),
     download: kvOk ? { url: kvOk, kind: "video", policy: "apify_api", hostSuffixes: [...APIFY_HOST_ALLOWLIST.apifyApi], maxBytes: APIFY_MAX_VIDEO_BYTES } : null,
     ...(kvOk ? {} : { previewOnlyReason: "no_apify_stored_file" }),
     durationSeconds: num(at(item, "videoMeta", "duration") ?? at(item, "video", "duration")),

@@ -39,6 +39,7 @@ import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
+import { TTS_PROVIDER_DISABLED_VALUE, classifyCreatomateRenderError, slotsWithTtsProvider, templateTtsConflictMessage, ttsProviderOverrideKey, unfilledTtsSlotKeys } from "./template-tts.js";
 import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 
 export type RenderOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
@@ -119,6 +120,20 @@ export class RenderJobsService {
     // Nest modules register it. Without it, a timeline with source ranges fails (never full-source fallback).
     @Inject(ClipDerivativesService) private readonly clipDerivatives?: ClipDerivativesService,
   ) {}
+
+  /** VE2E-47: pinned slots with `ttsProvider` backfilled from `rawTemplate` for snapshots pinned before this field existed. */
+  private static snapshotSlots(snapshot: { modifications: unknown; rawTemplate?: unknown }): TemplateModificationSlotResponse[] {
+    const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
+    return slotsWithTtsProvider(slots, snapshot.rawTemplate);
+  }
+
+  /** VE2E-47: TEMPLATE_TTS_CONFLICT outcome when a slot with a Creatomate TTS provider gets no LyOnix audio, unless explicitly allowed. */
+  private static checkTemplateTts(slots: TemplateModificationSlotResponse[], providedKeys: Iterable<string>, allow?: boolean): { ok: false; code: "TEMPLATE_TTS_CONFLICT"; message: string; status: number; retryable: false } | null {
+    if (allow) return null;
+    const unfilled = unfilledTtsSlotKeys(slots, providedKeys);
+    if (unfilled.length === 0) return null;
+    return { ok: false, code: "TEMPLATE_TTS_CONFLICT", message: templateTtsConflictMessage(unfilled), status: 409, retryable: false };
+  }
 
   /**
    * VE2E-37: scenes whose binding carries a source range on a video asset. Bindings without a
@@ -209,6 +224,8 @@ export class RenderJobsService {
         if (issued === "not_configured") return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
         if (!issued || issued === "forbidden") return { ok: false, code: "NOT_FOUND", message: `Không thể cấp delivery URL cho ${assignment.mediaAssetVersionId}`, status: 404 };
         modifications[slot.key] = issued.url;
+        // VE2E-47: an audio element with a template TTS provider would otherwise speak this URL as text and bill ElevenLabs itself.
+        if (assignment.kind === "audio" && slot.ttsProvider) modifications[ttsProviderOverrideKey(slot.key)] = TTS_PROVIDER_DISABLED_VALUE;
       } else if (assignment.kind === "color") {
         if (!HEX_COLOR_RE.test(assignment.color)) return { ok: false, code: "VALIDATION_FAILED", message: `Màu không hợp lệ cho ${slot.key}` };
         modifications[slot.key] = assignment.color;
@@ -245,8 +262,11 @@ export class RenderJobsService {
     if (snapshot.providerAccountId !== input.providerAccountId) {
       return { ok: false, code: "VALIDATION_FAILED", message: "providerAccountId không khớp với template snapshot đã pin" };
     }
-    const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
+    const slots = RenderJobsService.snapshotSlots(snapshot);
     if (!input.assignments?.length) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu assignments cho render" };
+    // VE2E-47: fail closed BEFORE any signed URL / RenderJob / Creatomate call when a template TTS slot would be left to Creatomate.
+    const ttsConflict = RenderJobsService.checkTemplateTts(slots, input.assignments.map((assignment) => assignment.modificationKey), input.allowTemplateTts);
+    if (ttsConflict) return ttsConflict;
 
     const built = await this.buildModifications(projectId, userId, role, slots, input.assignments);
     if (!built.ok) return built;
@@ -379,7 +399,7 @@ export class RenderJobsService {
     if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template" };
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
-    const slots = Array.isArray(snapshot.modifications) ? (snapshot.modifications as unknown as TemplateModificationSlotResponse[]) : [];
+    const slots = RenderJobsService.snapshotSlots(snapshot);
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
@@ -387,6 +407,9 @@ export class RenderJobsService {
     if (built.missingRequiredModificationKeys.length > 0) {
       return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
     }
+    // VE2E-47: refuse before any clip is cut when a template TTS slot would be left to Creatomate.
+    const ttsConflict = RenderJobsService.checkTemplateTts(slots, built.filledModificationKeys, input.allowTemplateTts);
+    if (ttsConflict) return ttsConflict;
     // VE2E-37: only scenes whose video actually landed in a template slot are cut. A scene keeps its
     // source audio only if the timeline explicitly set a non-zero volume for that slot (apify: never).
     const clipRequests = RenderJobsService.rangedVideoScenes(resolved)
@@ -412,6 +435,7 @@ export class RenderJobsService {
       assignments: built.assignments,
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}),
     }, workflowRunId, queuedJobId);
   }
 
@@ -657,10 +681,13 @@ export class RenderJobsService {
       if (!composition.ok) return composition;
       clipScenes = RenderJobsService.rangedVideoScenes(composition.data.renderable).map((scene) => ({ ...scene, stripAudio: true }));
     } else {
-      const slots = Array.isArray(snapshot.modifications) ? snapshot.modifications as unknown as TemplateModificationSlotResponse[] : [];
+      const slots = RenderJobsService.snapshotSlots(snapshot);
       const options = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
       const built = buildRenderAssignmentsFromTimeline(slots, resolved, options);
       if (built.missingRequiredModificationKeys.length) return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
+      // VE2E-47 preflight: fail closed BEFORE the RenderJob row (and any clip cut) exists.
+      const ttsConflict = RenderJobsService.checkTemplateTts(slots, built.filledModificationKeys, input.allowTemplateTts);
+      if (ttsConflict) return ttsConflict;
       clipScenes = RenderJobsService.rangedVideoScenes(resolved)
         .filter((scene) => built.videoSlotKeyBySceneId[scene.sceneId] !== undefined)
         .map((scene) => {
@@ -678,14 +705,14 @@ export class RenderJobsService {
       const failedJobs = await this.prisma.renderJob.count({ where: { workflowRunId, status: "failed" } });
       generation = failedJobs;
     }
-    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, scenes: timeline.scenes, options: timeline.optionValues, ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
+    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), scenes: timeline.scenes, options: timeline.optionValues, ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
     const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
     if (existing) return { ok: true, data: toJobResponse(existing) };
     try {
       const row = await this.prisma.renderJob.create({ data: {
         projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId,
         requestFingerprint: fingerprint, webhookToken: randomBytes(24).toString("base64url"), status: "preparing_clips",
-        modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null },
+        modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}) },
         createdByUserId: userId, clipsTotal, clipsReady: 0,
         ...(workflowRunId ? { workflowRunId } : {}),
       } });
@@ -713,9 +740,9 @@ export class RenderJobsService {
     if (!candidate) return false;
     const claimed = await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips", preparationLeaseUntil: candidate.preparationLeaseUntil }, data: { preparationLeaseUntil: new Date(Date.now() + 10 * 60_000), clipsReady: 0, clipFailures: [] } });
     if (claimed.count !== 1) return true;
-    const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null };
+    const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null; allowTemplateTts?: boolean };
     try {
-      const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}) };
+      const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}), ...(payload.allowTemplateTts ? { allowTemplateTts: true } : {}) };
       const actor = await this.prisma.user.findUnique({ where: { id: candidate.createdByUserId }, select: { role: true } });
       if (!actor) throw new Error("Render creator no longer exists");
       const role = actor.role === "admin" ? "admin" : "staff";
@@ -764,7 +791,8 @@ export class RenderJobsService {
     }
     if (nextStatus === "failed") {
       data.completedAt = new Date();
-      data.lastError = { code: "PROVIDER_SUBMIT_UNKNOWN", message: incoming.errorMessage ?? "Creatomate render failed" } as unknown as Prisma.InputJsonValue;
+      // VE2E-47: Creatomate-side TTS/quota failures get a real code + the real message, not "submit unknown".
+      data.lastError = classifyCreatomateRenderError(incoming.errorMessage) as unknown as Prisma.InputJsonValue;
     }
     return this.prisma.renderJob.update({ where: { id: jobId }, data });
   }
