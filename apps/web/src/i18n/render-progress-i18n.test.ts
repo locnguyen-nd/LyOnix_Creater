@@ -13,4 +13,13 @@ describe("VE2E-43 render progress translations", () => {
       expect(strings.renderClipFailure).toContain("{{message}}");
     }
   });
+
+  it("VE2E-52: warns about output below the template resolution and template layout notes in every locale", () => {
+    for (const locale of ["vi", "en", "ja", "ko"] as const) {
+      const strings = locales[locale].studioPro;
+      for (const token of ["{{width}}", "{{height}}", "{{expectedWidth}}", "{{expectedHeight}}", "{{scale}}"]) expect(strings.renderBelowTemplateResolution).toContain(token);
+      expect(strings.layoutFallbackWarning).toBeTruthy();
+      expect(strings.rankBadgesRenumbered).toContain("{{count}}");
+    }
+  });
 });

@@ -19,6 +19,17 @@ export function RenderProgress({ job }: { job: RenderJobResponse }) {
           {t("studioPro.renderClipFailure", { scene: failure.sceneId || "—", code: failure.code, message: failure.message })}
         </div>
       ))}
+      {job.output?.belowTemplateResolution ? (
+        <div role="alert">
+          {t("studioPro.renderBelowTemplateResolution", {
+            width: job.output.width ?? "?",
+            height: job.output.height ?? "?",
+            expectedWidth: job.output.expectedWidth ?? "?",
+            expectedHeight: job.output.expectedHeight ?? "?",
+            scale: job.output.renderScale ?? job.output.requestedScale ?? "?",
+          })}
+        </div>
+      ) : null}
       {job.status === "failed" && job.lastError && clips.failed.length === 0 ? <div role="alert">{job.lastError.code}: {job.lastError.message}</div> : null}
     </Banner>
   );

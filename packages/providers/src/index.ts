@@ -244,6 +244,8 @@ export {
   type TemplateScaleWarning,
   type DynamicCompositionResult,
 } from "./creatomate-dynamic.js";
+/** VE2E-52: structures of the two real pinned templates, shared by provider and API tests (not used at runtime). */
+export { newsRecapJpTemplate, top5CountdownTemplate } from "./fixtures/creatomate-templates.js";
 export {
   probeApifyAccount,
   searchApify,

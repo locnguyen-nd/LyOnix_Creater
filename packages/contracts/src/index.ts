@@ -511,6 +511,17 @@ export const renderJobStatuses = [
 ] as const;
 export type RenderJobStatus = (typeof renderJobStatuses)[number];
 
+/** VE2E-52: requested vs reported render output size; `belowTemplateResolution` drives the Studio warning. */
+export type RenderJobOutput = {
+  requestedScale: number | null;
+  renderScale: number | null;
+  width: number | null;
+  height: number | null;
+  expectedWidth: number | null;
+  expectedHeight: number | null;
+  belowTemplateResolution: boolean;
+};
+
 export type RenderJobResponse = {
   id: string;
   projectId: string;
@@ -529,6 +540,8 @@ export type RenderJobResponse = {
   costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string } | null;
+  /** VE2E-52: null until Creatomate has reported an output size (or for jobs created before this field). */
+  output: RenderJobOutput | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -908,6 +921,8 @@ export type TimelineDynamicPreviewResponse = {
   renderableSceneCount: number;
   totalSceneCount: number;
   missingReason: string | null;
+  /** VE2E-52: how the preview/final source was composed from the pinned template. */
+  layout?: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] } | undefined;
 };
 
 /** VE2E-13: whether the Creatomate Preview SDK's browser-side public token is configured server-side (B10/B11-gated) - never the render API secret. */

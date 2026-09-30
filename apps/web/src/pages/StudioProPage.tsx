@@ -228,6 +228,9 @@ export function StudioProPage() {
   const [sdkConfigured, setSdkConfigured] = useState<boolean | null>(null);
   const [sdkPublicToken, setSdkPublicToken] = useState<string | null>(null);
   const [sdkState, setSdkState] = useState<SdkPreviewState>("off");
+  // VE2E-52: how the previewed (== rendered) source was composed from the pinned template.
+  const [layoutWarnings, setLayoutWarnings] = useState<string[]>([]);
+  const [layoutSceneCount, setLayoutSceneCount] = useState(0);
   const sdkContainerRef = useRef<HTMLDivElement | null>(null);
   const sdkHandleRef = useRef<CreatomatePreviewHandle | null>(null);
   const sdkPushedVersionRef = useRef<string | null>(null);
@@ -393,6 +396,8 @@ export function StudioProPage() {
     const handle = sdkHandleRef.current;
     void fetchTimelineDynamicPreviewSource(context.projectId, baseVersionId)
       .then((preview) => {
+        setLayoutWarnings(preview.layout?.warnings ?? []);
+        setLayoutSceneCount(preview.renderableSceneCount);
         if (!preview.ready || !preview.source) { setSdkState("empty"); return; }
         sdkPushedVersionRef.current = baseVersionId;
         void handle.setSource(preview.source).then(() => setSdkState("ready")).catch(() => setSdkState("error"));
@@ -977,6 +982,8 @@ export function StudioProPage() {
         </Banner>
       ) : null}
       {preview && !preview.ready ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
+      {layoutWarnings.includes("template_layout_fallback") ? <Banner variant="warn">{t("studioPro.layoutFallbackWarning")}</Banner> : null}
+      {layoutWarnings.includes("rank_badges_renumbered") ? <Banner variant="warn">{t("studioPro.rankBadgesRenumbered", { count: layoutSceneCount })}</Banner> : null}
       {renderJob ? <RenderProgress job={renderJob} /> : null}
       </div>
 

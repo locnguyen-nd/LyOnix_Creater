@@ -15,10 +15,13 @@ import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type Ren
 import {
   ProviderError,
   applyDynamicStyleOverrides,
-  buildDynamicComposition,
+  buildDynamicCompositionWithWarnings,
+  countTemplateSceneSlots,
   extractDynamicStyleFromTemplate,
   getCreatomateRender,
   normalizeCreatomateStatus,
+  resolveCreatomateRenderScale,
+  templateResolution,
   submitCreatomateRender,
   submitCreatomateSourceRender,
   type CreatomateRenderResult,
@@ -27,6 +30,7 @@ import {
 import type {
   ErrorCode,
   RenderAssignmentInput,
+  RenderJobOutput,
   RenderJobResponse,
   RenderSubmitFromTimelineRequest,
   RenderSubmitRequest,
@@ -83,9 +87,29 @@ const stableStringify = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+type RenderOutputRecord = { requestedScale?: number | null; renderScale?: number | null; width?: number | null; height?: number | null; expectedWidth?: number | null; expectedHeight?: number | null };
+
+/** VE2E-52: merges only the fields the patch actually carries (a later status poll without size never erases an earlier report). */
+const mergeRenderOutput = (existing: unknown, patch: RenderOutputRecord): RenderOutputRecord => {
+  const merged: RenderOutputRecord = existing && typeof existing === "object" ? { ...(existing as RenderOutputRecord) } : {};
+  for (const [key, value] of Object.entries(patch)) if (typeof value === "number") (merged as Record<string, number>)[key] = value;
+  return merged;
+};
+
+const toRenderOutput = (raw: unknown): RenderJobOutput | null => {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const num = (key: string) => (typeof record[key] === "number" ? (record[key] as number) : null);
+  const output = { requestedScale: num("requestedScale"), renderScale: num("renderScale"), width: num("width"), height: num("height"), expectedWidth: num("expectedWidth"), expectedHeight: num("expectedHeight") };
+  const belowBySize = output.width !== null && output.expectedWidth !== null && output.width < output.expectedWidth;
+  const belowByHeight = output.height !== null && output.expectedHeight !== null && output.height < output.expectedHeight;
+  const belowByScale = output.renderScale !== null && output.renderScale < 1;
+  return { ...output, belowTemplateResolution: belowBySize || belowByHeight || belowByScale };
+};
+
 const toJobResponse = (row: {
   id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
-  clipsTotal?: number; clipsReady?: number; clipFailures?: unknown;
+  clipsTotal?: number; clipsReady?: number; clipFailures?: unknown; renderOutput?: unknown;
   resultUrl: string | null; snapshotUrl?: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
 }): RenderJobResponse => ({
@@ -105,6 +129,7 @@ const toJobResponse = (row: {
   costCurrency: row.costCurrency,
   renderDurationMs: row.renderDurationMs,
   lastError: row.lastError && typeof row.lastError === "object" ? (row.lastError as { code: string; message: string }) : null,
+  output: toRenderOutput(row.renderOutput),
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
@@ -282,7 +307,7 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId },
+      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId, expected: templateResolution(snapshot.rawTemplate) },
       (webhookUrl) =>
         submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
           templateId: snapshot.externalTemplateId,
@@ -304,7 +329,7 @@ export class RenderJobsService {
    * never the actual request if that would embed a volatile signed media-delivery URL.
    */
   private async createAndSubmitRenderJob(
-    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined },
+    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined; expected?: { width: number; height: number } | null | undefined },
     callProvider: (webhookUrl: string) => Promise<CreatomateRenderResult>,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
@@ -359,6 +384,14 @@ export class RenderJobsService {
           submittedAt: new Date(),
           ...(nextStatus ? { status: nextStatus, progress: submitted.progress } : {}),
           ...(submitted.snapshotUrl ? { snapshotUrl: submitted.snapshotUrl } : {}),
+          // VE2E-52: what LyOnix asked for (explicit render_scale), the template's resolution, and whatever size Creatomate already reports.
+          renderOutput: mergeRenderOutput(latest?.renderOutput, {
+            requestedScale: resolveCreatomateRenderScale(),
+            ...(params.expected ? { expectedWidth: params.expected.width, expectedHeight: params.expected.height } : {}),
+            ...(submitted.width !== null && submitted.width !== undefined ? { width: submitted.width } : {}),
+            ...(submitted.height !== null && submitted.height !== undefined ? { height: submitted.height } : {}),
+            ...(submitted.renderScale !== null && submitted.renderScale !== undefined ? { renderScale: submitted.renderScale } : {}),
+          }) as Prisma.InputJsonValue,
         },
       });
     } catch (error) {
@@ -472,6 +505,10 @@ export class RenderJobsService {
       style: ReturnType<typeof applyDynamicStyleOverrides>;
       renderable: Awaited<ReturnType<typeof resolveSceneBindingsForMapping>>;
       totalSceneCount: number;
+      /** VE2E-52: how the source was composed, for the preview response and the job record. */
+      layout: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] };
+      /** Template resolution the render is expected to reach at render_scale 1. */
+      expected: { width: number; height: number };
     }>
   > {
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -559,8 +596,11 @@ export class RenderJobsService {
     // call this exact same method with the exact same saved timeline row.
     const optionValues = (timeline.optionValues && typeof timeline.optionValues === "object" ? (timeline.optionValues as Record<string, string>) : {});
     const style = applyDynamicStyleOverrides(extractDynamicStyleFromTemplate(snapshot.rawTemplate), optionValues);
-    const source = buildDynamicComposition(dynamicScenes, style, { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT, outputFormat });
-    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source, style, renderable, totalSceneCount: scenes.length } };
+    // VE2E-52: one generator for Auto, Studio final render and Studio preview - clones the pinned template's own Scene layout to exactly N scenes.
+    const resolution = templateResolution(snapshot.rawTemplate) ?? { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT };
+    const composed = buildDynamicCompositionWithWarnings(dynamicScenes, style, { width: resolution.width, height: resolution.height, ...(outputFormat ? { outputFormat } : {}) });
+    const layout = { mode: style.layout ? ("template_scaled" as const) : ("style_only" as const), templateSceneSlots: style.layout?.scenes.length ?? 0, warnings: composed.warnings as string[] };
+    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source: composed.source, style, renderable, totalSceneCount: scenes.length, layout, expected: resolution } };
   }
 
   /**
@@ -588,7 +628,8 @@ export class RenderJobsService {
 
     const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}) });
     if (!resolvedComposition.ok) return resolvedComposition;
-    const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
+    const { templateSnapshotId, source, style, renderable, expected } = resolvedComposition.data;
+    const { layout: templateLayout, ...styleWithoutLayout } = style;
 
     // Fingerprint from each included scene's stable identifiers (never the resolved signed
     // delivery URLs, which mint a fresh random token every call — see `submit`'s own comment
@@ -606,7 +647,9 @@ export class RenderJobsService {
           timelineVersionId,
           providerAccountId: input.providerAccountId,
           outputFormat: input.outputFormat ?? null,
-          style,
+          style: styleWithoutLayout,
+          // VE2E-52: the layout itself is large; the pinned snapshot id + generator version identify it.
+          generator: templateLayout ? `template-scaled-v1:${templateSnapshotId}` : "style-only",
           scenes: renderable.map((scene) => ({
             sceneId: scene.sceneId,
             mediaAssetVersionId: scene.mediaAssetVersionId,
@@ -618,8 +661,8 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId },
-      (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
+      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId, expected },
+      (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl, renderScale: resolveCreatomateRenderScale() }),
     );
   }
 
@@ -637,7 +680,7 @@ export class RenderJobsService {
     timelineVersionId: string,
     userId: string,
     role: "admin" | "staff",
-  ): Promise<RenderOutcome<{ ready: boolean; source: Record<string, unknown> | null; renderableSceneCount: number; totalSceneCount: number; missingReason: string | null }>> {
+  ): Promise<RenderOutcome<{ ready: boolean; source: Record<string, unknown> | null; renderableSceneCount: number; totalSceneCount: number; missingReason: string | null; layout?: { mode: "template_scaled" | "style_only"; templateSceneSlots: number; warnings: string[] } }>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const resolved = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role);
     if (!resolved.ok) {
@@ -657,12 +700,13 @@ export class RenderJobsService {
         renderableSceneCount: resolved.data.renderable.length,
         totalSceneCount: resolved.data.totalSceneCount,
         missingReason: null,
+        layout: resolved.data.layout,
       },
     };
   }
 
   /** Durable render queue shared by Studio and Auto. The HTTP path never waits for media-worker or Creatomate. */
-  async enqueueTimelineRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff", input: RenderSubmitFromTimelineRequest, mode: "template" | "dynamic", workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+  async enqueueTimelineRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff", input: RenderSubmitFromTimelineRequest, requestedMode: "template" | "dynamic", workflowRunId?: string): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
@@ -676,6 +720,11 @@ export class RenderJobsService {
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
     let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
+    // VE2E-52: the fixed-slot (modification) path only when the scene count equals the template's Scene slots;
+    // any other count (fewer or more) is composed by the template-scaled generator so no scene/narration is dropped.
+    const includedSceneCount = resolved.filter((scene) => !scene.excluded).length;
+    const slotCount = countTemplateSceneSlots(snapshot.rawTemplate);
+    const mode: "template" | "dynamic" = requestedMode === "template" && slotCount > 0 && includedSceneCount !== slotCount ? "dynamic" : requestedMode;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
       if (!composition.ok) return composition;
@@ -777,13 +826,22 @@ export class RenderJobsService {
   }
 
   /** Applies the monotonic status guard and persists a Creatomate-reported result. Never lets a terminal state regress. */
-  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null; snapshotUrl?: string | null }) {
+  private async applyStatus(jobId: string, current: RenderJobStatus, incoming: { status: RenderJobStatus; url?: string | null; progress?: number | null; errorMessage?: string | null; renderDurationMs?: number | null; snapshotUrl?: string | null; width?: number | null; height?: number | null; renderScale?: number | null }) {
     const nextStatus = nextRenderJobStatus(current, incoming.status);
     if (!nextStatus) return null; // stale/out-of-order/duplicate — no-op, current row already reflects the latest applied state.
     const data: Prisma.RenderJobUpdateInput = { status: nextStatus };
     if (incoming.progress !== undefined && incoming.progress !== null) data.progress = incoming.progress;
     // VE2E-19: Creatomate can report a preview frame before the render is fully complete — capture it whenever present, not only at completion.
     if (incoming.snapshotUrl) data.snapshotUrl = incoming.snapshotUrl;
+    // VE2E-52: keep the size/scale Creatomate reports so the UI can warn when it is below the template resolution.
+    if (typeof incoming.width === "number" || typeof incoming.height === "number" || typeof incoming.renderScale === "number") {
+      const existing = await this.prisma.renderJob.findUnique({ where: { id: jobId }, select: { renderOutput: true } });
+      data.renderOutput = mergeRenderOutput(existing?.renderOutput, {
+        ...(typeof incoming.width === "number" ? { width: incoming.width } : {}),
+        ...(typeof incoming.height === "number" ? { height: incoming.height } : {}),
+        ...(typeof incoming.renderScale === "number" ? { renderScale: incoming.renderScale } : {}),
+      }) as Prisma.InputJsonValue;
+    }
     if (nextStatus === "completed") {
       data.resultUrl = incoming.url ?? null;
       data.completedAt = new Date();
@@ -813,6 +871,9 @@ export class RenderJobsService {
         errorMessage: remote.errorMessage,
         renderDurationMs: remote.renderDurationMs,
         snapshotUrl: remote.snapshotUrl,
+        width: remote.width,
+        height: remote.height,
+        renderScale: remote.renderScale,
       });
       return { ok: true, data: toJobResponse(updated ?? row) };
     } catch {
@@ -865,6 +926,9 @@ export class RenderJobsService {
             errorMessage: typeof record.error_message === "string" ? record.error_message : null,
             renderDurationMs: typeof record.render_duration === "number" ? Math.round(record.render_duration * 1000) : null,
             snapshotUrl: typeof record.snapshot_url === "string" ? record.snapshot_url : null,
+            width: typeof record.width === "number" ? record.width : null,
+            height: typeof record.height === "number" ? record.height : null,
+            renderScale: typeof record.render_scale === "number" ? record.render_scale : null,
           };
       const updated = await this.applyStatus(job.id, job.status as RenderJobStatus, outcome);
       await this.prisma.renderWebhookEvent.updateMany({ where: { renderJobId: job.id, eventFingerprint }, data: { appliedStatus: updated?.status ?? null } });
