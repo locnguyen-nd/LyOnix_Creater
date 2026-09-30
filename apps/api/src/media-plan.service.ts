@@ -107,6 +107,30 @@ export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
   return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
 };
 
+/** Apify search rejects queries over 200 chars; stay well below. */
+export const APIFY_FALLBACK_KEYWORD_MAX_CHARS = 100;
+
+/**
+ * VE2E-48: the Japanese Apify keyword of a segment. `keywords.ja` from the plan wins; otherwise, for a
+ * `ja` script (whose scene `visualQuery` is already Japanese) the first 1-2 distinct scene queries are
+ * joined within {@link APIFY_FALLBACK_KEYWORD_MAX_CHARS}. Non-ja scripts without keywords get `null`
+ * (English is never invented) -> Pexels with reason `no_ja_keywords`.
+ */
+export const apifyKeywordForSegment = (script: MediaPlanScript, segment: PlannedSegment): string | null => {
+  const planned = segment.keywords?.ja.trim();
+  if (planned) return planned;
+  if (!/^ja($|[-_])/i.test(script.language.trim())) return null;
+  const distinct: string[] = [];
+  for (const sceneId of segment.sceneIds) {
+    const query = script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery.replace(/\s+/g, " ").trim();
+    if (query && !distinct.some((existing) => existing.toLowerCase() === query.toLowerCase())) distinct.push(query);
+    if (distinct.length >= 2) break;
+  }
+  if (distinct.length === 0) return null;
+  const joined = distinct.length === 2 && `${distinct[0]} ${distinct[1]}`.length <= APIFY_FALLBACK_KEYWORD_MAX_CHARS ? `${distinct[0]} ${distinct[1]}` : distinct[0]!;
+  return joined.slice(0, APIFY_FALLBACK_KEYWORD_MAX_CHARS).trim() || null;
+};
+
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
 
 @Injectable()
@@ -168,11 +192,11 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger },
   ): Promise<{ source: SegmentSource } | { reason: string | null }> {
     if (!this.apify) return { reason: null };
-    const keyword = input.segment.keywords?.ja.trim();
+    const keyword = apifyKeywordForSegment(input.script, input.segment);
     if (!keyword) return { reason: "no_ja_keywords" };
     try {
       const account = await this.apify.findAccountForUser(userId, role);
-      if (!account) return { reason: null }; // No Apify account: behave exactly as before (nothing to record).
+      if (!account) return { reason: "no_apify_account" };
       const brief = this.segmentBrief(input.script, input.segment);
       const usedExternalIds = new Set([...input.ledger.externalIds].map((id) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id)));
       const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {

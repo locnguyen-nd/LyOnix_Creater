@@ -25,6 +25,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
+import type { MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -189,6 +190,21 @@ export class WorkflowRunnerService {
       await this.prisma.stepRun.update({ where: { id: stepRun.id }, data: { status: "failed", endedAt: new Date(), error: { code, message } } });
       if (operationId) await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "failed", errorCode: code } });
       throw error;
+    }
+  }
+
+  /** VE2E-48: persists per-segment sourceProvider + fallbackReason as the `media_plan_diagnostics` StepRun outputRef (no migration; read by GET /video-productions/:id). Best-effort. */
+  private async saveMediaSourcingDiagnostics(run: WorkflowRunRow, segments: MediaPlanSegmentDiagnostics[]): Promise<void> {
+    try {
+      const output = { segments } as unknown as Prisma.InputJsonValue;
+      const now = new Date();
+      await this.prisma.stepRun.upsert({
+        where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "media_plan_diagnostics", attempt: run.attempts } },
+        create: { workflowRunId: run.id, stepKey: "media_plan_diagnostics", attempt: run.attempts, status: "succeeded", startedAt: now, endedAt: now, outputRef: output },
+        update: { status: "succeeded", endedAt: now, outputRef: output },
+      });
+    } catch {
+      // Diagnostics must never fail the pipeline.
     }
   }
 
@@ -364,23 +380,31 @@ export class WorkflowRunnerService {
     };
     const ledger = new SegmentSourceLedger();
     const sourced: SourcedSegment[] = [];
-    for (const segment of this.mediaPlans.planSegments(planScript, backgroundSegmentRange)) {
-      const source =
-        (await this.mediaPlans.findReusableSource(run.projectId, segment, ledger)) ??
-        (await this.recordStep(
-          run,
-          `import_media_${segment.segmentId}`,
-          { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
-          async () => {
-            const outcome = await this.mediaPlans.importSegmentSource(run.projectId, userId, role, { providerAccountId: mediaConfig.providerAccountId, script: planScript, segment, ledger });
-            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-            return outcome.data;
-          },
-        ));
-      ledger.add(source);
-      sourced.push({ segment, source, errorCode: null });
+    const persistSourcing = () => this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics);
+    try {
+      for (const segment of this.mediaPlans.planSegments(planScript, backgroundSegmentRange)) {
+        const source =
+          (await this.mediaPlans.findReusableSource(run.projectId, segment, ledger)) ??
+          (await this.recordStep(
+            run,
+            `import_media_${segment.segmentId}`,
+            { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+            async () => {
+              const outcome = await this.mediaPlans.importSegmentSource(run.projectId, userId, role, { providerAccountId: mediaConfig.providerAccountId, script: planScript, segment, ledger });
+              if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+              return outcome.data;
+            },
+          ));
+        ledger.add(source);
+        sourced.push({ segment, source, errorCode: null });
+      }
+    } catch (error) {
+      // VE2E-48: keep the per-segment sourcing decisions made before the failing segment visible on the run.
+      await persistSourcing();
+      throw error;
     }
     const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
+    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics);
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 

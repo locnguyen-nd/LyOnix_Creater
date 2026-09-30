@@ -5,6 +5,7 @@ import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button } from "../components/ui";
 import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
+import { SourceBadge } from "../studio/SourceBadge";
 import { getVideoProduction, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
@@ -113,6 +114,20 @@ export function VideoProductionPage() {
             <a className="underline text-[12.5px]" href={run.resultUrl} target="_blank" rel="noreferrer">{t("videoProduction.openResult")}</a>
             <a className="underline text-[12.5px]" href={run.resultUrl} download>{t("videoProduction.download")}</a>
           </div>
+        </div>
+      ) : null}
+
+      {run.mediaSourcing && run.mediaSourcing.length > 0 ? (
+        <div className="mb-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4" data-testid="media-sourcing">
+          <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.sourcingTitle")}</p>
+          <ul className="flex flex-col gap-1.5">
+            {run.mediaSourcing.map((segment, index) => (
+              <li key={segment.segmentId} className="text-[12.5px]">
+                {index + 1}. {segment.segmentId}
+                <SourceBadge diagnostic={segment} />
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
 

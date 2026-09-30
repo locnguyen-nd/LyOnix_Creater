@@ -326,6 +326,9 @@ describe("WorkflowRunnerService", () => {
       ]);
       expect(persisted.segments).toEqual([{ segmentId: "g1", sceneIds: ["scene-1", "scene-2"], mediaAssetVersionId: "pexels-scene-1", subject: "Messi", priority: 1 }]);
       expect(stepRuns.map((s) => s.stepKey)).toContain("import_media_g1");
+      // VE2E-48: per-segment sourceProvider + fallbackReason are persisted on the run (StepRun outputRef).
+      const diagnosticsStep = stepRuns.find((s) => s.stepKey === "media_plan_diagnostics");
+      expect(diagnosticsStep.outputRef.segments).toMatchObject([{ segmentId: "g1", sourcing: "imported", sourceProvider: "pexels" }]);
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 

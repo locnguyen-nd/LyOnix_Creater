@@ -717,6 +717,8 @@ export type VideoProductionResponse = {
   lastError: { code: string; message: string; stepKey?: string } | null;
   /** VE2E-40: the run's persisted background segment setting (legacy runs read as auto) and its resolved range. */
   backgroundSegments: BackgroundSegmentsResolvedResponse;
+  /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */
+  mediaSourcing: MediaPlanSegmentDiagnostics[] | null;
   createdAt: string;
   updatedAt: string;
 };
