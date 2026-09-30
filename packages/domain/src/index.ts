@@ -198,3 +198,16 @@ export {
   type SegmentCountRange,
   type SceneSourceRange,
 } from "./media-plan.js";
+
+export {
+  JAPAN_GEONAMES_ID,
+  evaluateSocialCandidate,
+  isJapanCountry,
+  keywordOverlap,
+  selectSocialCandidates,
+  type SocialCandidateSignals,
+  type SocialEvaluation,
+  type SocialFilterContext,
+  type SocialRejectReason,
+  type SocialSelection,
+} from "./social-candidate-filter.js";
