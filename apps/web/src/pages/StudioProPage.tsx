@@ -639,22 +639,28 @@ export function StudioProPage() {
     }
   };
 
+  // Shared by Pexels and Apify imports: honours the "this scene / whole segment" scope. The new asset is not in
+  // `mediaLibrary` yet (state update pending), so the segment path must use the asset object directly.
+  const applyImportedAsset = (asset: MediaAssetVersionSummary, label: string) => {
+    const selectedSegmentId = draft.scenes.find((scene) => scene.sceneId === selectedSceneId)?.segmentId;
+    if (selectedSegmentId && mediaScope === "segment") {
+      if (asset.kind !== "video" && asset.kind !== "image") return;
+      mutate((prev) => {
+        const segmentAsset = { id: asset.id, kind: asset.kind as "video" | "image", durationMs: asset.durationMs };
+        const replaced = replaceSegmentSource(prev.scenes, prev.segments, selectedSegmentId, segmentAsset, segmentInPoints[selectedSegmentId] ?? 0);
+        return { ...prev, ...replaced, scenes: replaced.scenes.map((scene) => scene.segmentId === selectedSegmentId ? { ...scene, mediaLabel: label } : scene) };
+      });
+    } else {
+      assignMediaToSelectedScene({ id: asset.id, label });
+    }
+  };
+
   const importPexelsResult = async (externalId: string, label: string, type: PexelsMediaType = manualMediaType) => {
     if (!context || !visualAccountId) return;
     try {
       const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type, externalId, sceneId: selectedSceneId });
       setMediaLibrary((prev) => [asset, ...prev]);
-      const selectedSegmentId = draft.scenes.find((scene) => scene.sceneId === selectedSceneId)?.segmentId;
-      if (selectedSegmentId && mediaScope === "segment") {
-        if (asset.kind !== "video" && asset.kind !== "image") return;
-        mutate((prev) => {
-          const segmentAsset = { id: asset.id, kind: asset.kind as "video" | "image", durationMs: asset.durationMs };
-          const replaced = replaceSegmentSource(prev.scenes, prev.segments, selectedSegmentId, segmentAsset, segmentInPoints[selectedSegmentId] ?? 0);
-          return { ...prev, ...replaced, scenes: replaced.scenes.map((scene) => scene.segmentId === selectedSegmentId ? { ...scene, mediaLabel: label } : scene) };
-        });
-      } else {
-        assignMediaToSelectedScene({ id: asset.id, label });
-      }
+      applyImportedAsset(asset, label);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
     }
@@ -1164,7 +1170,7 @@ export function StudioProPage() {
                     selectedSceneId={selectedSceneId}
                     onImported={(asset, label) => {
                       setMediaLibrary((prev) => [asset, ...prev]);
-                      assignMediaToSelectedScene({ id: asset.id, label });
+                      applyImportedAsset(asset, label);
                     }}
                   />
                 </div>
