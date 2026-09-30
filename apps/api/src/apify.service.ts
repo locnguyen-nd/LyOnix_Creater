@@ -29,7 +29,7 @@ import {
   fetchApifyTikTokPost,
   hostMatchesSuffix,
   isLiveContentKind,
-  moderateSceneCandidate,
+  rankContentModels,
   isApifyPlatform,
   searchApify,
   type ApifyUsage,
@@ -43,6 +43,7 @@ import {
   type VisionModerationFrame,
   type VisionModerationSceneContext,
 } from "@lyonix/providers";
+import { moderateVisionWithModelFailover } from "./content-model-failover.js";
 import {
   applyVisionFindings,
   canAccessProject,
@@ -433,6 +434,8 @@ export class ApifyService {
     if (!account) return pool;
     const apiKey = decryptSecret(account.encryptedSecret);
     const kind = account.provider as LiveContentKind;
+    const ranked = rankContentModels(kind, account.availableModels ?? []);
+    const models = [...new Set([...(account.preferredModels ?? []).filter((id) => ranked.includes(id)), account.model, ...ranked])];
     const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
     const order = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SEGMENT).map((r) => r.candidate.candidateId);
     const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
@@ -442,8 +445,9 @@ export class ApifyService {
       const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
       if (!frame.ok) continue;
       const visionFrame: VisionModerationFrame = { mimeType: frame.mimeType || "image/jpeg", base64: frame.buffer.toString("base64") };
-      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId: account.model, operation: "image_moderation", sceneContext, frames: [visionFrame] });
-      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: account.model, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
+      const selected = await moderateVisionWithModelFailover(this.providerAccounts, { id: account.id, provider: kind, apiKey, models }, sceneContext, [visionFrame]);
+      if (!selected) continue;
+      const findings = decideVisionModeration({ raw: selected.outcome.raw, provider: kind, model: selected.modelId, operation: "image_moderation", evidenceRefs: selected.outcome.evidenceRefs });
       byId.set(candidateId, applyVisionFindings(candidate, findings));
     }
     return pool.map((c) => byId.get(c.candidateId) ?? c);

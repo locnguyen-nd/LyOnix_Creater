@@ -8,14 +8,31 @@ const usage = (body: Record<string, unknown>, requestId: string | null) => {
 };
 const timeoutMs = 120_000;
 const redact = (value: string) => value.replace(/sk-[a-zA-Z0-9_-]+/g, "[redacted]").replace(/AIza[a-zA-Z0-9_-]+/g, "[redacted]").slice(0, 220);
+/** VE2E-56: Gemini 429 bodies carry "Please retry in 34.5s" / `"retryDelay": "34s"`; returns ms or undefined. */
+export const parseRetryDelayMs = (detail: string): number | undefined => {
+  const m = /retry in ([0-9.]+)\s*s/i.exec(detail) ?? /retryDelay"?\s*:\s*"?([0-9.]+)s/i.exec(detail);
+  const seconds = m ? Number(m[1]) : NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds * 1000) : undefined;
+};
+const parseRetryAfterMs = (header: string | null): number | undefined => {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1_000);
+  const date = Date.parse(header);
+  return Number.isFinite(date) && date > Date.now() ? date - Date.now() : undefined;
+};
 const fail = (status: number, retryAfter: string | null, detail = "") => {
   const suffix = detail ? `: ${redact(detail)}` : "";
   const quota = /insufficient_quota|no credits remaining|you have no credits|quota exceeded/i.test(detail);
   const retired = status === 404 || /no longer available|is not found|not found for API version/i.test(detail);
-  if (quota) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false);
+  const accountLevel = /insufficient_quota|current quota|no credits remaining|you have no credits|billing/i.test(detail);
+  const daily = /PerDay|per day|daily/i.test(detail);
+  const scope = accountLevel ? "account" as const : daily ? "daily" as const : /PerMinute|per minute/i.test(detail) ? "minute" as const : undefined;
+  const retryAfterMs = parseRetryAfterMs(retryAfter) ?? parseRetryDelayMs(detail);
+  if (quota) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, scope);
   if (retired) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Model is no longer available${suffix}`, false);
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Provider authentication failed${suffix}`, false);
-  if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Provider rate limit reached${suffix}`, true, Number(retryAfter ?? 0) * 1000 || undefined);
+  if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Provider rate limit reached${suffix}`, true, retryAfterMs, scope);
   if (status === 400) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Provider rejected the generate payload${suffix}`, false);
   throw new ProviderError("PROVIDER_UNAVAILABLE", `Provider request failed (${status})${suffix}`, status >= 500);
 };

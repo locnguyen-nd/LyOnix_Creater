@@ -56,6 +56,9 @@ describe("PexelsService", () => {
       acquireContentRequestSlot: vi.fn(async () => true),
       releaseContentRequestSlot: vi.fn(async () => undefined),
       cooldownContentAccount: vi.fn(async () => new Date()),
+      getModelAvailability: vi.fn(async () => ({ available: true, retryAt: null })),
+      markModelLimited: vi.fn(async () => new Date()),
+      markModelUnusable: vi.fn(async () => undefined),
       // VE2E-29: no vision-capable "content" account by default - every pre-existing test below keeps
       // exercising the metadata-only path unchanged. Tests exercising the new vision wiring override this.
       contentGenerationCandidates: vi.fn(async () => []),

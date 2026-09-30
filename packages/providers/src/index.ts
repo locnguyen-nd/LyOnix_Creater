@@ -5,7 +5,11 @@ export type ProviderRole = (typeof providerRoles)[number];
 export type ProviderErrorCode = "PROVIDER_AUTH_INVALID" | "PROVIDER_CAPABILITY_UNAVAILABLE" | "PROVIDER_RATE_LIMITED" | "PROVIDER_QUOTA_EXHAUSTED" | "PROVIDER_SCHEMA_INVALID" | "PROVIDER_CONTENT_REFUSED" | "PROVIDER_TIMEOUT" | "PROVIDER_SUBMIT_UNKNOWN" | "PROVIDER_UNAVAILABLE" | "PROVIDER_NOT_CONFIGURED";
 
 export class ProviderError extends Error {
-  constructor(readonly code: ProviderErrorCode, message: string, readonly retryable: boolean, readonly retryAfterMs?: number) { super(message); }
+  /**
+   * VE2E-56: for 429/quota errors, how far the limit reaches. `daily` = per-model daily quota (until reset),
+   * `minute` = per-model RPM/TPM, `account` = billing/key level (cools the whole account). Absent = unknown.
+   */
+  constructor(readonly code: ProviderErrorCode, message: string, readonly retryable: boolean, readonly retryAfterMs?: number, readonly quotaScope?: "daily" | "minute" | "account") { super(message); }
 }
 
 export type CapabilitySnapshot = { capabilities: readonly string[]; models: readonly string[]; capturedAt: string };

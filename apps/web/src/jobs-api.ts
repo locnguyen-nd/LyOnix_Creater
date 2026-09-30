@@ -11,6 +11,8 @@ export type ApiProvider = {
   model: string;
   availableModels: string[];
   modelSnapshot: ApiProviderModelSnapshotEntry[];
+  preferredModels: string[];
+  modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   isFake: boolean;
   version: number;
 };

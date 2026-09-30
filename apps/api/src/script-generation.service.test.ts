@@ -43,6 +43,8 @@ describe("ScriptGenerationService.generate", () => {
     acquireContentRequestSlot: ReturnType<typeof vi.fn>;
     releaseContentRequestSlot: ReturnType<typeof vi.fn>;
     cooldownContentAccount: ReturnType<typeof vi.fn>;
+    getModelAvailability: ReturnType<typeof vi.fn>;
+    markModelLimited: ReturnType<typeof vi.fn>;
     markModelUnusable: ReturnType<typeof vi.fn>;
     repinModel: ReturnType<typeof vi.fn>;
   };
@@ -58,6 +60,8 @@ describe("ScriptGenerationService.generate", () => {
       acquireContentRequestSlot: vi.fn(async () => true),
       releaseContentRequestSlot: vi.fn(async () => undefined),
       cooldownContentAccount: vi.fn(async () => undefined),
+      getModelAvailability: vi.fn(async () => ({ available: true, retryAt: null })),
+      markModelLimited: vi.fn(async () => new Date(Date.now() + 60_000)),
       markModelUnusable: vi.fn(async () => undefined),
       repinModel: vi.fn(async () => undefined),
     };
@@ -120,15 +124,31 @@ describe("ScriptGenerationService.generate", () => {
 
   it("returns PROVIDER_QUOTA_EXHAUSTED once every available model for the account is out of quota", async () => {
     providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
-    const quotaResponse = () => new Response(JSON.stringify({ error: { message: "quota exceeded for this project" } }), { status: 429 });
-    const fetchMock = vi.fn().mockResolvedValueOnce(quotaResponse());
+    const quotaResponse = () => new Response(JSON.stringify({ error: { message: "model quota exceeded per day" } }), { status: 429 });
+    const fetchMock = vi.fn().mockResolvedValueOnce(quotaResponse()).mockResolvedValueOnce(quotaResponse());
     vi.stubGlobal("fetch", fetchMock);
 
     const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_QUOTA_EXHAUSTED", status: 429 });
+    if (outcome && outcome !== "forbidden" && !outcome.ok) expect(outcome.message).toContain("gpt-4o");
     expect(providerAccounts.repinModel).not.toHaveBeenCalled();
+    expect(providerAccounts.cooldownContentAccount).not.toHaveBeenCalled();
+    expect(providerAccounts.markModelLimited).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries the next model on the same key after a model-level 429", async () => {
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "rate limit per minute" } }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(draftBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
+    expect(outcome).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(providerAccounts.markModelLimited).toHaveBeenCalledWith("account-1", "gpt-4o-mini", expect.any(Number), expect.any(String));
+    expect(providerAccounts.cooldownContentAccount).not.toHaveBeenCalled();
   });
 
   it("does not burn the rest of the candidate list on an account-wide auth failure", async () => {
@@ -197,6 +217,8 @@ describe("ScriptGenerationService.extractSegmentKeywords (VE2E-50)", () => {
       acquireContentRequestSlot: vi.fn(async () => true),
       releaseContentRequestSlot: vi.fn(async () => undefined),
       cooldownContentAccount: vi.fn(async () => undefined),
+      getModelAvailability: vi.fn(async () => ({ available: true, retryAt: null })),
+      markModelLimited: vi.fn(async () => new Date(Date.now() + 60_000)),
       markModelUnusable: vi.fn(async () => undefined),
     };
     service = new ScriptGenerationService({} as unknown as SourcesService, providerAccounts as any);
@@ -216,11 +238,12 @@ describe("ScriptGenerationService.extractSegmentKeywords (VE2E-50)", () => {
     expect(providerAccounts.releaseContentRequestSlot).toHaveBeenCalledWith("account-1");
   });
 
-  it("returns a failure outcome (never throws) when the provider is rate limited, and starts the account cooldown", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "slow down" } }), { status: 429 })));
+  it("returns a failure outcome (never throws) when the provider is rate limited, and cools the model", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "rate limit per minute" } }), { status: 429 })));
     const outcome = await service.extractSegmentKeywords("user-1", "staff", { providerAccountId: "account-1", language: "ja", segments });
     expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
-    expect(providerAccounts.cooldownContentAccount).toHaveBeenCalled();
+    expect(providerAccounts.markModelLimited).toHaveBeenCalled();
+    expect(providerAccounts.cooldownContentAccount).not.toHaveBeenCalled();
   });
 
   it("fails without a call when the content account is unavailable or the request is empty", async () => {

@@ -15,7 +15,7 @@ import {
   getPexelsPhoto,
   getPexelsVideo,
   isLiveContentKind,
-  moderateSceneCandidate,
+  rankContentModels,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
@@ -25,6 +25,7 @@ import {
   type VisionModerationFrame,
   type VisionModerationSceneContext,
 } from "@lyonix/providers";
+import { moderateVisionWithModelFailover } from "./content-model-failover.js";
 import {
   applyVisionFindings,
   buildBoundedQueryVariants,
@@ -324,7 +325,8 @@ export class PexelsService {
 
     const apiKey = decryptSecret(account.encryptedSecret);
     const kind = account.provider as LiveContentKind;
-    const modelId = account.model;
+    const ranked = rankContentModels(kind, account.availableModels ?? []);
+    const models = [...new Set([...(account.preferredModels ?? []).filter((id) => ranked.includes(id)), account.model, ...ranked])];
     const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
 
     const priorityOrder = rankMediaCandidates(pool, brief, { usedExternalIds }).slice(0, MAX_VISION_CANDIDATES_PER_SCENE).map((r) => r.candidate.candidateId);
@@ -336,8 +338,9 @@ export class PexelsService {
       const downloaded = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_DOWNLOAD_BYTES, allowedHostSuffix: ".pexels.com" });
       if (!downloaded.ok) continue;
       const frame: VisionModerationFrame = { mimeType: downloaded.mimeType || "image/jpeg", base64: downloaded.buffer.toString("base64") };
-      const outcome = await moderateSceneCandidate({ kind, apiKey, modelId, operation: "image_moderation", sceneContext, frames: [frame] });
-      const findings = decideVisionModeration({ raw: outcome.raw, provider: kind, model: modelId, operation: "image_moderation", evidenceRefs: outcome.evidenceRefs });
+      const selected = await moderateVisionWithModelFailover(this.providerAccounts, { id: account.id, provider: kind, apiKey, models }, sceneContext, [frame]);
+      if (!selected) continue;
+      const findings = decideVisionModeration({ raw: selected.outcome.raw, provider: kind, model: selected.modelId, operation: "image_moderation", evidenceRefs: selected.outcome.evidenceRefs });
       byId.set(candidateId, applyVisionFindings(candidate, findings));
     }
     return pool.map((c) => byId.get(c.candidateId) ?? c);
