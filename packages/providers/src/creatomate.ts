@@ -81,7 +81,45 @@ export async function getCreatomateTemplate(apiKey: string, externalTemplateId: 
 // --- modification slot derivation ---
 
 export type ModificationKind = "text" | "video" | "image" | "audio" | "color" | "font" | "volume";
-export type TemplateModificationSlot = { key: string; kind: ModificationKind; label: string; required: boolean };
+export type TemplateModificationSlot = {
+  key: string;
+  kind: ModificationKind;
+  label: string;
+  required: boolean;
+  /** VE2E-47: TTS `provider` string of the template's audio element (audio `.source` slot only). */
+  ttsProvider?: string;
+};
+
+/**
+ * VE2E-47: Creatomate RenderScript audio elements can carry a `provider` (e.g. `"elevenlabs
+ * model_id=... voice_id=..."`); when set, Creatomate treats `source` as TEXT to speak and calls the
+ * TTS integration itself (billed on the owner's ElevenLabs account). LyOnix sends a media-delivery
+ * URL as `<name>.source`, so it must also blank `<name>.provider` in the same modifications object.
+ * This is the single place that knows the override key/value (the Test agent dry-runs exactly this).
+ */
+export const TTS_PROVIDER_DISABLED_VALUE = "";
+export const ttsProviderOverrideKey = (sourceKey: string): string => sourceKey.replace(/.source$/, ".provider");
+
+export type TemplateTtsElement = { elementName: string; provider: string; dynamic: boolean };
+
+/** Every named audio element in the template that carries a non-empty `provider` (dynamic or fixed). */
+export function findTemplateTtsElements(source: unknown): TemplateTtsElement[] {
+  const found: TemplateTtsElement[] = [];
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) { for (const item of node) walk(item); return; }
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+    if (name && type === "audio" && provider) {
+      found.push({ elementName: name, provider, dynamic: record.dynamic === true || (Array.isArray(record.dynamic) && record.dynamic.length > 0) });
+    }
+    for (const value of Object.values(record)) walk(value);
+  };
+  walk(source);
+  return found;
+}
 
 const ELEMENT_KIND: Record<string, "text" | "video" | "image" | "audio" | undefined> = { text: "text", video: "video", image: "image", audio: "audio" };
 
@@ -96,10 +134,10 @@ const ELEMENT_KIND: Record<string, "text" | "video" | "image" | "audio" | undefi
 export function deriveTemplateModifications(source: unknown): TemplateModificationSlot[] {
   const slots: TemplateModificationSlot[] = [];
   const seen = new Set<string>();
-  const push = (key: string, kind: ModificationKind, required: boolean) => {
+  const push = (key: string, kind: ModificationKind, required: boolean, ttsProvider?: string) => {
     if (seen.has(key)) return;
     seen.add(key);
-    slots.push({ key, kind, label: key, required });
+    slots.push({ key, kind, label: key, required, ...(ttsProvider ? { ttsProvider } : {}) });
   };
   const walk = (node: unknown) => {
     if (Array.isArray(node)) {
@@ -131,7 +169,8 @@ export function deriveTemplateModifications(source: unknown): TemplateModificati
         // VE2E-06: an audio element's `source` lets the Auto orchestrator attach a
         // generated narration clip — never required, since many audio elements are
         // fixed background music the template author does not want overridden.
-        push(`${name}.source`, "audio", false);
+        const ttsProvider = typeof record.provider === "string" ? record.provider.trim() : "";
+        push(`${name}.source`, "audio", false, ttsProvider || undefined);
         push(`${name}.volume`, "volume", false);
       }
     }

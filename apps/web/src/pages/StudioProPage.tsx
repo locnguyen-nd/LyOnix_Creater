@@ -1543,6 +1543,11 @@ export function StudioProPage() {
               <p className="mb-3 text-[11px] text-lyx-fg-muted">
                 {template ? `${t("studioPro.templateLabel")}: ${template.name}` : t("studioPro.noTemplate")}
               </p>
+              {template?.warnings?.length ? (
+                <p role="alert" className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-300">
+                  {t("studioPro.templateTtsWarning", { names: template.warnings.map((warning) => warning.elementName).join(", ") })}
+                </p>
+              ) : null}
 
               <div className="mb-3 flex gap-1">
                 <button type="button" title={t("studioPro.moveEarlier")} disabled={selectedSceneIndex <= 0} className="lyx-btn lyx-btn-ghost h-8 flex-1 text-[11px] disabled:opacity-30" onClick={() => moveScene(selectedScene.sceneId, -1)}>◀</button>

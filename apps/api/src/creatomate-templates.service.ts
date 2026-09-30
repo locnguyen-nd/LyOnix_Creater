@@ -17,6 +17,7 @@ import {
   type TemplateModificationSlot,
 } from "@lyonix/providers";
 import type { CreatomateTemplateSummaryResponse, ErrorCode, TemplateSnapshotResponse } from "@lyonix/contracts";
+import { slotsWithTtsProvider, templateTtsWarnings } from "./template-tts.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 
@@ -38,18 +39,23 @@ const mapProviderError = (error: unknown): { code: ErrorCode; message: string; s
   return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Creatomate", status: 502, retryable: true };
 };
 
-const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kind: slot.kind, label: slot.label, required: slot.required });
+const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kind: slot.kind, label: slot.label, required: slot.required, ...(slot.ttsProvider ? { ttsProvider: slot.ttsProvider } : {}) });
 
 const toSnapshotResponse = (row: {
-  id: string; externalTemplateId: string; name: string; previewUrl: string | null; modifications: unknown; capturedAt: Date;
-}): TemplateSnapshotResponse => ({
+  id: string; externalTemplateId: string; name: string; previewUrl: string | null; modifications: unknown; capturedAt: Date; rawTemplate?: unknown;
+}): TemplateSnapshotResponse => {
+  const slots = Array.isArray(row.modifications) ? (row.modifications as TemplateSnapshotResponse["modifications"]) : [];
+  const warnings = templateTtsWarnings(row.rawTemplate);
+  return {
   id: row.id,
   externalTemplateId: row.externalTemplateId,
   name: row.name,
   previewUrl: row.previewUrl,
-  modifications: Array.isArray(row.modifications) ? (row.modifications as TemplateSnapshotResponse["modifications"]) : [],
+  modifications: slotsWithTtsProvider(slots, row.rawTemplate),
   capturedAt: row.capturedAt.toISOString(),
-});
+  ...(warnings.length > 0 ? { warnings } : {}),
+  };
+};
 
 @Injectable()
 export class CreatomateTemplatesService {
