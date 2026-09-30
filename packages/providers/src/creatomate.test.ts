@@ -167,7 +167,7 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
   it("gets render status by id", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ id: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", render_duration: 4.2, snapshot_url: "https://cdn.creatomate.com/rnd_1.jpg" }), { status: 200 })));
     const result = await getCreatomateRender("key", "rnd_1");
-    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg" });
+    expect(result).toEqual({ externalJobId: "rnd_1", status: "succeeded", url: "https://cdn.creatomate.com/rnd_1.mp4", progress: null, errorMessage: null, renderDurationMs: 4200, snapshotUrl: "https://cdn.creatomate.com/rnd_1.jpg", width: null, height: null, renderScale: null });
   });
 });
 
