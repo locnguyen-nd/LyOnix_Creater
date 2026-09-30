@@ -259,6 +259,22 @@ export class TimelineVersionsService {
   }
 
   /** One validation path shared by `save` (Studio) and `persistApprovedForWorkflowRun` (Auto), so both flows produce the same contract. */
+  /**
+   * VE2E-44: persist the default `[0, min(voice, asset)]` range on every video scene that has none, so
+   * an approved timeline (and what Studio shows/renders from it) never sends a whole 50-100MB source.
+   * Scenes that already carry a range, images, unknown durations and short assets are returned as-is.
+   */
+  private async withDefaultVideoRanges(projectId: string, scenes: TimelineSceneBindingResponse[]): Promise<TimelineSceneBindingResponse[]> {
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: true });
+    const byId = new Map(resolved.map((scene) => [scene.sceneId, scene]));
+    return scenes.map((scene) => {
+      const filled = byId.get(scene.sceneId);
+      if (!filled || scene.sourceStartMs != null || scene.sourceDurationMs != null) return scene;
+      if (typeof filled.sourceStartMs !== "number" || typeof filled.sourceDurationMs !== "number") return scene;
+      return { ...scene, sourceStartMs: filled.sourceStartMs, sourceDurationMs: filled.sourceDurationMs };
+    });
+  }
+
   private async validateContent(
     projectId: string,
     input: { templateSnapshotId?: string | null; scenes: TimelineSceneBindingInput[]; optionValues?: TimelineOptionValues; segments?: TimelineSegmentInput[] },
@@ -323,6 +339,7 @@ export class TimelineVersionsService {
     if (!input.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Cần chọn template trước khi duyệt timeline" };
     const content = await this.validateContent(projectId, input);
     if (!content.ok) return content;
+    content.data.scenes = await this.withDefaultVideoRanges(projectId, content.data.scenes);
 
     const latest = await this.prisma.timelineVersion.findFirst({ where: { projectId }, orderBy: { version: "desc" } });
     if (latest && latest.workflowRunId === workflowRunId && latest.status === "approved" && latest.templateSnapshotId === input.templateSnapshotId) {
@@ -371,7 +388,13 @@ export class TimelineVersionsService {
     if (!row.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Cần chọn template trước khi duyệt timeline" };
     const latest = await this.prisma.timelineVersion.findFirst({ where: { projectId: row.projectId }, orderBy: { version: "desc" } });
     if (latest?.id !== id) return { ok: false, code: "VERSION_CONFLICT", message: "Timeline đã có phiên bản mới hơn. Tải lại trước khi duyệt.", status: 409 };
-    const updated = await this.prisma.timelineVersion.updateMany({ where: { id, status: "draft" }, data: { status: "approved", approvedAt: new Date(), approvedByUserId: userId } });
+    const storedScenes = (Array.isArray(row.scenes) ? row.scenes : []) as TimelineSceneBindingResponse[];
+    const withRanges = await this.withDefaultVideoRanges(row.projectId, storedScenes);
+    const rangesChanged = withRanges.some((scene, index) => scene !== storedScenes[index]);
+    const updated = await this.prisma.timelineVersion.updateMany({
+      where: { id, status: "draft" },
+      data: { status: "approved", approvedAt: new Date(), approvedByUserId: userId, ...(rangesChanged ? { scenes: withRanges as unknown as object } : {}) },
+    });
     if (updated.count !== 1) return { ok: false, code: "INVALID_STATE", message: "Timeline version đã được duyệt trong một yêu cầu khác" };
     const approved = await this.prisma.timelineVersion.findUnique({ where: { id } });
     return { ok: true, data: toTimelineVersionResponse(approved!) };

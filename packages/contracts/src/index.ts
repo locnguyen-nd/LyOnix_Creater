@@ -417,6 +417,7 @@ export type RenderSubmitRequest = {
 
 export const renderJobStatuses = [
   "accepted",
+  "preparing_clips",
   "queued",
   "rendering",
   "verifying",
@@ -435,6 +436,7 @@ export type RenderJobResponse = {
   status: RenderJobStatus;
   externalJobId: string | null;
   progress: number | null;
+  clipPreparation: { clipsTotal: number; clipsReady: number; failed: Array<{ sceneId: string; code: string; message: string }> };
   resultUrl: string | null;
   /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
   snapshotUrl: string | null;

@@ -52,12 +52,13 @@ export class RenderJobsController {
     const { user, session } = await requireUser(request, response, this.auth);
     requireCsrf(request, response, session);
     if (!body.providerAccountId?.trim()) throw normalizedError("VALIDATION_FAILED", "Thiếu providerAccountId để submit render", requestId(response));
-    const outcome = await this.renders.submitFromTimelineVersion(projectId, timelineVersionId, user.id, user.role, {
+    const outcome = await this.renders.enqueueTimelineRender(projectId, timelineVersionId, user.id, user.role, {
       providerAccountId: body.providerAccountId,
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
-    });
+    }, "template");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    response.status(202);
     return success(outcome.data, requestId(response));
   }
 
@@ -78,12 +79,13 @@ export class RenderJobsController {
     const { user, session } = await requireUser(request, response, this.auth);
     requireCsrf(request, response, session);
     if (!body.providerAccountId?.trim()) throw normalizedError("VALIDATION_FAILED", "Thiếu providerAccountId để submit render", requestId(response));
-    const outcome = await this.renders.submitDynamicFromTimeline(projectId, timelineVersionId, user.id, user.role, {
+    const outcome = await this.renders.enqueueTimelineRender(projectId, timelineVersionId, user.id, user.role, {
       providerAccountId: body.providerAccountId,
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
-    });
+    }, "dynamic");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    response.status(202);
     return success(outcome.data, requestId(response));
   }
 

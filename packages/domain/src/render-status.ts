@@ -9,6 +9,7 @@
 
 export const renderJobStatuses = [
   "accepted",
+  "preparing_clips",
   "queued",
   "rendering",
   "verifying",
@@ -25,6 +26,7 @@ const TERMINAL: ReadonlySet<RenderJobStatus> = new Set(["completed", "failed", "
 /** Progress rank for the non-terminal, non-side-band statuses only. */
 const PROGRESS_RANK: Record<string, number> = {
   accepted: 0,
+  preparing_clips: 0,
   queued: 1,
   rendering: 2,
   verifying: 3,

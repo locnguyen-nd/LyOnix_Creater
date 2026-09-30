@@ -179,7 +179,7 @@ describe("WorkflowRunnerService", () => {
     };
     renderJobs = {
       submit: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
-      submitFromTimelineVersion: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
+      enqueueTimelineRender: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "preparing_clips" } as any })),
       reconcileOne: vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any })),
     };
     service = new WorkflowRunnerService(
@@ -238,7 +238,7 @@ describe("WorkflowRunnerService", () => {
       optionValues: {},
     });
     expect(renderJobs.submit).not.toHaveBeenCalled();
-    expect(renderJobs.submitFromTimelineVersion).toHaveBeenCalledWith(projectId, "timeline-1", userId, "staff", { providerAccountId: "render-acc", idempotencyKey: "fp-1" }, "run-1");
+    expect(renderJobs.enqueueTimelineRender).toHaveBeenCalledWith(projectId, "timeline-1", userId, "staff", { providerAccountId: "render-acc", idempotencyKey: "fp-1" }, "template", "run-1");
     // The rendered caption is the scene narration, not its separately-authored screenText -
     // guarantees the on-screen text matches word-for-word what the voice actually says.
     expect(renderedFromPersisted()).toEqual([
@@ -273,7 +273,7 @@ describe("WorkflowRunnerService", () => {
     timelines.persistApprovedForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "VALIDATION_FAILED" as const, message: "bad timeline" }));
     await service.processNext();
     expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "VALIDATION_FAILED", message: "bad timeline" } });
-    expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
+    expect(renderJobs.enqueueTimelineRender).not.toHaveBeenCalled();
   });
 
   it("VE2E-38/40: asks the content provider for the run's background segment range (legacy run -> auto by target duration)", async () => {
@@ -393,7 +393,7 @@ describe("WorkflowRunnerService", () => {
     await service.processNext();
     expect(runs[0]).toMatchObject({ status: "needs_input" });
     expect(renderJobs.submit).not.toHaveBeenCalled();
-    expect(renderJobs.submitFromTimelineVersion).not.toHaveBeenCalled();
+    expect(renderJobs.enqueueTimelineRender).not.toHaveBeenCalled();
     expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
   });
 

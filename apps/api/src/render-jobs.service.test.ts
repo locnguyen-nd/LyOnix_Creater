@@ -43,6 +43,7 @@ describe("RenderJobsService", () => {
     timelineRows = new Map();
     let seq = 0;
     prisma = {
+      user: { findUnique: vi.fn(async () => ({ role: "staff" })) },
       project: { findUnique: async ({ where }: any) => (where.id === projectId ? { id: projectId } : null) },
       providerAccount: { findFirst: async () => ({ id: providerAccountId, encryptedSecret: "encrypted", deletedAt: null }) },
       templateSnapshot: { findUnique: async ({ where }: any) => (where.id === templateSnapshotId ? snapshotRow : null) },
@@ -60,6 +61,13 @@ describe("RenderJobsService", () => {
       sceneDraftVersion: { findMany: async () => [] },
       timelineVersion: { findUnique: vi.fn(async ({ where }: any) => timelineRows.get(where.id) ?? null) },
       renderJob: {
+        findFirst: vi.fn(async ({ where }: any) => [...renderJobRows.values()].find((row) => row.status === where.status && (where.status !== "preparing_clips" || !row.preparationLeaseUntil || row.preparationLeaseUntil < new Date())) ?? null),
+        updateMany: vi.fn(async ({ where, data }: any) => {
+          const row = renderJobRows.get(where.id);
+          if (!row || row.status !== where.status || ("preparationLeaseUntil" in where && row.preparationLeaseUntil !== where.preparationLeaseUntil)) return { count: 0 };
+          renderJobRows.set(where.id, { ...row, ...data, updatedAt: new Date() });
+          return { count: 1 };
+        }),
         create: vi.fn(async ({ data }: any) => {
           const existing = [...renderJobRows.values()].find((r) => r.requestFingerprint === data.requestFingerprint);
           if (existing) throw p2002();
@@ -76,10 +84,11 @@ describe("RenderJobsService", () => {
         }),
         update: vi.fn(async ({ where, data }: any) => {
           const row = renderJobRows.get(where.id);
-          const updated = { ...row, ...data, updatedAt: new Date() };
+          const updated = { ...row, ...data, clipsReady: typeof data.clipsReady === "object" ? (row.clipsReady ?? 0) + data.clipsReady.increment : (data.clipsReady ?? row.clipsReady), updatedAt: new Date() };
           renderJobRows.set(where.id, updated);
           return updated;
         }),
+        count: vi.fn(async ({ where }: any) => [...renderJobRows.values()].filter((r) => r.workflowRunId === where.workflowRunId && r.status === where.status).length),
         findMany: vi.fn(async () => [...renderJobRows.values()].filter((r) => !["completed", "failed", "cancelled"].includes(r.status) && r.externalJobId)),
       },
       renderWebhookEvent: {
@@ -423,6 +432,159 @@ describe("RenderJobsService", () => {
     });
   });
 
+  describe("VE2E-43 durable timeline queue", () => {
+    const rangedTimeline = () => ({
+      id: "timeline-ranged", projectId, status: "approved", templateSnapshotId,
+      scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null, sourceStartMs: 2000, sourceDurationMs: 3000 }],
+      optionValues: {},
+    });
+    it("returns a preparing job without calling Creatomate, deduplicates submit, then submits in worker", async () => {
+      timelineRows.set("timeline-async", {
+        id: "timeline-async", projectId, status: "approved", templateSnapshotId,
+        scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null }],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_async", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const first = await service.enqueueTimelineRender(projectId, "timeline-async", "user-1", "staff", { providerAccountId }, "template");
+      expect(first).toMatchObject({ ok: true, data: { status: "preparing_clips", clipPreparation: { clipsTotal: 0, clipsReady: 0 } } });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const second = await service.enqueueTimelineRender(projectId, "timeline-async", "user-1", "staff", { providerAccountId }, "template");
+      expect(second).toMatchObject({ ok: true, data: { id: first.ok ? first.data.id : "" } });
+      expect(renderJobRows.size).toBe(1);
+      expect(await service.processNextPreparation()).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(renderJobRows.get(first.ok ? first.data.id : "")?.status).toBe("queued");
+    });
+
+    it("reports cut progress and submits only the derivative after worker processing", async () => {
+      const cut = await withStubClipDerivatives();
+      timelineRows.set("timeline-ranged", rangedTimeline());
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_async", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-ranged", "user-1", "staff", { providerAccountId }, "template");
+      expect(queued).toMatchObject({ ok: true, data: { status: "preparing_clips", clipPreparation: { clipsTotal: 1, clipsReady: 0 } } });
+      expect(cut.worker.jobs).toHaveLength(0);
+      await service.processNextPreparation();
+      expect(cut.worker.jobs).toHaveLength(1);
+      const row = renderJobRows.get(queued.ok ? queued.data.id : "");
+      expect(row).toMatchObject({ status: "queued", clipsReady: 1 });
+      const body = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      expect(body.modifications["Video-1.source"]).toContain("deriv-1");
+    });
+
+    it("records a per-scene worker error and never submits the full source", async () => {
+      await withStubClipDerivatives((job) => failedClipResult(job, "RANGE_OUT_OF_BOUNDS", false));
+      timelineRows.set("timeline-ranged", rangedTimeline());
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-ranged", "user-1", "staff", { providerAccountId }, "template");
+      await service.processNextPreparation();
+      const row = renderJobRows.get(queued.ok ? queued.data.id : "");
+      expect(row.status).toBe("failed");
+      expect(row.clipFailures).toMatchObject([{ sceneId: "s1", code: "VALIDATION_FAILED" }]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("reclaims an expired preparation lease after restart", async () => {
+      timelineRows.set("timeline-ranged", rangedTimeline());
+      await withStubClipDerivatives();
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_recovered", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-ranged", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      renderJobRows.set(id, { ...renderJobRows.get(id), preparationLeaseUntil: new Date(Date.now() - 1000), clipFailures: [{ sceneId: "s1", code: "OLD", message: "prior attempt" }] });
+      expect(await service.processNextPreparation()).toBe(true);
+      expect(renderJobRows.get(id)).toMatchObject({ status: "queued", clipsReady: 1, clipFailures: [] });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    const plainTimeline = () => ({
+      id: "timeline-plain", projectId, status: "approved", templateSnapshotId,
+      scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null }],
+      optionValues: {},
+    });
+
+    it("P1-2: Auto retry after a failed job creates a new job; a duplicate submit while it runs dedupes", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_retry", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const enqueue = () => service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId, idempotencyKey: "run-fp" }, "template", "run-1");
+      const first = await enqueue();
+      const firstId = first.ok ? first.data.id : "";
+      // Duplicate while non-terminal -> same job.
+      const dup = await enqueue();
+      expect(dup.ok && dup.data.id).toBe(firstId);
+      renderJobRows.set(firstId, { ...renderJobRows.get(firstId), status: "failed", lastError: { code: "MEDIA_PREPARE_FAILED", message: "x", retryable: true } });
+      // User retry -> new job.
+      const retry = await enqueue();
+      expect(retry.ok && retry.data.id).not.toBe(firstId);
+      expect(retry).toMatchObject({ ok: true, data: { status: "preparing_clips" } });
+      expect(renderJobRows.size).toBe(2);
+      // Duplicate while the new one is running -> still deduped, no third job.
+      const dup2 = await enqueue();
+      expect(dup2.ok && dup2.data.id).toBe(retry.ok ? retry.data.id : "");
+      expect(renderJobRows.size).toBe(2);
+      // And it can actually be processed (preparation picks the new job).
+      await service.processNextPreparation();
+      expect(renderJobRows.get(retry.ok ? retry.data.id : "")?.status).toBe("queued");
+    });
+
+    it("P2: clipsTotal counts parent+range+stripAudio so clipsReady never exceeds it", async () => {
+      timelineRows.set("timeline-dup", {
+        id: "timeline-dup", projectId, status: "approved", templateSnapshotId,
+        scenes: [
+          { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "a", annotation: null, sourceStartMs: 0, sourceDurationMs: 2000 },
+          { sceneId: "s2", orderIndex: 1, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "b", annotation: null, sourceStartMs: 0, sourceDurationMs: 2000 },
+        ],
+        optionValues: {},
+      });
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-dup", "user-1", "staff", { providerAccountId }, "template");
+      // Same parent+range+stripAudio (template default = stripped) for both scenes -> at most one cut.
+      expect(queued.ok && queued.data.clipPreparation.clipsTotal).toBeLessThanOrEqual(1);
+    });
+
+    it("P1-1: a reclaimed second worker (INVALID_STATE) never fails a job the first worker already submitted", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      // While worker 2 has claimed the (reclaimed) lease, worker 1 finishes its provider submit.
+      prisma.user.findUnique = vi.fn(async () => {
+        renderJobRows.set(id, { ...renderJobRows.get(id), status: "queued", externalJobId: "rnd_first", submittedAt: new Date() });
+        return { role: "staff" };
+      });
+      expect(await service.processNextPreparation()).toBe(true);
+      expect(renderJobRows.get(id)).toMatchObject({ status: "queued", externalJobId: "rnd_first" });
+      expect(renderJobRows.get(id).lastError).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("P1-1: an exception after the provider accepted the render does not mark the job failed", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_ok", status: "planned" }]), { status: 200 })));
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      const original = service.submitFromTimelineVersion.bind(service);
+      vi.spyOn(service, "submitFromTimelineVersion").mockImplementation(async (...args) => {
+        await original(...args);
+        throw new Error("db connection lost after provider success");
+      });
+      await service.processNextPreparation();
+      expect(renderJobRows.get(id)).toMatchObject({ status: "queued", externalJobId: "rnd_ok" });
+    });
+
+    it("P1-1: a genuine preparation failure still marks a preparing_clips job failed", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId }, "template");
+      const id = queued.ok ? queued.data.id : "";
+      vi.spyOn(service, "submitFromTimelineVersion").mockRejectedValue(new Error("boom"));
+      await service.processNextPreparation();
+      expect(renderJobRows.get(id)).toMatchObject({ status: "failed", lastError: { code: "MEDIA_PREPARE_FAILED", retryable: true } });
+    });
+  });
+
   describe("submitDynamicFromTimeline", () => {
     const timelineVersionId = "timeline-dyn-1";
     const sceneRow = (overrides: Record<string, unknown>) => ({
@@ -626,6 +788,50 @@ describe("RenderJobsService", () => {
       setTimeline([rangedScene()], { "Video-1.volume": "60" });
       expect((await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
       expect(cut.worker.jobs[0]!.stripAudio).toBe(false);
+    });
+
+    describe("VE2E-44 default range for legacy/manual timelines", () => {
+      const legacyScene = (overrides: Record<string, unknown> = {}) => rangedScene({ segmentId: null, sourceStartMs: null, sourceDurationMs: null, ...overrides });
+
+      it("template path: a video scene without a range is cut to [0, voice duration] instead of being sent whole", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        expect((await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
+        expect(cut.worker.jobs).toHaveLength(1);
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 0, durationMs: 4000, stripAudio: true });
+      });
+
+      it("dynamic path: same default range; a social (apify) parent stays audio-stripped", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives(undefined, "apify");
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        expect((await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId })).ok).toBe(true);
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 0, durationMs: 4000, stripAudio: true });
+      });
+
+      it("skips the cut when the asset is already about the scene length, and never touches an existing range", async () => {
+        okFetch();
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 4300;
+        setTimeline([legacyScene()]);
+        await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+        expect(cut.worker.jobs).toHaveLength(0);
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([rangedScene()]);
+        await service.submitFromTimelineVersion(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+        expect(cut.worker.jobs[0]).toMatchObject({ startMs: 1000, durationMs: 4000 });
+      });
+
+      it("async enqueue counts the derived clip in clipsTotal", async () => {
+        const cut = await withStubClipDerivatives();
+        cut.store.rows.get("asset-1")!.durationMs = 60_000;
+        setTimeline([legacyScene()]);
+        const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+        expect(queued).toMatchObject({ ok: true, data: { clipPreparation: { clipsTotal: 1 } } });
+      });
     });
 
     it("template path: a social (apify) parent is always cut without audio, even with an explicit volume", async () => {
