@@ -41,6 +41,9 @@ function setup(apifyImpl: (call: number, args: any[]) => Promise<any>) {
   };
   const prisma: any = { mediaAssetVersion: { findFirst: async () => null } };
   const service = new MediaPlanService(prisma, {} as any, pexels as unknown as PexelsService, apify as unknown as ApifyService);
+  // VE2E-50: Apify only searches with a validated ja keyword (no visualQuery fallback) - give each planned segment its own.
+  const planOriginal = service.planSegments.bind(service);
+  service.planSegments = (script, range) => planOriginal(script, range).map((segment, i) => ({ ...segment, keywords: { ja: `東京夜景${i + 1}`, en: `tokyo ${i + 1}` } }));
   return { service, apify, pexels, pexelSnapshots, stats: () => ({ maxInFlight }) };
 }
 
