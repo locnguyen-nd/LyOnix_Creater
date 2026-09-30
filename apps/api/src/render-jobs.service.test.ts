@@ -88,6 +88,7 @@ describe("RenderJobsService", () => {
           renderJobRows.set(where.id, updated);
           return updated;
         }),
+        count: vi.fn(async ({ where }: any) => [...renderJobRows.values()].filter((r) => r.workflowRunId === where.workflowRunId && r.status === where.status).length),
         findMany: vi.fn(async () => [...renderJobRows.values()].filter((r) => !["completed", "failed", "cancelled"].includes(r.status) && r.externalJobId)),
       },
       renderWebhookEvent: {
@@ -502,6 +503,45 @@ describe("RenderJobsService", () => {
       id: "timeline-plain", projectId, status: "approved", templateSnapshotId,
       scenes: [{ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "Xin chào", annotation: null }],
       optionValues: {},
+    });
+
+    it("P1-2: Auto retry after a failed job creates a new job; a duplicate submit while it runs dedupes", async () => {
+      timelineRows.set("timeline-plain", plainTimeline());
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_retry", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const enqueue = () => service.enqueueTimelineRender(projectId, "timeline-plain", "user-1", "staff", { providerAccountId, idempotencyKey: "run-fp" }, "template", "run-1");
+      const first = await enqueue();
+      const firstId = first.ok ? first.data.id : "";
+      // Duplicate while non-terminal -> same job.
+      const dup = await enqueue();
+      expect(dup.ok && dup.data.id).toBe(firstId);
+      renderJobRows.set(firstId, { ...renderJobRows.get(firstId), status: "failed", lastError: { code: "MEDIA_PREPARE_FAILED", message: "x", retryable: true } });
+      // User retry -> new job.
+      const retry = await enqueue();
+      expect(retry.ok && retry.data.id).not.toBe(firstId);
+      expect(retry).toMatchObject({ ok: true, data: { status: "preparing_clips" } });
+      expect(renderJobRows.size).toBe(2);
+      // Duplicate while the new one is running -> still deduped, no third job.
+      const dup2 = await enqueue();
+      expect(dup2.ok && dup2.data.id).toBe(retry.ok ? retry.data.id : "");
+      expect(renderJobRows.size).toBe(2);
+      // And it can actually be processed (preparation picks the new job).
+      await service.processNextPreparation();
+      expect(renderJobRows.get(retry.ok ? retry.data.id : "")?.status).toBe("queued");
+    });
+
+    it("P2: clipsTotal counts parent+range+stripAudio so clipsReady never exceeds it", async () => {
+      timelineRows.set("timeline-dup", {
+        id: "timeline-dup", projectId, status: "approved", templateSnapshotId,
+        scenes: [
+          { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "a", annotation: null, sourceStartMs: 0, sourceDurationMs: 2000 },
+          { sceneId: "s2", orderIndex: 1, mediaAssetVersionId: "asset-1", audioVersionId: null, subtitleVersionId: null, screenTextOverride: "b", annotation: null, sourceStartMs: 0, sourceDurationMs: 2000 },
+        ],
+        optionValues: {},
+      });
+      const queued = await service.enqueueTimelineRender(projectId, "timeline-dup", "user-1", "staff", { providerAccountId }, "template");
+      // Same parent+range+stripAudio (template default = stripped) for both scenes -> at most one cut.
+      expect(queued.ok && queued.data.clipPreparation.clipsTotal).toBeLessThanOrEqual(1);
     });
 
     it("P1-1: a reclaimed second worker (INVALID_STATE) never fails a job the first worker already submitted", async () => {

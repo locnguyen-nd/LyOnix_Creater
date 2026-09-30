@@ -651,20 +651,34 @@ export class RenderJobsService {
     if (!snapshot || snapshot.providerAccountId !== input.providerAccountId) return { ok: false, code: "VALIDATION_FAILED", message: "Template không thuộc tài khoản render đã chọn" };
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes);
-    let clipScenes: SceneBindingForMapping[];
+    let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
       if (!composition.ok) return composition;
-      clipScenes = RenderJobsService.rangedVideoScenes(composition.data.renderable);
+      clipScenes = RenderJobsService.rangedVideoScenes(composition.data.renderable).map((scene) => ({ ...scene, stripAudio: true }));
     } else {
       const slots = Array.isArray(snapshot.modifications) ? snapshot.modifications as unknown as TemplateModificationSlotResponse[] : [];
       const options = (timeline.optionValues && typeof timeline.optionValues === "object" ? timeline.optionValues : {}) as Record<string, string>;
       const built = buildRenderAssignmentsFromTimeline(slots, resolved, options);
       if (built.missingRequiredModificationKeys.length) return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${built.missingRequiredModificationKeys.join(", ")}` };
-      clipScenes = RenderJobsService.rangedVideoScenes(resolved).filter((scene) => built.videoSlotKeyBySceneId[scene.sceneId] !== undefined);
+      clipScenes = RenderJobsService.rangedVideoScenes(resolved)
+        .filter((scene) => built.videoSlotKeyBySceneId[scene.sceneId] !== undefined)
+        .map((scene) => {
+          const explicitVolume = options[built.videoSlotKeyBySceneId[scene.sceneId]!.replace(/\.source$/, ".volume")];
+          return { ...scene, stripAudio: !(explicitVolume !== undefined && Number(explicitVolume) > 0) };
+        });
     }
-    const clipsTotal = new Set(clipScenes.map((scene) => `${scene.mediaAssetVersionId}|${scene.sourceStartMs}|${scene.sourceDurationMs}`)).size;
-    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, scenes: timeline.scenes, options: timeline.optionValues })).digest("hex")}`;
+    const clipsTotal = new Set(clipScenes.map((scene) => `${scene.mediaAssetVersionId}|${scene.sourceStartMs}|${scene.sourceDurationMs}|${scene.stripAudio}`)).size;
+    // VE2E-43 P1-2: an Auto run's key is identical across manual retries, so the previous attempt's
+    // FAILED job would be replayed forever. The attempt generation is the number of failed jobs this
+    // run already has; a non-failed job (in flight or completed) keeps generation stable so concurrent
+    // duplicate submits still dedupe onto one job and a second paid job is never created.
+    let generation = 0;
+    if (workflowRunId) {
+      const failedJobs = await this.prisma.renderJob.count({ where: { workflowRunId, status: "failed" } });
+      generation = failedJobs;
+    }
+    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, scenes: timeline.scenes, options: timeline.optionValues, ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
     const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
     if (existing) return { ok: true, data: toJobResponse(existing) };
     try {
