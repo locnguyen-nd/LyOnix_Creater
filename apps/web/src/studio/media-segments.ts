@@ -42,3 +42,63 @@ export function replaceSegmentSource<S extends Scene>(
     segments: segments.map((row) => row.segmentId === segmentId ? { ...row, mediaAssetVersionId: asset.id } : row),
   };
 }
+
+/**
+ * Remove one scene from its segment. The scene loses `segmentId` and its source range. Remaining
+ * members stay consecutive: removing a middle scene splits the segment in two (the tail gets a new
+ * unique id and keeps its own per-scene ranges); a segment left with no scenes is removed.
+ */
+export function detachSceneFromSegment<S extends Scene>(
+  scenes: S[], segments: TimelineSegmentResponse[], sceneId: string,
+): { scenes: S[]; segments: TimelineSegmentResponse[] } {
+  const segment = segments.find((row) => row.sceneIds.includes(sceneId));
+  const scene = scenes.find((row) => row.sceneId === sceneId);
+  if (!segment || !scene) return { scenes, segments };
+  const at = segment.sceneIds.indexOf(sceneId);
+  const head = segment.sceneIds.slice(0, at);
+  const tail = segment.sceneIds.slice(at + 1);
+  const usedIds = new Set(segments.map((row) => row.segmentId));
+  let tailId = `${segment.segmentId}-b`;
+  for (let n = 2; usedIds.has(tailId); n += 1) tailId = `${segment.segmentId}-b${n}`;
+  const nextSegments: TimelineSegmentResponse[] = [];
+  for (const row of segments) {
+    if (row.segmentId !== segment.segmentId) { nextSegments.push(row); continue; }
+    if (head.length) nextSegments.push({ ...row, sceneIds: head });
+    if (tail.length) nextSegments.push({ ...row, segmentId: head.length ? tailId : row.segmentId, sceneIds: tail });
+  }
+  const tailSet = new Set(head.length ? tail : []);
+  return {
+    scenes: scenes.map((row) => {
+      if (row.sceneId === sceneId) return { ...row, segmentId: null, sourceStartMs: null, sourceDurationMs: null };
+      return tailSet.has(row.sceneId) ? { ...row, segmentId: tailId } : row;
+    }),
+    segments: nextSegments,
+  };
+}
+
+/** Assign media to exactly one scene: detach it from its segment, then bind the new source (no range). */
+export function assignSceneOnly<S extends Scene>(
+  scenes: S[], segments: TimelineSegmentResponse[], sceneId: string, asset: { id: string; label: string | null },
+): { scenes: S[]; segments: TimelineSegmentResponse[] } {
+  const detached = detachSceneFromSegment(scenes, segments, sceneId);
+  return {
+    segments: detached.segments,
+    scenes: detached.scenes.map((scene) => scene.sceneId === sceneId
+      ? { ...scene, mediaAssetVersionId: asset.id, mediaLabel: asset.label, sourceStartMs: null, sourceDurationMs: null }
+      : scene),
+  };
+}
+
+/**
+ * True when an in-point leaves less footage than the segment's scenes need, i.e. replaceSegmentSource
+ * would shorten a range or wrap back to 0 (repeated footage).
+ */
+export function inPointShortfall(
+  scenes: Scene[], segment: TimelineSegmentResponse, assetDurationMs: number | null, inPointMs: number,
+): { shortByMs: number } | null {
+  if (!assetDurationMs) return null;
+  const needed = scenes.filter((scene) => segment.sceneIds.includes(scene.sceneId)).reduce((sum, scene) => sum + (scene.sourceDurationMs ?? 0), 0);
+  const cursor = Math.min(Math.max(0, Math.floor(inPointMs)), Math.max(0, assetDurationMs - 1));
+  const shortByMs = needed - (assetDurationMs - cursor);
+  return shortByMs > 0 ? { shortByMs } : null;
+}

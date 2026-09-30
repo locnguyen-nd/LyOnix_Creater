@@ -51,3 +51,54 @@ describe("Studio media segment edits", () => {
     ]);
   });
 });
+
+import { assignSceneOnly, detachSceneFromSegment, inPointShortfall } from "./media-segments";
+import { validateTimelineSegmentStructure } from "@lyonix/domain/timeline-segments";
+
+describe("per-scene override inside a segment", () => {
+  const four = () => ({
+    scenes: ["a", "b", "c", "d"].map((id, i) => scene(id, { mediaAssetVersionId: "src", segmentId: "g1", sourceStartMs: i * 1000, sourceDurationMs: 1000 })),
+    segments: [{ segmentId: "g1", sceneIds: ["a", "b", "c", "d"], mediaAssetVersionId: "src", subject: null, priority: null }],
+  });
+  const valid = (r: { scenes: TimelineSceneDraftForSave[]; segments: { segmentId: string; sceneIds: string[] }[] }) => validateTimelineSegmentStructure(r.scenes, r.segments);
+
+  it("detaching a middle scene splits the segment and keeps both halves valid", () => {
+    const { scenes, segments } = four();
+    const r = detachSceneFromSegment(scenes, segments, "b");
+    expect(r.segments.map((s) => s.sceneIds)).toEqual([["a"], ["c", "d"]]);
+    expect(r.segments[1]!.segmentId).not.toBe("g1");
+    const b = r.scenes.find((s) => s.sceneId === "b")!;
+    expect([b.segmentId, b.sourceStartMs, b.sourceDurationMs]).toEqual([null, null, null]);
+    expect(r.scenes.find((s) => s.sceneId === "c")!.sourceStartMs).toBe(2000);
+    expect(valid(r)).toEqual({ ok: true });
+  });
+
+  it("detaching the first/last scene shrinks the segment; a lone scene removes it", () => {
+    const { scenes, segments } = four();
+    expect(detachSceneFromSegment(scenes, segments, "a").segments.map((s) => [s.segmentId, s.sceneIds])).toEqual([["g1", ["b", "c", "d"]]]);
+    expect(detachSceneFromSegment(scenes, segments, "d").segments.map((s) => s.sceneIds)).toEqual([["a", "b", "c"]]);
+    const one = detachSceneFromSegment([scenes[0]!], [{ ...segments[0]!, sceneIds: ["a"] }], "a");
+    expect(one.segments).toEqual([]);
+    expect(valid(one)).toEqual({ ok: true });
+  });
+
+  it("assignSceneOnly changes only that scene and leaves the rest of the segment on its source", () => {
+    const { scenes, segments } = four();
+    const r = assignSceneOnly(scenes, segments, "b", { id: "other", label: "L" });
+    expect(r.scenes.map((s) => [s.mediaAssetVersionId, s.segmentId])).toEqual([["src", "g1"], ["other", null], ["src", expect.any(String)], ["src", expect.any(String)]]);
+    expect(valid(r)).toEqual({ ok: true });
+  });
+
+  it("is a no-op for a scene outside any segment", () => {
+    const r = detachSceneFromSegment([scene("x")], [], "x");
+    expect(r.segments).toEqual([]);
+  });
+
+  it("reports a shortfall only when the in-point leaves too little footage", () => {
+    const { scenes, segments } = four(); // needs 4000ms
+    expect(inPointShortfall(scenes, segments[0]!, 10000, 0)).toBeNull();
+    expect(inPointShortfall(scenes, segments[0]!, 10000, 6000)).toBeNull();
+    expect(inPointShortfall(scenes, segments[0]!, 10000, 8000)).toEqual({ shortByMs: 2000 });
+    expect(inPointShortfall(scenes, segments[0]!, null, 8000)).toBeNull();
+  });
+});

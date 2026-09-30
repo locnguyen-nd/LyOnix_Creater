@@ -35,7 +35,7 @@ import type {
 } from "@lyonix/contracts";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
-import { applyMediaPlan, replaceSegmentSource } from "../studio/media-segments";
+import { applyMediaPlan, assignSceneOnly, inPointShortfall, replaceSegmentSource } from "../studio/media-segments";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
   approveTimelineVersion,
@@ -199,6 +199,7 @@ export function StudioProPage() {
   const [mediaPlanBusy, setMediaPlanBusy] = useState(false);
   const [mediaPlanDiagnostics, setMediaPlanDiagnostics] = useState<MediaPlanResponse["diagnostics"]>([]);
   const [segmentCount, setSegmentCount] = useState("auto");
+  const [mediaScope, setMediaScope] = useState<"segment" | "scene">("segment");
   const [segmentInPoints, setSegmentInPoints] = useState<Record<string, number>>({});
 
   const [voiceAccountId, setVoiceAccountId] = useState("");
@@ -594,6 +595,10 @@ export function StudioProPage() {
     if (!selectedSceneId) return;
     const selected = draft.scenes.find((scene) => scene.sceneId === selectedSceneId);
     const libraryAsset = mediaLibrary.find((row) => row.id === asset.id);
+    if (selected?.segmentId && mediaScope === "scene") {
+      mutate((prev) => ({ ...prev, ...assignSceneOnly(prev.scenes, prev.segments, selectedSceneId, { id: asset.id, label: asset.label }) }));
+      return;
+    }
     if (selected?.segmentId && libraryAsset && (libraryAsset.kind === "video" || libraryAsset.kind === "image")) {
       mutate((prev) => {
         const segmentAsset = { id: libraryAsset.id, kind: libraryAsset.kind as "video" | "image", durationMs: libraryAsset.durationMs };
@@ -638,7 +643,7 @@ export function StudioProPage() {
       const { asset } = await importPexels(context.projectId, { providerAccountId: visualAccountId, type, externalId, sceneId: selectedSceneId });
       setMediaLibrary((prev) => [asset, ...prev]);
       const selectedSegmentId = draft.scenes.find((scene) => scene.sceneId === selectedSceneId)?.segmentId;
-      if (selectedSegmentId) {
+      if (selectedSegmentId && mediaScope === "segment") {
         if (asset.kind !== "video" && asset.kind !== "image") return;
         mutate((prev) => {
           const segmentAsset = { id: asset.id, kind: asset.kind as "video" | "image", durationMs: asset.durationMs };
@@ -1076,6 +1081,17 @@ export function StudioProPage() {
               {draft.segments.length ? (
                 <div className="flex flex-col gap-2 border-y border-lyx-border py-2">
                   <p className="text-[11px] font-medium">{t("studioPro.backgroundSegments")}</p>
+                  {draft.scenes.find((row) => row.sceneId === selectedScene?.sceneId)?.segmentId ? (
+                    <div role="radiogroup" aria-label={t("studioPro.mediaScope")} className="flex flex-wrap items-center gap-3 text-[10px]">
+                      <span className="text-lyx-fg-muted">{t("studioPro.mediaScope")}</span>
+                      {(["segment", "scene"] as const).map((scope) => (
+                        <label key={scope} className="flex items-center gap-1">
+                          <input type="radio" name="media-scope" checked={mediaScope === scope} onChange={() => setMediaScope(scope)} />
+                          {t(scope === "scene" ? "studioPro.mediaScopeScene" : "studioPro.mediaScopeSegment")}
+                        </label>
+                      ))}
+                    </div>
+                  ) : null}
                   {draft.segments.map((segment, index) => {
                     const sourceId = segment.mediaAssetVersionId ?? draft.scenes.find((scene) => segment.sceneIds.includes(scene.sceneId))?.mediaAssetVersionId ?? null;
                     const source = sourceId ? mediaAssetById.get(sourceId) : undefined;
@@ -1090,6 +1106,10 @@ export function StudioProPage() {
                         </div>
                         {source ? <p className="mt-1 truncate text-lyx-fg-muted">{source.origin === "apify" ? `⚠ ${t("studioPro.ownerAcceptedRisk")}` : source.originalFileName}</p> : null}
                         {diagnostic?.sourcing === "failed" ? <p className="mt-1 text-lyx-danger">{t("studioPro.segmentSourceMissing")}</p> : null}
+                        {(() => {
+                          const shortfall = selectedInSegment && source?.kind === "video" ? inPointShortfall(draft.scenes, segment, source.durationMs, segmentInPoints[segment.segmentId] ?? 0) : null;
+                          return shortfall ? <p role="alert" className="mt-1 text-amber-500">⚠ {t("studioPro.inPointShortfall", { seconds: (shortfall.shortByMs / 1000).toFixed(1) })}</p> : null;
+                        })()}
                         {selectedInSegment && source?.kind === "video" ? (
                           <label className="mt-2 flex items-center gap-2 text-lyx-fg-muted">
                             {t("studioPro.segmentInPoint")}
