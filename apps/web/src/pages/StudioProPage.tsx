@@ -471,6 +471,12 @@ export function StudioProPage() {
   const totalSeconds = Math.round(
     draft.scenes.reduce((sum, row) => (row.excluded ? sum : sum + (sceneById.get(row.sceneId)?.durationHintMs ?? 0)), 0) / 1000,
   );
+  // VE2E-54: real voice total (hint fallback per scene) vs the intake target, warn outside +-10 s.
+  const targetSec = context?.targetDurationSec ?? 60;
+  const voiceTotalSec = Math.round(
+    draft.scenes.reduce((sum, row) => (row.excluded ? sum : sum + (audioBySceneId[row.sceneId]?.durationMs ?? sceneById.get(row.sceneId)?.durationHintMs ?? 0)), 0) / 100,
+  ) / 10;
+  const durationOutOfBand = Math.abs(voiceTotalSec - targetSec) > 10;
   const mediaAssetById = new Map(mediaLibrary.map((asset) => [asset.id, asset]));
   const selectedMediaAsset = selectedSceneDraft?.mediaAssetVersionId ? mediaAssetById.get(selectedSceneDraft.mediaAssetVersionId) : undefined;
   const selectedAudio = selectedScene ? audioBySceneId[selectedScene.sceneId] : undefined;
@@ -1432,6 +1438,12 @@ export function StudioProPage() {
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-lyx-fg-muted">
               <div className="flex flex-wrap items-center gap-2">
                 <span>{t("studioPro.timelineSummary", { scenes: orderedScenes.length, seconds: totalSeconds })}</span>
+                <span
+                  data-testid="duration-budget"
+                  className={durationOutOfBand ? "rounded-full bg-[#fdecea] px-2 py-0.5 text-[10.5px] font-semibold text-lyx-danger" : "text-[10.5px]"}
+                >
+                  {t(durationOutOfBand ? "studioPro.durationOutOfBand" : "studioPro.durationBudget", { total: voiceTotalSec, target: targetSec, min: targetSec - 10, max: targetSec + 10 })}
+                </span>
                 <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf2e3] px-2 py-0.5 text-[10.5px] font-semibold text-[#b45309]">
                   🔇 {t("studioPro.muteNote")}
                 </span>

@@ -25,10 +25,14 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import type { MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, MediaPlanSegmentDiagnostics } from "@lyonix/contracts";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
+  buildNarrationBudget,
+  calibrateCharsPerSecond,
+  checkDurationBand,
+  type NarrationBudget,
   readBackgroundSegmentsSetting,
   resolveBackgroundSegmentRange,
   type AutoSceneMedia,
@@ -208,6 +212,39 @@ export class WorkflowRunnerService {
     }
   }
 
+  /** VE2E-54: chars/sec from this voice's (and model's) historical scene audio in the run's language -> narration budget for the script prompt. Best-effort: any failure falls back to the language default. */
+  private async resolveNarrationBudget(targetSec: number, language: string, voiceId: string, modelId?: string): Promise<{ budget: NarrationBudget; calibrationSource: "history" | "default" }> {
+    let samples: Array<{ chars: number; durationMs: number }> = [];
+    try {
+      const rows = await this.prisma.audioVersion.findMany({
+        where: { externalVoiceId: voiceId, ...(modelId ? { modelId } : {}), sceneDraftVersion: { scriptDraftVersion: { language } } },
+        orderBy: { createdAt: "desc" },
+        take: 80,
+        select: { durationMs: true, sceneDraftVersion: { select: { narration: true } } },
+      });
+      samples = (rows ?? []).map((row) => ({ chars: row.sceneDraftVersion.narration.length, durationMs: row.durationMs }));
+    } catch {
+      samples = [];
+    }
+    const calibration = calibrateCharsPerSecond(samples, language);
+    return { budget: buildNarrationBudget({ targetSec, charsPerSecond: calibration.charsPerSecond }), calibrationSource: calibration.source };
+  }
+
+  /** VE2E-54: persists target vs real total scene voice duration as the `duration_budget` StepRun outputRef (read by GET /video-productions/:id). Best-effort; never fails the pipeline. */
+  private async saveDurationBudget(run: WorkflowRunRow, diagnostics: DurationBudgetDiagnostics): Promise<void> {
+    try {
+      const output = diagnostics as unknown as Prisma.InputJsonValue;
+      const now = new Date();
+      await this.prisma.stepRun.upsert({
+        where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "duration_budget", attempt: run.attempts } },
+        create: { workflowRunId: run.id, stepKey: "duration_budget", attempt: run.attempts, status: "succeeded", startedAt: now, endedAt: now, outputRef: output },
+        update: { status: "succeeded", endedAt: now, outputRef: output },
+      });
+    } catch {
+      // Diagnostics must never fail the pipeline.
+    }
+  }
+
   private async handleFailure(run: WorkflowRunRow, error: unknown): Promise<void> {
     const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";
     const message = error instanceof Error ? error.message : "Lỗi không xác định trong workflow runner";
@@ -276,6 +313,8 @@ export class WorkflowRunnerService {
     // media plan's segment count, so a retry that reuses the approved script plans the same count.
     const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
     let approved = existingApproved;
+    // VE2E-54: narration budget (targetChars + scene range) from the intake target, calibrated on this voice's history.
+    const { budget: durationBudget, calibrationSource } = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
@@ -289,6 +328,7 @@ export class WorkflowRunnerService {
             language: profile.locale,
             direction,
             ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+            durationBudget,
           });
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
@@ -354,6 +394,18 @@ export class WorkflowRunnerService {
         durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
       });
     }
+    // VE2E-54: real total of all scene voice durations vs the intake target (+-10 s). No correction loop yet:
+    // outside the band the run continues but is flagged `duration_out_of_band` with the real total (never silent).
+    const knownDurations = approved.scenes.map((scene) => audioByScene.get(scene.sceneId)?.durationMs).filter((ms): ms is number => typeof ms === "number");
+    const band = checkDurationBand({ targetSec: profile.durationSec, totalMs: knownDurations.reduce((sum, ms) => sum + ms, 0) });
+    await this.saveDurationBudget(run, {
+      ...band,
+      sceneCount: approved.scenes.length,
+      unknownScenes: approved.scenes.length - knownDurations.length,
+      flag: band.inBand ? null : "duration_out_of_band",
+      charsPerSecond: durationBudget.charsPerSecond,
+      calibrationSource,
+    });
     // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
     await this.setStatus(run.id, "aligning");
 

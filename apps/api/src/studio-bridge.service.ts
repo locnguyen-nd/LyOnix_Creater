@@ -68,7 +68,11 @@ export class StudioBridgeService {
     if (!run.sourceVersionId) return { ok: false, code: "INVALID_STATE", message: "Video production chưa có nguồn để mở Studio", status: 409 };
     const scriptDraft = await this.prisma.scriptDraftVersion.findFirst({ where: { sourceVersionId: run.sourceVersionId, status: "approved" }, orderBy: { version: "desc" } });
     if (!scriptDraft) return { ok: false, code: "INVALID_STATE", message: "Kịch bản chưa được duyệt — chưa có gì để mở Studio", status: 409 };
-    return this.buildContext(run.id, { projectId: run.projectId, sourceVersionId: run.sourceVersionId, scriptDraftVersionId: scriptDraft.id });
+    const built = await this.buildContext(run.id, { projectId: run.projectId, sourceVersionId: run.sourceVersionId, scriptDraftVersionId: scriptDraft.id });
+    if (!built.ok || !run.automationProfileVersionId) return built;
+    // VE2E-54: the intake target duration, so Studio can compare the real voice total against it.
+    const profile = await this.prisma.automationProfileVersion?.findUnique({ where: { id: run.automationProfileVersionId }, select: { durationSec: true } }).catch(() => null);
+    return profile ? { ok: true, data: { ...built.data, targetDurationSec: profile.durationSec } } : built;
   }
 
   private async createBridge(job: JobRecord, userId: string) {

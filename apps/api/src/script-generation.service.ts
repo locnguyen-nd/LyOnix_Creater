@@ -9,6 +9,7 @@ import {
   CONTENT_MODEL_RANKING_VERSION,
 } from "@lyonix/providers";
 import type { ErrorCode, ScriptDraftV2GenerationResponse } from "@lyonix/contracts";
+import type { NarrationBudget } from "@lyonix/domain";
 import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -19,6 +20,8 @@ export type GenerateScriptDraftInput = {
   direction?: string;
   /** VE2E-38/40: target background segment range for the draft's visualPlan (Auto passes the run's resolved intake setting; absent = default rule). Internal only, not an HTTP body field. */
   backgroundSegmentRange?: { min: number; max: number } | null;
+  /** VE2E-54: narration budget from the intake target (Auto passes it; absent = legacy prompt line). Internal only. */
+  durationBudget?: NarrationBudget | null;
 };
 
 export type GenerateScriptDraftOutcome =
@@ -94,6 +97,7 @@ export class ScriptGenerationService {
               language,
               ...(input.direction ? { direction: input.direction } : {}),
               ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
+              ...(input.durationBudget ? { durationBudget: input.durationBudget } : {}),
             });
             if (result.modelId !== account.model) {
               await this.providerAccounts.repinModel(account.id, result.modelId).catch(() => undefined);

@@ -679,6 +679,25 @@ export type MediaPlanRequest = {
   backgroundSegments?: BackgroundSegmentsSetting;
 };
 
+/** VE2E-54: total-duration check stored as the `duration_budget` StepRun outputRef. */
+export type DurationBudgetDiagnostics = {
+  targetSec: number;
+  totalSec: number;
+  toleranceSec: number;
+  minSec: number;
+  maxSec: number;
+  inBand: boolean;
+  /** Signed seconds outside the band (0 when inside). */
+  deviationSec: number;
+  sceneCount: number;
+  /** Scenes whose audio duration was unknown (total is then a lower bound). */
+  unknownScenes: number;
+  /** Set to `duration_out_of_band` when the real total is outside target +- tolerance. */
+  flag: "duration_out_of_band" | null;
+  charsPerSecond: number | null;
+  calibrationSource: "history" | "default" | null;
+};
+
 export type MediaPlanSegmentDiagnostics = {
   segmentId: string;
   origin: "visual_plan" | "fallback";
@@ -738,6 +757,8 @@ export type VideoProductionResponse = {
   backgroundSegments: BackgroundSegmentsResolvedResponse;
   /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */
   mediaSourcing: MediaPlanSegmentDiagnostics[] | null;
+  /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
+  durationBudget: DurationBudgetDiagnostics | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -941,6 +962,8 @@ export type StudioContextResponse = {
   sourceVersionId: string;
   scriptDraftVersionId: string;
   scenes: StudioSceneContextResponse[];
+  /** VE2E-54: intake target duration in seconds (Auto-run Studio); absent for legacy jobs (Studio assumes 60). */
+  targetDurationSec?: number;
   latestTimelineVersion: TimelineVersionResponse | null;
   /** VE2E-38: the bridged script version's `visualPlan` (segments + ja/en keywords to prefill Studio search), `null` when none. */
   visualPlan: ScriptVisualPlanResponse | null;
