@@ -152,6 +152,13 @@ export class ScriptGenerationService {
     };
   }
 
+  /** VE2E-55: the verified content account the caller may use (same candidate list/order as {@link generate}), or null. */
+  async resolveContentAccountId(userId: string, role: "admin" | "staff"): Promise<string | null> {
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
+    const account = accounts.find((candidate) => candidate.role === "content" && isLiveContentKind(candidate.provider) && (candidate.isFake ? process.env.NODE_ENV === "test" : candidate.status === "verified"));
+    return account?.id ?? null;
+  }
+
   /**
    * VE2E-50: ONE cheap content call that returns ja+en search keywords for every given segment from
    * the narration only (never from `visualQuery`). Same account/model selection, rate-limit slot and

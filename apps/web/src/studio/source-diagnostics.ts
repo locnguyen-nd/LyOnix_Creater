@@ -2,6 +2,8 @@
 export type SourceReasonKey =
   | "no_apify_account"
   | "no_ja_keywords"
+  | "no_content_account"
+  | "extraction_failed"
   | "apify_no_usable_candidate"
   | "apify_duplicate_or_unsupported_source"
   | "platform_not_importable"
@@ -12,6 +14,8 @@ export type SourceReasonKey =
 const known: ReadonlySet<string> = new Set<SourceReasonKey>([
   "no_apify_account",
   "no_ja_keywords",
+  "no_content_account",
+  "extraction_failed",
   "apify_no_usable_candidate",
   "apify_duplicate_or_unsupported_source",
   "platform_not_importable",

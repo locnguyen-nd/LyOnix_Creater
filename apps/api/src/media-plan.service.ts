@@ -42,7 +42,9 @@ import type {
 } from "@lyonix/contracts";
 import { isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
+import { randomUUID } from "node:crypto";
 import { ApifyService } from "./apify.service.js";
+import { ScriptGenerationService } from "./script-generation.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -144,7 +146,51 @@ export class MediaPlanService {
     @Inject(PexelsService) private readonly pexels: PexelsService,
     /** VE2E-46: Apify-first sourcing. Absent (older 3-argument construction) = unchanged Pexels-only behaviour. */
     @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
+    /** VE2E-55: keyword extraction for Studio plans. Absent = no extraction (segments without a ja keyword go to Pexels). */
+    @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
   ) {}
+
+  /**
+   * VE2E-55: Studio counterpart of the Auto runner's extraction. One call for all given segments lacking a valid ja
+   * keyword; applies the result in place. Returns the reason to record when segments stay without a keyword
+   * (`no_content_account` | `extraction_failed`), else null. Never throws; the call is recorded as a ProviderOperation.
+   */
+  private async extractKeywordsForStudio(userId: string, role: "admin" | "staff", script: MediaPlanScript, segments: PlannedSegment[]): Promise<string | null> {
+    const needing = segmentsNeedingKeywords(segments);
+    if (needing.length === 0 || !this.scriptGeneration) return null;
+    if (!(await this.apifyAvailable(userId, role))) return null;
+    let accountId: string | null = null;
+    try {
+      accountId = await this.scriptGeneration.resolveContentAccountId(userId, role);
+    } catch {
+      accountId = null;
+    }
+    if (!accountId) return "no_content_account";
+    const record = async (status: "succeeded" | "failed", errorCode: string | null, requestId: string | null) => {
+      try {
+        await this.prisma.providerOperation.create({ data: { providerAccountId: accountId, role: "content", operation: "extract_keywords", status, correlationId: randomUUID(), errorCode, externalRequestId: requestId } });
+      } catch {
+        // Bookkeeping is best-effort.
+      }
+    };
+    try {
+      const outcome = await this.scriptGeneration.extractSegmentKeywords(userId, role, {
+        providerAccountId: accountId,
+        language: script.language,
+        segments: needing.map((segment) => ({ segmentId: segment.segmentId, narration: segmentNarration(script, segment) })),
+      });
+      if (!outcome.ok) {
+        await record("failed", outcome.code, null);
+        return "extraction_failed";
+      }
+      await record("succeeded", null, outcome.usage.providerRequestId);
+      applyExtractedKeywords(segments, outcome.keywords);
+      return null;
+    } catch {
+      await record("failed", "PROVIDER_UNAVAILABLE", null);
+      return "extraction_failed";
+    }
+  }
 
   /** VE2E-50: whether the user can run an Apify search at all (the runner only pays for keyword extraction when it can). */
   async apifyAvailable(userId: string, role: "admin" | "staff"): Promise<boolean> {
@@ -358,13 +404,24 @@ export class MediaPlanService {
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
     const sourced: SourcedSegment[] = [];
-    for (const segment of this.planSegments(planScript, range)) {
+    const plannedSegments = this.planSegments(planScript, range);
+    let extractionReason: string | null = null;
+    let extractionDone = false;
+    for (const segment of plannedSegments) {
       let source = await this.findReusableSource(projectId, segment, ledger);
       let errorCode: string | null = null;
       if (!source) {
+        if (!extractionDone) {
+          // VE2E-55: lazily, once, only when a segment needs a NEW source (same rule as the Auto runner).
+          extractionDone = true;
+          extractionReason = await this.extractKeywordsForStudio(userId, role, planScript, plannedSegments.slice(plannedSegments.indexOf(segment)));
+        }
         const imported = await this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segment, ledger });
-        if (imported.ok) source = imported.data;
-        else errorCode = imported.code;
+        if (imported.ok) {
+          source = imported.data;
+          // Refine the generic reason with why extraction did not help this segment.
+          if (extractionReason && source.provider === "pexels" && source.fallbackReason === "no_ja_keywords") source = { ...source, fallbackReason: extractionReason };
+        } else errorCode = imported.code;
       }
       if (source) ledger.add(source);
       sourced.push({ segment, source, errorCode });
