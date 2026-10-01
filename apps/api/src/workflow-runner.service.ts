@@ -39,7 +39,9 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
 } from "@lyonix/domain";
+import { ProviderError, type ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
 import { AudioVersionsService } from "./audio-versions.service.js";
+import { getSharedProviderLimiter, mapBounded, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
@@ -109,6 +111,9 @@ const classify = (code: string): "blocked_provider" | "needs_input" | "retry" =>
   return "retry";
 };
 
+/** WorkflowStepFailure and ProviderError (e.g. a limiter wait timeout = PROVIDER_RATE_LIMITED) keep their own code; anything else is a transient PROVIDER_UNAVAILABLE. */
+const errorCodeOf = (error: unknown): string => (error instanceof WorkflowStepFailure || error instanceof ProviderError ? error.code : "PROVIDER_UNAVAILABLE");
+
 const DEFAULT_MAX_ATTEMPTS = 2;
 
 type ProviderStepMeta = { role: "content" | "tts" | "visual" | "render"; operation: string; providerAccountId: string };
@@ -143,25 +148,70 @@ export class WorkflowRunnerService {
     @Inject(TimelineVersionsService) private readonly timelines: TimelineVersionsService,
   ) {}
 
+  /** VE2E-61: test/DI overrides (plain fields, not constructor params, so Nest DI is unaffected); default = shared process limiter + env config. */
+  limiter: ProviderLimiter | null = null;
+  voiceParallelism: number = resolveConcurrencyConfig().voiceParallelism;
+
   /** One tick: claim+run at most one draft Auto run, then reconcile every run waiting on a render. Returns whether anything happened (used by the worker loop to decide whether to sleep). */
   async processNext(): Promise<boolean> {
-    const processedDraft = await this.processOneDraft();
+    const started = await this.startNextDraft();
+    if (started !== null && started !== "lost_race") await started.done;
     const reconciledAny = await this.reconcileRenders();
-    return processedDraft || reconciledAny;
+    return started !== null || reconciledAny;
   }
 
-  private async processOneDraft(): Promise<boolean> {
+  /**
+   * VE2E-61: atomically claims the oldest `draft` run (`updateMany where status=draft` -> exactly one worker/tick wins) and starts
+   * its pipeline WITHOUT awaiting it, so the worker loop can keep several runs in flight (`WORKFLOW_CONCURRENCY`).
+   * Returns `null` when nothing is queued, `"lost_race"` when another tick/replica claimed the candidate first (caller may
+   * immediately try the next one), else the `{ done }` handle of the started run (`done` never rejects: failures go through handleFailure).
+   */
+  async startNextDraft(): Promise<{ done: Promise<void> } | "lost_race" | null> {
     const candidate = await this.prisma.workflowRun.findFirst({ where: { mode: "auto", status: "draft" }, orderBy: { createdAt: "asc" } });
-    if (!candidate) return false;
+    if (!candidate) return null;
     const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
-    if (claimed.count !== 1) return true; // another worker tick/replica won the claim race
+    if (claimed.count !== 1) return "lost_race";
     const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
-    try {
-      await this.runPipeline(run);
-    } catch (error) {
-      await this.handleFailure(run, error);
+    const done = (async () => {
+      try {
+        await this.runPipeline(run);
+      } catch (error) {
+        try {
+          await this.handleFailure(run, error);
+        } catch {
+          // Persisting the failure must not crash the worker loop; the run stays in its last durable status.
+        }
+      }
+    })();
+    return { done };
+  }
+
+  /** Claims up to `limit - inflight.size` draft runs and tracks them in `inflight` (frees a slot when a run ends). Returns how many started. */
+  async fillSlots(inflight: Set<Promise<void>>, limit: number): Promise<number> {
+    let started = 0;
+    let lostRaces = 0;
+    while (inflight.size < limit) {
+      const handle = await this.startNextDraft();
+      if (handle === null) break;
+      if (handle === "lost_race") {
+        if (++lostRaces >= 3) break;
+        continue;
+      }
+      const tracked: Promise<void> = handle.done.finally(() => { inflight.delete(tracked); });
+      inflight.add(tracked);
+      started += 1;
     }
-    return true;
+    return started;
+  }
+
+  /** Reconciles runs parked on a render (public so the concurrent worker loop can call it between claims). */
+  reconcile(): Promise<boolean> {
+    return this.reconcileRenders();
+  }
+
+  /** VE2E-61: runs `fn` behind the process-wide per-provider limiter (FIFO wait + timeout, cooldown aware) shared by every job. */
+  private limited<T>(key: ProviderLimiterKey, fn: () => Promise<T>): Promise<T> {
+    return (this.limiter ?? getSharedProviderLimiter()).run(key, fn);
   }
 
   private async actorFor(userId: string): Promise<{ userId: string; role: "admin" | "staff" } | null> {
@@ -212,7 +262,7 @@ export class WorkflowRunnerService {
       }
       return value;
     } catch (error) {
-      const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";
+      const code = errorCodeOf(error);
       const message = error instanceof Error ? error.message : "Lỗi không xác định";
       await this.prisma.stepRun.update({ where: { id: stepRun.id }, data: { status: "failed", endedAt: new Date(), error: { code, message } } });
       if (operationId) await this.prisma.providerOperation.update({ where: { id: operationId }, data: { status: "failed", errorCode: code } });
@@ -275,7 +325,7 @@ export class WorkflowRunnerService {
         run,
         "extract_keywords",
         { role: "content", operation: "extract_keywords", providerAccountId: ctx.contentAccountId },
-        async () => {
+        () => this.limited("content", async () => {
           const result = await this.scriptGeneration.extractSegmentKeywords(ctx.userId, ctx.role, {
             providerAccountId: ctx.contentAccountId,
             language: ctx.script.language,
@@ -284,7 +334,7 @@ export class WorkflowRunnerService {
           });
           if (!result.ok) throw new WorkflowStepFailure(result.code, result.message);
           return result;
-        },
+        }),
       );
       applyExtractedKeywords(ctx.segments, outcome.keywords);
       await this.appendRunUsage(run, { step: "extract_keywords", kind: "content", provider: outcome.provider, modelId: outcome.modelId, inputTokens: outcome.usage.inputTokens, outputTokens: outcome.usage.outputTokens, costAmount: outcome.usage.costAmount, costCurrency: outcome.usage.costCurrency, at: new Date().toISOString() });
@@ -328,7 +378,7 @@ export class WorkflowRunnerService {
   }
 
   private async handleFailure(run: WorkflowRunRow, error: unknown): Promise<void> {
-    const code = error instanceof WorkflowStepFailure ? error.code : "PROVIDER_UNAVAILABLE";
+    const code = errorCodeOf(error);
     const message = error instanceof Error ? error.message : "Lỗi không xác định trong workflow runner";
     const bucket = classify(code);
     if (bucket === "retry") {
@@ -404,7 +454,7 @@ export class WorkflowRunnerService {
         run,
         "generate_script",
         { role: "content", operation: "generate_script", providerAccountId: contentConfig.providerAccountId },
-        async () => {
+        () => this.limited("content", async () => {
           const outcome = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
             providerAccountId: contentConfig.providerAccountId,
             language: profile.locale,
@@ -416,7 +466,7 @@ export class WorkflowRunnerService {
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
           return outcome.response;
-        },
+        }),
       );
 
       // VE2E-50: keep WHY the visualPlan is missing/invalid (and whether the strict schema was rejected) instead of a silent null.
@@ -451,7 +501,11 @@ export class WorkflowRunnerService {
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
     const audioByScene = new Map<string, { audioVersionId: string; mediaAssetVersionId: string; subtitleVersionId: string | null; durationMs: number | null }>();
-    for (const scene of approved.scenes) {
+    // VE2E-61: scenes are voiced with bounded parallelism (WORKFLOW_VOICE_PARALLELISM) AND the shared per-provider limiter
+    // (elevenlabs), so many runs together never exceed the provider's concurrent-request ceiling. Each scene's work is
+    // independent: a scene that already has a `current` AudioVersion is reused (no second ElevenLabs charge), and the
+    // per-scene StepRun key stays `generate_audio_<sceneId>`.
+    const voiced = await mapBounded(approved.scenes, this.voiceParallelism, async (scene) => {
       // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion
       // already tied to this exact SceneDraftVersion id reflects a real, already-paid-for prior
       // success, safe to reuse without a real ElevenLabs call.
@@ -461,19 +515,21 @@ export class WorkflowRunnerService {
         include: { subtitleVersions: { where: { status: "current" }, orderBy: { version: "desc" }, take: 1 } },
       });
       if (existingAudio) {
-        audioByScene.set(scene.sceneId, {
-          audioVersionId: existingAudio.id,
-          mediaAssetVersionId: existingAudio.mediaAssetVersionId,
-          subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
-          durationMs: typeof existingAudio.durationMs === "number" ? existingAudio.durationMs : null,
-        });
-        continue;
+        return {
+          sceneId: scene.sceneId,
+          value: {
+            audioVersionId: existingAudio.id,
+            mediaAssetVersionId: existingAudio.mediaAssetVersionId,
+            subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
+            durationMs: typeof existingAudio.durationMs === "number" ? existingAudio.durationMs : null,
+          },
+        };
       }
       const audio = await this.recordStep(
         run,
         `generate_audio_${scene.sceneId}`,
         { role: "tts", operation: "generate_voice", providerAccountId: voiceConfig.providerAccountId },
-        async () => {
+        () => this.limited("elevenlabs", async () => {
           const outcome = await this.audioVersions.generateForWorkflowRun(scene.id, userId, role, {
             providerAccountId: voiceConfig.providerAccountId,
             voiceId: voiceConfig.voiceId!,
@@ -481,15 +537,19 @@ export class WorkflowRunnerService {
           });
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
           return outcome.data;
-        },
+        }),
       );
-      audioByScene.set(scene.sceneId, {
-        audioVersionId: audio.id,
-        mediaAssetVersionId: audio.mediaAssetVersionId,
-        subtitleVersionId: audio.subtitleVersion?.id ?? null,
-        durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
-      });
-    }
+      return {
+        sceneId: scene.sceneId,
+        value: {
+          audioVersionId: audio.id,
+          mediaAssetVersionId: audio.mediaAssetVersionId,
+          subtitleVersionId: audio.subtitleVersion?.id ?? null,
+          durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
+        },
+      };
+    });
+    for (const entry of voiced) audioByScene.set(entry.sceneId, entry.value);
     // VE2E-54: real total of all scene voice durations vs the intake target (+-10 s). No correction loop yet:
     // outside the band the run continues but is flagged `duration_out_of_band` with the real total (never silent).
     const knownDurations = approved.scenes.map((scene) => audioByScene.get(scene.sceneId)?.durationMs).filter((ms): ms is number => typeof ms === "number");
@@ -620,7 +680,7 @@ export class WorkflowRunnerService {
       run,
       "submit_render",
       { role: "render", operation: "render_submit", providerAccountId: renderConfig.providerAccountId },
-      async () => {
+      () => this.limited("creatomate", async () => {
         const outcome = await this.renderJobs.enqueueTimelineRender(
           run.projectId,
           timeline.id,
@@ -636,7 +696,7 @@ export class WorkflowRunnerService {
         );
         if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
         return outcome.data;
-      },
+      }),
     );
     // Terminal progress (completed/failed) is applied by `reconcileRenders()` as the linked RenderJob advances — never here, since Creatomate rendering is inherently async (webhook/poll).
   }

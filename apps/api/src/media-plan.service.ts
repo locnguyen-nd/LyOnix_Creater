@@ -45,7 +45,8 @@ import type {
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { ProviderError, isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { randomUUID } from "node:crypto";
 import { ScriptGenerationService } from "./script-generation.service.js";
@@ -292,7 +293,7 @@ export class MediaPlanService {
       const brief = this.segmentBrief(input.script, input.segment);
       // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
       const usedExternalIds = input.ledger.apifyPlainIds;
-      const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {
+      const outcome = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
         platform: apifyAutoPlatformFromEnv(),
         keyword,
         brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
@@ -301,7 +302,7 @@ export class MediaPlanService {
         scriptLanguage: input.script.language,
         segmentDurationSeconds: input.segment.durationMs / 1000,
         ...(input.job ? { job: input.job } : {}),
-      });
+      }));
       if (!outcome.ok) return { reason: outcome.reason, quality: outcome.quality ?? null };
       const asset = outcome.data.asset;
       if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
@@ -322,7 +323,9 @@ export class MediaPlanService {
           apifyQuality: outcome.data.quality,
         },
       };
-    } catch {
+    } catch (error) {
+      // VE2E-61: a limiter wait timeout is a queueing problem, not an Apify failure; the segment still falls back to Pexels.
+      if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") return { reason: "apify_queue_timeout" };
       return { reason: "apify_error:unexpected" };
     }
   }
@@ -342,14 +345,14 @@ export class MediaPlanService {
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
     return input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
-      const outcome = await this.pexels.autoImportForScene(projectId, userId, role, {
+      const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
         providerAccountId: input.providerAccountId,
         sceneId: input.segment.sceneIds[0]!,
         query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
         sceneBrief: brief,
         usedExternalIds: [...input.ledger.externalIds],
         ...(input.job ? { visionBudget: input.job.vision } : {}),
-      });
+      }));
       if (!outcome.ok) return outcome;
       const asset = outcome.data.asset;
       if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
