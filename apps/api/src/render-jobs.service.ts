@@ -41,6 +41,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { QueueStatusService } from "./queue-status.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { TTS_PROVIDER_DISABLED_VALUE, classifyCreatomateRenderError, slotsWithTtsProvider, templateTtsConflictMessage, ttsProviderOverrideKey, unfilledTtsSlotKeys } from "./template-tts.js";
 import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
@@ -803,9 +804,19 @@ export class RenderJobsService {
     if (!(await this.assertProjectAccess(row.projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy render job", status: 404 };
     if (!isTerminalRenderStatus(row.status as RenderJobStatus) && row.externalJobId) {
       const reconciled = await this.reconcileOne(row.id);
-      if (reconciled.ok) return { ok: true, data: reconciled.data };
+      if (reconciled.ok) return { ok: true, data: await this.withQueueState(reconciled.data, row) };
     }
-    return { ok: true, data: toJobResponse(row) };
+    return { ok: true, data: await this.withQueueState(toJobResponse(row), row) };
+  }
+
+  private queueStatusService: QueueStatusService | null = null;
+  /** VE2E-62: adds queueKind/queuePosition/queuedAt/startedAt (derived from rows, see QueueStatusService); terminal jobs skip the queue queries. */
+  private async withQueueState(response: RenderJobResponse, row: { id: string; status: string; createdAt: Date; preparationLeaseUntil?: Date | null; submittedAt?: Date | null }): Promise<RenderJobResponse> {
+    if (isTerminalRenderStatus(row.status as RenderJobStatus)) {
+      return { ...response, queueKind: null, queuePosition: null, queuedAt: row.createdAt.toISOString(), startedAt: row.submittedAt?.toISOString() ?? null };
+    }
+    const state = await (this.queueStatusService ??= new QueueStatusService(this.prisma)).renderQueueState(row);
+    return { ...response, ...state };
   }
 
   /** Applies the monotonic status guard and persists a Creatomate-reported result. Never lets a terminal state regress. */

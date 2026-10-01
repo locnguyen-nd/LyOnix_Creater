@@ -28,6 +28,7 @@ import type { DurationBudgetDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPl
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { QueueStatusService } from "./queue-status.service.js";
 import { SourcesService } from "./sources.service.js";
 import { asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
 
@@ -111,6 +112,12 @@ export class VideoProductionsService {
     if (profile === "forbidden") return { ok: false, code: "FORBIDDEN", message: "Không có quyền tạo automation profile", status: 403 };
     if (profile === "invalid") return { ok: false, code: "VALIDATION_FAILED", message: "Cấu hình automation profile không hợp lệ" };
     return { ok: true, data: { projectId: project.id, automationProfileId: profile.id } };
+  }
+
+  private queueStatusService: QueueStatusService | null = null;
+  /** VE2E-62: lazily built from the same Prisma client (keeps the constructor/DI shape unchanged). */
+  private get queueStatus(): QueueStatusService {
+    return (this.queueStatusService ??= new QueueStatusService(this.prisma));
   }
 
   private async assertWriteAccess(projectId: string, userId: string, role: "admin" | "staff") {
@@ -257,6 +264,7 @@ export class VideoProductionsService {
     for (const row of renderRows) {
       if (row.workflowRunId && !latestRenderByRun.has(row.workflowRunId)) latestRenderByRun.set(row.workflowRunId, row);
     }
+    const queueStates = await this.queueStatus.workflowQueueStates(runs);
     return {
       ok: true,
       data: runs.map((run) => {
@@ -281,6 +289,7 @@ export class VideoProductionsService {
           costCurrency: render?.costCurrency ?? null,
           renderDurationMs: render?.renderDurationMs ?? null,
           lastError: (run.lastError as VideoProductionListItemResponse["lastError"]) ?? null,
+          queue: queueStates.get(run.id)!,
           createdAt: run.createdAt.toISOString(),
           updatedAt: run.updatedAt.toISOString(),
         };
@@ -327,6 +336,21 @@ export class VideoProductionsService {
     return { ok: true, data: { retried: true } };
   }
 
+  /**
+   * VE2E-62: removes a run that is still WAITING in the queue (`draft`) from it. Compare-and-set on `status: draft`, so a run the
+   * worker already claimed (`source_ready`...) is never cancelled mid-pipeline here (-> 409). The worker only claims `draft`, so
+   * once `cancelled` the run is never picked up and every later queued run moves up one position. The row stays (audit) and is
+   * deletable like any other `cancelled` run.
+   */
+  async cancelQueued(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<{ cancelled: true }>> {
+    const run = await this.prisma.workflowRun.findUnique({ where: { id }, select: { id: true, mode: true, projectId: true, createdByUserId: true, status: true, deletedAt: true } });
+    if (!run || run.mode !== "auto" || run.deletedAt || run.createdByUserId !== userId) return notFoundRun;
+    if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
+    const updated = await this.prisma.workflowRun.updateMany({ where: { id, status: "draft", deletedAt: null }, data: { status: "cancelled" } });
+    if (updated.count === 0) return { ok: false, code: "INVALID_STATE", message: "Video đã bắt đầu chạy hoặc không còn trong hàng chờ nên không thể hủy khỏi hàng đợi.", status: 409 };
+    return { ok: true, data: { cancelled: true } };
+  }
+
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<VideoProductionResponse>> {
     const run = await this.prisma.workflowRun.findUnique({ where: { id } });
     if (!run || run.deletedAt) return notFoundRun;
@@ -368,6 +392,7 @@ export class VideoProductionsService {
         apifyUsage,
         visionUsage,
         durationBudget,
+        queue: (await this.queueStatus.workflowQueueStates([run])).get(run.id)!,
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),
       },

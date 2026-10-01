@@ -22,6 +22,9 @@ export function RenderProgress({ job }: { job: RenderJobResponse }) {
           {t("studioPro.renderClipsProgress", { ready: clips.clipsReady, total: clips.clipsTotal })}
         </div>
       ) : null}
+      {job.queuePosition ? (
+        <div role="status">{t(job.queueKind === "render" ? "studioPro.renderQueueProvider" : "studioPro.renderQueueMedia", { position: job.queuePosition })}</div>
+      ) : null}
       {clips.failed.map((failure, index) => (
         <div key={`${failure.sceneId}-${index}`} role="alert">
           {t("studioPro.renderClipFailure", { scene: failure.sceneId || "—", code: failure.code, message: failure.message })}

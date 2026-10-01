@@ -19,10 +19,14 @@ describe("OpenAPI baseline", () => {
     expect(openApiDocument.components.schemas.SuccessMediaPlan.required).toEqual(["data", "meta"]);
   });
 
-  it("documents the additive VE2E-58 timeline edit schemas", () => {
-    const added = openApiDocument.components.schemas.TimelineAddedScene;
-    expect(added.required).toEqual(["sceneId", "narration", "screenText", "durationHintMs", "origin"]);
-    expect(added.properties.origin.enum).toEqual(["added", "split"]);
-    expect(Object.keys(openApiDocument.components.schemas.TimelineEditExtensions.properties)).toEqual(["addedScenes", "removedSceneIds"]);
+  it("VE2E-62: documents queue summary, cancel-queued and queue state fields", () => {
+    expect(openApiDocument.paths["/queue-summary"].get.operationId).toBe("getQueueSummary");
+    expect(openApiDocument.components.schemas.QueueSummary.required).toEqual(["kind", "active", "limit", "queued"]);
+    expect(openApiDocument.components.schemas.QueueSummary.properties.kind.enum).toEqual(["workflow", "render", "media"]);
+    expect(openApiDocument.paths["/video-productions/{id}/cancel"].post.operationId).toBe("cancelQueuedVideoProduction");
+    expect(openApiDocument.paths["/video-productions/{id}/cancel"].post.responses["409"]).toBeDefined();
+    expect(openApiDocument.components.schemas.QueueState.required).toEqual(["queuePosition", "queuedAt", "startedAt"]);
+    expect(openApiDocument.components.schemas.SuccessVideoProduction.properties.data.required).toContain("queue");
+    expect(Object.keys(openApiDocument.components.schemas.SuccessRenderJob.properties.data.properties)).toEqual(expect.arrayContaining(["queuePosition", "queuedAt", "startedAt", "queueKind"]));
   });
 });

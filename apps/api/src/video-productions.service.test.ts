@@ -51,7 +51,7 @@ describe("VideoProductionsService", () => {
       sourceVersion: { findUnique: async ({ where }: any) => (where.id === sourceId ? { id: sourceId, projectId } : null) },
       scriptDraftVersion: { findFirst: async () => null },
       renderJob: { findFirst: async () => null, findMany: async () => [] as any[] },
-      stepRun: { findMany: async () => [] },
+      stepRun: { findMany: async () => [], groupBy: async () => [] as any[] },
       workflowRun: {
         create: vi.fn(async ({ data }: any) => {
           if (workflowRuns.some((row) => row.requestFingerprint === data.requestFingerprint)) throw p2002();
@@ -284,6 +284,34 @@ describe("VideoProductionsService", () => {
       workflowRuns[0].status = "failed";
       expect(await service.remove(submitted.data.id, "other-user", "admin")).toMatchObject({ ok: false, code: "NOT_FOUND" });
       expect(prisma.workflowRun.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("cancelQueued (VE2E-62)", () => {
+    it("takes a run that is still waiting in the queue (draft) out of it", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      expect(workflowRuns[0].status).toBe("draft");
+      expect(await service.cancelQueued(submitted.data.id, userId, "staff")).toMatchObject({ ok: true, data: { cancelled: true } });
+      expect(workflowRuns[0].status).toBe("cancelled");
+      expect(prisma.workflowRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: submitted.data.id, status: "draft", deletedAt: null }) }));
+    });
+
+    it("never cancels a run a worker already claimed (compare-and-set on draft) -> 409", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      for (const status of ["source_ready", "voice_generating", "rendering", "completed", "failed"]) {
+        workflowRuns[0].status = status;
+        expect(await service.cancelQueued(submitted.data.id, userId, "staff")).toMatchObject({ ok: false, code: "INVALID_STATE", status: 409 });
+        expect(workflowRuns[0].status).toBe(status);
+      }
+    });
+
+    it("hides another user's run as not found and does not touch it", async () => {
+      const submitted = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId });
+      if (!submitted.ok) throw new Error("expected run");
+      expect(await service.cancelQueued(submitted.data.id, "other-user", "admin")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(workflowRuns[0].status).toBe("draft");
     });
   });
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
+import { QueueBadge } from "../components/QueueStatus";
 import { Button } from "../components/ui";
 import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
@@ -105,6 +106,7 @@ export function VideoProductionPage() {
       />
       <div className="mb-4 flex items-center gap-3">
         <StatusPill tone={statusTone(run.status)}>{t(`videoProduction.status.${run.status}`)}</StatusPill>
+        <QueueBadge status={run.status} queue={run.queue} />
         <span className="text-[11.5px] text-lyx-fg-muted">{t("videoProduction.attempts", { count: run.attempts })}</span>
       </div>
 
