@@ -517,6 +517,24 @@ export const renderJobStatuses = [
 ] as const;
 export type RenderJobStatus = (typeof renderJobStatuses)[number];
 
+// --- VE2E-62: queue visibility (queuePosition / active-limit summary) ---
+
+export const queueKinds = ["workflow", "render", "media"] as const;
+export type QueueKind = (typeof queueKinds)[number];
+
+/**
+ * VE2E-62: `GET /queue-summary` item. `active` = items occupying a slot now, `limit` = configured parallelism
+ * (VE2E-61 `concurrency-config`), `queued` = items waiting FIFO for a slot. Counts are global (all users).
+ */
+export type QueueSummaryResponse = { kind: QueueKind; active: number; limit: number; queued: number };
+
+/**
+ * VE2E-62: per-item queue state. `queuePosition` is 1-based among queued items of the same kind and null when the
+ * item is not waiting. `queuedAt` = when it entered the wait (null when never/no longer queued is still reported
+ * as the enqueue time); `startedAt` = when it began running (null while waiting or unknown).
+ */
+export type QueueStateFields = { queuePosition: number | null; queuedAt: string | null; startedAt: string | null };
+
 export type RenderJobResponse = {
   id: string;
   projectId: string;
@@ -541,6 +559,11 @@ export type RenderJobResponse = {
   costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string } | null;
+  /** VE2E-62: which queue `queuePosition` refers to ("media" = waiting for clip preparation, "render" = queued at the provider); null when not waiting. */
+  queueKind?: Extract<QueueKind, "render" | "media"> | null;
+  queuePosition?: number | null;
+  queuedAt?: string | null;
+  startedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -820,6 +843,8 @@ export type VideoProductionResponse = {
   visionUsage?: MediaPlanVisionUsage | null;
   /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
   durationBudget: DurationBudgetDiagnostics | null;
+  /** VE2E-62: workflow queue state (`queuePosition` is set only while the run is `draft`, i.e. waiting for a worker slot). */
+  queue: QueueStateFields;
   createdAt: string;
   updatedAt: string;
 };
@@ -847,6 +872,8 @@ export type VideoProductionListItemResponse = {
   costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
+  /** VE2E-62 */
+  queue: QueueStateFields;
   createdAt: string;
   updatedAt: string;
 };
@@ -927,6 +954,34 @@ export type TimelineSegmentResponse = {
   priority: number | null;
 };
 
+/**
+ * VE2E-58 (CR-STUDIO-EDIT-PARALLEL-2026-10-01 §3A, additive): a scene the user created on the timeline
+ * (`origin: "added"`) or produced by splitting another scene at a sentence boundary (`"split"`). Script
+ * scenes have no definition here - the approved script stays their source of truth. A split's two halves
+ * are new scenes; `splitFromSceneId` points at the script scene (or added scene) they descend from.
+ * Voice is never carried over: such a scene has no audio until "Sinh giọng" runs for it.
+ */
+export const timelineAddedSceneOrigins = ["added", "split"] as const;
+export type TimelineAddedSceneOrigin = (typeof timelineAddedSceneOrigins)[number];
+
+export type TimelineAddedSceneInput = {
+  sceneId: string;
+  narration: string;
+  screenText: string;
+  durationHintMs: number;
+  origin: TimelineAddedSceneOrigin;
+  splitFromSceneId?: string | null;
+};
+
+export type TimelineAddedSceneResponse = {
+  sceneId: string;
+  narration: string;
+  screenText: string;
+  durationHintMs: number;
+  origin: TimelineAddedSceneOrigin;
+  splitFromSceneId: string | null;
+};
+
 /** Template-level modification values not tied to one scene (secondary text/color/font/volume), keyed by the pinned `TemplateSnapshot`'s modification key. */
 export type TimelineOptionValues = Record<string, string>;
 
@@ -938,6 +993,10 @@ export type SaveTimelineVersionRequest = {
   optionValues?: TimelineOptionValues;
   /** VE2E-42 (optional): background segments; omitted/empty = no segment plan (pre-VE2E-42 behavior). */
   segments?: TimelineSegmentInput[];
+  /** VE2E-58 (optional): user-added / split scene definitions; every one must also be listed in `scenes`. Omitted = none (every timeline saved before VE2E-58). */
+  addedScenes?: TimelineAddedSceneInput[];
+  /** VE2E-58 (optional): script scenes dropped from `scenes` but recoverable; must be script scene ids and absent from `scenes`. */
+  removedSceneIds?: string[];
 };
 
 export type TimelineVersionResponse = {
@@ -950,6 +1009,10 @@ export type TimelineVersionResponse = {
   optionValues: TimelineOptionValues;
   /** VE2E-42: always an array; empty for timelines saved before VE2E-42 or without a segment plan. */
   segments: TimelineSegmentResponse[];
+  /** VE2E-58: always an array; empty for timelines without user-added/split scenes. */
+  addedScenes: TimelineAddedSceneResponse[];
+  /** VE2E-58: always an array; script scenes removed from this timeline (recoverable). */
+  removedSceneIds: string[];
   supersedesId: string | null;
   /** VE2E-42: set when this version was written + auto-approved by an Auto `WorkflowRun` (exactly what that run rendered); null for Studio-authored versions. */
   workflowRunId: string | null;
@@ -1011,6 +1074,9 @@ export type StudioSceneContextResponse = {
   screenText: string;
   visualQuery: string;
   durationHintMs: number;
+  /** VE2E-58 (additive): `"script"` for a scene of the approved script, `"added"`/`"split"` for a user-created one (then `splitFromSceneId` may name its origin). Absent on older servers = script. */
+  origin?: "script" | "added" | "split";
+  splitFromSceneId?: string | null;
 };
 
 /**

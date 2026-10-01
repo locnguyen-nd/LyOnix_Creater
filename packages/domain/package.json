@@ -10,6 +10,7 @@
     "./media-candidate": "./src/media-candidate.ts",
     "./vision-moderation-policy": "./src/vision-moderation-policy.ts",
     "./timeline-segments": "./src/timeline-segments.ts",
+    "./timeline-edit": "./src/timeline-edit.ts",
     "./media-lineage": "./src/media-lineage.ts",
     "./background-segments": "./src/background-segments.ts"
   },

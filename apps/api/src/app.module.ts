@@ -50,6 +50,8 @@ import { AudioVersionsController } from "./audio-versions.controller.js";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { VideoProductionsController } from "./video-productions.controller.js";
 import { VideoProductionsService } from "./video-productions.service.js";
+import { QueueStatusController } from "./queue-status.controller.js";
+import { QueueStatusService } from "./queue-status.service.js";
 import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
 import { SystemSettingsController } from "./system-settings.controller.js";
 import { SystemSettingsService } from "./system-settings.service.js";
@@ -85,6 +87,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptVersionsController,
     AudioVersionsController,
     VideoProductionsController,
+    QueueStatusController,
     StudioBridgeController,
     TimelineVersionsController,
   ],
@@ -117,6 +120,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptVersionsService,
     AudioVersionsService,
     VideoProductionsService,
+    QueueStatusService,
     SystemSettingsService,
     TiktokSyncSchedulerService,
     StudioBridgeService,

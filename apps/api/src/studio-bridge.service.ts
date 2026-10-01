@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
-import { canAccessProject } from "@lyonix/domain";
+import { canAccessProject, TIMELINE_ADDED_SCENE_ID_PREFIX } from "@lyonix/domain";
 import { normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import type { ErrorCode, StudioContextResponse } from "@lyonix/contracts";
 import { GrantsService } from "./grants.service.js";
@@ -149,11 +149,20 @@ export class StudioBridgeService {
   }
 
   private async buildContext(displayId: string, bridge: { projectId: string; sourceVersionId: string; scriptDraftVersionId: string }): Promise<StudioBridgeOutcome<StudioContextResponse>> {
-    const [scenes, latestTimeline, script] = await Promise.all([
+    const [sceneRows, latestTimeline, script] = await Promise.all([
       this.prisma.sceneDraftVersion.findMany({ where: { scriptDraftVersionId: bridge.scriptDraftVersionId }, orderBy: { orderIndex: "asc" } }),
       this.prisma.timelineVersion.findFirst({ where: { projectId: bridge.projectId }, orderBy: { version: "desc" } }),
       this.prisma.scriptDraftVersion.findUnique({ where: { id: bridge.scriptDraftVersionId }, select: { visualPlan: true } }),
     ]);
+    // VE2E-58: script scenes + the latest timeline's user-added/split scenes (mirrored as SceneDraftVersion rows so the
+    // voice flow works), in the latest timeline's order; scenes it does not list (removed / not yet placed) keep script order after.
+    const timeline = latestTimeline ? toTimelineVersionResponse(latestTimeline) : null;
+    const addedById = new Map((timeline?.addedScenes ?? []).map((def) => [def.sceneId, def]));
+    const visible = sceneRows.filter((scene) => !scene.sceneId.startsWith(TIMELINE_ADDED_SCENE_ID_PREFIX) || addedById.has(scene.sceneId));
+    const timelineOrder = new Map((timeline?.scenes ?? []).map((scene, index) => [scene.sceneId, index]));
+    const scenes = timelineOrder.size === 0
+      ? visible
+      : [...visible].sort((a, b) => (timelineOrder.get(a.sceneId) ?? Number.MAX_SAFE_INTEGER) - (timelineOrder.get(b.sceneId) ?? Number.MAX_SAFE_INTEGER) || a.orderIndex - b.orderIndex);
     return {
       ok: true,
       data: {
@@ -161,18 +170,25 @@ export class StudioBridgeService {
         projectId: bridge.projectId,
         sourceVersionId: bridge.sourceVersionId,
         scriptDraftVersionId: bridge.scriptDraftVersionId,
-        scenes: scenes.map((scene) => ({
-          id: scene.id,
-          sceneId: scene.sceneId,
-          orderIndex: scene.orderIndex,
-          narration: scene.narration,
-          screenText: scene.screenText,
-          visualQuery: scene.visualQuery,
-          durationHintMs: scene.durationHintMs,
-        })),
-        latestTimelineVersion: latestTimeline ? toTimelineVersionResponse(latestTimeline) : null,
+        scenes: scenes.map((scene, index) => {
+          const added = addedById.get(scene.sceneId);
+          return {
+            id: scene.id,
+            sceneId: scene.sceneId,
+            // Script scenes keep their own orderIndex; once the timeline reorders/adds scenes the list is already in timeline order.
+            orderIndex: timelineOrder.size === 0 ? scene.orderIndex : index,
+            // An added/split scene's own text is the timeline definition (the mirrored row is only a copy for the voice flow).
+            narration: added?.narration ?? scene.narration,
+            screenText: added?.screenText ?? scene.screenText,
+            visualQuery: scene.visualQuery,
+            durationHintMs: added?.durationHintMs ?? scene.durationHintMs,
+            origin: added ? added.origin : ("script" as const),
+            ...(added?.splitFromSceneId ? { splitFromSceneId: added.splitFromSceneId } : {}),
+          };
+        }),
+        latestTimelineVersion: timeline,
         // VE2E-38: lets Studio show the segments and prefill ja/en search keywords; tolerant (bad/legacy -> null).
-        visualPlan: normalizeScriptVisualPlanV2(script?.visualPlan ?? null, scenes.map((scene) => scene.sceneId)),
+        visualPlan: normalizeScriptVisualPlanV2(script?.visualPlan ?? null, visible.map((scene) => scene.sceneId)),
       },
     };
   }

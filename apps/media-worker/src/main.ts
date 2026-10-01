@@ -110,6 +110,8 @@ const bootstrap = async () => {
     });
     consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, frameProcessor, log });
     log(`ready on queue ${cfg.queue} (${brokerLabel}); FFmpeg runs here only`);
+    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, log });
+    log(`ready on queue ${cfg.queue} (${brokerLabel}); prefetch=${cfg.prefetch} ffmpegThreads=${cfg.ffmpegThreads}; FFmpeg runs here only`);
     await Promise.race([closed, new Promise<void>((r) => { wake = r; })]);
     if (stopping) {
       await consumer.drain();

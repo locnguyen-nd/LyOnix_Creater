@@ -12,12 +12,16 @@ describe("TimelineVersionsService", () => {
   let timelineRows: any[];
   let mediaRows: any[];
   let templateRows: any[];
+  let sceneDraftRows: any[];
+  let scriptDraftRows: any[];
   let nextId: number;
 
   beforeEach(() => {
     nextId = 1;
     projectRows = [{ id: projectId }];
     timelineRows = [];
+    scriptDraftRows = [{ id: "script-1", projectId, status: "approved" }];
+    sceneDraftRows = ["s1", "s2", "s3"].map((sceneId, orderIndex) => ({ id: `sdv-${sceneId}`, scriptDraftVersionId: "script-1", sceneId, orderIndex, narration: `N ${sceneId}`, screenText: "", visualQuery: "", durationHintMs: 5000 }));
     mediaRows = [
       { id: "media-1", projectId, kind: "video", durationMs: 30_000, deletedAt: null },
       { id: "media-2", projectId, kind: "image", durationMs: null, deletedAt: null },
@@ -32,7 +36,18 @@ describe("TimelineVersionsService", () => {
       },
       audioVersion: { findMany: async () => [] },
       subtitleVersion: { findMany: async () => [] },
-      sceneDraftVersion: { findMany: async () => [] },
+      sceneDraftVersion: {
+        findMany: async () => [],
+        findFirst: async ({ where }: any) => sceneDraftRows.find((r) => r.scriptDraftVersionId === where.scriptDraftVersionId && r.sceneId === where.sceneId) ?? null,
+        create: async ({ data }: any) => { const row = { id: `sdv-${sceneDraftRows.length + 1}`, ...data }; sceneDraftRows.push(row); return row; },
+        update: async ({ where, data }: any) => Object.assign(sceneDraftRows.find((r) => r.id === where.id), data),
+      },
+      scriptDraftVersion: {
+        findFirst: async ({ where }: any) => {
+          const draft = scriptDraftRows.find((d) => d.status === where.status && d.projectId === where.sourceVersion.projectId);
+          return draft ? { id: draft.id, scenes: sceneDraftRows.filter((r) => r.scriptDraftVersionId === draft.id) } : null;
+        },
+      },
       templateSnapshot: { findUnique: async ({ where }: any) => templateRows.find((r) => r.id === where.id) ?? null },
       timelineVersion: {
         findMany: async ({ where, orderBy }: any) => {
@@ -338,6 +353,92 @@ describe("TimelineVersionsService", () => {
       };
       const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
       expect(outcome).toMatchObject({ ok: false, code: "VERSION_CONFLICT" });
+    });
+  });
+
+  describe("VE2E-58 timeline edit model (added / split / removed scenes)", () => {
+    const added = (sceneId: string, extra: Record<string, unknown> = {}) => ({ sceneId, narration: "Xin chào. Tạm biệt.", screenText: "Hi", durationHintMs: 4000, origin: "added" as const, ...extra });
+    const scenes = (...ids: string[]) => ids.map((sceneId) => ({ sceneId }));
+
+    it("persists added scenes + removed script scenes, mirrors added scenes as SceneDraftVersion rows, and reads them back", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        scenes: scenes("s1", "usr-1", "s3"),
+        addedScenes: [added("usr-1")],
+        removedSceneIds: ["s2"],
+      });
+      expect(outcome).toMatchObject({ ok: true, data: { addedScenes: [{ sceneId: "usr-1", origin: "added", splitFromSceneId: null, narration: "Xin chào. Tạm biệt." }], removedSceneIds: ["s2"] } });
+      expect(sceneDraftRows.find((r) => r.sceneId === "usr-1")).toMatchObject({ scriptDraftVersionId: "script-1", narration: "Xin chào. Tạm biệt.", screenText: "Hi", orderIndex: 3 });
+      expect(sceneDraftRows.filter((r) => !r.sceneId.startsWith("usr-")).map((r) => r.narration)).toEqual(["N s1", "N s2", "N s3"]);
+      const latest = await service.latest(projectId, "user-1", "staff");
+      expect(latest).toMatchObject({ ok: true, data: { removedSceneIds: ["s2"], addedScenes: [{ sceneId: "usr-1" }] } });
+    });
+
+    it("re-saving updates the mirrored row text instead of creating a duplicate", async () => {
+      const first = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("s1", "usr-1"), addedScenes: [added("usr-1")] });
+      if (!first.ok) throw new Error("expected ok");
+      await service.save(projectId, "user-1", "staff", { supersedesId: first.data.id, scenes: scenes("s1", "usr-1"), addedScenes: [added("usr-1", { narration: "Câu mới." })] });
+      expect(sceneDraftRows.filter((r) => r.sceneId === "usr-1")).toHaveLength(1);
+      expect(sceneDraftRows.find((r) => r.sceneId === "usr-1")!.narration).toBe("Câu mới.");
+    });
+
+    it("a split pair keeps splitFromSceneId and the original script scene is recoverable", async () => {
+      const outcome = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        scenes: scenes("s1", "usr-1", "usr-2", "s3"),
+        addedScenes: [added("usr-1", { origin: "split", splitFromSceneId: "s2" }), added("usr-2", { origin: "split", splitFromSceneId: "s2" })],
+        removedSceneIds: ["s2"],
+      });
+      expect(outcome).toMatchObject({ ok: true, data: { addedScenes: [{ splitFromSceneId: "s2" }, { splitFromSceneId: "s2" }], removedSceneIds: ["s2"] } });
+    });
+
+    it("rejects invalid edits with VALIDATION_FAILED and writes nothing", async () => {
+      const save = (extra: Record<string, unknown>) => service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("s1", "usr-1"), ...extra } as any);
+      const bad: Record<string, unknown>[] = [
+        { addedScenes: [added("usr-1", { narration: "   " })] },
+        { addedScenes: [added("usr-1"), added("usr-1")] },
+        { addedScenes: [added("s1")] },
+        { addedScenes: [added("usr-1")], removedSceneIds: ["unknown"] },
+        { addedScenes: [added("usr-1")], removedSceneIds: ["s1"] },
+        { addedScenes: [added("usr-1", { durationHintMs: 1 })] },
+        { addedScenes: [added("usr-1", { origin: "split", splitFromSceneId: "ghost" })] },
+        { addedScenes: "nope" },
+        { addedScenes: [added("usr-1")], removedSceneIds: "nope" },
+      ];
+      for (const extra of bad) expect(await save(extra), JSON.stringify(extra)).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      // a timeline id that is neither a script scene nor an added scene
+      expect(await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("s1", "ghost"), removedSceneIds: ["s2"] })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      // an added scene definition that is not on the timeline
+      expect(await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("s1"), addedScenes: [added("usr-1")] })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(timelineRows).toHaveLength(0);
+      expect(sceneDraftRows.some((r) => r.sceneId.startsWith("usr-"))).toBe(false);
+    });
+
+    it("refuses edits when the project has no approved script", async () => {
+      scriptDraftRows = [];
+      expect(await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("s1", "usr-1"), addedScenes: [added("usr-1")] })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("a legacy save (no edits) is unchanged: arbitrary ids still accepted, empty arrays returned, no script lookup", async () => {
+      prisma.scriptDraftVersion.findFirst = async () => { throw new Error("must not look up the script"); };
+      const outcome = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: scenes("anything") });
+      expect(outcome).toMatchObject({ ok: true, data: { addedScenes: [], removedSceneIds: [] } });
+    });
+
+    it("approve keeps the edit model", async () => {
+      const saved = await service.save(projectId, "user-1", "staff", { supersedesId: null, templateSnapshotId: "template-1", scenes: scenes("s1", "usr-1"), addedScenes: [added("usr-1")], removedSceneIds: ["s2", "s3"] });
+      if (!saved.ok) throw new Error("expected ok");
+      const approved = await service.approve(saved.data.id, "user-1", "staff");
+      expect(approved).toMatchObject({ ok: true, data: { status: "approved", addedScenes: [{ sceneId: "usr-1" }], removedSceneIds: ["s2", "s3"] } });
+    });
+
+    it("the Auto runner path validates + persists edits through the same rules", async () => {
+      const input = { templateSnapshotId: "template-1", scenes: scenes("s1", "usr-1"), addedScenes: [added("usr-1")], removedSceneIds: ["s2", "s3"] };
+      const outcome = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      expect(outcome).toMatchObject({ ok: true, data: { addedScenes: [{ sceneId: "usr-1" }], removedSceneIds: ["s2", "s3"] } });
+      const again = await service.persistApprovedForWorkflowRun("run-1", projectId, "user-1", "staff", input);
+      expect(timelineRows).toHaveLength(1);
+      expect(again.ok && outcome.ok && again.data.id === outcome.data.id).toBe(true);
     });
   });
 });

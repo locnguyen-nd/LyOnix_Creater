@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
-import { Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
+import { Ban, Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
 import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome";
+import { QueueBadge, QueueSummaryBar } from "../components/QueueStatus";
 import { Button } from "../components/ui";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { AutoRunTimeline } from "../components/AutoRunTimeline";
@@ -10,6 +11,12 @@ import { ApiError } from "../api";
 import type { VideoProductionListItemResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { deleteVideoProduction, listVideoProductionEvents, listVideoProductions, retryVideoProduction } from "../video-productions-api";
 import { isTerminalRun } from "../video-production-stages";
+import type { VideoProductionListItemResponse, WorkflowRunStatus } from "@lyonix/contracts";
+import { cancelQueuedVideoProduction, deleteVideoProduction, listVideoProductions, retryVideoProduction } from "../video-productions-api";
+import { hasLiveRuns, isWaitingInQueue } from "../queue-display";
+
+/** How often the list refreshes while some run is still queued/running, so "#N" and the status stay current without a manual reload. */
+const LIST_POLL_MS = 5000;
 
 const filters = ["all", "completed", "active", "attention"] as const;
 type Filter = (typeof filters)[number];
@@ -100,6 +107,34 @@ export function VideoProductionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, timelineKey]);
 
+  // VE2E-62: keep the queue position / status fresh while anything is still queued or running.
+  const live = useMemo(() => hasLiveRuns(rows), [rows]);
+  useEffect(() => {
+    if (!live) return;
+    const timer = setInterval(() => {
+      void listVideoProductions().then(setRows).catch(() => undefined);
+    }, LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [live]);
+
+  const [cancelling, setCancelling] = useState<string | null>(null);
+  // Only a run still waiting in the queue can be cancelled; the API refuses (409) once a worker claimed it, in which case the list is refreshed.
+  const cancelQueued = async (row: VideoProductionListItemResponse) => {
+    const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
+    if (!window.confirm(t("videoProductions.queueCancelConfirm", { title }))) return;
+    setCancelling(row.id);
+    setError(null);
+    try {
+      await cancelQueuedVideoProduction(row.id);
+      setRows((current) => current.map((item) => (item.id === row.id ? { ...item, status: "cancelled", queue: { ...item.queue, queuePosition: null } } : item)));
+    } catch (err) {
+      setError(err instanceof ApiError && err.code === "INVALID_STATE" ? t("videoProductions.queueCancelFailed") : err instanceof ApiError ? err.message : t("common.error"));
+      void listVideoProductions().then(setRows).catch(() => undefined);
+    } finally {
+      setCancelling(null);
+    }
+  };
+
   const visible = useMemo(() => rows.filter((row) =>
     filter === "all" || (filter === "completed" && row.status === "completed") ||
     (filter === "attention" && needsAttention(row.status)) ||
@@ -151,6 +186,7 @@ export function VideoProductionsPage() {
         actions={<Button onClick={() => navigate("/jobs/new?entry=auto")}>{t("videoProductions.createNew")}</Button>}
       />
       {error ? <Banner variant="danger">{error}</Banner> : null}
+      <QueueSummaryBar />
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {filters.map((item) => (
           <button key={item} type="button" onClick={() => { setFilter(item); setShown(PAGE_SIZE); }} aria-pressed={filter === item}
@@ -196,14 +232,18 @@ export function VideoProductionsPage() {
                   <button type="button" onClick={() => navigate(`/video-productions/${row.id}`)} className="block w-full truncate text-left text-[13px] font-semibold leading-5 hover:underline">{title}</button>
                   {row.caption ? <p className="truncate text-[11px] leading-4 text-lyx-fg-muted">{row.caption}</p> : null}
                   {row.createdByName ? <p className="text-[11px] text-lyx-fg-muted">{t("jobs.creator")}: {row.createdByName}</p> : null}
+                  <QueueBadge status={row.status} queue={row.queue} />
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-lyx-border pt-2 text-[11px] text-lyx-fg-muted">
                     {formatDuration(row.renderDurationMs) ? <span className="inline-flex items-center gap-1"><Clock3 size={12} />{formatDuration(row.renderDurationMs)}</span> : null}
                     {row.costAmount ? <span className="inline-flex items-center gap-1"><Wallet size={12} />{row.costAmount} {row.costCurrency}</span> : null}
                     <span>{new Date(row.createdAt).toLocaleDateString()}</span>
+                    {isWaitingInQueue(row.status, row.queue) ? (
+                      <button type="button" onClick={() => void cancelQueued(row)} disabled={cancelling === row.id} title={t("videoProductions.queueCancel")} aria-label={`${t("videoProductions.queueCancel")}: ${title}`} className="ml-auto rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35"><Ban size={14} /></button>
+                    ) : null}
                     {isRetriable(row.status) ? (
                       <button type="button" onClick={() => void retry(row)} disabled={retrying === row.id} title={t("videoProductions.retry")} aria-label={`${t("videoProductions.retry")}: ${title}`} className="ml-auto rounded p-1 hover:bg-lyx-muted hover:text-lyx-fg disabled:opacity-35"><RotateCw size={14} className={retrying === row.id ? "animate-spin" : undefined} /></button>
                     ) : null}
-                    <button type="button" onClick={() => void remove(row)} disabled={deleting === row.id || !needsAttention(row.status) && row.status !== "completed"} title={row.status === "completed" || needsAttention(row.status) ? t("videoProductions.delete") : t("videoProductions.deleteRunning")} aria-label={`${t("videoProductions.delete")}: ${title}`} className={`rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35 ${isRetriable(row.status) ? "" : "ml-auto"}`}><Trash2 size={14} /></button>
+                    <button type="button" onClick={() => void remove(row)} disabled={deleting === row.id || !needsAttention(row.status) && row.status !== "completed"} title={row.status === "completed" || needsAttention(row.status) ? t("videoProductions.delete") : t("videoProductions.deleteRunning")} aria-label={`${t("videoProductions.delete")}: ${title}`} className={`rounded p-1 hover:bg-lyx-muted hover:text-lyx-danger disabled:opacity-35 ${isRetriable(row.status) || isWaitingInQueue(row.status, row.queue) ? "" : "ml-auto"}`}><Trash2 size={14} /></button>
                   </div>
                   {row.lastError?.message && needsAttention(row.status) ? <p className="line-clamp-2 text-[11px] text-lyx-warn">{row.lastError.message}</p> : null}
                 </div>

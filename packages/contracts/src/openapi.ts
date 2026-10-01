@@ -21,6 +21,47 @@ export const openApiDocument = {
         },
       },
     },
+    "/queue-summary": {
+      get: {
+        operationId: "getQueueSummary",
+        summary: "Concurrency + queue summary per kind (workflow, render, media): active, limit, queued",
+        responses: {
+          "200": { description: "Queue summary", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessQueueSummary" } } } },
+        },
+      },
+    },
+    "/video-productions/{id}/cancel": {
+      post: {
+        operationId: "cancelQueuedVideoProduction",
+        summary: "Cancel an Auto run that is still waiting in the queue (status draft); a run already started cannot be cancelled",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Run removed from the queue (status cancelled)", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessCancelled" } } } },
+          "404": { description: "Run not found", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+          "409": { description: "Run is no longer queued (INVALID_STATE)", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        },
+      },
+    },
+    "/video-productions/{id}": {
+      get: {
+        operationId: "getVideoProduction",
+        summary: "Auto run detail incl. queue state (queue.queuePosition, queue.queuedAt, queue.startedAt)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Run", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessVideoProduction" } } } },
+        },
+      },
+    },
+    "/render-jobs/{id}": {
+      get: {
+        operationId: "getRenderJob",
+        summary: "Render job incl. queue state (queueKind, queuePosition, queuedAt, startedAt)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Render job", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessRenderJob" } } } },
+        },
+      },
+    },
     "/health": {
       get: {
         operationId: "getHealth",
@@ -76,6 +117,62 @@ export const openApiDocument = {
           meta: { $ref: "#/components/schemas/RequestMeta" },
         },
       },
+      QueueState: {
+        type: "object",
+        required: ["queuePosition", "queuedAt", "startedAt"],
+        properties: {
+          queuePosition: { type: ["integer", "null"], minimum: 1, description: "1-based among queued items of the same kind; null when not waiting" },
+          queuedAt: { type: ["string", "null"], format: "date-time" },
+          startedAt: { type: ["string", "null"], format: "date-time" },
+        },
+      },
+      QueueSummary: {
+        type: "object",
+        required: ["kind", "active", "limit", "queued"],
+        properties: {
+          kind: { type: "string", enum: ["workflow", "render", "media"] },
+          active: { type: "integer", minimum: 0 },
+          limit: { type: "integer", minimum: 1 },
+          queued: { type: "integer", minimum: 0 },
+        },
+      },
+      SuccessQueueSummary: {
+        type: "object",
+        required: ["data", "meta"],
+        properties: { data: { type: "array", items: { $ref: "#/components/schemas/QueueSummary" } }, meta: { $ref: "#/components/schemas/RequestMeta" } },
+      },
+      SuccessCancelled: {
+        type: "object",
+        required: ["data", "meta"],
+        properties: { data: { type: "object", required: ["cancelled"], properties: { cancelled: { const: true } } }, meta: { $ref: "#/components/schemas/RequestMeta" } },
+      },
+      SuccessVideoProduction: {
+        type: "object",
+        required: ["data", "meta"],
+        properties: {
+          data: { type: "object", required: ["id", "status", "queue"], properties: { id: { type: "string" }, status: { type: "string" }, queue: { $ref: "#/components/schemas/QueueState" } } },
+          meta: { $ref: "#/components/schemas/RequestMeta" },
+        },
+      },
+      SuccessRenderJob: {
+        type: "object",
+        required: ["data", "meta"],
+        properties: {
+          data: {
+            type: "object",
+            required: ["id", "status"],
+            properties: {
+              id: { type: "string" },
+              status: { type: "string" },
+              queueKind: { type: ["string", "null"], enum: ["render", "media", null] },
+              queuePosition: { type: ["integer", "null"], minimum: 1 },
+              queuedAt: { type: ["string", "null"], format: "date-time" },
+              startedAt: { type: ["string", "null"], format: "date-time" },
+            },
+          },
+          meta: { $ref: "#/components/schemas/RequestMeta" },
+        },
+      },
       MediaPlanRequest: {
         type: "object",
         required: ["scriptDraftVersionId", "providerAccountId"],
@@ -107,6 +204,27 @@ export const openApiDocument = {
             },
           },
           meta: { $ref: "#/components/schemas/RequestMeta" },
+        },
+      },
+      // VE2E-58: additive timeline edit model (user-added / split scenes + removed script scenes). Carried by
+      // SaveTimelineVersionRequest (optional) and TimelineVersionResponse (always present, [] for legacy timelines).
+      TimelineAddedScene: {
+        type: "object",
+        required: ["sceneId", "narration", "screenText", "durationHintMs", "origin"],
+        properties: {
+          sceneId: { type: "string", maxLength: 100 },
+          narration: { type: "string", minLength: 1, maxLength: 4000 },
+          screenText: { type: "string", maxLength: 2000 },
+          durationHintMs: { type: "integer", minimum: 500, maximum: 120000 },
+          origin: { type: "string", enum: ["added", "split"] },
+          splitFromSceneId: { type: ["string", "null"] },
+        },
+      },
+      TimelineEditExtensions: {
+        type: "object",
+        properties: {
+          addedScenes: { type: "array", items: { $ref: "#/components/schemas/TimelineAddedScene" } },
+          removedSceneIds: { type: "array", items: { type: "string" } },
         },
       },
     },

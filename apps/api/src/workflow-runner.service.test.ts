@@ -9,6 +9,7 @@ import type { SourcesService } from "./sources.service.js";
 import type { TimelineVersionsService } from "./timeline-versions.service.js";
 import { buildRenderAssignmentsFromTimeline } from "./timeline-render-mapping.js";
 import { MediaPlanService } from "./media-plan.service.js";
+import { ProviderLimiter } from "@lyonix/providers";
 
 const projectId = "project-1";
 const userId = "user-1";
@@ -553,6 +554,128 @@ describe("WorkflowRunnerService", () => {
     it("returns false from processNext when there is nothing to claim or reconcile", async () => {
       runs = [];
       expect(await service.processNext()).toBe(false);
+    });
+  });
+
+  describe("VE2E-61 concurrency", () => {
+    const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const persistedTimelineScenes = () => persistedTimeline().scenes.map((scene: any) => scene.audioVersionId);
+    const gatedVoice = () => {
+      const gates: Array<() => void> = [];
+      const state = { active: 0, peak: 0, started: [] as string[] };
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => {
+        state.started.push(id);
+        state.active += 1;
+        state.peak = Math.max(state.peak, state.active);
+        await new Promise<void>((resolve) => gates.push(resolve));
+        state.active -= 1;
+        return { ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 4000, subtitleVersion: { id: `subtitle-${id}` } } as any };
+      });
+      const releaseAll = async () => {
+        for (let i = 0; i < 20; i += 1) {
+          while (gates.length) gates.shift()!();
+          await tick();
+        }
+      };
+      return { state, releaseAll };
+    };
+
+    it("voices independent scenes in parallel (bounded by voiceParallelism) and keeps scene order in the timeline", async () => {
+      service.voiceParallelism = 2;
+      service.limiter = new ProviderLimiter({ defaultMaxInFlight: 8 });
+      const { state, releaseAll } = gatedVoice();
+      const started = await service.startNextDraft();
+      expect(started).not.toBeNull();
+      for (let i = 0; i < 10; i += 1) await tick();
+      expect(state.started).toEqual(["scene-db-1", "scene-db-2"]);
+      expect(state.peak).toBe(2);
+      await releaseAll();
+      await (started as { done: Promise<void> }).done;
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      expect(persistedTimelineScenes()).toEqual(["audio-scene-db-1", "audio-scene-db-2"]);
+    });
+
+    it("the elevenlabs limiter caps in-flight voice calls below the in-run parallelism", async () => {
+      service.voiceParallelism = 4;
+      service.limiter = new ProviderLimiter({ limits: { elevenlabs: 1 }, defaultMaxInFlight: 8 });
+      const { state, releaseAll } = gatedVoice();
+      const started = await service.startNextDraft();
+      for (let i = 0; i < 10; i += 1) await tick();
+      expect(state.started).toEqual(["scene-db-1"]);
+      await releaseAll();
+      await (started as { done: Promise<void> }).done;
+      expect(state.peak).toBe(1);
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("a voice failure stops new scenes and keeps the failure code (bounded retry, not a failed run)", async () => {
+      service.voiceParallelism = 1;
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) =>
+        id === "scene-db-1"
+          ? { ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "429" }
+          : { ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `m-${id}`, subtitleVersion: null } as any },
+      );
+      await service.processNext();
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(1);
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED", retryable: true } });
+    });
+
+    it("a limiter wait timeout is a retryable PROVIDER_RATE_LIMITED, not a failed run", async () => {
+      const limiter = new ProviderLimiter({ limits: { content: 1 }, waitTimeoutMs: 20 });
+      service.limiter = limiter;
+      let release!: () => void;
+      const holder = limiter.run("content", () => new Promise<void>((resolve) => { release = resolve; }));
+      await tick();
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED", retryable: true } });
+      expect(scriptGeneration.generate).not.toHaveBeenCalled();
+      release();
+      await holder;
+    });
+
+    it("N concurrent runs: shared content limiter bounds script calls, slots bound runs, every run completes", async () => {
+      runs.length = 0;
+      for (const n of [1, 2, 3, 4]) runs.push(draftRun({ id: `run-${n}`, requestFingerprint: `fp-${n}`, correlationId: `corr-${n}`, createdAt: new Date(1_000 + n) }));
+      service.limiter = new ProviderLimiter({ limits: { content: 2 }, defaultMaxInFlight: 8 });
+      let active = 0;
+      let peak = 0;
+      const generate = scriptGeneration.generate as ReturnType<typeof vi.fn>;
+      const base = generate.getMockImplementation()!;
+      generate.mockImplementation(async (...args: unknown[]) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        active -= 1;
+        return base(...args);
+      });
+      const inflight = new Set<Promise<void>>();
+      expect(await service.fillSlots(inflight, 3)).toBe(3);
+      expect(inflight.size).toBe(3);
+      expect(runs.filter((r) => r.status === "draft").map((r) => r.id)).toEqual(["run-4"]);
+      while (inflight.size > 0) await Promise.race([...inflight]);
+      expect(await service.fillSlots(inflight, 3)).toBe(1);
+      while (inflight.size > 0) await Promise.race([...inflight]);
+      expect(runs.map((r) => r.status)).toEqual(["render_queued", "render_queued", "render_queued", "render_queued"]);
+      expect(peak).toBeLessThanOrEqual(2);
+      expect(generate).toHaveBeenCalledTimes(4);
+      expect(renderJobs.enqueueTimelineRender).toHaveBeenCalledTimes(4);
+    });
+
+    it("never double-claims: two workers racing for the same draft produce one started run and one lost race", async () => {
+      const results = await Promise.all([service.startNextDraft(), service.startNextDraft()]);
+      expect(results.filter((r) => r === "lost_race")).toHaveLength(1);
+      const handles = results.filter((r): r is { done: Promise<void> } => typeof r === "object" && r !== null);
+      expect(handles).toHaveLength(1);
+      await handles[0]!.done;
+      expect(scriptGeneration.generate).toHaveBeenCalledTimes(1);
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns null when nothing is queued", async () => {
+      runs.length = 0;
+      expect(await service.startNextDraft()).toBeNull();
+      expect(await service.fillSlots(new Set(), 3)).toBe(0);
     });
   });
 });
