@@ -5,6 +5,7 @@ import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { normalizedError, success } from "./envelopes.js";
 import { MediaService } from "./media.service.js";
+import { uploadMaxBytes } from "./quarantine.js";
 
 type CreateFolderBody = { name?: string; parentId?: string | null };
 type ImportUrlBody = { url?: string; folderId?: string | null; reusable?: boolean; kind?: MediaAssetKind };
@@ -85,6 +86,35 @@ export class MediaController {
     if (result === "invalid") throw normalizedError("VALIDATION_FAILED", "Dữ liệu asset không hợp lệ", requestId(response));
     if (result === "unsupported_media") throw normalizedError("UNSUPPORTED_MEDIA", "MIME không khớp loại asset", requestId(response), 415);
     if (result === "quarantine_missing") throw normalizedError("VALIDATION_FAILED", "Không tìm thấy file trong quarantine hoặc token đã dùng", requestId(response), 409);
+    return success(result, requestId(response));
+  }
+
+  /** Raw-body upload (`Content-Type: video/*|image/*`); name and browser-measured metadata travel in the query string. */
+  @Post("projects/:projectId/media-assets/upload")
+  async upload(
+    @Param("projectId") projectId: string,
+    @Query() query: { fileName?: string; widthPx?: string; heightPx?: string; durationMs?: string; folderId?: string },
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const fileName = (query.fileName ?? "").replace(/[\\/]/g, "_").slice(0, 160);
+    if (!fileName.trim()) throw normalizedError("VALIDATION_FAILED", "Thiếu tên file", requestId(response));
+    const positiveInt = (value: string | undefined) => { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.round(n) : null; };
+    const result = await this.media.uploadStream(projectId, user.id, user.role, {
+      stream: request,
+      fileName,
+      maxBytes: uploadMaxBytes(),
+      widthPx: positiveInt(query.widthPx),
+      heightPx: positiveInt(query.heightPx),
+      durationMs: positiveInt(query.durationMs),
+      folderId: query.folderId || null,
+    });
+    if (result === "forbidden") throw normalizedError("NOT_FOUND", "Không tìm thấy dự án", requestId(response), 404);
+    if (result === "too_large") throw normalizedError("VALIDATION_FAILED", "File vượt giới hạn dung lượng upload", requestId(response), 413);
+    if (result === "unsupported_media") throw normalizedError("UNSUPPORTED_MEDIA", "File không phải video/ảnh được hỗ trợ (MP4, MOV, WebM, JPG, PNG, WebP, GIF)", requestId(response), 415);
+    if (result === "invalid" || result === "quarantine_missing") throw normalizedError("VALIDATION_FAILED", "Không thể lưu file đã upload", requestId(response), 409);
     return success(result, requestId(response));
   }
 

@@ -59,7 +59,8 @@ import {
   submitDynamicRenderFromTimeline,
 } from "../studio/timeline-api";
 import { UndoStack } from "../studio/undo-stack";
-import { ApifyMediaTab } from "../studio/ApifyMediaTab";
+import { MediaPicker } from "../studio/MediaPicker";
+import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/auto-shorts";
 import { SourceBadge } from "../studio/SourceBadge";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
@@ -907,11 +908,28 @@ export function StudioProPage() {
     : leftCollapsed
       ? "lg:grid-cols-[36px_minmax(0,1fr)_260px]"
       : rightCollapsed
-        ? "lg:grid-cols-[240px_minmax(0,1fr)_36px]"
-        : "lg:grid-cols-[240px_minmax(0,1fr)_260px]";
+        ? "lg:grid-cols-[320px_minmax(0,1fr)_36px]"
+        : "lg:grid-cols-[320px_minmax(0,1fr)_260px]";
   const mediaScale = MEDIA_SCALE_STEPS[mediaScaleIdx]!;
   const visibleLibrary = libraryExpanded ? mediaLibrary : mediaLibrary.slice(0, LIBRARY_PREVIEW_LIMIT);
   const selectedSceneIndex = selectedScene ? orderedScenes.findIndex((scene) => scene.sceneId === selectedScene.sceneId) : -1;
+
+  // Media picker inputs: keyword chips for Pexels, per-segment lengths for the long-video -> shorts planner.
+  const pickerKeywordChips = (() => {
+    if (!selectedScene) return [];
+    const visualSegment = context.visualPlan?.segments.find((row) => row.sceneIds.includes(selectedScene.sceneId));
+    const planned = [{ lang: "en", value: visualSegment?.keywords.en }, { lang: "ja", value: visualSegment?.keywords.ja }].filter((row): row is { lang: string; value: string } => Boolean(row.value?.trim()));
+    return planned.length ? planned : selectedScene.visualQuery ? [{ lang: "", value: selectedScene.visualQuery }] : [];
+  })();
+  const fallbackSceneMs = (sceneId: string) => scenes.find((scene) => scene.sceneId === sceneId)?.durationHintMs ?? 3000;
+  const shortsSegmentDurations = segmentDurations(draft.scenes, draft.segments, fallbackSceneMs);
+  const applyLongVideoShorts = (asset: MediaAssetVersionSummary, plan: ShortsPlan) => {
+    mutate((prev) => {
+      const applied = applyShortsPlan(prev.scenes, prev.segments, { id: asset.id, durationMs: asset.durationMs }, plan, fallbackSceneMs);
+      const members = new Set(prev.segments.flatMap((segment) => segment.sceneIds));
+      return { ...prev, ...applied, scenes: applied.scenes.map((scene) => (members.has(scene.sceneId) ? { ...scene, mediaLabel: asset.originalFileName } : scene)) };
+    });
+  };
 
   return (
     <div className="-m-7 flex min-h-[calc(100vh-var(--lyx-topbar))] flex-col">
@@ -1087,26 +1105,29 @@ export function StudioProPage() {
 
           {leftTab === "media" ? (
             <div className="flex flex-col gap-3 overflow-y-auto p-3">
-              <Select value={visualAccountId} onChange={(event) => setVisualAccountId(event.target.value)} disabled={visualAccounts.length === 0}>
-                {visualAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Pexels" })}</option> : null}
-                {visualAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>{account.name}</option>
-                ))}
-              </Select>
-              <label className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted">
-                <span>{t("studioPro.backgroundSegments")}</span>
-                <Select value={segmentCount} onChange={(event) => setSegmentCount(event.target.value)} disabled={mediaPlanBusy}>
-                  <option value="auto">{t("studioPro.backgroundSegmentsAuto")}</option>
-                  {[1, 2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{t("studioPro.backgroundSegmentsFixed", { count })}</option>)}
+              <div className="flex flex-col gap-2.5 rounded-xl border border-lyx-border bg-lyx-bg-muted p-3">
+                <Select value={visualAccountId} onChange={(event) => setVisualAccountId(event.target.value)} disabled={visualAccounts.length === 0}>
+                  {visualAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Pexels" })}</option> : null}
+                  {visualAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>{account.name}</option>
+                  ))}
                 </Select>
-              </label>
-              <Button disabled={(!visualAccountId && !apifyAccountId) || mediaPlanBusy} onClick={() => void autoFillAllMedia()}>
-                {mediaPlanBusy ? t("studioPro.mediaPlanning") : t("studioPro.autoFillMedia")}
-              </Button>
-              <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.autoFillMediaHint")}</p>
+                <label className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted">
+                  <span>{t("studioPro.backgroundSegments")}</span>
+                  <Select value={segmentCount} onChange={(event) => setSegmentCount(event.target.value)} disabled={mediaPlanBusy}>
+                    <option value="auto">{t("studioPro.backgroundSegmentsAuto")}</option>
+                    {[1, 2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{t("studioPro.backgroundSegmentsFixed", { count })}</option>)}
+                  </Select>
+                </label>
+                <Button disabled={(!visualAccountId && !apifyAccountId) || mediaPlanBusy} onClick={() => void autoFillAllMedia()}>
+                  {mediaPlanBusy ? t("studioPro.mediaPlanning") : t("studioPro.autoFillMedia")}
+                </Button>
+                <p className="text-[10px] leading-4 text-lyx-fg-muted">{t("studioPro.autoFillMediaHint")}</p>
+              </div>
               {draft.segments.length ? (
-                <div className="flex flex-col gap-2 border-y border-lyx-border py-2">
-                  <p className="text-[11px] font-medium">{t("studioPro.backgroundSegments")}</p>
+                <details className="rounded-xl border border-lyx-border p-3" open>
+                  <summary className="cursor-pointer text-[12px] font-semibold">{t("studioPro.backgroundSegments")} <span className="font-normal text-lyx-fg-muted">({draft.segments.length})</span></summary>
+                  <div className="mt-2 flex flex-col gap-2">
                   {draft.scenes.find((row) => row.sceneId === selectedScene?.sceneId)?.segmentId ? (
                     <div role="radiogroup" aria-label={t("studioPro.mediaScope")} className="flex flex-wrap items-center gap-3 text-[10px]">
                       <span className="text-lyx-fg-muted">{t("studioPro.mediaScope")}</span>
@@ -1149,117 +1170,45 @@ export function StudioProPage() {
                       </div>
                     );
                   })}
-                </div>
-              ) : null}
-              <p className="border-t border-lyx-border pt-2 text-[10px] text-lyx-fg-muted">{t("studioPro.perSceneOverrideHint")}</p>
-              <Select aria-label={t("studioPro.manualMediaType")} value={manualMediaType} onChange={(event) => setManualMediaType(event.target.value as PexelsMediaType)}>
-                <option value="video">{t("studioPro.videoMedia")}</option>
-                <option value="photo">{t("studioPro.photoMedia")}</option>
-              </Select>
-              <div className="flex gap-1.5">
-                <input
-                  value={pexelsQuery}
-                  onChange={(event) => setPexelsQuery(event.target.value)}
-                  placeholder={t("studioPro.pexelsSearchPlaceholder")}
-                  className="h-9 flex-1 rounded-[4px] border border-lyx-border bg-lyx-muted px-2 text-[12px]"
-                />
-                <Button variant="secondary" disabled={pexelsSearching || !visualAccountId} onClick={() => void runPexelsSearch()}>
-                  {pexelsSearching ? t("studioPro.aiSearchRunning") : t("studioPro.search")}
-                </Button>
-              </div>
-              {selectedScene ? (
-                <div className="flex flex-wrap gap-2 text-[10px] text-lyx-fg-muted">
-                  {(() => {
-                    const visualSegment = context.visualPlan?.segments.find((row) => row.sceneIds.includes(selectedScene.sceneId));
-                    const keywords = [{ lang: "en", value: visualSegment?.keywords.en }, { lang: "ja", value: visualSegment?.keywords.ja }].filter((row): row is { lang: string; value: string } => Boolean(row.value?.trim()));
-                    const queries = keywords.length ? keywords : [{ lang: "", value: selectedScene.visualQuery }];
-                    return queries.map((row) => <button key={row.lang || row.value} type="button" className="underline" onClick={() => { setPexelsQuery(row.value); void runPexelsSearch(row.value); }}>{row.lang ? `${row.lang}: ` : ""}{row.value}</button>);
-                  })()}
-                </div>
-              ) : null}
-              <details className="rounded-[4px] border border-lyx-border p-2">
-                <summary className="cursor-pointer text-[11px] font-medium">{t("studioPro.apifyTab")}</summary>
-                <div className="mt-2">
-                  <ApifyMediaTab
-                    projectId={context.projectId}
-                    accountId={apifyAccountId}
-                    visualPlan={context.visualPlan}
-                    selectedSceneId={selectedSceneId}
-                    onImported={(asset, label) => {
-                      setMediaLibrary((prev) => [asset, ...prev]);
-                      applyImportedAsset(asset, label);
-                    }}
-                  />
-                </div>
-              </details>
-              <Button variant="secondary" disabled title={t("common.comingSoon")} onClick={() => fileInputRef.current?.click()}>
-                {t("studioPro.uploadReplace")}
-              </Button>
-              <input ref={fileInputRef} type="file" accept="image/*,video/*" className="hidden" disabled />
-
-              {pexelsResults ? (
-                <div>
-                  <p className="mb-1 text-[11px] text-lyx-fg-muted">{t("studioPro.suggested")}</p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {pexelsResults.videos.map((video) => (
-                      <button
-                        key={video.externalId}
-                        type="button"
-                        onClick={() => void importPexelsResult(video.externalId, `Pexels ${video.attribution.photographerName}`, "video")}
-                        className="relative overflow-hidden rounded-[4px] border border-lyx-border bg-lyx-muted"
-                        style={{ aspectRatio: "9 / 16" }}
-                        title={`${video.attribution.photographerName} · ${video.attribution.pexelsPageUrl}`}
-                      >
-                        <img src={video.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                        <span className="absolute bottom-1 left-1 rounded-[3px] bg-lyx-bg/90 px-1 text-[8px]">{video.attribution.photographerName}</span>
-                      </button>
-                    ))}
-                    {pexelsResults.photos.map((photo) => (
-                      <button
-                        key={photo.externalId}
-                        type="button"
-                        onClick={() => void importPexelsResult(photo.externalId, `Pexels ${photo.attribution.photographerName}`, "photo")}
-                        className="relative overflow-hidden rounded-[4px] border border-lyx-border bg-lyx-muted"
-                        style={{ aspectRatio: "9 / 16" }}
-                        title={`${photo.attribution.photographerName} · ${photo.attribution.pexelsPageUrl}`}
-                      >
-                        <img src={photo.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                        <span className="absolute bottom-1 left-1 rounded-[3px] bg-lyx-bg/90 px-1 text-[8px]">{photo.attribution.photographerName}</span>
-                      </button>
-                    ))}
                   </div>
-                </div>
+                </details>
               ) : null}
-
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <p className="text-[11px] text-lyx-fg-muted">{t("studioPro.library")}</p>
-                  {mediaLibrary.length > LIBRARY_PREVIEW_LIMIT ? (
-                    <button type="button" className="text-[10px] underline" onClick={() => setLibraryExpanded((prev) => !prev)}>
-                      {libraryExpanded ? t("studioPro.libraryCollapse") : t("studioPro.libraryShowAll", { count: mediaLibrary.length })}
-                    </button>
-                  ) : null}
-                </div>
-                <div className="grid max-h-64 grid-cols-3 gap-1.5 overflow-y-auto">
-                  {visibleLibrary.map((asset) => {
-                    const url = thumbCache[asset.id];
-                    return (
-                      <button
-                        key={asset.id}
-                        type="button"
-                        onClick={() => assignMediaToSelectedScene({ id: asset.id, label: asset.originalFileName })}
-                        className={`relative flex aspect-[9/16] items-center justify-center overflow-hidden rounded-[7px] border bg-lyx-muted text-[9px] text-lyx-fg-muted ${
-                          selectedSceneDraft?.mediaAssetVersionId === asset.id ? "border-2 border-lyx-fg" : "border-lyx-border"
-                        }`}
-                        title={asset.originalFileName}
-                      >
-                        {url && (asset.kind === "image" || asset.kind === "video") ? <LazyThumb kind={asset.kind} url={url} className="h-full w-full" /> : null}
-                        <span className="absolute bottom-1 left-1 rounded-[3px] bg-lyx-bg/90 px-1 text-[8px] font-bold">{asset.origin}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
+              <p className="text-[10px] leading-4 text-lyx-fg-muted">{t("studioPro.perSceneOverrideHint")}</p>
+              <MediaPicker
+                projectId={context.projectId}
+                library={mediaLibrary}
+                thumbCache={thumbCache}
+                selectedAssetId={selectedSceneDraft?.mediaAssetVersionId ?? null}
+                selectedSceneLabel={selectedScene ? `#${scenes.indexOf(selectedScene) + 1}` : null}
+                onAssign={assignMediaToSelectedScene}
+                pexels={{
+                  hasAccount: visualAccounts.length > 0,
+                  query: pexelsQuery,
+                  setQuery: setPexelsQuery,
+                  type: manualMediaType,
+                  setType: setManualMediaType,
+                  results: pexelsResults,
+                  searching: pexelsSearching,
+                  keywordChips: pickerKeywordChips,
+                  onSearch: (query) => void runPexelsSearch(query),
+                  onImport: (externalId, label, type) => void importPexelsResult(externalId, label, type),
+                }}
+                apify={{
+                  accountId: apifyAccountId,
+                  visualPlan: context.visualPlan,
+                  selectedSceneId,
+                  fallbackKeyword: selectedScene?.visualQuery ?? "",
+                  onImported: (asset, label) => {
+                    setMediaLibrary((prev) => [asset, ...prev]);
+                    applyImportedAsset(asset, label);
+                  },
+                }}
+                upload={{
+                  segmentDurations: shortsSegmentDurations,
+                  onUploaded: (asset) => setMediaLibrary((prev) => [asset, ...prev.filter((row) => row.id !== asset.id)]),
+                  onApplyShorts: (asset, plan) => applyLongVideoShorts(asset, plan),
+                }}
+              />
             </div>
           ) : null}
 

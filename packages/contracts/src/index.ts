@@ -755,6 +755,8 @@ export type MediaPlanApifyQuality = {
   reusedLibraryAsset: boolean;
   /** The search result came from the shared TTL cache or another segment's identical search (no new Actor run). */
   searchReused: boolean;
+  /** VE2E-30: vision verdict over frames extracted from the imported video (`unchecked` = not run: flag off, no vision account/budget, or no frames). */
+  frameCheck?: "accepted" | "rejected" | "unchecked";
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
