@@ -738,7 +738,7 @@ export class RenderJobsService {
       const failedJobs = await this.prisma.renderJob.count({ where: { workflowRunId, status: "failed" } });
       generation = failedJobs;
     }
-    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), scenes: timeline.scenes, options: timeline.optionValues, ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
+    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), scenes: timeline.scenes, options: timeline.optionValues, ...(Array.isArray(timeline.addedScenes) && timeline.addedScenes.length > 0 ? { addedScenes: timeline.addedScenes } : {}), ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
     const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
     if (existing) return { ok: true, data: toJobResponse(existing) };
     try {

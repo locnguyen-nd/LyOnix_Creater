@@ -207,5 +207,24 @@ describe("StudioBridgeService", () => {
       sceneRows.pop();
       expect(await service.contextForVideoProduction(runId, userId, "staff")).toMatchObject({ ok: true, data: { visualPlan: null } });
     });
+
+    it("VE2E-58: returns user-added/split scenes (origin, own text) in timeline order, hides orphaned mirrored rows, keeps removed script scenes", async () => {
+      workflowRunRows.push({ id: runId, projectId: "project-auto-1", sourceVersionId: "source-1" });
+      scriptRows.push({ id: "script-auto-1", sourceVersionId: "source-1", version: 1, status: "approved" });
+      const row = (id: string, sceneId: string, orderIndex: number, narration: string) => ({ id, scriptDraftVersionId: "script-auto-1", sceneId, orderIndex, narration, screenText: "t", visualQuery: "q", durationHintMs: 5000 });
+      sceneRows.push(row("r1", "s01", 0, "n1"), row("r2", "s02", 1, "n2"), row("r3", "s03", 2, "n3"), row("r4", "usr-1", 3, "stale mirror"), row("r5", "usr-2", 4, "orphan"));
+      timelineRows.push({
+        id: "tl-1", projectId: "project-auto-1", version: 1, status: "draft", templateSnapshotId: null, supersedesId: null, createdAt: new Date(), approvedAt: null,
+        scenes: [{ sceneId: "s01", orderIndex: 0 }, { sceneId: "usr-1", orderIndex: 1 }, { sceneId: "s03", orderIndex: 2 }],
+        optionValues: {}, segments: [],
+        addedScenes: [{ sceneId: "usr-1", narration: "Cảnh mới.", screenText: "Mới", durationHintMs: 3000, origin: "split", splitFromSceneId: "s02" }],
+        removedSceneIds: ["s02"],
+      });
+      const outcome = await service.contextForVideoProduction(runId, userId, "staff");
+      if (!outcome.ok) throw new Error("expected ok");
+      expect(outcome.data.scenes.map((s) => [s.sceneId, s.origin, s.orderIndex])).toEqual([["s01", "script", 0], ["usr-1", "split", 1], ["s03", "script", 2], ["s02", "script", 3]]);
+      expect(outcome.data.scenes[1]).toMatchObject({ id: "r4", narration: "Cảnh mới.", screenText: "Mới", durationHintMs: 3000, splitFromSceneId: "s02" });
+      expect(outcome.data.latestTimelineVersion).toMatchObject({ removedSceneIds: ["s02"], addedScenes: [{ sceneId: "usr-1" }] });
+    });
   });
 });

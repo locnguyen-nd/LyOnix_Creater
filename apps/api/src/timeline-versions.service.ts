@@ -13,12 +13,14 @@
  * and renders exactly as before.
  */
 import { Inject, Injectable } from "@nestjs/common";
-import { canAccessProject, validateTimelineSegmentStructure } from "@lyonix/domain";
+import { canAccessProject, TIMELINE_ADDED_SCENE_ID_PREFIX, validateTimelineEditState, validateTimelineSegmentStructure } from "@lyonix/domain";
 import { isDynamicStyleOptionKey, isValidDynamicStyleOptionValue } from "@lyonix/providers";
 import type {
   ErrorCode,
   SaveTimelineVersionRequest,
   TemplateModificationSlotResponse,
+  TimelineAddedSceneInput,
+  TimelineAddedSceneResponse,
   TimelineOptionValues,
   TimelineRenderPreviewResponse,
   TimelineSceneBindingInput,
@@ -67,10 +69,20 @@ const toTimelineSegmentResponse = (segment: Partial<TimelineSegmentResponse>): T
   priority: nullableInt(segment.priority),
 });
 
+/** VE2E-58: reads one stored added/split scene definition; a legacy row simply has none of them. */
+const toTimelineAddedSceneResponse = (def: Partial<TimelineAddedSceneResponse>): TimelineAddedSceneResponse => ({
+  sceneId: String(def.sceneId ?? ""),
+  narration: String(def.narration ?? ""),
+  screenText: String(def.screenText ?? ""),
+  durationHintMs: nullableInt(def.durationHintMs) ?? 0,
+  origin: def.origin === "split" ? "split" : "added",
+  splitFromSceneId: typeof def.splitFromSceneId === "string" && def.splitFromSceneId ? def.splitFromSceneId : null,
+});
+
 export const toTimelineVersionResponse = (row: {
   id: string; projectId: string; version: number; status: string; templateSnapshotId: string | null;
   scenes: unknown; optionValues: unknown; supersedesId: string | null; createdAt: Date; approvedAt: Date | null;
-  segments?: unknown; workflowRunId?: string | null;
+  segments?: unknown; workflowRunId?: string | null; addedScenes?: unknown; removedSceneIds?: unknown;
 }): TimelineVersionResponse => ({
   id: row.id,
   projectId: row.projectId,
@@ -80,6 +92,8 @@ export const toTimelineVersionResponse = (row: {
   scenes: ((Array.isArray(row.scenes) ? row.scenes : []) as TimelineSceneBindingResponse[]).map(toTimelineSceneBindingResponse),
   optionValues: (row.optionValues && typeof row.optionValues === "object" ? row.optionValues : {}) as TimelineOptionValues,
   segments: ((Array.isArray(row.segments) ? row.segments : []) as TimelineSegmentResponse[]).map(toTimelineSegmentResponse),
+  addedScenes: ((Array.isArray(row.addedScenes) ? row.addedScenes : []) as Partial<TimelineAddedSceneResponse>[]).map(toTimelineAddedSceneResponse),
+  removedSceneIds: (Array.isArray(row.removedSceneIds) ? row.removedSceneIds : []).filter((id): id is string => typeof id === "string"),
   supersedesId: row.supersedesId,
   workflowRunId: row.workflowRunId ?? null,
   createdAt: row.createdAt.toISOString(),
@@ -91,6 +105,8 @@ type ValidatedTimelineContent = {
   scenes: TimelineSceneBindingResponse[];
   segments: TimelineSegmentResponse[];
   optionValues: TimelineOptionValues;
+  addedScenes: TimelineAddedSceneResponse[];
+  removedSceneIds: string[];
 };
 
 /** Input of the trusted Auto runner path (never exposed over HTTP). */
@@ -99,6 +115,8 @@ export type WorkflowRunTimelineInput = {
   scenes: TimelineSceneBindingInput[];
   optionValues?: TimelineOptionValues;
   segments?: TimelineSegmentInput[];
+  addedScenes?: TimelineAddedSceneInput[];
+  removedSceneIds?: string[];
 };
 
 /** Key-order-independent JSON for content equality (JSONB does not preserve object key order). */
@@ -144,7 +162,8 @@ export class TimelineVersionsService {
     projectId: string,
     scenes: TimelineSceneBindingInput[],
     segmentsInput: TimelineSegmentInput[] | undefined,
-  ): Promise<TimelineOutcome<{ scenes: TimelineSceneBindingResponse[]; segments: TimelineSegmentResponse[] }>> {
+    edits: { addedScenes?: TimelineAddedSceneInput[] | undefined; removedSceneIds?: string[] | undefined } = {},
+  ): Promise<TimelineOutcome<{ scenes: TimelineSceneBindingResponse[]; segments: TimelineSegmentResponse[]; addedScenes: TimelineAddedSceneResponse[]; removedSceneIds: string[] }>> {
     if (!Array.isArray(scenes) || scenes.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline cần ít nhất một scene" };
     if (scenes.length > MAX_SCENES) return { ok: false, code: "VALIDATION_FAILED", message: `Timeline vượt quá ${MAX_SCENES} scene` };
     const seen = new Set<string>();
@@ -168,6 +187,29 @@ export class TimelineVersionsService {
     const trimmedScenes = scenes.map((scene) => ({ ...scene, sceneId: scene.sceneId.trim() }));
     const structure = validateTimelineSegmentStructure(trimmedScenes, segmentList);
     if (!structure.ok) return { ok: false, code: "VALIDATION_FAILED", message: structure.message };
+
+    // VE2E-58: user-added/split scenes + removed script scenes. Only checked against the approved script when the
+    // timeline actually carries edits, so every pre-VE2E-58 save keeps validating exactly as before.
+    if (edits.addedScenes !== undefined && edits.addedScenes !== null && !Array.isArray(edits.addedScenes)) return { ok: false, code: "VALIDATION_FAILED", message: "addedScenes phải là mảng" };
+    if (edits.removedSceneIds !== undefined && edits.removedSceneIds !== null && !Array.isArray(edits.removedSceneIds)) return { ok: false, code: "VALIDATION_FAILED", message: "removedSceneIds phải là mảng" };
+    const addedInput = edits.addedScenes ?? [];
+    const removedInput = edits.removedSceneIds ?? [];
+    if (addedInput.length > MAX_SCENES) return { ok: false, code: "VALIDATION_FAILED", message: `Timeline vượt quá ${MAX_SCENES} cảnh tự thêm` };
+    const addedScenes: TimelineAddedSceneResponse[] = addedInput.map((def) => ({
+      sceneId: typeof def?.sceneId === "string" ? def.sceneId.trim() : "",
+      narration: typeof def?.narration === "string" ? def.narration.trim() : "",
+      screenText: typeof def?.screenText === "string" ? def.screenText.trim() : "",
+      durationHintMs: def?.durationHintMs,
+      origin: def?.origin,
+      splitFromSceneId: typeof def?.splitFromSceneId === "string" && def.splitFromSceneId.trim() ? def.splitFromSceneId.trim() : null,
+    }));
+    const removedSceneIds = removedInput.map((id) => (typeof id === "string" ? id.trim() : ""));
+    if (addedScenes.length > 0 || removedSceneIds.length > 0) {
+      const script = await this.loadScriptScenes(projectId);
+      if (!script) return { ok: false, code: "VALIDATION_FAILED", message: "Dự án chưa có kịch bản đã duyệt để thêm/xóa cảnh" };
+      const editCheck = validateTimelineEditState({ scenes: trimmedScenes, segments: segmentList, addedScenes, removedSceneIds }, { scriptSceneIds: script.scenes.map((row) => row.sceneId) });
+      if (!editCheck.ok) return { ok: false, code: "VALIDATION_FAILED", message: editCheck.message };
+    }
 
     const mediaIds = [
       ...new Set(
@@ -233,8 +275,51 @@ export class TimelineVersionsService {
           subject: segment.subject?.trim() || null,
           priority: segment.priority ?? null,
         })),
+        addedScenes,
+        removedSceneIds,
       },
     };
+  }
+
+  /**
+   * The approved script's own scenes (excluding rows VE2E-58 materialized for user-added scenes) of the
+   * project's latest approved `ScriptDraftVersion`, or null when the project has none.
+   */
+  private async loadScriptScenes(projectId: string): Promise<{ scriptDraftVersionId: string; scenes: { sceneId: string; orderIndex: number }[]; allOrderIndexes: number[] } | null> {
+    const draft = await this.prisma.scriptDraftVersion.findFirst({
+      where: { status: "approved", sourceVersion: { projectId } },
+      orderBy: { version: "desc" },
+      select: { id: true, scenes: { select: { sceneId: true, orderIndex: true } } },
+    });
+    if (!draft) return null;
+    return {
+      scriptDraftVersionId: draft.id,
+      scenes: draft.scenes.filter((row) => !row.sceneId.startsWith(TIMELINE_ADDED_SCENE_ID_PREFIX)),
+      allOrderIndexes: draft.scenes.map((row) => row.orderIndex),
+    };
+  }
+
+  /**
+   * VE2E-58: the existing voice flow (`POST /scene-versions/:id/audio-versions`) is keyed by a persisted
+   * `SceneDraftVersion`, so each user-added/split scene is mirrored as a row under the project's approved
+   * script draft (idempotent on `scriptDraftVersionId + sceneId`; text kept in sync). The script's own
+   * rows are never modified and rows are never deleted (a deleted added scene just stops being listed).
+   */
+  private async materializeAddedScenes(projectId: string, defs: TimelineAddedSceneResponse[]): Promise<void> {
+    if (defs.length === 0) return;
+    const script = await this.loadScriptScenes(projectId);
+    if (!script) return;
+    let nextOrder = Math.max(-1, ...script.allOrderIndexes) + 1;
+    for (const def of defs) {
+      const existing = await this.prisma.sceneDraftVersion.findFirst({ where: { scriptDraftVersionId: script.scriptDraftVersionId, sceneId: def.sceneId }, select: { id: true } });
+      if (existing) {
+        await this.prisma.sceneDraftVersion.update({ where: { id: existing.id }, data: { narration: def.narration, screenText: def.screenText, durationHintMs: def.durationHintMs } });
+      } else {
+        await this.prisma.sceneDraftVersion.create({
+          data: { scriptDraftVersionId: script.scriptDraftVersionId, sceneId: def.sceneId, orderIndex: nextOrder++, narration: def.narration, screenText: def.screenText, visualQuery: "", durationHintMs: def.durationHintMs },
+        });
+      }
+    }
   }
 
   private async validateOptionValues(templateSnapshotId: string | null | undefined, optionValues: TimelineOptionValues): Promise<TimelineOutcome<TimelineOptionValues>> {
@@ -277,17 +362,17 @@ export class TimelineVersionsService {
 
   private async validateContent(
     projectId: string,
-    input: { templateSnapshotId?: string | null; scenes: TimelineSceneBindingInput[]; optionValues?: TimelineOptionValues; segments?: TimelineSegmentInput[] },
+    input: { templateSnapshotId?: string | null; scenes: TimelineSceneBindingInput[]; optionValues?: TimelineOptionValues; segments?: TimelineSegmentInput[]; addedScenes?: TimelineAddedSceneInput[]; removedSceneIds?: string[] },
   ): Promise<TimelineOutcome<ValidatedTimelineContent>> {
     if (input.templateSnapshotId) {
       const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: input.templateSnapshotId } });
       if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
     }
-    const scenes = await this.validateScenes(projectId, input.scenes, input.segments);
+    const scenes = await this.validateScenes(projectId, input.scenes, input.segments, { addedScenes: input.addedScenes, removedSceneIds: input.removedSceneIds });
     if (!scenes.ok) return scenes;
     const optionValues = await this.validateOptionValues(input.templateSnapshotId, input.optionValues ?? {});
     if (!optionValues.ok) return optionValues;
-    return { ok: true, data: { scenes: scenes.data.scenes, segments: scenes.data.segments, optionValues: optionValues.data } };
+    return { ok: true, data: { scenes: scenes.data.scenes, segments: scenes.data.segments, optionValues: optionValues.data, addedScenes: scenes.data.addedScenes, removedSceneIds: scenes.data.removedSceneIds } };
   }
 
   async save(projectId: string, userId: string, role: "admin" | "staff", input: SaveTimelineVersionRequest): Promise<TimelineOutcome<TimelineVersionResponse>> {
@@ -300,6 +385,7 @@ export class TimelineVersionsService {
     if ((input.supersedesId ?? null) !== expectedSupersedesId) {
       return { ok: false, code: "VERSION_CONFLICT", message: "Timeline đã có phiên bản mới hơn từ khi bạn tải. Tải lại rồi lưu lại.", status: 409 };
     }
+    await this.materializeAddedScenes(projectId, content.data.addedScenes);
     const created = await this.prisma.timelineVersion.create({
       data: {
         projectId,
@@ -309,6 +395,8 @@ export class TimelineVersionsService {
         scenes: content.data.scenes as unknown as object,
         optionValues: content.data.optionValues as unknown as object,
         segments: content.data.segments as unknown as object,
+        addedScenes: content.data.addedScenes as unknown as object,
+        removedSceneIds: content.data.removedSceneIds as unknown as object,
         supersedesId: expectedSupersedesId,
         createdByUserId: userId,
       },
@@ -347,12 +435,15 @@ export class TimelineVersionsService {
       if (
         stableJson(existing.scenes) === stableJson(content.data.scenes) &&
         stableJson(existing.segments) === stableJson(content.data.segments) &&
+        stableJson(existing.addedScenes) === stableJson(content.data.addedScenes) &&
+        stableJson(existing.removedSceneIds) === stableJson(content.data.removedSceneIds) &&
         stableJson(existing.optionValues) === stableJson(content.data.optionValues)
       ) {
         return { ok: true, data: existing };
       }
     }
     const now = new Date();
+    await this.materializeAddedScenes(projectId, content.data.addedScenes);
     try {
       const created = await this.prisma.timelineVersion.create({
         data: {
@@ -363,6 +454,8 @@ export class TimelineVersionsService {
           scenes: content.data.scenes as unknown as object,
           optionValues: content.data.optionValues as unknown as object,
           segments: content.data.segments as unknown as object,
+          addedScenes: content.data.addedScenes as unknown as object,
+          removedSceneIds: content.data.removedSceneIds as unknown as object,
           supersedesId: latest?.id ?? null,
           createdByUserId: userId,
           approvedAt: now,
