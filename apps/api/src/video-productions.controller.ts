@@ -93,6 +93,16 @@ export class VideoProductionsController {
     return success(outcome.data, requestId(response));
   }
 
+  /** VE2E-62: take a still-queued (draft) run out of the queue. */
+  @Post("video-productions/:id/cancel")
+  async cancel(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const outcome = await this.productions.cancelQueued(id, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400);
+    return success(outcome.data, requestId(response));
+  }
+
   @Post("video-productions/:id/retry")
   async retry(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user, session } = await requireUser(request, response, this.auth);

@@ -517,6 +517,24 @@ export const renderJobStatuses = [
 ] as const;
 export type RenderJobStatus = (typeof renderJobStatuses)[number];
 
+// --- VE2E-62: queue visibility (queuePosition / active-limit summary) ---
+
+export const queueKinds = ["workflow", "render", "media"] as const;
+export type QueueKind = (typeof queueKinds)[number];
+
+/**
+ * VE2E-62: `GET /queue-summary` item. `active` = items occupying a slot now, `limit` = configured parallelism
+ * (VE2E-61 `concurrency-config`), `queued` = items waiting FIFO for a slot. Counts are global (all users).
+ */
+export type QueueSummaryResponse = { kind: QueueKind; active: number; limit: number; queued: number };
+
+/**
+ * VE2E-62: per-item queue state. `queuePosition` is 1-based among queued items of the same kind and null when the
+ * item is not waiting. `queuedAt` = when it entered the wait (null when never/no longer queued is still reported
+ * as the enqueue time); `startedAt` = when it began running (null while waiting or unknown).
+ */
+export type QueueStateFields = { queuePosition: number | null; queuedAt: string | null; startedAt: string | null };
+
 export type RenderJobResponse = {
   id: string;
   projectId: string;
@@ -541,6 +559,11 @@ export type RenderJobResponse = {
   costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string } | null;
+  /** VE2E-62: which queue `queuePosition` refers to ("media" = waiting for clip preparation, "render" = queued at the provider); null when not waiting. */
+  queueKind?: Extract<QueueKind, "render" | "media"> | null;
+  queuePosition?: number | null;
+  queuedAt?: string | null;
+  startedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -818,6 +841,8 @@ export type VideoProductionResponse = {
   visionUsage?: MediaPlanVisionUsage | null;
   /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
   durationBudget: DurationBudgetDiagnostics | null;
+  /** VE2E-62: workflow queue state (`queuePosition` is set only while the run is `draft`, i.e. waiting for a worker slot). */
+  queue: QueueStateFields;
   createdAt: string;
   updatedAt: string;
 };
@@ -845,6 +870,8 @@ export type VideoProductionListItemResponse = {
   costCurrency: string | null;
   renderDurationMs: number | null;
   lastError: { code: string; message: string; stepKey?: string } | null;
+  /** VE2E-62 */
+  queue: QueueStateFields;
   createdAt: string;
   updatedAt: string;
 };
