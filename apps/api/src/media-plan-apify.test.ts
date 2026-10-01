@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MediaPlanService, SegmentSourceLedger, apifyAutoPlatformFromEnv, apifyKeywordForSegment, apifyLedgerIdFromFileName, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript } from "./media-plan.service.js";
+import { MediaPlanService, SegmentSourceLedger, apifyAutoPlatformFromEnv, apifyAutoPlatformsFromEnv, apifyImagePlatformsFromEnv, apifyKeywordForSegment, apifyLedgerIdFromFileName, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript } from "./media-plan.service.js";
 import type { ApifyService } from "./apify.service.js";
 import type { PexelsService } from "./pexels.service.js";
 
@@ -33,18 +33,19 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
   let pexels: { autoImportForScene: ReturnType<typeof vi.fn> };
   let apify: { findAccountForUser: ReturnType<typeof vi.fn>; autoImportForSegment: ReturnType<typeof vi.fn> };
   let service: MediaPlanService;
-  const prisma: any = { project: { findUnique: async () => ({ id: projectId }) } };
+  const prisma: any = { project: { findUnique: async () => ({ id: projectId }) }, mediaAssetVersion: { findFirst: async () => null } };
   const grants: any = { forUser: async () => ({ teamIds: [], projectIds: [projectId], channelIds: [] }) };
 
   const firstSegment = (svc: MediaPlanService, s: MediaPlanScript) => svc.planSegments(s, { min: 1, max: 1 })[0]!;
 
   beforeEach(() => {
+    process.env.APIFY_VIDEO_PLATFORMS = "tiktok";
     pexels = { autoImportForScene: vi.fn(async () => ({ ok: true as const, data: { asset: { id: "pexels-asset-1", kind: "video", durationMs: 30_000 } as any, externalId: "ext-1" } })) };
     apify = { findAccountForUser: vi.fn(async () => ({ id: "apify-acc", encryptedSecret: "enc" })), autoImportForSegment: vi.fn(async () => apifyOk) };
     service = new MediaPlanService(prisma, grants, pexels as unknown as PexelsService, apify as unknown as ApifyService);
   });
 
-  afterEach(() => { delete process.env.APIFY_AUTO_PLATFORM; });
+  afterEach(() => { delete process.env.APIFY_AUTO_PLATFORM; delete process.env.APIFY_AUTO_PLATFORMS; delete process.env.APIFY_VIDEO_PLATFORMS; delete process.env.APIFY_IMAGE_PLATFORMS; });
 
   it("sources the segment from Apify with keywords.ja and never touches Pexels on success", async () => {
     const s = script();
@@ -191,6 +192,90 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger });
     expect(seen).toEqual(["555", "7001"]);
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_duplicate_or_unsupported_source" } });
+  });
+
+  it("VE2E-53: splits a segment whose short social clip cannot cover every scene and sources the rest from a second clip", async () => {
+    const s: MediaPlanScript = {
+      ...script(),
+      scenes: [
+        { sceneId: "s1", narration: "一つ目。", screenText: "one", visualQuery: "a", durationHintMs: 2000, voiceDurationMs: 2000 },
+        { sceneId: "s2", narration: "二つ目。", screenText: "two", visualQuery: "b", durationHintMs: 6000, voiceDurationMs: 6000 },
+      ],
+    };
+    apify.autoImportForSegment
+      .mockResolvedValueOnce({ ...apifyOk, data: { ...apifyOk.data, asset: { id: "short-clip", kind: "video", durationMs: 5000 }, externalId: "1", ledgerId: "apify:tiktok:1" } })
+      .mockResolvedValueOnce({ ...apifyOk, data: { ...apifyOk.data, asset: { id: "long-clip", kind: "video", durationMs: 20_000 }, externalId: "2", ledgerId: "apify:tiktok:2" } });
+    const result = await service.sourceSegments(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segments: service.planSegments(s, { min: 1, max: 1 }), ledger: new SegmentSourceLedger() });
+    expect(result.sourced.map((piece) => [piece.segment.segmentId, piece.segment.sceneIds, piece.source?.mediaAssetVersionId])).toEqual([
+      ["g1", ["s1"], "short-clip"],
+      ["g1-b", ["s2"], "long-clip"],
+    ]);
+    expect(apify.autoImportForSegment).toHaveBeenCalledTimes(2);
+  });
+
+  it("VE2E-53: keeps the single short clip when no second source can be found", async () => {
+    const s: MediaPlanScript = {
+      ...script(),
+      scenes: [
+        { sceneId: "s1", narration: "一つ目。", screenText: "one", visualQuery: "a", durationHintMs: 2000, voiceDurationMs: 2000 },
+        { sceneId: "s2", narration: "二つ目。", screenText: "two", visualQuery: "b", durationHintMs: 6000, voiceDurationMs: 6000 },
+      ],
+    };
+    apify.autoImportForSegment
+      .mockResolvedValueOnce({ ...apifyOk, data: { ...apifyOk.data, asset: { id: "short-clip", kind: "video", durationMs: 5000 }, externalId: "1", ledgerId: "apify:tiktok:1" } })
+      .mockResolvedValue({ ok: false as const, reason: "apify_no_usable_candidate" });
+    pexels.autoImportForScene.mockResolvedValue({ ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "none" });
+    const result = await service.sourceSegments(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segments: service.planSegments(s, { min: 1, max: 1 }), ledger: new SegmentSourceLedger() });
+    expect(result.sourced).toHaveLength(1);
+    expect(result.sourced[0]).toMatchObject({ segment: { segmentId: "g1", sceneIds: ["s1", "s2"] }, source: { mediaAssetVersionId: "short-clip" } });
+  });
+
+  it("a VIDEO slot tries the next video platform (never an image platform), then Pexels", async () => {
+    process.env.APIFY_VIDEO_PLATFORMS = "tiktok,x,pinterest";
+    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_abstained:low_relevance" });
+    const s = script();
+    const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: { ...firstSegment(service, s), visualKind: "video" }, ledger: new SegmentSourceLedger() });
+    expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => [c[4].platform, c[4].mediaType])).toEqual([["tiktok", "video"], ["x", "video"]]);
+    expect(outcome).toMatchObject({ ok: true, data: { provider: "apify" } });
+    expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+  });
+
+  it("an IMAGE slot is sourced from Pinterest as a photo, and its Pexels fallback is photos only", async () => {
+    apify.autoImportForSegment.mockResolvedValueOnce({ ok: true, data: { ...apifyOk.data, asset: { id: "pin-photo", kind: "image", durationMs: null }, externalId: "pin1", ledgerId: "apify:pinterest:pin1", platform: "pinterest" } });
+    const s = script();
+    const imageSegment = { ...firstSegment(service, s), visualKind: "image" as const };
+    const ok = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: imageSegment, ledger: new SegmentSourceLedger() });
+    expect(apify.autoImportForSegment.mock.calls[0]![4]).toMatchObject({ platform: "pinterest", mediaType: "image" });
+    expect(ok).toMatchObject({ ok: true, data: { mediaAssetVersionId: "pin-photo", kind: "image", provider: "apify" } });
+
+    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_no_usable_candidate" });
+    await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: imageSegment, ledger: new SegmentSourceLedger() });
+    expect(pexels.autoImportForScene.mock.calls[0]![3]).toMatchObject({ mediaType: "image" });
+  });
+
+  it("a segment with no template kind keeps the legacy behaviour (video platforms, no Pexels media type)", async () => {
+    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_no_usable_candidate" });
+    const s = script();
+    await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
+    expect(apify.autoImportForSegment.mock.calls[0]![4]).toMatchObject({ platform: "tiktok", mediaType: "video" });
+    expect(pexels.autoImportForScene.mock.calls[0]![3]).not.toHaveProperty("mediaType");
+  });
+
+  it("parses the per-kind platform lists (video default tiktok, image default pinterest; wrong-kind platforms are ignored)", () => {
+    delete process.env.APIFY_VIDEO_PLATFORMS;
+    delete process.env.APIFY_AUTO_PLATFORMS;
+    delete process.env.APIFY_IMAGE_PLATFORMS;
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok"]);
+    expect(apifyImagePlatformsFromEnv()).toEqual(["pinterest"]);
+    process.env.APIFY_VIDEO_PLATFORMS = "pinterest, google_video, x, instagram, tiktok, x";
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["x", "tiktok"]);
+    process.env.APIFY_IMAGE_PLATFORMS = "tiktok, google_image, pinterest";
+    expect(apifyImagePlatformsFromEnv()).toEqual(["google_image", "pinterest"]);
+    process.env.APIFY_VIDEO_PLATFORMS = "instagram";
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok"]);
+    delete process.env.APIFY_VIDEO_PLATFORMS;
+    process.env.APIFY_AUTO_PLATFORM = "x";
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["x"]);
   });
 
   it("reads the platform from APIFY_AUTO_PLATFORM but never allows google_video or unknown values", () => {

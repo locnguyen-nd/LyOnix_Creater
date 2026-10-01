@@ -113,6 +113,8 @@ export type AutoImportForSceneInput = {
   usedExternalIds?: readonly string[];
   /** VE2E-57: job-level vision budget shared with the other segments of the same run (a fresh one per scene when omitted). */
   visionBudget?: VisionBudget;
+  /** Template-aware sourcing: `image` = photos only, `video` = videos only (no cross-kind fallback). Omitted = legacy (video, else photo). */
+  mediaType?: "video" | "image";
 };
 
 @Injectable()
@@ -369,11 +371,14 @@ export class PexelsService {
     const queriedAt = new Date().toISOString();
     const usedExternalIds = new Set(input.usedExternalIds ?? []);
 
-    const videoPool = await this.collectCandidatePool(apiKey, accountId, variants, "video", queriedAt);
-    if (!videoPool.ok) return { ok: false, ...mapProviderError(videoPool.error) };
-    let pool = videoPool.candidates;
+    let pool: MediaCandidate[] = [];
     let isPhotoPool = false;
-    if (pool.length === 0) {
+    if (input.mediaType !== "image") {
+      const videoPool = await this.collectCandidatePool(apiKey, accountId, variants, "video", queriedAt);
+      if (!videoPool.ok) return { ok: false, ...mapProviderError(videoPool.error) };
+      pool = videoPool.candidates;
+    }
+    if (pool.length === 0 && input.mediaType !== "video") {
       const photoPool = await this.collectCandidatePool(apiKey, accountId, variants, "photo", queriedAt);
       if (!photoPool.ok) return { ok: false, ...mapProviderError(photoPool.error) };
       pool = photoPool.candidates;

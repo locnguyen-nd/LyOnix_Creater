@@ -26,6 +26,7 @@ import {
   canWriteProjectResource,
   computeSegmentSourceRanges,
   computeSocialWindowRanges,
+  computeWindowRangesWithLoopFallback,
   socialWindowOptionsFromEnv,
   deriveSceneBrief,
   planBackgroundSegments,
@@ -126,6 +127,10 @@ export class SegmentSourceLedger {
 
 /** VE2E-51: at most this many segments are sourced at once. */
 export const MEDIA_PLAN_SOURCING_CONCURRENCY = 3;
+/** Window guards per provider: social (Apify) clips skip the author's intro/outro, stock (Pexels) clips are used from the first frame to the last. */
+const windowOptionsFor = (provider: string | undefined) => (provider === "apify" ? socialWindowOptionsFromEnv() : { startGuardMs: 0, endGuardMs: 0 });
+/** VE2E-53: how many times a segment may be split to source the scenes a short social clip cannot cover. */
+const MAX_SECOND_SOURCE_SPLITS = 2;
 
 /** Pexels imports are registered as `pexels-<id>.<ext>` (pexels.service.ts `import`); that is the only place the external id survives on the asset row. */
 export const pexelsExternalIdFromFileName = (fileName: string): string | null => /^pexels-(\d+)\./.exec(fileName)?.[1] ?? null;
@@ -141,6 +146,32 @@ export const apifyAutoPlatformFromEnv = (): ApifyPlatform => {
   const value = process.env.APIFY_AUTO_PLATFORM;
   return isApifyPlatform(value) && value !== "google_video" ? value : "tiktok";
 };
+
+/**
+ * Ordered platforms tried per segment before falling back to Pexels: env `APIFY_AUTO_PLATFORMS` (comma list, e.g. `tiktok,pinterest`);
+ * legacy single `APIFY_AUTO_PLATFORM` still wins when the list is unset. Default `tiktok,pinterest` (Pinterest = curated, better
+ * caption/scene fit when TikTok yields nothing usable). Unknown values and `google_video` are dropped; empty -> TikTok only.
+ */
+const VIDEO_PLATFORMS: ReadonlySet<ApifyPlatform> = new Set<ApifyPlatform>(["tiktok", "x"]);
+const IMAGE_PLATFORMS: ReadonlySet<ApifyPlatform> = new Set<ApifyPlatform>(["pinterest", "google_image"]);
+const parsePlatformList = (raw: string, allowed: ReadonlySet<ApifyPlatform>, fallback: ApifyPlatform[]): ApifyPlatform[] => {
+  const list = raw.split(",").map((v) => v.trim()).filter((v): v is ApifyPlatform => isApifyPlatform(v) && allowed.has(v));
+  const unique = [...new Set(list)];
+  return unique.length > 0 ? unique : fallback;
+};
+
+/** Platforms for VIDEO slots, in order: env `APIFY_VIDEO_PLATFORMS` (alias `APIFY_AUTO_PLATFORMS`; legacy single `APIFY_AUTO_PLATFORM`), default TikTok. Image-only platforms are never used for a video slot. */
+export const apifyAutoPlatformsFromEnv = (): ApifyPlatform[] => {
+  const raw = process.env.APIFY_VIDEO_PLATFORMS ?? process.env.APIFY_AUTO_PLATFORMS;
+  if (raw !== undefined) return parsePlatformList(raw, VIDEO_PLATFORMS, ["tiktok"]);
+  return process.env.APIFY_AUTO_PLATFORM ? [apifyAutoPlatformFromEnv()] : ["tiktok"];
+};
+
+/** Platforms for IMAGE slots, in order: env `APIFY_IMAGE_PLATFORMS`, default Pinterest. */
+export const apifyImagePlatformsFromEnv = (): ApifyPlatform[] => parsePlatformList(process.env.APIFY_IMAGE_PLATFORMS ?? "", IMAGE_PLATFORMS, ["pinterest"]);
+
+/** Kind a segment must be sourced as: the template slot's kind when the planner knows it, else video (legacy). */
+export const segmentVisualKind = (segment: PlannedSegment): "video" | "image" => segment.visualKind ?? "video";
 
 /**
  * The Japanese Apify keyword of a segment (VE2E-50): only `segment.keywords.ja` when it is a real short
@@ -292,17 +323,26 @@ export class MediaPlanService {
       const brief = this.segmentBrief(input.script, input.segment);
       // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
       const usedExternalIds = input.ledger.apifyPlainIds;
-      const outcome = await this.apify.autoImportForSegment(projectId, userId, role, account, {
-        platform: apifyAutoPlatformFromEnv(),
-        keyword,
-        brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
-        sceneId: input.segment.sceneIds[0]!,
-        usedExternalIds,
-        scriptLanguage: input.script.language,
-        segmentDurationSeconds: input.segment.durationMs / 1000,
-        ...(input.job ? { job: input.job } : {}),
-      });
-      if (!outcome.ok) return { reason: outcome.reason, quality: outcome.quality ?? null };
+      let outcome: Awaited<ReturnType<ApifyService["autoImportForSegment"]>> | null = null;
+      let firstFailure: { reason: string; quality: MediaPlanApifyQuality | null } | null = null;
+      // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
+      const visualKind = segmentVisualKind(input.segment);
+      for (const platform of visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv()) {
+        const attempt = await this.apify.autoImportForSegment(projectId, userId, role, account, {
+          platform,
+          mediaType: visualKind,
+          keyword,
+          brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
+          sceneId: input.segment.sceneIds[0]!,
+          usedExternalIds,
+          scriptLanguage: input.script.language,
+          segmentDurationSeconds: input.segment.durationMs / 1000,
+          ...(input.job ? { job: input.job } : {}),
+        });
+        if (attempt.ok) { outcome = attempt; break; }
+        firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
+      }
+      if (!outcome) return { reason: firstFailure?.reason ?? "apify_no_platform", quality: firstFailure?.quality ?? null };
       const asset = outcome.data.asset;
       if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
         // Release the reservation made by ApifyService (the ledger itself never held this clip).
@@ -348,6 +388,8 @@ export class MediaPlanService {
         query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
         sceneBrief: brief,
         usedExternalIds: [...input.ledger.externalIds],
+        // Template-aware sourcing: an image slot gets a photo, a video slot a video (no cross-kind fallback). Unknown kind = legacy.
+        ...(input.segment.visualKind ? { mediaType: input.segment.visualKind } : {}),
         ...(input.job ? { visionBudget: input.job.vision } : {}),
       });
       if (!outcome.ok) return outcome;
@@ -399,9 +441,36 @@ export class MediaPlanService {
       if (pending.length > 0) extractionReason = (await input.beforeSourcing(pending)) ?? null;
     }
     const job = new ApifyJobContext();
-    const results: Array<SourcedSegment | undefined> = new Array(input.segments.length).fill(undefined);
+    const results: Array<SourcedSegment[] | undefined> = new Array(input.segments.length).fill(undefined);
     let failure: { index: number; error: unknown } | null = null;
     let next = 0;
+    const segmentMs = (sceneIds: string[]) => sceneIds.reduce((total, sceneId) => total + (input.script.scenes.find((s) => s.sceneId === sceneId) ? sceneDuration(input.script.scenes.find((s) => s.sceneId === sceneId)!) : 1), 0);
+    /**
+     * VE2E-53 second source: a social (Apify) clip whose guard-bounded window cannot cover every scene of its segment no longer
+     * leaves those scenes on a clip that does not fit. The segment is split at the coverage boundary and the uncovered scenes are
+     * sourced as their own segment (`<id>-b`), up to {@link MAX_SECOND_SOURCE_SPLITS} times. If the extra source cannot be found the
+     * original single-source behaviour is kept, so a run never fails because of this refinement.
+     */
+    const withSecondSource = async (head: SourcedSegment, depth: number): Promise<SourcedSegment[]> => {
+      const { segment, source } = head;
+      if (!source || depth >= MAX_SECOND_SOURCE_SPLITS || source.kind !== "video") return [head];
+      const durations = segment.sceneIds.map((sceneId) => ({ sceneId, durationMs: segmentMs([sceneId]) }));
+      const plan = computeSocialWindowRanges(durations, source.durationMs, windowOptionsFor(source.provider));
+      if (!plan || !plan.needsSecondSource || plan.uncoveredSceneIds.length === 0) return [head];
+      const uncovered = new Set(plan.uncoveredSceneIds);
+      const tailIds = segment.sceneIds.filter((sceneId) => uncovered.has(sceneId));
+      const coveredIds = segment.sceneIds.filter((sceneId) => !uncovered.has(sceneId));
+      const tailSegment: PlannedSegment = { ...segment, segmentId: `${segment.segmentId}-b`, sceneIds: tailIds, durationMs: segmentMs(tailIds) };
+      try {
+        const tail = await sourceOne(tailSegment, depth + 1);
+        if (tail.some((piece) => !piece.source)) return [head];
+        if (coveredIds.length === 0) return tail;
+        return [{ ...head, segment: { ...segment, sceneIds: coveredIds, durationMs: segmentMs(coveredIds) } }, ...tail];
+      } catch {
+        return [head];
+      }
+    };
+    const sourceOne = async (segment: PlannedSegment, depth: number): Promise<SourcedSegment[]> => withSecondSource(await one(segment), depth);
     const one = async (segment: PlannedSegment): Promise<SourcedSegment> => {
       let source = await this.findReusableSource(projectId, segment, input.ledger);
       let errorCode: string | null = null;
@@ -426,12 +495,12 @@ export class MediaPlanService {
         if (index >= input.segments.length) return;
         const segment = input.segments[index]!;
         try {
-          results[index] = await one(segment);
+          results[index] = await sourceOne(segment, 0);
         } catch (error) {
           if (input.stopOnFailure) {
             if (!failure || index < failure.index) failure = { index, error };
           } else {
-            results[index] = { segment, source: null, errorCode: "PROVIDER_UNAVAILABLE" };
+            results[index] = [{ segment, source: null, errorCode: "PROVIDER_UNAVAILABLE" }];
           }
         }
       }
@@ -442,7 +511,7 @@ export class MediaPlanService {
     const touched = u.runs > 0 || u.searchesReused > 0 || u.libraryReuses > 0;
     const failed = failure as { index: number; error: unknown } | null;
     return {
-      sourced: results.filter((entry): entry is SourcedSegment => entry !== undefined),
+      sourced: results.flatMap((entry) => entry ?? []),
       failure: failed ? { segment: input.segments[failed.index]!, error: failed.error } : null,
       visionUsage: job.vision.usage(),
       apifyUsage: touched ? { runs: u.runs, seconds: u.seconds, usd: u.usd, searchesReused: u.searchesReused, libraryReuses: u.libraryReuses } : null,
@@ -466,13 +535,17 @@ export class MediaPlanService {
           const scene = script.scenes.find((s) => s.sceneId === sceneId);
           return { sceneId, durationMs: scene ? sceneDuration(scene) : 1 };
         });
-        ranges = source.kind === "video" ? computeSegmentSourceRanges(sceneDurations, source.durationMs) : null;
-        if (source.kind === "video" && source.provider === "apify") {
-          // VE2E-53: social clips - guard-bounded, non-looping window; a second source (sourcing agent) covers what is left.
-          const plan = computeSocialWindowRanges(sceneDurations, source.durationMs, socialWindowOptionsFromEnv());
+        ranges = null;
+        if (source.kind === "video") {
+          // Non-looping, contiguous window for EVERY video source (social clips keep their intro/outro guards, stock clips none): a
+          // clip that cannot cover all scenes is flagged for a second source (see withSecondSource) instead of silently replaying
+          // its opening seconds in a later scene. Only an unknown duration falls back to the legacy looping layout.
+          const plan = computeWindowRangesWithLoopFallback(sceneDurations, source.durationMs, windowOptionsFor(source.provider));
           if (plan) {
             ranges = plan.ranges;
             socialWindow = { needsSecondSource: plan.needsSecondSource, coveredMs: plan.coveredMs };
+          } else {
+            ranges = computeSegmentSourceRanges(sceneDurations, source.durationMs);
           }
         }
         for (const sceneId of segment.sceneIds) bySceneId.set(sceneId, { segmentId: segment.segmentId, source, range: ranges?.find((r) => r.sceneId === sceneId) ?? null });

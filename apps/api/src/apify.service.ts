@@ -57,6 +57,7 @@ import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
+import { VideoFramesService, visionVideoFramesEnabled } from "./video-frames.service.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
@@ -79,10 +80,10 @@ export const APIFY_SEARCH_LIMIT = 10;
 const MAX_FILTERED_POOL = 8;
 const flagOn = (value: string | undefined, fallback: boolean) => (value === undefined || value.trim() === "" ? fallback : !/^(0|false|off|no)$/i.test(value.trim()));
 /**
- * `APIFY_TWO_PHASE` (default OFF until the Test agent's read-only probe confirms the `postURLs` input of
- * `clockworks/tiktok-scraper`; see the VE2E-51 handoff): `1` = search without download, then download only the chosen post.
+ * `APIFY_TWO_PHASE` (default ON since the 01/10 read-only probe confirmed the `postURLs` input of
+ * `clockworks/tiktok-scraper`: search ~12 s + one targeted download ~24 s, vs 2-4 min for the download search): `0` = classic single-phase.
  */
-export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, false);
+export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, true);
 /** `APIFY_TWO_PHASE_FALLBACK` (default on): when phase 2 fails, fall back to the single-phase download search. */
 export const apifyTwoPhaseFallbackEnabled = () => flagOn(process.env.APIFY_TWO_PHASE_FALLBACK, true);
 
@@ -156,6 +157,8 @@ export class ApifyService {
     @Inject(MediaService) private readonly media: MediaService,
     /** Only needed for the Auto vision-moderation pass (VE2E-46); omitted in unit tests that do not exercise it. */
     @Optional() @Inject(ProviderAccountsService) private readonly providerAccounts?: ProviderAccountsService,
+    /** VE2E-30: frames of imported videos for vision moderation (media worker). Omitted = frame check is always `unchecked`. */
+    @Optional() @Inject(VideoFramesService) private readonly videoFrames?: VideoFramesService,
   ) {}
 
   private async access(projectId: string, userId: string, role: "admin" | "staff", write: boolean) {
@@ -425,7 +428,7 @@ export class ApifyService {
    * (cover image; never the video itself). Candidates whose preview cannot be fetched, or when no vision-capable
    * content account exists, keep their metadata-only score - moderation only ever strengthens evidence / rejects.
    */
-  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<MediaCandidate[]> {
+  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string, fetchFrames?: (candidate: MediaCandidate) => Promise<VisionModerationFrame[]>): Promise<MediaCandidate[]> {
     if (!this.providerAccounts) return pool;
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
@@ -441,6 +444,7 @@ export class ApifyService {
       account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: models[0] ?? account.model, models },
       sceneContext,
       availability: this.providerAccounts as unknown as ModelAvailability,
+      ...(fetchFrames ? { fetchFrames } : {}),
       fetchFrame: async (candidate) => {
         const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
         if (!frame.ok) return null;
@@ -448,6 +452,25 @@ export class ApifyService {
         return visionFrame;
       },
     });
+  }
+
+  /**
+   * VE2E-30: vision verdict over frames sampled from the IMPORTED video (media worker `frame.extract`), reusing the same
+   * budgeted pipeline as the cover-frame pass. Opt-in (`VISION_VIDEO_FRAMES=1`). Only an explicit `rejected` decision blocks the
+   * clip; everything else (flag off, no vision account/budget/frames, worker down) is `unchecked` and never fails sourcing.
+   */
+  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<"accepted" | "rejected" | "unchecked"> {
+    if (!visionVideoFramesEnabled() || !this.videoFrames || asset.kind !== "video") return "unchecked";
+    try {
+      const moderated = await this.moderatePool([candidate], brief, userId, role, usedExternalIds, budget, `${scopeKey}:frames`, async () => {
+        const outcome = await this.videoFrames!.framesForAsset(asset.id);
+        return outcome.ok ? outcome.frames : [];
+      });
+      const decision = moderated[0]?.moderationDecision ?? null;
+      return decision === "rejected" ? "rejected" : decision === "accepted" ? "accepted" : "unchecked";
+    } catch {
+      return "unchecked";
+    }
   }
 
   /** VE2E-51: an asset of this project already imported from the same platform video (no second download). */
@@ -522,6 +545,8 @@ export class ApifyService {
       usedExternalIds: Set<string>;
       /** Script language: `ja` scripts only accept Japanese-language, JP-located clips (else Pexels). Omitted = no language rule. */
       scriptLanguage?: string;
+      /** Template-aware sourcing: only candidates of this kind (`image` = photo, `video` = video) are eligible. Omitted = any importable candidate. */
+      mediaType?: "video" | "image";
       /** The segment's duration: candidates shorter than this are rejected (they would loop). */
       segmentDurationSeconds?: number;
       job?: ApifyJobContext;
@@ -538,7 +563,8 @@ export class ApifyService {
     const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds };
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
-      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible);
+      const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
+      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
       if (input.platform !== "tiktok") return eligible;
       const selection = selectSocialCandidates(
         eligible.filter((r) => r.social).map((r) => ({ ref: r, signals: r.social! })),
@@ -576,6 +602,8 @@ export class ApifyService {
     if (library) {
       quality.reusedLibraryAsset = true;
       job.usage.libraryReuses += 1;
+      quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+      if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
       return done(library, decision.chosen);
     }
 
@@ -618,6 +646,12 @@ export class ApifyService {
       input.usedExternalIds.delete(importedId);
       release();
       return fail(`apify_import_failed:${imported.code}`);
+    }
+    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+    if (quality.frameCheck === "rejected") {
+      // Unbind the rejected clip from its scene so a retry never reuses it through the library shortcut; the video id stays reserved.
+      await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
+      return fail("apify_frames_rejected");
     }
     return {
       ok: true,

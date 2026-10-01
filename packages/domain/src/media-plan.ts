@@ -44,6 +44,8 @@ export type PlannedSegment = {
   keywords: { ja: string; en: string } | null;
   durationMs: number;
   origin: "visual_plan" | "fallback";
+  /** Kind the pinned template expects for this segment's scenes (set by `splitSegmentsByVisualKind`); undefined = legacy video behaviour. */
+  visualKind?: "video" | "image";
 };
 
 export type SegmentCountRange = { min: number; max: number };

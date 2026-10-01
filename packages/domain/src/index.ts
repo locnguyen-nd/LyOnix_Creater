@@ -183,6 +183,7 @@ export {
   type BackgroundSegmentRange,
   type BackgroundSegmentsParseResult,
 } from "./background-segments.js";
+export { deriveSceneVisualKinds, splitSegmentsByVisualKind, computeWindowRangesWithLoopFallback, type VisualKind, type WindowRangePlan } from "./media-plan-kinds.js";
 export {
   planBackgroundSegments,
   fitSegmentsToRange,
