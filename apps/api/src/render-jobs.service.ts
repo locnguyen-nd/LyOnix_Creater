@@ -41,6 +41,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { fixedSlotPathApplies } from "./render-mode.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { TTS_PROVIDER_DISABLED_VALUE, classifyCreatomateRenderError, slotsWithTtsProvider, templateTtsConflictMessage, ttsProviderOverrideKey, unfilledTtsSlotKeys } from "./template-tts.js";
 import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
@@ -358,8 +359,21 @@ export class RenderJobsService {
     // Only the request that atomically won the fingerprint race actually calls Creatomate.
     const base = process.env.PUBLIC_BASE_URL!.replace(/\/$/, "");
     const webhookUrl = `${base}/api/v1/render-webhooks/creatomate/${job.webhookToken}`;
+    let submitted: CreatomateRenderResult;
     try {
-      const submitted = await callProvider(webhookUrl);
+      submitted = await callProvider(webhookUrl);
+    } catch (error) {
+      const mapped = mapProviderError(error);
+      if (!(error instanceof ProviderError)) console.error("[render-jobs] Creatomate submit threw a non-provider error", job.id, error);
+      job = await this.prisma.renderJob.update({
+        where: { id: job.id },
+        data: { status: "failed", lastError: { code: mapped.code, message: mapped.message } as unknown as Prisma.InputJsonValue },
+      });
+      return { ok: false, ...mapped };
+    }
+    // Creatomate has ACCEPTED the render from here on. A local persistence failure must never be reported as a
+    // provider network error nor flip the job to `failed` (the render still runs and the webhook/reconcile can finish it).
+    try {
       const reportedStatus = normalizeCreatomateStatus(submitted.status);
       // The webhook can arrive and complete this job WHILE this submit call is still in
       // flight (Creatomate may call back before the HTTP response reaches us). Re-read the
@@ -380,12 +394,12 @@ export class RenderJobsService {
         },
       });
     } catch (error) {
-      const mapped = mapProviderError(error);
+      console.error("[render-jobs] Persisting accepted Creatomate render failed; retrying with core fields only", job.id, submitted.externalJobId, error);
+      // Core fields only (no optional/newer columns) so the externalJobId is never lost and webhook/reconcile can correlate.
       job = await this.prisma.renderJob.update({
         where: { id: job.id },
-        data: { status: "failed", lastError: { code: mapped.code, message: mapped.message } as unknown as Prisma.InputJsonValue },
+        data: { externalJobId: submitted.externalJobId, submittedAt: new Date(), status: "rendering" },
       });
-      return { ok: false, ...mapped };
     }
     return { ok: true, data: toJobResponse(job) };
   }
@@ -705,9 +719,15 @@ export class RenderJobsService {
     let clipScenes: Array<SceneBindingForMapping & { stripAudio: boolean }>;
     // VE2E-52: the fixed-slot (modification) path only when the scene count equals the template's Scene slots;
     // any other count (fewer or more) is composed by the template-scaled generator so no scene/narration is dropped.
-    const includedSceneCount = resolved.filter((scene) => !scene.excluded).length;
+    const includedScenes = resolved.filter((scene) => !scene.excluded);
     const slotCount = countTemplateSceneSlots(snapshot.rawTemplate);
-    const mode: "template" | "dynamic" = requestedMode === "template" && slotCount > 0 && includedSceneCount !== slotCount ? "dynamic" : requestedMode;
+    const fixedSlotsOk = fixedSlotPathApplies({
+      slotCount,
+      includedSceneCount: includedScenes.length,
+      imageSceneCount: includedScenes.filter((scene) => scene.mediaKind === "image").length,
+      templateImageSlots: RenderJobsService.snapshotSlots(snapshot).filter((slot) => slot.kind === "image").length,
+    });
+    const mode: "template" | "dynamic" = requestedMode === "template" && !fixedSlotsOk ? "dynamic" : requestedMode;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
       if (!composition.ok) return composition;

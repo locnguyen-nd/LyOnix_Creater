@@ -43,6 +43,7 @@ import { RenderJobsController } from "./render-jobs.controller.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
+import { VideoFramesService } from "./video-frames.service.js";
 import { ScriptVersionsController } from "./script-versions.controller.js";
 import { ScriptVersionsService } from "./script-versions.service.js";
 import { AudioVersionsController } from "./audio-versions.controller.js";
@@ -112,6 +113,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
     MediaJobsGateway,
     ClipDerivativesService,
+    VideoFramesService,
     ScriptVersionsService,
     AudioVersionsService,
     VideoProductionsService,

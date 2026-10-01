@@ -38,9 +38,13 @@ import {
   type PlannedSegment,
   type AutoSceneMedia,
   type AutoTemplateSlot,
+  deriveSceneVisualKinds,
+  splitSegmentsByVisualKind,
 } from "@lyonix/domain";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
+import { countTemplateSceneSlots } from "@lyonix/providers";
+import { fixedSlotPathApplies } from "./render-mode.js";
 import { PrismaService } from "./prisma.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
@@ -151,17 +155,42 @@ export class WorkflowRunnerService {
   }
 
   private async processOneDraft(): Promise<boolean> {
-    const candidate = await this.prisma.workflowRun.findFirst({ where: { mode: "auto", status: "draft" }, orderBy: { createdAt: "asc" } });
-    if (!candidate) return false;
-    const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
-    if (claimed.count !== 1) return true; // another worker tick/replica won the claim race
-    const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
-    try {
-      await this.runPipeline(run);
-    } catch (error) {
-      await this.handleFailure(run, error);
-    }
+    const started = await this.startNextDraft();
+    if (!started) return false;
+    await started.done;
     return true;
+  }
+
+  /**
+   * Claims the oldest draft Auto run (atomic `draft -> source_ready`, so concurrent callers/replicas never take the
+   * same run) and starts its pipeline WITHOUT waiting for it. Returns `null` when no draft exists, else a handle whose
+   * `done` promise settles when the run's pipeline ends (never rejects: failures go through `handleFailure`). It is a
+   * handle, not a bare promise, because returning a promise from an async function would make the caller wait for it.
+   * The worker loop keeps up to `WORKFLOW_CONCURRENCY` runs in flight; `processOneDraft` awaits `done` (sequential path).
+   */
+  async startNextDraft(): Promise<{ done: Promise<void> } | null> {
+    const candidate = await this.prisma.workflowRun.findFirst({ where: { mode: "auto", status: "draft" }, orderBy: { createdAt: "asc" } });
+    if (!candidate) return null;
+    const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
+    if (claimed.count !== 1) return { done: Promise.resolve() }; // another worker tick/replica won the claim race
+    const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
+    const done = (async () => {
+      try {
+        await this.runPipeline(run);
+      } catch (error) {
+        try {
+          await this.handleFailure(run, error);
+        } catch (failure) {
+          console.error("Workflow run failure handling failed", run.id, failure instanceof Error ? failure.message : "unknown error");
+        }
+      }
+    })();
+    return { done };
+  }
+
+  /** Reconciles every run waiting on a render (public entry for the concurrent worker loop). */
+  reconcile(): Promise<boolean> {
+    return this.reconcileRenders();
   }
 
   private async actorFor(userId: string): Promise<{ userId: string; role: "admin" | "staff" } | null> {
@@ -526,12 +555,22 @@ export class WorkflowRunnerService {
       })),
       visualPlan: approved.visualPlan ?? null,
     };
+    // Template-aware sourcing: a template can mix image and video scene slots. Each scene is sourced as the kind its slot expects
+    // (images from Pinterest, videos from TikTok), so a segment never mixes kinds. A video-only template stays video-only.
+    const kindSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
+    const kindSlots = (Array.isArray(kindSnapshot?.modifications) ? kindSnapshot.modifications : []) as unknown as Array<{ kind?: string }>;
+    const kindByScene = deriveSceneVisualKinds(kindSlots.map((slot) => String(slot.kind ?? "")), orderedScenes.map((scene) => scene.sceneId));
+    let plannedSegments = this.mediaPlans.planSegments(planScript, backgroundSegmentRange);
+    if (kindByScene) {
+      const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
+      plannedSegments = splitSegmentsByVisualKind(plannedSegments, kindByScene, durationByScene);
+    }
     const ledger = new SegmentSourceLedger();
     // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
     const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {
       providerAccountId: mediaConfig.providerAccountId,
       script: planScript,
-      segments: this.mediaPlans.planSegments(planScript, backgroundSegmentRange),
+      segments: plannedSegments,
       ledger,
       stopOnFailure: true,
       // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
@@ -581,7 +620,16 @@ export class WorkflowRunnerService {
     const extraText = { title: approved.title, caption: approved.caption };
     // Preflight only (no DB/provider effect): fail fast as needs_input with the exact missing keys
     // before anything is persisted, same message/classification as before VE2E-42.
-    const built = buildAutoRenderAssignments(slots, sceneMedia, extraText);
+    // Only the fixed-slot path needs every slot filled. When the scene count differs from the template's scene slots, or an
+    // image scene (e.g. Pinterest) has no image slot, the render step composes the scenes with the template-scaled generator
+    // (VE2E-52) instead, so a positional "missing Video-N" check would wrongly reject a run that renders fine.
+    const fixedSlots = fixedSlotPathApplies({
+      slotCount: countTemplateSceneSlots(snapshot.rawTemplate),
+      includedSceneCount: sceneMedia.length,
+      imageSceneCount: sceneMedia.filter((scene) => scene.visualKind === "image").length,
+      templateImageSlots: slots.filter((slot) => slot.kind === "image").length,
+    });
+    const built = fixedSlots ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
     if (!built.ok) {
       const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
       throw new WorkflowStepFailure("VALIDATION_FAILED", detail);

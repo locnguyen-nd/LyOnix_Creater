@@ -494,6 +494,20 @@ describe("WorkflowRunnerService", () => {
     expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
   });
 
+  it("sources each scene as the kind its template slot expects (image slot -> photo, video slot -> video) and never mixes kinds in one segment", async () => {
+    prisma.templateSnapshot.findUnique = vi.fn(async () => ({
+      id: templateSnapshotId,
+      providerAccountId: "render-acc",
+      modifications: [
+        { key: "Image-1.source", kind: "image", label: "Image-1.source", required: false },
+        { key: "Video-2.source", kind: "video", label: "Video-2.source", required: false },
+      ],
+    }));
+    await service.processNext();
+    const calls = (pexels.autoImportForScene as any).mock.calls as Array<[string, string, string, { sceneId: string; mediaType?: string }]>;
+    expect(calls.map((call) => [call[3].sceneId, call[3].mediaType])).toEqual([["scene-1", "image"], ["scene-2", "video"]]);
+  });
+
   it("bounded-retries a transient provider failure (re-queues to draft, increments attempts) then fails after maxAttempts", async () => {
     audioVersions.generateForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "rate limited" }));
     await service.processNext();
