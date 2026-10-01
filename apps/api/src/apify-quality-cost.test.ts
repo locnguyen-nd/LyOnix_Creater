@@ -78,6 +78,7 @@ describe("ApifyService quality/cost - VE2E-51", () => {
   const makeService = () => new ApifyService(prisma, { forUser: async () => ({ projectIds: [projectId] }) } as any, media as unknown as MediaService);
 
   beforeEach(async () => {
+    process.env.APIFY_TWO_PHASE = "0"; // single-phase by default in these tests; the two-phase block below opts in
     prevKey = process.env.PERSISTENCE_ENCRYPTION_KEY;
     process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
     root = await mkdtemp(join(tmpdir(), "lyonix-apify-q-"));
@@ -204,6 +205,81 @@ describe("ApifyService quality/cost - VE2E-51", () => {
       const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ usedExternalIds: used }));
       expect(outcome).toMatchObject({ ok: false, reason: "apify_phase2_failed:PROVIDER_SCHEMA_INVALID", quality: { phase2: "failed" } });
       expect(used.size).toBe(0);
+    });
+  });
+
+  describe("VE2E-30 frame check of the imported video (VISION_VIDEO_FRAMES)", () => {
+    const framesService = { framesForAsset: vi.fn(async () => ({ ok: true as const, frames: [{ mimeType: "image/jpeg" as const, base64: "AAAA" }], reused: false, skippedFrames: 0 })) };
+    let withFrames: ApifyService;
+    let verdict: "accepted" | "rejected" | null;
+    const spyModeration = () => vi.spyOn(withFrames as any, "moderatePool").mockImplementation(async (...args: any[]) => {
+      const [pool, , , , , , scopeKey] = args as [any[], unknown, unknown, unknown, unknown, unknown, string];
+      return String(scopeKey).endsWith(":frames") ? pool.map((c) => ({ ...c, moderationDecision: verdict })) : pool;
+    });
+
+    beforeEach(() => {
+      verdict = null;
+      framesService.framesForAsset.mockClear();
+      media = { registerAsset: vi.fn(async () => fakeAsset), assignScene: vi.fn(async () => ({})) } as any;
+      withFrames = new ApifyService(prisma, { forUser: async () => ({ projectIds: [projectId] }) } as any, media as unknown as MediaService, undefined, framesService as any);
+      withFrames.apifyDeps = apifyStub({ "東京 夜景": [item("1")] });
+    });
+    afterEach(() => { delete process.env.VISION_VIDEO_FRAMES; });
+
+    it("is off by default: no frames are extracted and the clip is imported as before", async () => {
+      const spy = spyModeration();
+      const outcome = await withFrames.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+      expect(outcome).toMatchObject({ ok: true, data: { quality: { frameCheck: "unchecked" } } });
+      expect(framesService.framesForAsset).not.toHaveBeenCalled();
+      expect(spy.mock.calls.some((call) => String(call[6]).endsWith(":frames"))).toBe(false);
+    });
+
+    it("an accepted verdict over the extracted frames keeps the clip and records it", async () => {
+      process.env.VISION_VIDEO_FRAMES = "1";
+      verdict = "accepted";
+      spyModeration();
+      const outcome = await withFrames.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+      expect(outcome).toMatchObject({ ok: true, data: { asset: { id: "asset-1" }, quality: { frameCheck: "accepted" } } });
+      expect(framesService.framesForAsset).toHaveBeenCalledTimes(0); // moderatePool is stubbed: the frames callback is only invoked by the real pipeline
+    });
+
+    it("a rejected verdict fails the segment source (caller falls back), unbinds the asset from the scene and keeps the video id reserved", async () => {
+      process.env.VISION_VIDEO_FRAMES = "1";
+      verdict = "rejected";
+      spyModeration();
+      const used = new Set<string>();
+      const outcome = await withFrames.autoImportForSegment(projectId, "u1", "staff", account(), auto({ usedExternalIds: used }));
+      expect(outcome).toMatchObject({ ok: false, reason: "apify_frames_rejected", quality: { frameCheck: "rejected" } });
+      expect((media as any).assignScene).toHaveBeenCalledWith("asset-1", "u1", "staff", null);
+      expect(used.has("1")).toBe(true);
+    });
+
+    it("anything but an explicit rejection (no verdict, worker down) never blocks sourcing", async () => {
+      process.env.VISION_VIDEO_FRAMES = "1";
+      verdict = null;
+      spyModeration();
+      const outcome = await withFrames.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+      expect(outcome).toMatchObject({ ok: true, data: { quality: { frameCheck: "unchecked" } } });
+    });
+  });
+
+  describe("template-aware media type (image slot = photo, video slot = video)", () => {
+    const cand = (mediaType: "video" | "photo", id: string) => ({
+      candidate: { candidateId: "apify:pinterest:" + mediaType + ":" + id, source: "apify:pinterest", externalId: id, mediaType, accessMethod: "api_download", previewUrl: "https://i.pinimg.com/x.jpg", eligibility: { autoEligible: true }, provenance: {} },
+      download: { url: "https://i.pinimg.com/x.jpg", kind: mediaType === "photo" ? "image" : "video" },
+    });
+    const searched = (results: unknown[]) => vi.spyOn(service as any, "searchShared").mockResolvedValue({ reused: false, outcome: { ok: true, data: { results } } });
+
+    it("an image slot never accepts a video candidate", async () => {
+      searched([cand("video", "v1"), cand("video", "v2")]);
+      const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ platform: "pinterest", mediaType: "image" }));
+      expect(outcome).toMatchObject({ ok: false, reason: "apify_no_usable_candidate" });
+    });
+
+    it("a video slot never accepts a photo candidate", async () => {
+      searched([cand("photo", "p1")]);
+      const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ platform: "pinterest", mediaType: "video" }));
+      expect(outcome).toMatchObject({ ok: false, reason: "apify_no_usable_candidate" });
     });
   });
 });

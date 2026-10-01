@@ -5,7 +5,7 @@ import type { MediaAssetKind, MediaAssetVersionSummary, MediaFolderSummary, Medi
 import { canAccessProject, computeExpiresAt, findDuplicateReusableAsset, isSafeSegmentName, isSha256Hex, parseMediaAssetTransform } from "@lyonix/domain";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
-import { promoteQuarantineFileToProjectAsset, readQuarantineFile, writeQuarantineFile } from "./quarantine.js";
+import { discardQuarantineFile, promoteQuarantineFileToProjectAsset, readQuarantineFile, writeQuarantineFile, writeQuarantineStream } from "./quarantine.js";
 import { fetchBinarySafely } from "./safe-binary-fetch.js";
 
 export type CreateFolderInput = { name: string; parentId?: string | null };
@@ -249,6 +249,44 @@ export class MediaService {
    * `registerAsset` for the actual storage/dedupe/retention logic instead of a
    * parallel path.
    */
+  /**
+   * Client upload of a (long) source video or an image: the raw body is streamed to quarantine (never held in memory),
+   * the real type is sniffed from the bytes, then the file goes through the same `registerAsset` path as every other
+   * source (`origin: "upload"`). Dimensions/duration are hints measured by the browser.
+   */
+  async uploadStream(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { stream: AsyncIterable<Buffer | Uint8Array>; fileName: string; maxBytes: number; widthPx?: number | null; heightPx?: number | null; durationMs?: number | null; folderId?: string | null },
+  ) {
+    if (!(await this.assertAccess(projectId, userId, role))) return "forbidden" as const;
+    const written = await writeQuarantineStream(input.stream, input.maxBytes);
+    if (written === "too_large") return "too_large" as const;
+    const sniffed = sniffMediaMimeType(written.head);
+    const kind: MediaAssetKind | null = sniffed?.startsWith("video/") ? "video" : sniffed?.startsWith("image/") ? "image" : null;
+    if (!sniffed || !kind || written.bytes <= 0) {
+      await discardQuarantineFile(written.quarantineToken);
+      return "unsupported_media" as const;
+    }
+    const registered = await this.registerAsset(projectId, userId, role, {
+      quarantineToken: written.quarantineToken,
+      kind,
+      originalFileName: input.fileName.trim() || `upload.${kind === "video" ? "mp4" : "jpg"}`,
+      mimeType: sniffed,
+      checksumSha256: written.sha256,
+      bytes: written.bytes,
+      widthPx: input.widthPx ?? null,
+      heightPx: input.heightPx ?? null,
+      durationMs: input.durationMs ?? null,
+      origin: "upload",
+      reusable: true,
+      folderId: input.folderId ?? null,
+    });
+    if (typeof registered === "string") await discardQuarantineFile(written.quarantineToken);
+    return registered;
+  }
+
   async importFromUrl(projectId: string, userId: string, role: "admin" | "staff", input: ImportFromUrlInput) {
     if (!(await this.assertAccess(projectId, userId, role))) return "forbidden" as const;
     const downloaded = await fetchBinarySafely(input.url, { maxBytes: MAX_IMPORT_URL_BYTES });

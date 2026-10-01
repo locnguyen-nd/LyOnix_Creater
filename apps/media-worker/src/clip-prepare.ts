@@ -28,28 +28,17 @@ import {
   type ProbeInfo,
 } from "./clip-plan.js";
 import type { MediaWorkerConfig } from "./config.js";
+import { JobLockBusyError, MediaJobError } from "./job-errors.js";
+import { resolveMediaSource } from "./media-source.js";
 import { BinaryNotFoundError, ProcessTimeoutError, type ProcessRunner } from "./process.js";
+
+export { JobLockBusyError, MediaJobError };
 
 /** Relative (to MEDIA_ROOT) directory for clip.prepare outputs — `working` retention class, swept after 7 days. */
 export const MEDIA_JOBS_DIR = "working/media-jobs";
 const MANIFEST_FILE = "result.json";
 const OUTPUT_FILE = "clip.mp4";
 const LOCK_FILE = ".lock";
-
-export class MediaJobError extends Error {
-  constructor(readonly code: MediaJobErrorCode, message: string, readonly retryable = false) {
-    super(message);
-    this.name = "MediaJobError";
-  }
-}
-
-/** Another delivery/process holds the job lock; consumer should requeue with a delay. */
-export class JobLockBusyError extends Error {
-  constructor(readonly jobKey: string) {
-    super(`clip.prepare ${jobKey} is being processed elsewhere`);
-    this.name = "JobLockBusyError";
-  }
-}
 
 type StoredManifest = { fingerprint: string; result: ClipPrepareSuccess };
 
@@ -189,24 +178,8 @@ export class ClipPrepareProcessor {
     throw new JobLockBusyError(jobKey);
   }
 
-  private async resolveSource(relativePath: string): Promise<string> {
-    const { mediaRoot } = this.deps.config;
-    if (relativePath.startsWith("_quarantine/")) throw new MediaJobError("SOURCE_UNSAFE_PATH", "quarantined files cannot be used as clip sources");
-    const resolved = resolveWithinRoot(mediaRoot, relativePath, resolve, relative);
-    if (!resolved.ok) throw new MediaJobError("SOURCE_UNSAFE_PATH", `source path rejected (${resolved.reason})`);
-    let real: string;
-    let realRoot: string;
-    try {
-      real = await realpath(resolved.absolutePath);
-      realRoot = await realpath(mediaRoot);
-    } catch {
-      throw new MediaJobError("SOURCE_NOT_FOUND", "source file does not exist under MEDIA_ROOT");
-    }
-    const rel = relative(realRoot, real);
-    if (rel.startsWith("..") || rel.split(/[\\/]/)[0] === "..") throw new MediaJobError("SOURCE_UNSAFE_PATH", "source resolves outside MEDIA_ROOT");
-    const info = await stat(real);
-    if (!info.isFile()) throw new MediaJobError("SOURCE_NOT_FOUND", "source is not a regular file");
-    return real;
+  private resolveSource(relativePath: string): Promise<string> {
+    return resolveMediaSource(this.deps.config.mediaRoot, relativePath);
   }
 
   private async probe(path: string): Promise<ProbeInfo> {

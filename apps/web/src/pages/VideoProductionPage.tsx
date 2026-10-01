@@ -7,6 +7,7 @@ import { Button } from "../components/ui";
 import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { SourceBadge } from "../studio/SourceBadge";
+import { STAGE_COLORS, STAGE_KEYS, currentStage, formatElapsed, stageOfStep, summarizeStages, type StageKey } from "../video-production-stages";
 import { getVideoProduction, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
@@ -26,6 +27,9 @@ function statusTone(status: WorkflowRunStatus) {
   return "neutral" as const;
 }
 
+const dotClass = (status: string) =>
+  status === "done" ? "bg-lyx-ok" : status === "failed" ? "bg-lyx-danger" : status === "running" ? "border-2 border-lyx-fg bg-lyx-bg" : "bg-lyx-neutral-bg";
+
 export function VideoProductionPage() {
   const { t } = useTranslation();
   const { id } = useParams();
@@ -34,6 +38,7 @@ export function VideoProductionPage() {
   const [events, setEvents] = useState<WorkflowStepEventResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   // Bumped after a successful retry to re-run the polling effect below - the poll loop stops
   // its interval once it observes a TERMINAL_STATUSES status, so restarting it after the run
   // goes back to "draft" needs a fresh effect run, not just a state update inside the old one.
@@ -49,6 +54,7 @@ export function VideoProductionPage() {
           if (cancelled) return;
           setRun(nextRun);
           setEvents(nextEvents);
+          setNowMs(Date.now());
           if (TERMINAL_STATUSES.has(nextRun.status) && pollTimer.current) {
             clearInterval(pollTimer.current);
             pollTimer.current = null;
@@ -85,6 +91,12 @@ export function VideoProductionPage() {
 
   const canOpenStudio = Boolean(run.scriptDraftVersionId);
   const isDone = run.status === "completed" && Boolean(run.resultUrl);
+  const stages = summarizeStages(events, run, nowMs);
+  const current = currentStage(stages);
+  const finished = TERMINAL_STATUSES.has(run.status);
+  const elapsedMs = (finished ? Date.parse(run.updatedAt) : nowMs) - Date.parse(run.createdAt);
+  const doneCount = stages.filter((stage) => stage.status === "done").length;
+  const stageEvents = (key: StageKey) => events.filter((event) => stageOfStep(event.stepKey) === key);
 
   return (
     <>
@@ -104,77 +116,121 @@ export function VideoProductionPage() {
           </>
         }
       />
-      <div className="mb-4 flex items-center gap-3">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
         <StatusPill tone={statusTone(run.status)}>{t(`videoProduction.status.${run.status}`)}</StatusPill>
         <QueueBadge status={run.status} queue={run.queue} />
         <span className="text-[11.5px] text-lyx-fg-muted">{t("videoProduction.attempts", { count: run.attempts })}</span>
+        <span className="text-[11.5px] text-lyx-fg-muted">{t("videoProduction.elapsed", { time: formatElapsed(elapsedMs) })}</span>
+        <span className="text-[11.5px] text-lyx-fg-muted">{t("videoProduction.stageProgress", { done: doneCount, total: STAGE_KEYS.length })}</span>
+      </div>
+
+      <div className="mb-5 flex gap-1" aria-hidden>
+        {stages.map((stage) => (
+          <i
+            key={stage.key}
+            className={`h-2 flex-1 rounded-full ${stage.status === "running" ? "animate-pulse" : ""}`}
+            style={{ background: stage.status === "pending" ? "var(--lyx-neutral-bg)" : stage.status === "failed" ? "var(--lyx-danger)" : STAGE_COLORS[stage.key] }}
+          />
+        ))}
       </div>
 
       {run.lastError ? <Banner variant="danger">{run.lastError.message}</Banner> : null}
 
-      {isDone && run.resultUrl ? (
-        <div className="mb-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
-          <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.reviewTitle")}</p>
-          <video className="mb-3 max-h-[420px] rounded-[6px]" src={run.resultUrl} controls />
-          <div className="flex gap-3">
-            <a className="underline text-[12.5px]" href={run.resultUrl} target="_blank" rel="noreferrer">{t("videoProduction.openResult")}</a>
-            <a className="underline text-[12.5px]" href={run.resultUrl} download>{t("videoProduction.download")}</a>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="min-w-0 rounded-xl border border-lyx-border bg-lyx-bg p-4">
+          <p className="mb-4 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.historyTitle")}</p>
+          {events.length === 0 ? <p className="text-[12.5px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
+          <ol>
+            {stages.map((stage, index) => {
+              const list = stageEvents(stage.key);
+              const notable = list.filter((event) => event.status === "failed" || event.status === "running");
+              const last = index === stages.length - 1;
+              return (
+                <li key={stage.key} className="flex gap-3" data-testid={`stage-${stage.key}`} aria-current={stage.key === current.key && stage.status === "running" ? "step" : undefined}>
+                  <div className="flex flex-col items-center">
+                    <span className={`mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full ${dotClass(stage.status)}`} />
+                    {!last ? <span className="w-px grow bg-lyx-border" /> : null}
+                  </div>
+                  <div className={`min-w-0 grow ${last ? "" : "pb-5"}`}>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className={`text-[13.5px] font-semibold ${stage.status === "pending" ? "text-lyx-fg-muted" : ""}`}>{t(`videoProduction.stage.${stage.key}`)}</span>
+                      <span className="shrink-0 text-[11.5px] text-lyx-fg-muted">
+                        {stage.status === "pending"
+                          ? t("videoProduction.stagePending")
+                          : `${stage.stepsTotal > 1 ? `${stage.stepsDone}/${stage.stepsTotal} · ` : ""}${formatElapsed((stage.endMs ?? nowMs) - (stage.startMs ?? nowMs))}`}
+                      </span>
+                    </div>
+                    {notable.length > 0 ? (
+                      <ul className="mt-1.5 flex flex-col gap-1">
+                        {notable.map((event) => (
+                          <li key={`${event.stepKey}-${event.attempt}`} className="flex items-center justify-between gap-3 text-[12px]">
+                            <span>{event.stepKey}{event.attempt > 1 ? ` (×${event.attempt})` : ""}</span>
+                            <span className={event.status === "failed" ? "text-lyx-danger" : "text-lyx-fg-muted"}>{event.error?.message ?? event.status}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {stage.key === "media" && run.mediaSourcing && run.mediaSourcing.length > 0 ? (
+                      <div className="mt-3 overflow-hidden rounded-lg border border-lyx-border" data-testid="media-sourcing">
+                        <p className="border-b border-lyx-border bg-lyx-bg-muted px-3 py-1.5 text-[11px] font-semibold text-lyx-fg-muted">{t("studioPro.sourcingTitle")}</p>
+                        <ul>
+                          {run.mediaSourcing.map((segment, segIndex) => (
+                            <li key={segment.segmentId} className="border-b border-lyx-border px-3 py-2 text-[12.5px] last:border-b-0">
+                              {segIndex + 1}. {segment.segmentId}
+                              <SourceBadge diagnostic={segment} />
+                              {segment.apifyQuality && segment.apifyQuality.considered > 0 ? (
+                                <span className="mt-0.5 block text-[10px] text-lyx-fg-muted" data-testid="apify-quality">
+                                  {t("studioPro.apifyQualityLine", { passed: segment.apifyQuality.passed, considered: segment.apifyQuality.considered, reasons: formatRejectReasons(segment.apifyQuality.rejected) })}
+                                </span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+
+        <div className="flex min-w-0 flex-col gap-5">
+          <div className="rounded-xl border border-lyx-border bg-lyx-bg p-4">
+            <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.reviewTitle")}</p>
+            {isDone && run.resultUrl ? (
+              <>
+                <video className="mb-3 max-h-[420px] w-full rounded-[6px] bg-black" src={run.resultUrl} controls />
+                <div className="flex gap-3">
+                  <a className="underline text-[12.5px]" href={run.resultUrl} target="_blank" rel="noreferrer">{t("videoProduction.openResult")}</a>
+                  <a className="underline text-[12.5px]" href={run.resultUrl} download>{t("videoProduction.download")}</a>
+                </div>
+              </>
+            ) : (
+              <div className="flex h-[240px] w-full items-center justify-center rounded-[6px] bg-lyx-bg-muted px-4 text-center text-[12px] text-lyx-fg-muted">{t("videoProduction.resultPending")}</div>
+            )}
           </div>
-        </div>
-      ) : null}
 
-      {run.mediaSourcing && run.mediaSourcing.length > 0 ? (
-        <div className="mb-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4" data-testid="media-sourcing">
-          <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.sourcingTitle")}</p>
-          <ul className="flex flex-col gap-1.5">
-            {run.mediaSourcing.map((segment, index) => (
-              <li key={segment.segmentId} className="text-[12.5px]">
-                {index + 1}. {segment.segmentId}
-                <SourceBadge diagnostic={segment} />
-                {segment.apifyQuality && segment.apifyQuality.considered > 0 ? (
-                  <span className="mt-0.5 block text-[10px] text-lyx-fg-muted" data-testid="apify-quality">
-                    {t("studioPro.apifyQualityLine", { passed: segment.apifyQuality.passed, considered: segment.apifyQuality.considered, reasons: formatRejectReasons(segment.apifyQuality.rejected) })}
-                  </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-          {run.apifyUsage ? (
-            <p className="mt-3 text-[11.5px] text-lyx-fg-muted" data-testid="apify-usage">
-              <span className="font-semibold">{t("studioPro.apifyUsageTitle")}: </span>
-              {t("studioPro.apifyUsageLine", { runs: run.apifyUsage.runs, seconds: Math.round(run.apifyUsage.seconds), usd: run.apifyUsage.usd === null ? t("studioPro.apifyUsageUsdUnknown") : `$${run.apifyUsage.usd.toFixed(4)}` })}
-              {run.apifyUsage.searchesReused > 0 || run.apifyUsage.libraryReuses > 0 ? ` · ${t("studioPro.apifyUsageReuse", { searches: run.apifyUsage.searchesReused, library: run.apifyUsage.libraryReuses })}` : ""}
-            </p>
-          ) : null}
-          {run.visionUsage ? (
-            <p className="mt-1 text-[11.5px] text-lyx-fg-muted" data-testid="vision-usage">
-              <span className="font-semibold">{t("studioPro.visionUsageTitle")}: </span>
-              {t("studioPro.visionUsageLine", { calls: run.visionUsage.calls, max: run.visionUsage.maxCalls })}
-              {run.visionUsage.skippedSegments > 0 ? ` · ${t("studioPro.visionUsageSkipped", { count: run.visionUsage.skippedSegments })}` : ""}
-            </p>
+          {run.apifyUsage || run.visionUsage ? (
+            <div className="rounded-xl border border-lyx-border bg-lyx-bg p-4">
+              <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.costTitle")}</p>
+              {run.apifyUsage ? (
+                <p className="text-[12px] text-lyx-fg-muted" data-testid="apify-usage">
+                  <span className="font-semibold text-lyx-fg">{t("studioPro.apifyUsageTitle")}: </span>
+                  {t("studioPro.apifyUsageLine", { runs: run.apifyUsage.runs, seconds: Math.round(run.apifyUsage.seconds), usd: run.apifyUsage.usd === null ? t("studioPro.apifyUsageUsdUnknown") : `$${run.apifyUsage.usd.toFixed(4)}` })}
+                  {run.apifyUsage.searchesReused > 0 || run.apifyUsage.libraryReuses > 0 ? ` · ${t("studioPro.apifyUsageReuse", { searches: run.apifyUsage.searchesReused, library: run.apifyUsage.libraryReuses })}` : ""}
+                </p>
+              ) : null}
+              {run.visionUsage ? (
+                <p className="mt-2 text-[12px] text-lyx-fg-muted" data-testid="vision-usage">
+                  <span className="font-semibold text-lyx-fg">{t("studioPro.visionUsageTitle")}: </span>
+                  {t("studioPro.visionUsageLine", { calls: run.visionUsage.calls, max: run.visionUsage.maxCalls })}
+                  {run.visionUsage.skippedSegments > 0 ? ` · ${t("studioPro.visionUsageSkipped", { count: run.visionUsage.skippedSegments })}` : ""}
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </div>
-      ) : null}
-
-      <div className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
-        <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.historyTitle")}</p>
-        <ul className="flex flex-col gap-1.5">
-          {events.length === 0 ? <li className="text-[12.5px] text-lyx-fg-muted">{t("common.loading")}</li> : null}
-          {events.map((event) => (
-            <li key={`${event.stepKey}-${event.attempt}`} className="flex items-center justify-between text-[12.5px]">
-              <span className="flex items-center gap-2">
-                <span
-                  className={`inline-block h-2 w-2 rounded-full ${
-                    event.status === "succeeded" ? "bg-lyx-ok" : event.status === "failed" ? "bg-lyx-danger" : event.status === "running" ? "bg-lyx-warn" : "bg-lyx-neutral-bg"
-                  }`}
-                />
-                {event.stepKey}
-                {event.attempt > 1 ? ` (×${event.attempt})` : ""}
-              </span>
-              <span className="text-lyx-fg-muted">{event.error?.message ?? event.status}</span>
-            </li>
-          ))}
-        </ul>
       </div>
     </>
   );

@@ -49,3 +49,4 @@ Open `http://localhost:5173`. Local demo accounts (not production secrets):
 - `staff@lyonix.local` / `lyonix-staff`
 
 Session and demo data stay in the browser. Nest session auth is task I03-01.
+"C:\Program Files (x86)\cloudflared\cloudflared.exe" tunnel --url http://localhost:3000

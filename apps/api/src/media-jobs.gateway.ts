@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { MediaJobClient, MediaJobClientError, type ClipPrepareJobInput, type ClipPrepareResult } from "@lyonix/media-jobs";
+import { MediaJobClient, MediaJobClientError, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult } from "@lyonix/media-jobs";
 
 /** Per-clip wait for a media-worker result (env `MEDIA_PREPARE_TIMEOUT_MS`, default 180s). */
 export const mediaPrepareTimeoutMs = (): number => {
@@ -11,6 +11,11 @@ export interface ClipPreparer {
   prepareClip(job: ClipPrepareJobInput, options?: { timeoutMs?: number }): Promise<ClipPrepareResult>;
 }
 
+/** VE2E-30: frame sampling for vision moderation (same worker/queue as clip.prepare). */
+export interface FrameExtractor {
+  extractFrames(job: FrameExtractJobInput, options?: { timeoutMs?: number }): Promise<FrameExtractResult>;
+}
+
 /**
  * VE2E-37: API-side handle on `apps/media-worker` (the only FFmpeg process). Connects to
  * RabbitMQ lazily on the first clip request, so renders without source ranges never need a
@@ -18,7 +23,7 @@ export interface ClipPreparer {
  * `RESULT_TIMEOUT`, ...) — callers map it to a render error, never to a full-source fallback.
  */
 @Injectable()
-export class MediaJobsGateway implements ClipPreparer, OnModuleDestroy {
+export class MediaJobsGateway implements ClipPreparer, FrameExtractor, OnModuleDestroy {
   private client: Promise<MediaJobClient> | null = null;
 
   private connect(): Promise<MediaJobClient> {
@@ -39,6 +44,19 @@ export class MediaJobsGateway implements ClipPreparer, OnModuleDestroy {
     } catch (error) {
       if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
         this.client = null; // connection dropped: reconnect on the next call
+        await client.close().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async extractFrames(job: FrameExtractJobInput, options: { timeoutMs?: number } = {}): Promise<FrameExtractResult> {
+    const client = await this.connect();
+    try {
+      return await client.extractFrames(job, { timeoutMs: options.timeoutMs ?? mediaPrepareTimeoutMs() });
+    } catch (error) {
+      if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
+        this.client = null;
         await client.close().catch(() => undefined);
       }
       throw error;

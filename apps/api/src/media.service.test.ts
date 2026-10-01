@@ -182,4 +182,27 @@ describe("MediaService", () => {
       expect(prisma.mediaAssetVersion.create).not.toHaveBeenCalled();
     });
   });
+
+  describe("uploadStream (long source video)", () => {
+    const mp4 = (extra = 0) => Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(40 + extra, 7)]);
+    async function* chunks(buffer: Buffer, size = 16) { for (let i = 0; i < buffer.length; i += size) yield buffer.subarray(i, i + size); }
+
+    it("streams the body to storage, sniffs the real type and registers an upload asset with the browser-measured duration", async () => {
+      const body = mp4(200);
+      const result = await service.uploadStream(projectId, userId, "staff", { stream: chunks(body), fileName: "long.mp4", maxBytes: 1_000_000, durationMs: 600_000, widthPx: 1920, heightPx: 1080 });
+      expect(result).toMatchObject({ kind: "video", origin: "upload", mimeType: "video/mp4", bytes: body.length, durationMs: 600_000, originalFileName: "long.mp4" });
+    });
+
+    it("rejects files over the cap and leaves nothing registered", async () => {
+      const result = await service.uploadStream(projectId, userId, "staff", { stream: chunks(mp4(500)), fileName: "huge.mp4", maxBytes: 100 });
+      expect(result).toBe("too_large");
+      expect(prisma.mediaAssetVersion.create).not.toHaveBeenCalled();
+    });
+
+    it("rejects non-media bytes regardless of the file name", async () => {
+      const result = await service.uploadStream(projectId, userId, "staff", { stream: chunks(Buffer.from("<html>not a video</html>")), fileName: "fake.mp4", maxBytes: 1_000_000 });
+      expect(result).toBe("unsupported_media");
+      expect(prisma.mediaAssetVersion.create).not.toHaveBeenCalled();
+    });
+  });
 });

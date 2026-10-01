@@ -16,6 +16,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
+import { VideoFramesService } from "./video-frames.service.js";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
 import { WorkflowRunnerService } from "./workflow-runner.service.js";
 
@@ -40,6 +41,7 @@ import { WorkflowRunnerService } from "./workflow-runner.service.js";
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
     MediaJobsGateway,
     ClipDerivativesService,
+    VideoFramesService,
     TimelineVersionsService,
     WorkflowRunnerService,
   ],

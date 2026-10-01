@@ -196,6 +196,7 @@ describe("ApifyService.autoImportForSegment - VE2E-46 pool rules", () => {
   const input = (platform: "tiktok" | "pinterest" | "google_video" = "tiktok") => ({ platform, keyword: "東京 夜景", brief: brief(), sceneId: "s1", usedExternalIds: new Set<string>() });
 
   beforeEach(async () => {
+    process.env.APIFY_TWO_PHASE = "0"; // these VE2E-46 rules are written against the single-phase flow
     prevKey = process.env.PERSISTENCE_ENCRYPTION_KEY;
     process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
     root = await mkdtemp(join(tmpdir(), "lyonix-apify-auto-"));

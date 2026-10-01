@@ -108,13 +108,13 @@ describe("MediaPlanService", () => {
       ]);
       expect(built.scenes).toEqual([
         { sceneId: "s1", mediaAssetVersionId: "v1", mediaKind: "video", segmentId: "seg-1", sourceStartMs: 0, sourceDurationMs: 4000 },
-        // 5s source, second scene no longer fits after 4s -> loops to 0 at the scene boundary
-        { sceneId: "s2", mediaAssetVersionId: "v1", mediaKind: "video", segmentId: "seg-1", sourceStartMs: 0, sourceDurationMs: 3000 },
+        // 5s source, the second scene no longer fits after 4s -> it gets only the remaining 1s (never a replay of scene 1's footage); a second source should cover the rest
+        { sceneId: "s2", mediaAssetVersionId: "v1", mediaKind: "video", segmentId: "seg-1", sourceStartMs: 4000, sourceDurationMs: 1000 },
         { sceneId: "s3", mediaAssetVersionId: null, mediaKind: null, segmentId: null, sourceStartMs: null, sourceDurationMs: null },
       ]);
       expect(built.segments).toEqual([{ segmentId: "seg-1", sceneIds: ["s1", "s2"], mediaAssetVersionId: "v1", subject: null, priority: null }]);
       expect(built.diagnostics).toEqual([
-        { segmentId: "seg-1", origin: "fallback", sourcing: "imported", errorCode: null, durationMs: 7000, looped: true, short: false },
+        { segmentId: "seg-1", origin: "fallback", sourcing: "imported", errorCode: null, durationMs: 7000, looped: false, short: true, needsSecondSource: true, coveredMs: 5000 },
         { segmentId: "seg-2", origin: "fallback", sourcing: "failed", errorCode: "MEDIA_RELEVANCE_BELOW_THRESHOLD", durationMs: 5000, looped: false, short: false },
       ]);
     });

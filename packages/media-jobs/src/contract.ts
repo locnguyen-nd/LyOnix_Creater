@@ -130,17 +130,17 @@ export class MediaJobClientError extends Error {
   }
 }
 
-const JOB_KEY_RE = /^[A-Za-z0-9._:-]{1,160}$/;
+export const JOB_KEY_RE = /^[A-Za-z0-9._:-]{1,160}$/;
 /** Upper bound for a single prepared clip; segments are ~6-20s (CR §4), 5 min is a generous hard cap. */
 export const MAX_CLIP_DURATION_MS = 5 * 60 * 1000;
-const MAX_START_MS = 24 * 60 * 60 * 1000;
+export const MAX_START_MS = 24 * 60 * 60 * 1000;
 
 export type Validation<T> = { ok: true; value: T } | { ok: false; errors: string[] };
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-const isInt = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value);
+export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+export const isInt = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value);
 
-const hasUnsafePathShape = (relativePath: string): boolean => {
+export const hasUnsafePathShape = (relativePath: string): boolean => {
   const normalized = relativePath.replaceAll("\\", "/");
   return (
     normalized.startsWith("/") ||

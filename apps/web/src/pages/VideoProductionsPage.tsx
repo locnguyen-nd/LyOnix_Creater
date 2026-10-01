@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Ban, Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
@@ -6,7 +6,11 @@ import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome
 import { QueueBadge, QueueSummaryBar } from "../components/QueueStatus";
 import { Button } from "../components/ui";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
+import { AutoRunTimeline } from "../components/AutoRunTimeline";
 import { ApiError } from "../api";
+import type { VideoProductionListItemResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
+import { deleteVideoProduction, listVideoProductionEvents, listVideoProductions, retryVideoProduction } from "../video-productions-api";
+import { isTerminalRun } from "../video-production-stages";
 import type { VideoProductionListItemResponse, WorkflowRunStatus } from "@lyonix/contracts";
 import { cancelQueuedVideoProduction, deleteVideoProduction, listVideoProductions, retryVideoProduction } from "../video-productions-api";
 import { hasLiveRuns, isWaitingInQueue } from "../queue-display";
@@ -17,6 +21,14 @@ const LIST_POLL_MS = 5000;
 const filters = ["all", "completed", "active", "attention"] as const;
 type Filter = (typeof filters)[number];
 const PAGE_SIZE = 12;
+const TIMELINE_WINDOW_MIN = 30;
+const TIMELINE_MAX_ROWS = 10;
+const LIVE_POLL_MS = 5000;
+type View = "timeline" | "gallery";
+const VIEW_KEY = "lyonix.autoView";
+const readView = (): View => {
+  try { return window.localStorage.getItem(VIEW_KEY) === "gallery" ? "gallery" : "timeline"; } catch { return "timeline"; }
+};
 
 function statusTone(status: WorkflowRunStatus) {
   if (status === "completed") return "ok" as const;
@@ -47,13 +59,53 @@ export function VideoProductionsPage() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
   const [playing, setPlaying] = useState<VideoProductionListItemResponse | null>(null);
+  const [view, setViewState] = useState<View>(readView);
+  const [events, setEvents] = useState<Record<string, WorkflowStepEventResponse[] | undefined>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const setView = (next: View) => {
+    setViewState(next);
+    try { window.localStorage.setItem(VIEW_KEY, next); } catch { /* per-viewer convenience only */ }
+  };
+
+  const reload = useCallback(() => listVideoProductions()
+    .then((next) => setRows(next))
+    .catch((err) => setError(err instanceof ApiError ? err.message : t("common.error"))), [t]);
 
   useEffect(() => {
-    void listVideoProductions()
-      .then(setRows)
-      .catch((err) => setError(err instanceof ApiError ? err.message : t("common.error")))
-      .finally(() => setLoading(false));
-  }, [t]);
+    void reload().finally(() => setLoading(false));
+  }, [reload]);
+
+  // Live refresh: poll the existing list endpoint while any run is still in flight, so a job created
+  // elsewhere (or finishing) shows up without a manual reload.
+  const hasActive = rows.some((row) => !isTerminalRun(row.status) && !needsAttention(row.status));
+  useEffect(() => {
+    if (!hasActive) return;
+    const timer = setInterval(() => { void reload(); setNowMs(Date.now()); }, LIVE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [hasActive, reload]);
+
+  const timelineRows = useMemo(() => {
+    const from = nowMs - TIMELINE_WINDOW_MIN * 60_000;
+    return rows
+      .filter((row) => !isTerminalRun(row.status) || Date.parse(row.updatedAt) >= from)
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .slice(-TIMELINE_MAX_ROWS);
+  }, [rows, nowMs]);
+
+  // Step events (existing per-run endpoint) feed the bars. Finished runs are fetched once; running ones on every poll.
+  const timelineKey = timelineRows.map((row) => `${row.id}:${row.status}:${row.updatedAt}`).join("|") + (hasActive ? `@${nowMs}` : "");
+  useEffect(() => {
+    if (view !== "timeline") return;
+    let cancelled = false;
+    for (const row of timelineRows) {
+      void listVideoProductionEvents(row.id)
+        .then((list) => { if (!cancelled) setEvents((current) => ({ ...current, [row.id]: list })); })
+        .catch(() => undefined);
+    }
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, timelineKey]);
 
   // VE2E-62: keep the queue position / status fresh while anything is still queued or running.
   const live = useMemo(() => hasLiveRuns(rows), [rows]);
@@ -144,9 +196,25 @@ export function VideoProductionsPage() {
           </button>
         ))}
       </div>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <p className="text-[12px] text-lyx-fg-muted">{hasActive ? t("videoProductions.timeline.live") : t("videoProductions.timeline.idle")}</p>
+        <div role="group" aria-label={t("videoProductions.view.label")} className="inline-flex overflow-hidden rounded-lg border border-lyx-border text-[12.5px]">
+          {(["timeline", "gallery"] as const).map((item) => (
+            <button key={item} type="button" aria-pressed={view === item} onClick={() => setView(item)}
+              className={`px-3.5 py-1.5 ${view === item ? "bg-lyx-cta font-semibold text-lyx-cta-fg" : "bg-lyx-bg hover:bg-lyx-muted"}`}>
+              {t(`videoProductions.view.${item}`)}
+            </button>
+          ))}
+        </div>
+      </div>
       {loading ? <p className="text-[12px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
-      {!loading && visible.length === 0 ? <EmptyState title={t("videoProductions.empty")} /> : null}
-      {!loading && visible.length > 0 ? (
+      {!loading && view === "timeline" ? (
+        timelineRows.length === 0
+          ? <EmptyState title={t("videoProductions.timeline.empty")} />
+          : <AutoRunTimeline rows={timelineRows} events={events} nowMs={nowMs} windowMinutes={TIMELINE_WINDOW_MIN} onOpen={(id) => navigate(`/video-productions/${id}`)} />
+      ) : null}
+      {!loading && view === "gallery" && visible.length === 0 ? <EmptyState title={t("videoProductions.empty")} /> : null}
+      {!loading && view === "gallery" && visible.length > 0 ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
           {visible.slice(0, shown).map((row) => {
             const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
@@ -184,7 +252,7 @@ export function VideoProductionsPage() {
           })}
         </div>
       ) : null}
-      {!loading && shown < visible.length ? <div className="mt-5 text-center"><button type="button" onClick={() => setShown((count) => count + PAGE_SIZE)} className="rounded-lg border border-lyx-border bg-lyx-bg px-5 py-2 text-sm font-medium hover:bg-lyx-muted">{t("videoProductions.showMore", { count: visible.length - shown })}</button></div> : null}
+      {!loading && view === "gallery" && shown < visible.length ? <div className="mt-5 text-center"><button type="button" onClick={() => setShown((count) => count + PAGE_SIZE)} className="rounded-lg border border-lyx-border bg-lyx-bg px-5 py-2 text-sm font-medium hover:bg-lyx-muted">{t("videoProductions.showMore", { count: visible.length - shown })}</button></div> : null}
       {playing?.resultUrl ? <VideoPlayerDialog title={playing.title || t("videoProductions.title")} caption={playing.caption} url={playing.resultUrl} onClose={() => setPlaying(null)} /> : null}
     </>
   );

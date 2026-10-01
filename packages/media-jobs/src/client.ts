@@ -10,6 +10,15 @@ import {
   type ClipPrepareJobInput,
   type ClipPrepareResult,
 } from "./contract.js";
+import {
+  buildFrameExtractJob,
+  FRAME_EXTRACT_JOB_TYPE,
+  parseFrameExtractResult,
+  validateFrameExtractJob,
+  type FrameExtractJob,
+  type FrameExtractJobInput,
+  type FrameExtractResult,
+} from "./frame-contract.js";
 import { assertMediaJobQueue, connectMediaJobBroker, type MediaJobBrokerConnection, type MediaJobChannel, type MediaJobMessage } from "./transport.js";
 
 /** Worker defaults: 120s per attempt x 2 attempts; client waits a bit longer than that. */
@@ -23,7 +32,9 @@ export type PrepareClipOptions = {
 
 type Pending = {
   jobKey: string;
-  resolve: (result: ClipPrepareResult) => void;
+  jobType: string;
+  parse: (input: unknown) => { jobKey: string } | null;
+  resolve: (result: never) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   cleanup: () => void;
@@ -33,11 +44,11 @@ type Pending = {
  * Enqueue + await-result client for `apps/media-worker` (RPC over RabbitMQ with a
  * private, auto-deleted reply queue). Long-lived: create once per process and reuse.
  *
- * Resolves with the worker's `ClipPrepareResult` (which may be `ok: false` with an
- * error code); rejects with `MediaJobClientError` only for transport-level problems
- * (not configured, broker down, timeout, malformed result). Because jobs are
- * idempotent by `jobKey`, a caller that timed out can simply call `prepareClip` again
- * with the same job — the worker returns the stored result without re-running FFmpeg.
+ * Resolves with the worker's result (which may be `ok: false` with an error code); rejects
+ * with `MediaJobClientError` only for transport-level problems (not configured, broker
+ * down, timeout, malformed result). Because jobs are idempotent by `jobKey`, a caller that
+ * timed out can simply call again with the same job — the worker returns the stored result
+ * without re-running FFmpeg. Job types: `clip.prepare` (VE2E-36/37) and `frame.extract` (VE2E-30).
  */
 export class MediaJobClient {
   private readonly pending = new Map<string, Pending>();
@@ -89,13 +100,30 @@ export class MediaJobClient {
   }
 
   prepareClip(job: ClipPrepareJob | ClipPrepareJobInput, options: PrepareClipOptions = {}): Promise<ClipPrepareResult> {
-    if (this.closed) return Promise.reject(new MediaJobClientError("BROKER_UNAVAILABLE", "MediaJobClient is closed"));
     const candidate = "schemaVersion" in job ? job : buildClipPrepareJob(job);
     const validation = validateClipPrepareJob(candidate);
     if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
+    return this.request<ClipPrepareResult>(CLIP_PREPARE_JOB_TYPE, validation.value, parseClipPrepareResult, options);
+  }
+
+  /** VE2E-30: samples a few JPEG frames from a stored video (for vision moderation). Same retry/idempotency rules as `prepareClip`. */
+  extractFrames(job: FrameExtractJob | FrameExtractJobInput, options: PrepareClipOptions = {}): Promise<FrameExtractResult> {
+    const candidate = "schemaVersion" in job ? job : buildFrameExtractJob(job);
+    const validation = validateFrameExtractJob(candidate);
+    if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
+    return this.request<FrameExtractResult>(FRAME_EXTRACT_JOB_TYPE, validation.value, parseFrameExtractResult, options);
+  }
+
+  private request<TResult extends { jobKey: string }>(
+    jobType: string,
+    job: { jobKey: string },
+    parse: (input: unknown) => TResult | null,
+    options: PrepareClipOptions,
+  ): Promise<TResult> {
+    if (this.closed) return Promise.reject(new MediaJobClientError("BROKER_UNAVAILABLE", "MediaJobClient is closed"));
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
     const correlationId = randomUUID();
-    return new Promise<ClipPrepareResult>((resolve, reject) => {
+    return new Promise<TResult>((resolve, reject) => {
       if (options.signal?.aborted) {
         reject(options.signal.reason ?? new Error("aborted"));
         return;
@@ -110,21 +138,21 @@ export class MediaJobClient {
         const entry = this.pending.get(correlationId);
         if (!entry) return;
         entry.cleanup();
-        reject(new MediaJobClientError("RESULT_TIMEOUT", `No clip.prepare result for jobKey ${validation.value.jobKey} within ${timeoutMs}ms`));
+        reject(new MediaJobClientError("RESULT_TIMEOUT", `No ${jobType} result for jobKey ${job.jobKey} within ${timeoutMs}ms`));
       }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", onAbort);
         this.pending.delete(correlationId);
       };
-      this.pending.set(correlationId, { jobKey: validation.value.jobKey, resolve, reject, timer, cleanup });
+      this.pending.set(correlationId, { jobKey: job.jobKey, jobType, parse, resolve: resolve as (result: never) => void, reject, timer, cleanup });
       options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        this.channel.sendToQueue(this.queue, Buffer.from(JSON.stringify(validation.value)), {
+        this.channel.sendToQueue(this.queue, Buffer.from(JSON.stringify(job)), {
           persistent: true,
           contentType: "application/json",
-          type: CLIP_PREPARE_JOB_TYPE,
-          messageId: validation.value.jobKey,
+          type: jobType,
+          messageId: job.jobKey,
           correlationId,
           replyTo: this.replyQueue,
           // Nobody awaits the result after the timeout; let RabbitMQ drop it if still unconsumed.
@@ -132,7 +160,7 @@ export class MediaJobClient {
         });
       } catch (error) {
         cleanup();
-        reject(new MediaJobClientError("BROKER_UNAVAILABLE", `Failed to publish clip.prepare: ${error instanceof Error ? error.message : "unknown error"}`));
+        reject(new MediaJobClientError("BROKER_UNAVAILABLE", `Failed to publish ${jobType}: ${error instanceof Error ? error.message : "unknown error"}`));
       }
     });
   }
@@ -151,17 +179,17 @@ export class MediaJobClient {
     const entry = this.pending.get(correlationId);
     if (!entry) return; // late reply after timeout/abort — ignored; the worker's stored result is reusable by jobKey
     entry.cleanup();
-    let parsed: ClipPrepareResult | null = null;
+    let parsed: { jobKey: string } | null = null;
     try {
-      parsed = parseClipPrepareResult(JSON.parse(message.content.toString("utf8")));
+      parsed = entry.parse(JSON.parse(message.content.toString("utf8")));
     } catch {
       parsed = null;
     }
     if (!parsed || parsed.jobKey !== entry.jobKey) {
-      entry.reject(new MediaJobClientError("INVALID_RESULT", `Malformed clip.prepare result for jobKey ${entry.jobKey}`));
+      entry.reject(new MediaJobClientError("INVALID_RESULT", `Malformed ${entry.jobType} result for jobKey ${entry.jobKey}`));
       return;
     }
-    entry.resolve(parsed);
+    entry.resolve(parsed as never);
   }
 
   private failAll(error: MediaJobClientError): void {

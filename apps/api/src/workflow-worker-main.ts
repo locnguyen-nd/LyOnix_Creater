@@ -35,6 +35,8 @@ const bootstrap = async () => {
   const stop = () => { stopping = true; };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  // Runs are independent: a new job is claimed as soon as a slot is free instead of waiting for the previous pipeline to finish.
+  const inflight = new Set<Promise<void>>();
   while (!stopping) {
     try {
       const prepared = await renders.processNextPreparation();

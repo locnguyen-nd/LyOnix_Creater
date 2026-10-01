@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isSafeRelativePath } from "@lyonix/domain";
@@ -32,6 +33,58 @@ export async function writeQuarantineFile(buffer: Buffer): Promise<QuarantinedFi
   const token = randomUUID();
   await writeFile(join(dir, token), buffer);
   return { quarantineToken: token, sha256: createHash("sha256").update(buffer).digest("hex"), bytes: buffer.byteLength };
+}
+
+/** Default cap for a streamed client upload (long source videos); override with env `MEDIA_UPLOAD_MAX_BYTES`. */
+export const DEFAULT_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+export const uploadMaxBytes = (env: Record<string, string | undefined> = process.env): number => {
+  const value = Number(env.MEDIA_UPLOAD_MAX_BYTES);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_UPLOAD_MAX_BYTES;
+};
+
+/**
+ * Streams a (possibly very large) upload into `_quarantine/<uuid>` without buffering it in memory, hashing it on the
+ * way. Aborts and deletes the partial file the moment `maxBytes` is exceeded. `head` is the first 64 bytes, enough to
+ * sniff the real media type before anything is registered.
+ */
+export async function writeQuarantineStream(
+  source: AsyncIterable<Buffer | Uint8Array>,
+  maxBytes: number,
+): Promise<(QuarantinedFile & { head: Buffer }) | "too_large"> {
+  const dir = quarantineDir();
+  await mkdir(dir, { recursive: true });
+  const token = randomUUID();
+  const path = join(dir, token);
+  const hash = createHash("sha256");
+  const out = createWriteStream(path);
+  let bytes = 0;
+  const headChunks: Buffer[] = [];
+  let headLength = 0;
+  try {
+    for await (const chunk of source) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > maxBytes) {
+        out.destroy();
+        await rm(path, { force: true });
+        return "too_large";
+      }
+      if (headLength < 64) { headChunks.push(buffer.subarray(0, 64 - headLength)); headLength += Math.min(buffer.byteLength, 64 - headLength); }
+      hash.update(buffer);
+      if (!out.write(buffer)) await new Promise<void>((resolve) => out.once("drain", resolve));
+    }
+    await new Promise<void>((resolve, reject) => { out.end((error?: Error | null) => (error ? reject(error) : resolve())); });
+  } catch (error) {
+    out.destroy();
+    await rm(path, { force: true });
+    throw error;
+  }
+  return { quarantineToken: token, sha256: hash.digest("hex"), bytes, head: Buffer.concat(headChunks) };
+}
+
+export async function discardQuarantineFile(token: string): Promise<void> {
+  if (!TOKEN_RE.test(token)) return;
+  await rm(join(quarantineDir(), token), { force: true });
 }
 
 export async function readQuarantineFile(token: string): Promise<Buffer> {

@@ -20,8 +20,8 @@ export async function sweepExpiredMediaJobs(mediaRoot: string, now: Date = new D
     const dir = join(root, entry.name);
     let expiresAtMs: number | null = null;
     try {
-      const manifest = JSON.parse(await readFile(join(dir, "result.json"), "utf8")) as { result?: { output?: { expiresAt?: string } } };
-      const parsed = Date.parse(manifest.result?.output?.expiresAt ?? "");
+      const manifest = JSON.parse(await readFile(join(dir, "result.json"), "utf8")) as { result?: { output?: { expiresAt?: string }; expiresAt?: string } };
+      const parsed = Date.parse(manifest.result?.output?.expiresAt ?? manifest.result?.expiresAt ?? "");
       expiresAtMs = Number.isFinite(parsed) ? parsed : null;
     } catch {
       expiresAtMs = null;
