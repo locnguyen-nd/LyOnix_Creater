@@ -109,7 +109,9 @@ export type BudgetedModerationInput = {
   account: { id: string; provider: string; apiKey: string; model: string; models?: readonly string[] };
   sceneContext: VisionModerationSceneContext;
   /** Returns the cover frame for a candidate, or null when it cannot be fetched (candidate keeps its metadata score). */
-  fetchFrame: (candidate: MediaCandidate) => Promise<VisionModerationFrame | null>;
+  fetchFrame?: (candidate: MediaCandidate) => Promise<VisionModerationFrame | null>;
+  /** VE2E-30: several frames of ONE video (extracted by the media worker); takes precedence over `fetchFrame`. One verdict per call. */
+  fetchFrames?: (candidate: MediaCandidate) => Promise<VisionModerationFrame[]>;
   availability: ModelAvailability;
   /** Test seam; defaults to the real adapter. */
   moderate?: typeof moderateSceneCandidate;
@@ -133,8 +135,8 @@ export async function moderatePoolWithBudget(input: BudgetedModerationInput): Pr
       budget.note(input.scopeKey, "vision_skipped_budget");
       break;
     }
-    const frame = await input.fetchFrame(candidate);
-    if (!frame) continue;
+    const frames = input.fetchFrames ? await input.fetchFrames(candidate) : await input.fetchFrame?.(candidate).then((frame) => (frame ? [frame] : []));
+    if (!frames || frames.length === 0) continue;
     const selected = await callContentWithModelFailover(input.availability, account.id, account.models ?? [account.model], async (modelId) => {
       const modelKey = `${account.id}:${modelId}`;
       const cachedCapability = budget.capabilityFor(modelKey);
@@ -146,7 +148,7 @@ export async function moderatePoolWithBudget(input: BudgetedModerationInput): Pr
         modelId,
         operation: "image_moderation",
         sceneContext: input.sceneContext,
-        frames: [frame],
+        frames,
         ...(cachedCapability ? { capabilityEvidence: { verifiedAt: cachedCapability } } : {}),
       });
       if (outcome.capabilityVerifiedAt) budget.setCapability(modelKey, outcome.capabilityVerifiedAt);

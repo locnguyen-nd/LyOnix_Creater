@@ -148,3 +148,40 @@ describe.skipIf(!availability.ok)("clip.prepare with real FFmpeg", () => {
     await client.close();
   }, 120_000);
 });
+
+describe.skipIf(!availability.ok)("frame.extract with real FFmpeg (VE2E-30)", () => {
+  let mediaRoot: string;
+  const LONG = "projects/p/assets/long-960x540.mp4";
+  const version = availability.ok ? availability.version : "";
+
+  beforeAll(async () => {
+    mediaRoot = await mkdtemp(join(tmpdir(), "lyonix-frames-it-"));
+    await mkdir(join(mediaRoot, "projects/p/assets"), { recursive: true });
+    generate(["-f", "lavfi", "-i", "testsrc=duration=12:size=960x540:rate=10", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", join(mediaRoot, LONG)]);
+  }, 60_000);
+  afterAll(async () => { await rm(mediaRoot, { recursive: true, force: true }); });
+
+  it("writes real JPEG frames (scaled down to maxWidth, under the byte cap) and reuses them on re-delivery", async () => {
+    const { FrameExtractProcessor } = await import("./frame-extract.js");
+    const { buildFrameExtractJob, MAX_FRAME_EXTRACT_BYTES } = await import("@lyonix/media-jobs");
+    const { readFile } = await import("node:fs/promises");
+    const { readJpegSize } = await import("./frame-plan.js");
+    const processor = new FrameExtractProcessor({ config: { mediaRoot, ffmpegPath, ffprobePath, jobTimeoutMs: 60_000, maxAttempts: 2 }, runner: runProcess, ffmpegVersion: version });
+    const job = buildFrameExtractJob({ jobKey: "frames:it", source: { relativePath: LONG, mediaAssetVersionId: "mav-it" }, frameCount: 4, maxWidth: 480 });
+    const result = await processor.handle(job);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.frames).toHaveLength(4);
+    for (const frame of result.frames) {
+      const bytes = await readFile(join(mediaRoot, frame.relativePath));
+      expect(bytes.length).toBe(frame.bytes);
+      expect(bytes.length).toBeLessThanOrEqual(MAX_FRAME_EXTRACT_BYTES);
+      expect(readJpegSize(bytes)).toEqual({ width: 480, height: 270 });
+      expect(frame.atMs).toBeGreaterThan(500);
+      expect(frame.atMs).toBeLessThan(11_500);
+    }
+    expect(new Set(result.frames.map((f) => f.sha256)).size).toBe(4); // testsrc changes over time: distinct frames
+    const again = await processor.handle(job);
+    expect(again.ok && again.reused).toBe(true);
+  });
+});

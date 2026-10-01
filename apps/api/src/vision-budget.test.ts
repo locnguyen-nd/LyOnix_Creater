@@ -67,4 +67,22 @@ describe("vision job budget", () => {
     expect(input.availability.cooldownContentAccount).not.toHaveBeenCalled();
     expect(budget.calls).toBe(4);
   });
+
+  it("VE2E-30: sends every extracted frame of one video in a single request (one verdict, one call)", async () => {
+    const budget = new VisionBudget({ maxCalls: 4, maxCandidatesPerSegment: 1 });
+    const moderate = vi.fn(async (_input: { frames: unknown[] }) => ({ raw: null, capabilityVerifiedAt: "2026-10-01T00:00:00.000Z", evidenceRefs: [] }));
+    const frames = [{ mimeType: "image/jpeg", base64: "AAAA" }, { mimeType: "image/jpeg", base64: "BBBB" }, { mimeType: "image/jpeg", base64: "CCCC" }];
+    await moderatePoolWithBudget({ ...base(budget, "video"), fetchFrames: async () => frames, moderate: moderate as never });
+    expect(moderate).toHaveBeenCalledTimes(1);
+    expect(moderate.mock.calls[0]![0].frames).toEqual(frames);
+  });
+
+  it("VE2E-30: a video whose frames cannot be produced keeps its score and spends no vision call", async () => {
+    const budget = new VisionBudget({ maxCalls: 4, maxCandidatesPerSegment: 1 });
+    const moderate = vi.fn();
+    const pool = await moderatePoolWithBudget({ ...base(budget, "video"), fetchFrames: async () => [], moderate: moderate as never });
+    expect(moderate).not.toHaveBeenCalled();
+    expect(budget.calls).toBe(0);
+    expect(pool[0]!.moderationDecision).toBeNull();
+  });
 });

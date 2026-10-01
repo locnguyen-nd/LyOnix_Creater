@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connectMediaJobBroker, redactBrokerUrl, type MediaJobBrokerConnection } from "@lyonix/media-jobs";
 import { ClipPrepareProcessor, MEDIA_JOBS_DIR } from "./clip-prepare.js";
+import { FrameExtractProcessor } from "./frame-extract.js";
 import { loadMediaWorkerConfig, MediaWorkerConfigError } from "./config.js";
 import { startClipPrepareConsumer, type ConsumerHandle } from "./consumer.js";
 import { BinaryNotFoundError, readToolVersion, runProcess } from "./process.js";
@@ -74,6 +75,7 @@ const bootstrap = async () => {
   sweepTimer.unref();
 
   const processor = new ClipPrepareProcessor({ config: cfg, runner: runProcess, ffmpegVersion, log });
+  const frameProcessor = new FrameExtractProcessor({ config: cfg, runner: runProcess, ffmpegVersion, log });
 
   let stopping = false;
   let connection: MediaJobBrokerConnection | null = null;
@@ -106,7 +108,7 @@ const bootstrap = async () => {
         resolveClosed();
       });
     });
-    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, log });
+    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, frameProcessor, log });
     log(`ready on queue ${cfg.queue} (${brokerLabel}); FFmpeg runs here only`);
     await Promise.race([closed, new Promise<void>((r) => { wake = r; })]);
     if (stopping) {
