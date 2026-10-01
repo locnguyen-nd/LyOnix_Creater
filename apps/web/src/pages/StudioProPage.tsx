@@ -35,6 +35,8 @@ import type {
   MediaPlanResponse,
 } from "@lyonix/contracts";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
+import { FullPreviewPlayer } from "../studio/FullPreviewPlayer";
+import type { FullPreviewSceneInput } from "../studio/full-preview";
 import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
 import { applyMediaPlan, assignSceneOnly, inPointShortfall, replaceSegmentSource } from "../studio/media-segments";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
@@ -218,6 +220,8 @@ export function StudioProPage() {
   const [renderJob, setRenderJob] = useState<RenderJobResponse | null>(null);
   const [renderSubmitting, setRenderSubmitting] = useState(false);
   const [showReview, setShowReview] = useState(false);
+  // VE2E-60: browser-side full-video preview (approximation, not render evidence).
+  const [showFullPreview, setShowFullPreview] = useState(false);
   const [renderPlaybackError, setRenderPlaybackError] = useState(false);
 
   // VE2E-13: Creatomate JavaScript Preview SDK — off by default (mounting it loads a real
@@ -485,6 +489,29 @@ export function StudioProPage() {
   const mediaAssetById = new Map(mediaLibrary.map((asset) => [asset.id, asset]));
   const selectedMediaAsset = selectedSceneDraft?.mediaAssetVersionId ? mediaAssetById.get(selectedSceneDraft.mediaAssetVersionId) : undefined;
   const selectedAudio = selectedScene ? audioBySceneId[selectedScene.sceneId] : undefined;
+  const fullPreviewScenes = useMemo<FullPreviewSceneInput[]>(() => {
+    if (!showFullPreview) return [];
+    return draft.scenes.flatMap((row) => {
+      const scene = sceneById.get(row.sceneId);
+      if (!scene) return [];
+      const asset = row.mediaAssetVersionId ? mediaLibrary.find((item) => item.id === row.mediaAssetVersionId) : undefined;
+      const audio = audioBySceneId[row.sceneId];
+      return [{
+        sceneId: row.sceneId,
+        excluded: row.excluded,
+        narration: scene.narration,
+        screenText: row.screenTextOverride || scene.screenText,
+        durationHintMs: scene.durationHintMs,
+        mediaKind: asset ? (asset.kind === "video" ? "video" : "image") : null,
+        mediaUrl: row.mediaAssetVersionId ? thumbCache[row.mediaAssetVersionId] : null,
+        sourceStartMs: row.sourceStartMs,
+        sourceDurationMs: row.sourceDurationMs,
+        audioUrl: audio ? thumbCache[audio.mediaAssetVersionId] : null,
+        audioDurationMs: audio?.durationMs ?? null,
+      } satisfies FullPreviewSceneInput];
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showFullPreview, draft.scenes, context, mediaLibrary, audioBySceneId, thumbCache]);
   const sceneOptionGroups = template ? groupTemplateOptionsByScene(template.modifications, orderedScenes.map((scene) => ({ sceneId: scene.sceneId }))) : { bySceneId: new Map(), leftover: [] };
   const selectedSceneOptions: TemplateModificationSlotResponse[] = selectedScene ? sceneOptionGroups.bySceneId.get(selectedScene.sceneId) ?? [] : [];
 
@@ -960,6 +987,9 @@ export function StudioProPage() {
             >
               {timelineStatus === "approved" ? t("studioPro.timelineApproved") : t("studioPro.approveTimeline")}
             </Button>
+            <Button variant="secondary" onClick={() => setShowFullPreview(true)} disabled={orderedScenes.length === 0}>
+              {t("studioPro.fullPreviewButton")}
+            </Button>
             <Button variant="secondary" onClick={() => setShowReview((prev) => !prev)}>
               {t("studioPro.reviewBeforeRender")}
             </Button>
@@ -1022,6 +1052,15 @@ export function StudioProPage() {
         </div>
       ) : renderJob && renderJob.status !== "failed" && renderJob.status !== "cancelled" ? (
         <div className="mx-5 mb-2 text-[11.5px] text-lyx-fg-muted">{t("studioPro.renderResultLoading")}</div>
+      ) : null}
+
+      {showFullPreview ? (
+        <FullPreviewPlayer
+          scenes={fullPreviewScenes}
+          initialSceneId={selectedSceneId}
+          onSceneChange={setSelectedSceneId}
+          onClose={() => setShowFullPreview(false)}
+        />
       ) : null}
 
       {showReview ? (
