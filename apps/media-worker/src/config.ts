@@ -1,3 +1,4 @@
+import { availableParallelism } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { DEFAULT_MEDIA_WORKER_QUEUE } from "@lyonix/media-jobs";
 
@@ -14,7 +15,10 @@ export type MediaWorkerConfig = {
   jobTimeoutMs: number;
   /** Bounded retries for retryable failures (FFMPEG_FAILED / FFMPEG_TIMEOUT). */
   maxAttempts: number;
+  /** Parallel clip.prepare jobs (AMQP prefetch). Default 3, never above the CPU count (VE2E-61). */
   prefetch: number;
+  /** FFmpeg `-threads` per job: cpuCount / prefetch (>= 1) so parallel cuts do not starve each other. */
+  ffmpegThreads: number;
   sweepIntervalMs: number;
 };
 
@@ -41,10 +45,16 @@ const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
  * - MEDIA_ROOT (default `./data/media`, resolved against the repo root like apps/api)
  * - FFMPEG_PATH / FFPROBE_PATH (default `ffmpeg` / `ffprobe` on PATH)
  * - MEDIA_WORKER_COPY_TOLERANCE_MS (default 1000), MEDIA_WORKER_JOB_TIMEOUT_MS (default 120000),
- *   MEDIA_WORKER_MAX_ATTEMPTS (default 2), MEDIA_WORKER_PREFETCH (default 1),
+ *   MEDIA_WORKER_MAX_ATTEMPTS (default 2),
+ *   MEDIA_WORKER_PREFETCH (default min(3, CPU count), 1..16; always capped at the CPU count so FFmpeg jobs do not starve each other),
+ *   MEDIA_WORKER_FFMPEG_THREADS (default floor(CPU count / prefetch), >= 1; 1..64),
  *   MEDIA_WORKER_SWEEP_INTERVAL_MS (default 6h)
  */
-export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string): MediaWorkerConfig => {
+export const DEFAULT_MEDIA_WORKER_PREFETCH = 3;
+
+export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string, cpuCount: number = availableParallelism()): MediaWorkerConfig => {
+  const cpus = Math.max(1, Math.floor(cpuCount) || 1);
+  const prefetch = Math.min(readInt(env, "MEDIA_WORKER_PREFETCH", DEFAULT_MEDIA_WORKER_PREFETCH, 1, 16), cpus);
   const mediaRootRaw = env.MEDIA_ROOT?.trim() || "./data/media";
   return {
     queue: env.MEDIA_WORKER_QUEUE?.trim() || DEFAULT_MEDIA_WORKER_QUEUE,
@@ -55,7 +65,8 @@ export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string):
     copyToleranceMs: readInt(env, "MEDIA_WORKER_COPY_TOLERANCE_MS", 1000, 0, 10_000),
     jobTimeoutMs: readInt(env, "MEDIA_WORKER_JOB_TIMEOUT_MS", 120_000, 1_000, 30 * 60_000),
     maxAttempts: readInt(env, "MEDIA_WORKER_MAX_ATTEMPTS", 2, 1, 5),
-    prefetch: readInt(env, "MEDIA_WORKER_PREFETCH", 1, 1, 16),
+    prefetch,
+    ffmpegThreads: readInt(env, "MEDIA_WORKER_FFMPEG_THREADS", Math.max(1, Math.floor(cpus / prefetch)), 1, 64),
     sweepIntervalMs: readInt(env, "MEDIA_WORKER_SWEEP_INTERVAL_MS", 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
   };
 };

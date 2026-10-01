@@ -238,6 +238,41 @@ describe("clip.prepare consumer + MediaJobClient (in-memory broker)", () => {
     expect(broker.depth("q")).toBe(0);
   });
 
+  it("VE2E-61: prefetch>1 runs jobs in parallel with independent outputs; a duplicate jobKey is still processed once", async () => {
+    const broker = new InMemoryMediaJobBroker();
+    const base = fakeRunner();
+    let active = 0;
+    let peak = 0;
+    const runner: ProcessRunner = async (binary, args, opts) => {
+      if (binary !== "ffmpeg") return base.runner(binary, args, opts);
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 25));
+      active -= 1;
+      return base.runner(binary, args, opts);
+    };
+    const processor = new ClipPrepareProcessor({ config: { ...cfg(), ffmpegThreads: 2 }, runner, ffmpegVersion: "v" });
+    await startClipPrepareConsumer({ channel: broker.createChannel(), queue: "q", prefetch: 3, processor });
+    const client = await MediaJobClient.create({ channel: broker.createChannel(), queue: "q" });
+    const jobs = [1, 2, 3].map((n) => job({ ...buildClipPrepareJob({ jobKey: `clip:par-${n}`, source: { relativePath: SOURCE, mediaAssetVersionId: "mav-1" }, startMs: 2000 + n * 100, durationMs: 4000, stripAudio: true }) }));
+    const results = await Promise.all([...jobs, jobs[0]!].map((j) => client.prepareClip(j, { timeoutMs: 3000 })));
+    expect(results.every((r) => r.ok)).toBe(true);
+    const keys = results.slice(0, 3).map((r) => r.jobKey);
+    expect(new Set(keys).size).toBe(3);
+    const paths = results.slice(0, 3).map((r) => (r.ok ? r.output.relativePath : ""));
+    expect(new Set(paths).size).toBe(3);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(3);
+    // 3 distinct jobKeys -> 3 ffmpeg runs; the 4th message (same jobKey as the first) is either locked-and-requeued or reused, never re-encoded.
+    expect(base.ffmpegCalls()).toHaveLength(3);
+    for (const call of base.ffmpegCalls()) {
+      const idx = call.args.indexOf("-threads");
+      expect(idx).toBeGreaterThan(-1);
+      expect(call.args[idx + 1]).toBe("2");
+      expect(idx).toBe(call.args.length - 3); // output option, right before the output path
+    }
+  });
+
   it("answers poison messages with INVALID_JOB and acks them", async () => {
     const broker = new InMemoryMediaJobBroker();
     const processor = new ClipPrepareProcessor({ config: cfg(), runner: fakeRunner().runner, ffmpegVersion: "v" });
@@ -295,9 +330,19 @@ describe("sweepExpiredMediaJobs (7-day working TTL)", () => {
 
 describe("loadMediaWorkerConfig", () => {
   it("defaults: queue lyonix.media, tolerance 1000ms, bounded timeout/attempts, repo-relative MEDIA_ROOT", () => {
-    const config = loadMediaWorkerConfig({}, "/repo");
-    expect(config).toMatchObject({ queue: "lyonix.media", copyToleranceMs: 1000, jobTimeoutMs: 120_000, maxAttempts: 2, prefetch: 1, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", rabbitmqUrl: null });
+    const config = loadMediaWorkerConfig({}, "/repo", 8);
+    expect(config).toMatchObject({ queue: "lyonix.media", copyToleranceMs: 1000, jobTimeoutMs: 120_000, maxAttempts: 2, prefetch: 3, ffmpegThreads: 2, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", rabbitmqUrl: null });
     expect(config.mediaRoot.replaceAll("\\", "/")).toMatch(/\/repo\/data\/media$/);
+  });
+
+  it("VE2E-61: prefetch defaults to 3 but never exceeds the CPU count; FFmpeg threads share the CPUs", () => {
+    expect(loadMediaWorkerConfig({}, "/repo", 2)).toMatchObject({ prefetch: 2, ffmpegThreads: 1 });
+    expect(loadMediaWorkerConfig({}, "/repo", 1)).toMatchObject({ prefetch: 1, ffmpegThreads: 1 });
+    expect(loadMediaWorkerConfig({}, "/repo", 12)).toMatchObject({ prefetch: 3, ffmpegThreads: 4 });
+    expect(loadMediaWorkerConfig({ MEDIA_WORKER_PREFETCH: "8" }, "/repo", 4)).toMatchObject({ prefetch: 4, ffmpegThreads: 1 });
+    expect(loadMediaWorkerConfig({ MEDIA_WORKER_PREFETCH: "2", MEDIA_WORKER_FFMPEG_THREADS: "6" }, "/repo", 16)).toMatchObject({ prefetch: 2, ffmpegThreads: 6 });
+    expect(() => loadMediaWorkerConfig({ MEDIA_WORKER_PREFETCH: "0" }, "/repo", 4)).toThrow(MediaWorkerConfigError);
+    expect(() => loadMediaWorkerConfig({ MEDIA_WORKER_FFMPEG_THREADS: "x" }, "/repo", 4)).toThrow(MediaWorkerConfigError);
   });
 
   it("reads overrides and rejects out-of-range values", () => {
