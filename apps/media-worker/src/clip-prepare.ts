@@ -67,7 +67,7 @@ export const sha256File = (path: string): Promise<string> =>
 const toPosix = (path: string) => path.split(sep).join("/");
 
 export type ClipPrepareProcessorDeps = {
-  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts">;
+  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts"> & Partial<Pick<MediaWorkerConfig, "ffmpegThreads">>;
   runner: ProcessRunner;
   ffmpegVersion: string;
   now?: () => Date;
@@ -236,7 +236,10 @@ export class ClipPrepareProcessor {
   }
 
   private async encode(args: string[]): Promise<void> {
-    const result = await this.deps.runner(this.deps.config.ffmpegPath, args, { timeoutMs: this.deps.config.jobTimeoutMs, maxStdoutBytes: 64 * 1024 });
+    // VE2E-61: cap encoder threads (output option, inserted before the output path) so parallel jobs share the CPUs.
+    const threads = this.deps.config.ffmpegThreads;
+    const bounded = threads && threads > 0 && args.length > 0 ? [...args.slice(0, -1), "-threads", String(threads), args[args.length - 1]!] : args;
+    const result = await this.deps.runner(this.deps.config.ffmpegPath, bounded, { timeoutMs: this.deps.config.jobTimeoutMs, maxStdoutBytes: 64 * 1024 });
     if (result.exitCode !== 0) throw new MediaJobError("FFMPEG_FAILED", `ffmpeg exited ${result.exitCode}: ${result.stderrTail.slice(-800)}`, true);
   }
 

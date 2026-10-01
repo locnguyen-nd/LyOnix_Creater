@@ -78,7 +78,7 @@ describe.skipIf(!availability.ok)("clip.prepare with real FFmpeg", () => {
       "-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", "-shortest", join(mediaRoot, MPEG4),
     ]);
     processor = new ClipPrepareProcessor({
-      config: { mediaRoot, ffmpegPath, ffprobePath, copyToleranceMs: 1000, jobTimeoutMs: 60_000, maxAttempts: 1 },
+      config: { mediaRoot, ffmpegPath, ffprobePath, copyToleranceMs: 1000, jobTimeoutMs: 60_000, maxAttempts: 1, ffmpegThreads: 2 },
       runner: runProcess,
       ffmpegVersion: version,
     });
@@ -104,7 +104,7 @@ describe.skipIf(!availability.ok)("clip.prepare with real FFmpeg", () => {
 
   it("re-encodes to 1080x1920 H.264 when keyframe drift exceeds the configured tolerance, keeping audio when asked", async () => {
     const strict = new ClipPrepareProcessor({
-      config: { mediaRoot, ffmpegPath, ffprobePath, copyToleranceMs: 200, jobTimeoutMs: 60_000, maxAttempts: 1 },
+      config: { mediaRoot, ffmpegPath, ffprobePath, copyToleranceMs: 200, jobTimeoutMs: 60_000, maxAttempts: 1, ffmpegThreads: 2 },
       runner: runProcess,
       ffmpegVersion: version,
     });
