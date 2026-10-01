@@ -353,3 +353,5 @@ export {
   type CaptionSceneV1,
   type CaptionSegmentV1,
 } from "./caption-plan-v1.js";
+
+export { ProviderLimiter, providerLimiterKeys, type ProviderLimiterKey, type ProviderLimiterOptions, type ProviderLimiterSnapshot } from "./provider-limiter.js";
