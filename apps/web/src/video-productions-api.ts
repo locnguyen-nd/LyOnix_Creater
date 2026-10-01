@@ -6,6 +6,7 @@
 import { api, csrfHeaders } from "./api";
 import type {
   BackgroundSegmentsSetting,
+  QueueSummaryResponse,
   StudioContextResponse,
   VideoProductionListItemResponse,
   VideoProductionResponse,
@@ -73,6 +74,16 @@ export async function deleteVideoProduction(id: string): Promise<void> {
 
 export async function retryVideoProduction(id: string): Promise<void> {
   await api(`/video-productions/${id}/retry`, { method: "POST", headers: await csrfHeaders() });
+}
+
+/** VE2E-62: take a run that is still waiting in the queue out of it (409 once a worker already claimed it). */
+export async function cancelQueuedVideoProduction(id: string): Promise<void> {
+  await api(`/video-productions/${id}/cancel`, { method: "POST", headers: await csrfHeaders() });
+}
+
+/** VE2E-62: `[{kind, active, limit, queued}]` for the workflow / render / media queues. */
+export async function fetchQueueSummary(): Promise<QueueSummaryResponse[]> {
+  return api<QueueSummaryResponse[]>("/queue-summary");
 }
 
 export async function listVideoProductionEvents(id: string): Promise<WorkflowStepEventResponse[]> {
