@@ -968,6 +968,39 @@ describe("RenderJobsService", () => {
       expect(badges).toEqual(["第3位", "第2位", "第1位"]);
     });
 
+    it("VE2E-58: user-added + split scenes (11 on the 10-slot template) are all rendered by the generator, no 409, none dropped; a removed script scene does the same at 9", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      const edited = (ids: string[]) => ids.map((sceneId, index) => ({ sceneId, orderIndex: index, mediaAssetVersionId: "asset-1", audioVersionId: "audio-1", subtitleVersionId: null, screenTextOverride: `Cảnh ${sceneId}`, annotation: null, excluded: false }));
+      const ten = Array.from({ length: 10 }, (_, i) => `s${i + 1}`);
+      // s5 split into usr-1/usr-2 -> 11 scenes
+      const split = [...ten.slice(0, 4), "usr-1", "usr-2", ...ten.slice(5)];
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: edited(split), optionValues: {}, addedScenes: [{ sceneId: "usr-1", narration: "a", screenText: "Nửa đầu", durationHintMs: 3000, origin: "split", splitFromSceneId: "s5" }, { sceneId: "usr-2", narration: "b", screenText: "Nửa sau", durationHintMs: 3000, origin: "split", splitFromSceneId: "s5" }], removedSceneIds: ["s5"] });
+      const fetchMock = okFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      const queued = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(queued.ok).toBe(true);
+      expect(queued.ok && renderJobRows.get(queued.data.id).modificationsPayload).toMatchObject({ mode: "dynamic" });
+      await service.processNextPreparation();
+      const composed = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body)).source.elements.filter((el: any) => el.type === "composition");
+      expect(composed).toHaveLength(11);
+      // fewer scenes than slots (one script scene removed, recoverable) is composed the same way
+      timelineRows.set(timelineVersionId, { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: edited(ten.slice(0, 9)), optionValues: {}, addedScenes: [], removedSceneIds: ["s10"] });
+      const preview = await service.previewDynamicComposition(projectId, timelineVersionId, "user-1", "staff");
+      expect(preview).toMatchObject({ ok: true, data: { ready: true, renderableSceneCount: 9, totalSceneCount: 9 } });
+      expect(((preview.ok ? preview.data.source : null) as any).elements.filter((el: any) => el.type === "composition")).toHaveLength(9);
+    });
+
+    it("VE2E-58: a text edit on an added scene (no binding change) is a different render, not a replay of the old job", async () => {
+      pinTemplate(newsRecapJpTemplate());
+      const base = { id: timelineVersionId, projectId, status: "approved", templateSnapshotId, scenes: scenesFor(10), optionValues: {} };
+      const def = (screenText: string) => [{ sceneId: "s1", narration: "x", screenText, durationHintMs: 3000, origin: "added", splitFromSceneId: null }];
+      timelineRows.set(timelineVersionId, { ...base, addedScenes: def("A") });
+      const a = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      timelineRows.set(timelineVersionId, { ...base, addedScenes: def("B") });
+      const b = await service.enqueueTimelineRender(projectId, timelineVersionId, "user-1", "staff", { providerAccountId }, "template");
+      expect(a.ok && b.ok && a.data.id !== b.data.id).toBe(true);
+    });
+
     it("N equal to the template's scene slots keeps the fixed-slot modification path", async () => {
       pinTemplate(newsRecapJpTemplate());
       setTimeline(10);
