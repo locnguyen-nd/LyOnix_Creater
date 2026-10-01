@@ -38,6 +38,23 @@ import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import { FullPreviewPlayer } from "../studio/FullPreviewPlayer";
 import type { FullPreviewSceneInput } from "../studio/full-preview";
 import { buildTimelineSaveScenes, withMediaAssigned } from "../studio/timeline-save";
+import type { TimelineAddedSceneDef } from "@lyonix/domain/timeline-edit";
+import {
+  addBlankScene,
+  buildEditSavePayload,
+  buildEffectiveScenes,
+  contextNeedsRefresh,
+  duplicateSelectedScene,
+  planSplit,
+  removeSelectedScene,
+  removedSceneInfos,
+  resolveOrderedSceneIds,
+  restoreRemovedScene,
+  sceneNeedsSave,
+  splitSelectedScene,
+  type EditOutcome,
+} from "../studio/timeline-edit-actions";
+import { TimelineEditToolbar } from "../studio/TimelineEditToolbar";
 import { applyMediaPlan, assignSceneOnly, inPointShortfall, replaceSegmentSource } from "../studio/media-segments";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
@@ -112,23 +129,31 @@ type TimelineDraft = {
   optionValues: TimelineOptionValues;
   /** VE2E-42: the saved segment plan, carried through unchanged on re-save. */
   segments: TimelineSegmentResponse[];
+  /** VE2E-59: user-added / split scene definitions (VE2E-58 contract); every one is also a row of `scenes`. */
+  addedScenes: TimelineAddedSceneDef[];
+  /** VE2E-59: script scenes dropped from the timeline, recoverable from the "cảnh đã xóa" list. */
+  removedSceneIds: string[];
 };
 
 const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
   const saved = context.latestTimelineVersion;
-  const contextIds = new Set(context.scenes.map((scene) => scene.sceneId));
   const savedById = new Map((saved?.scenes ?? []).map((scene) => [scene.sceneId, scene]));
+  const removedSceneIds = saved?.removedSceneIds ?? [];
   // A previously saved scene order (reordered via the timeline's move buttons) is preserved
   // across reloads; any scene the script has that the saved timeline doesn't know about yet
-  // (freshly generated, never saved) is appended at the end in its script order.
-  const orderedSceneIds = [
-    ...(saved?.scenes ?? []).map((scene) => scene.sceneId).filter((sceneId) => contextIds.has(sceneId)),
-    ...context.scenes.map((scene) => scene.sceneId).filter((sceneId) => !savedById.has(sceneId)),
-  ];
+  // (freshly generated, never saved) is appended at the end in its script order. A scene the
+  // user removed (VE2E-59) stays out of the timeline - it lives in `removedSceneIds`.
+  const orderedSceneIds = resolveOrderedSceneIds(
+    context.scenes.map((scene) => scene.sceneId),
+    (saved?.scenes ?? []).map((scene) => scene.sceneId),
+    removedSceneIds,
+  );
   return {
     templateSnapshotId: saved?.templateSnapshotId ?? null,
     optionValues: saved?.optionValues ?? {},
     segments: saved?.segments ?? [],
+    addedScenes: (saved?.addedScenes ?? []).map((def) => ({ ...def, splitFromSceneId: def.splitFromSceneId ?? null })),
+    removedSceneIds: [...removedSceneIds],
     scenes: orderedSceneIds.map((sceneId) => {
       const bound = savedById.get(sceneId);
       return {
@@ -178,7 +203,7 @@ export function StudioProPage() {
   const [mediaLibrary, setMediaLibrary] = useState<MediaAssetVersionSummary[]>([]);
   const [thumbCache, setThumbCache] = useState<Record<string, string>>({});
 
-  const [draft, setDraft] = useState<TimelineDraft>({ templateSnapshotId: null, scenes: [], optionValues: {}, segments: [] });
+  const [draft, setDraft] = useState<TimelineDraft>({ templateSnapshotId: null, scenes: [], optionValues: {}, segments: [], addedScenes: [], removedSceneIds: [] });
   const [baseVersionId, setBaseVersionId] = useState<string | null>(null);
   const [timelineStatus, setTimelineStatus] = useState<"draft" | "approved" | null>(null);
   const [lastSavedJson, setLastSavedJson] = useState("");
@@ -423,14 +448,28 @@ export function StudioProPage() {
     setSdkState("loading");
   };
 
-  const persist = async () => {
-    if (!context) return;
+  /** VE2E-59: re-read the Studio context WITHOUT touching the draft - after a save the server has mirrored new/split scenes as SceneDraftVersion rows, and their ids are needed to generate voice. */
+  const refreshContextOnly = async (): Promise<StudioContextResponse | null> => {
+    if (!id) return null;
+    try {
+      const ctx = await (isVideoProduction ? fetchVideoProductionStudioContext(id) : fetchStudioContext(id));
+      setContext(ctx);
+      return ctx;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Saves the current draft; resolves to the fresh context when new scenes were mirrored, else the current one. */
+  const persist = async (): Promise<StudioContextResponse | null> => {
+    if (!context) return null;
     setSaving(true);
     try {
       const result = await saveTimelineVersion(context.projectId, {
         supersedesId: baseVersionId,
         templateSnapshotId: draft.templateSnapshotId,
         ...buildTimelineSaveScenes(draft.scenes, draft.segments),
+        ...buildEditSavePayload(draft),
         optionValues: draft.optionValues,
       });
       setBaseVersionId(result.id);
@@ -438,9 +477,11 @@ export function StudioProPage() {
       setLastSavedJson(JSON.stringify(draft));
       setConflict(false);
       void previewTimelineVersion(result.id).then(setPreview).catch(() => undefined);
+      return contextNeedsRefresh(context.scenes, draft.addedScenes) ? await refreshContextOnly() : context;
     } catch (err) {
       if (err instanceof ApiError && err.code === "VERSION_CONFLICT") setConflict(true);
       else setError(err instanceof ApiError ? err.message : t("common.error"));
+      return null;
     } finally {
       setSaving(false);
     }
@@ -467,10 +508,41 @@ export function StudioProPage() {
     });
   };
 
+  // VE2E-59: add / duplicate / delete / split / restore a scene. Every op is a pure domain function
+  // applied through `mutate`, so it is undoable and autosaved like any other timeline edit.
+  const [editMessage, setEditMessage] = useState<string | null>(null);
+  const runEdit = (op: (current: TimelineDraft) => EditOutcome<TimelineDraft>) => {
+    const outcome = op(draft);
+    if (!outcome.ok) {
+      setEditMessage(outcome.message);
+      return;
+    }
+    setEditMessage(null);
+    mutate(() => outcome.draft);
+    if (outcome.selectSceneId) setSelectedSceneId(outcome.selectSceneId);
+  };
+  const handleAddScene = (narration: string) =>
+    runEdit((current) => addBlankScene(current, { afterSceneId: selectedSceneId, narration }));
+  const handleDuplicateScene = () => selectedSceneId && runEdit((current) => duplicateSelectedScene(current, selectedSceneId, context?.scenes ?? []));
+  const handleRemoveScene = () => selectedSceneId && runEdit((current) => removeSelectedScene(current, selectedSceneId));
+  const handleRestoreScene = (sceneId: string) => runEdit((current) => restoreRemovedScene(current, sceneId, selectedSceneId));
+  const handleSplitScene = (sceneId: string, sentenceBoundary: number) =>
+    runEdit((current) => {
+      const bound = current.scenes.find((row) => row.sceneId === sceneId);
+      const asset = bound?.mediaAssetVersionId ? mediaAssetById.get(bound.mediaAssetVersionId) : undefined;
+      return splitSelectedScene(current, sceneId, sentenceBoundary, context?.scenes ?? [], {
+        kind: asset ? (asset.kind as "video" | "image") : null,
+        durationMs: asset?.durationMs ?? null,
+      });
+    });
+
   const handleUndo = () => setDraft((prev) => undoStack.current.undo(prev) ?? prev);
   const handleRedo = () => setDraft((prev) => undoStack.current.redo(prev) ?? prev);
 
-  const scenes = context?.scenes ?? [];
+  // VE2E-59: the script scenes in the timeline plus user-added/split scenes (their own text wins),
+  // never a scene the user removed - see studio/timeline-edit-actions.ts.
+  const scenes = useMemo(() => buildEffectiveScenes(context?.scenes ?? [], draft), [context, draft]);
+  const removedScenes = useMemo(() => removedSceneInfos(context?.scenes ?? [], draft), [context, draft]);
   const sceneById = new Map(scenes.map((scene) => [scene.sceneId, scene]));
   // The timeline's own scene order (reorderable via the move buttons), not the fixed script
   // order - drives the scene board, the review panel and the render's actual scene order.
@@ -732,11 +804,11 @@ export function StudioProPage() {
   // Resolves once that scene's audio finishes (completed or failed) so callers can await
   // one scene before starting the next - `generateAudioForSelectedScene` below and the
   // "apply to the whole video" bulk action both build on this single implementation.
-  const generateAudioForScene = (scene: StudioSceneContextResponse): Promise<void> => {
+  const generateAudioForSceneRow = (scene: StudioSceneContextResponse, sceneRowId: string): Promise<void> => {
     if (!context || !voiceAccountId || !selectedVoiceId) return Promise.resolve();
     setAudioBusySceneId(scene.sceneId);
     setAudioNotice(null);
-    return generateSceneAudio(scene.id, { providerAccountId: voiceAccountId, voiceId: selectedVoiceId }, crypto.randomUUID())
+    return generateSceneAudio(sceneRowId, { providerAccountId: voiceAccountId, voiceId: selectedVoiceId }, crypto.randomUUID())
       .then(
         (accepted) =>
           new Promise<void>((resolve) => {
@@ -778,7 +850,44 @@ export function StudioProPage() {
       });
   };
 
+  // VE2E-59: a scene added/split in this session has no SceneDraftVersion row until the timeline is
+  // SAVED (the server mirrors it then), so voice generation flushes the save first and uses the
+  // fresh row id. `knownRowId` lets a bulk caller resolve ids once for many scenes.
+  const generateAudioForScene = async (scene: StudioSceneContextResponse, knownRowId?: string): Promise<void> => {
+    let sceneRowId = knownRowId ?? scene.id;
+    if (!sceneRowId) {
+      const fresh = await persist();
+      sceneRowId = fresh?.scenes.find((row) => row.sceneId === scene.sceneId)?.id ?? "";
+      if (!sceneRowId) {
+        setAudioNotice(t("studioPro.editSaveFirst"));
+        return;
+      }
+    }
+    return generateAudioForSceneRow(scene, sceneRowId);
+  };
+
   const generateAudioForSelectedScene = () => (selectedScene ? generateAudioForScene(selectedScene) : Promise.resolve());
+
+  // VE2E-59: voice ONLY for non-excluded scenes that have none (new/split scenes); a scene that
+  // already has audio is never regenerated, so no repeated ElevenLabs charge. Sequential, like the bulk action.
+  const generateMissingVoices = async () => {
+    if (!voiceAccountId || !selectedVoiceId) return;
+    const missing = draft.scenes.filter((row) => !row.excluded && !row.audioVersionId).map((row) => row.sceneId);
+    if (missing.length === 0) return;
+    let freshScenes = scenes;
+    if (missing.some((sceneId) => sceneNeedsSave(scenes.find((scene) => scene.sceneId === sceneId)))) {
+      const fresh = await persist();
+      if (!fresh) return;
+      freshScenes = fresh.scenes;
+    }
+    setVoiceApplyBusy({ done: 0, total: missing.length });
+    for (let i = 0; i < missing.length; i++) {
+      const row = freshScenes.find((scene) => scene.sceneId === missing[i]);
+      if (row?.id) await generateAudioForSceneRow(row, row.id);
+      setVoiceApplyBusy({ done: i + 1, total: missing.length });
+    }
+    setVoiceApplyBusy(null);
+  };
 
   // Auto mode: one voice pick, generated narration for every scene in order (sequential -
   // ElevenLabs is billed per call, so no fan-out) instead of clicking "generate" per scene.
@@ -1062,6 +1171,24 @@ export function StudioProPage() {
           onClose={() => setShowFullPreview(false)}
         />
       ) : null}
+
+      <div className="mx-5 mb-2">
+        <TimelineEditToolbar
+          selectedScene={selectedScene}
+          sceneCount={draft.scenes.length}
+          removedScenes={removedScenes}
+          missingVoiceCount={draft.scenes.filter((row) => !row.excluded && !row.audioVersionId).length}
+          voiceReady={Boolean(voiceAccountId && selectedVoiceId)}
+          voiceBusy={voiceApplyBusy !== null || audioBusySceneId !== null}
+          message={editMessage}
+          onAdd={handleAddScene}
+          onDuplicate={handleDuplicateScene}
+          onRemove={handleRemoveScene}
+          onSplit={handleSplitScene}
+          onRestore={handleRestoreScene}
+          onGenerateMissingVoices={() => void generateMissingVoices()}
+        />
+      </div>
 
       {showReview ? (
         <div className="mx-5 mb-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
