@@ -925,6 +925,34 @@ export type TimelineSegmentResponse = {
   priority: number | null;
 };
 
+/**
+ * VE2E-58 (CR-STUDIO-EDIT-PARALLEL-2026-10-01 §3A, additive): a scene the user created on the timeline
+ * (`origin: "added"`) or produced by splitting another scene at a sentence boundary (`"split"`). Script
+ * scenes have no definition here - the approved script stays their source of truth. A split's two halves
+ * are new scenes; `splitFromSceneId` points at the script scene (or added scene) they descend from.
+ * Voice is never carried over: such a scene has no audio until "Sinh giọng" runs for it.
+ */
+export const timelineAddedSceneOrigins = ["added", "split"] as const;
+export type TimelineAddedSceneOrigin = (typeof timelineAddedSceneOrigins)[number];
+
+export type TimelineAddedSceneInput = {
+  sceneId: string;
+  narration: string;
+  screenText: string;
+  durationHintMs: number;
+  origin: TimelineAddedSceneOrigin;
+  splitFromSceneId?: string | null;
+};
+
+export type TimelineAddedSceneResponse = {
+  sceneId: string;
+  narration: string;
+  screenText: string;
+  durationHintMs: number;
+  origin: TimelineAddedSceneOrigin;
+  splitFromSceneId: string | null;
+};
+
 /** Template-level modification values not tied to one scene (secondary text/color/font/volume), keyed by the pinned `TemplateSnapshot`'s modification key. */
 export type TimelineOptionValues = Record<string, string>;
 
@@ -936,6 +964,10 @@ export type SaveTimelineVersionRequest = {
   optionValues?: TimelineOptionValues;
   /** VE2E-42 (optional): background segments; omitted/empty = no segment plan (pre-VE2E-42 behavior). */
   segments?: TimelineSegmentInput[];
+  /** VE2E-58 (optional): user-added / split scene definitions; every one must also be listed in `scenes`. Omitted = none (every timeline saved before VE2E-58). */
+  addedScenes?: TimelineAddedSceneInput[];
+  /** VE2E-58 (optional): script scenes dropped from `scenes` but recoverable; must be script scene ids and absent from `scenes`. */
+  removedSceneIds?: string[];
 };
 
 export type TimelineVersionResponse = {
@@ -948,6 +980,10 @@ export type TimelineVersionResponse = {
   optionValues: TimelineOptionValues;
   /** VE2E-42: always an array; empty for timelines saved before VE2E-42 or without a segment plan. */
   segments: TimelineSegmentResponse[];
+  /** VE2E-58: always an array; empty for timelines without user-added/split scenes. */
+  addedScenes: TimelineAddedSceneResponse[];
+  /** VE2E-58: always an array; script scenes removed from this timeline (recoverable). */
+  removedSceneIds: string[];
   supersedesId: string | null;
   /** VE2E-42: set when this version was written + auto-approved by an Auto `WorkflowRun` (exactly what that run rendered); null for Studio-authored versions. */
   workflowRunId: string | null;
@@ -1009,6 +1045,9 @@ export type StudioSceneContextResponse = {
   screenText: string;
   visualQuery: string;
   durationHintMs: number;
+  /** VE2E-58 (additive): `"script"` for a scene of the approved script, `"added"`/`"split"` for a user-created one (then `splitFromSceneId` may name its origin). Absent on older servers = script. */
+  origin?: "script" | "added" | "split";
+  splitFromSceneId?: string | null;
 };
 
 /**

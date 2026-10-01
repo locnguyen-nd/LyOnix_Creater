@@ -994,6 +994,10 @@ model TimelineVersion {
   optionValues       Json                  @default("{}")
   // VE2E-42: TimelineSegmentResponse[] ({segmentId, sceneIds, mediaAssetVersionId?, subject?, priority?}); [] = no segment plan.
   segments           Json                  @default("[]")
+  // VE2E-58: user-added / split scene definitions ({sceneId, narration, screenText, durationHintMs, origin, splitFromSceneId}); [] = none.
+  addedScenes        Json                  @default("[]")
+  // VE2E-58: script scene ids dropped from `scenes` (recoverable); [] = none.
+  removedSceneIds    Json                  @default("[]")
   supersedesId       String?               @db.Uuid
   // VE2E-42: the Auto WorkflowRun that wrote + auto-approved this version (what it rendered); null for Studio saves. Opaque ref, no FK (see block comment above).
   workflowRunId      String?               @db.Uuid

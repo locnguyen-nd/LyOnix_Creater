@@ -109,6 +109,27 @@ export const openApiDocument = {
           meta: { $ref: "#/components/schemas/RequestMeta" },
         },
       },
+      // VE2E-58: additive timeline edit model (user-added / split scenes + removed script scenes). Carried by
+      // SaveTimelineVersionRequest (optional) and TimelineVersionResponse (always present, [] for legacy timelines).
+      TimelineAddedScene: {
+        type: "object",
+        required: ["sceneId", "narration", "screenText", "durationHintMs", "origin"],
+        properties: {
+          sceneId: { type: "string", maxLength: 100 },
+          narration: { type: "string", minLength: 1, maxLength: 4000 },
+          screenText: { type: "string", maxLength: 2000 },
+          durationHintMs: { type: "integer", minimum: 500, maximum: 120000 },
+          origin: { type: "string", enum: ["added", "split"] },
+          splitFromSceneId: { type: ["string", "null"] },
+        },
+      },
+      TimelineEditExtensions: {
+        type: "object",
+        properties: {
+          addedScenes: { type: "array", items: { $ref: "#/components/schemas/TimelineAddedScene" } },
+          removedSceneIds: { type: "array", items: { type: "string" } },
+        },
+      },
     },
   },
 } satisfies OpenAPIV3_1.Document;

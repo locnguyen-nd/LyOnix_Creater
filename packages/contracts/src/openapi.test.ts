@@ -18,4 +18,11 @@ describe("OpenAPI baseline", () => {
     expect(openApiDocument.components.schemas.MediaPlanRequest.required).toEqual(["scriptDraftVersionId", "providerAccountId"]);
     expect(openApiDocument.components.schemas.SuccessMediaPlan.required).toEqual(["data", "meta"]);
   });
+
+  it("documents the additive VE2E-58 timeline edit schemas", () => {
+    const added = openApiDocument.components.schemas.TimelineAddedScene;
+    expect(added.required).toEqual(["sceneId", "narration", "screenText", "durationHintMs", "origin"]);
+    expect(added.properties.origin.enum).toEqual(["added", "split"]);
+    expect(Object.keys(openApiDocument.components.schemas.TimelineEditExtensions.properties)).toEqual(["addedScenes", "removedSceneIds"]);
+  });
 });
