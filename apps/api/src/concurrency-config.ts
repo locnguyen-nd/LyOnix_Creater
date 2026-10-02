@@ -3,10 +3,11 @@
  * plus the process-wide provider limiter shared by every job in this process.
  *
  * Env (all optional; an invalid value falls back to the default and is reported in `warnings`, never crashes a run):
- * - WORKFLOW_CONCURRENCY            Auto runs in flight at once (default 5, 1..10)
+ * - WORKFLOW_CONCURRENCY            Auto runs in flight at once (default 5, 1..64; raise only after measuring - see capacity-report)
  * - WORKFLOW_VOICE_PARALLELISM      scenes voiced in parallel inside one run (default 3, 1..8; still bounded by the elevenlabs limiter)
  * - PROVIDER_CONCURRENCY_CONTENT / _APIFY / _PEXELS / _ELEVENLABS / _CREATOMATE
- *                                   max in-flight provider calls across ALL jobs in the process (defaults 3/3/3/2/2, 1..16)
+ *                                   max in-flight provider calls across ALL jobs in the process (defaults 3/3/3/2/2, 1..64;
+ *                                   set to the provider PLAN's own concurrency cap, never above it)
  * - PROVIDER_LIMIT_WAIT_TIMEOUT_MS  max wait in the FIFO queue / cooldown before PROVIDER_RATE_LIMITED (default 120000, 1000..1800000)
  *
  * Honest limit: Creatomate's concurrent-render cap belongs to the account plan; PROVIDER_CONCURRENCY_CREATOMATE only queues on
@@ -15,7 +16,8 @@
 import { ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
 
 export const DEFAULT_WORKFLOW_CONCURRENCY = 5;
-export const MAX_WORKFLOW_CONCURRENCY = 10;
+/** Ceiling only: defaults stay conservative (DEC-2026-10-02-CAPACITY-250 asks 50 concurrent runs; operators opt in via env). */
+export const MAX_WORKFLOW_CONCURRENCY = 64;
 export const DEFAULT_VOICE_PARALLELISM = 3;
 export const MAX_VOICE_PARALLELISM = 8;
 export const DEFAULT_PROVIDER_WAIT_TIMEOUT_MS = 120_000;
@@ -27,7 +29,7 @@ export const DEFAULT_PROVIDER_LIMITS: Readonly<Record<ProviderLimiterKey, number
   elevenlabs: 2,
   creatomate: 2,
 };
-const MAX_PROVIDER_LIMIT = 16;
+const MAX_PROVIDER_LIMIT = 64;
 
 export type ConcurrencyConfig = {
   workflow: number;
