@@ -4,23 +4,28 @@ import { mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "no
 import { join, relative, resolve, sep } from "node:path";
 import { computeExpiresAt, resolveWithinRoot } from "@lyonix/domain";
 import {
+  CLIP_CROP_PROFILE_VERSION,
   CLIP_PREPARE_PROFILE_VERSION,
   CLIP_PREPARE_RESULT_TYPE,
   clipPrepareFingerprint,
+  cropPlanDigest,
   MEDIA_JOB_SCHEMA_VERSION,
   validateClipPrepareJob,
   type ClipPrepareFailure,
   type ClipPrepareJob,
+  type ClipPrepareReframe,
   type ClipPrepareResult,
   type ClipPrepareSuccess,
   type MediaJobErrorCode,
 } from "@lyonix/media-jobs";
 import {
   buildCopyArgs,
+  buildImageCropArgs,
   buildKeyframeProbeArgs,
   buildProbeArgs,
   buildReencodeArgs,
   checkRange,
+  isFullFrameCropPlan,
   parseKeyframePackets,
   parseProbeJson,
   planClip,
@@ -38,6 +43,7 @@ export { JobLockBusyError, MediaJobError };
 export const MEDIA_JOBS_DIR = "working/media-jobs";
 const MANIFEST_FILE = "result.json";
 const OUTPUT_FILE = "clip.mp4";
+const IMAGE_OUTPUT_FILE = "clip.jpg";
 const LOCK_FILE = ".lock";
 
 type StoredManifest = { fingerprint: string; result: ClipPrepareSuccess };
@@ -182,10 +188,21 @@ export class ClipPrepareProcessor {
     return resolveMediaSource(this.deps.config.mediaRoot, relativePath);
   }
 
-  private async probe(path: string): Promise<ProbeInfo> {
+  private async probe(path: string, isImage = false): Promise<ProbeInfo> {
     const result = await this.deps.runner(this.deps.config.ffprobePath, buildProbeArgs(path), { timeoutMs: this.deps.config.jobTimeoutMs });
     if (result.exitCode !== 0) throw new MediaJobError("PROBE_FAILED", `ffprobe exited ${result.exitCode}: ${result.stderrTail.slice(-500)}`);
-    const parsed = parseProbeJson(result.stdout);
+    let text = result.stdout;
+    if (isImage) {
+      // ffprobe reports no duration for stills; give the shared parser a nominal one (same trick as reframe.analyze).
+      try {
+        const json = JSON.parse(text) as { format?: Record<string, unknown> };
+        json.format = { ...(json.format ?? {}), duration: "0.04" };
+        text = JSON.stringify(json);
+      } catch {
+        throw new MediaJobError("PROBE_FAILED", "ffprobe output unusable (malformed)");
+      }
+    }
+    const parsed = parseProbeJson(text);
     if (!parsed.ok) {
       if (parsed.reason === "no_video_stream") throw new MediaJobError("NO_VIDEO_STREAM", "source has no video stream");
       throw new MediaJobError("PROBE_FAILED", `ffprobe output unusable (${parsed.reason})`);
@@ -216,10 +233,102 @@ export class ClipPrepareProcessor {
     if (result.exitCode !== 0) throw new MediaJobError("FFMPEG_FAILED", `ffmpeg exited ${result.exitCode}: ${result.stderrTail.slice(-800)}`, true);
   }
 
+  /** The plan was computed on the displayed size of the source; applying it to another size would cut the wrong area (never guess). */
+  private assertCropPlanFits(job: ClipPrepareJob, probe: ProbeInfo): void {
+    const plan = job.cropPlan;
+    if (!plan) return;
+    if (plan.sourceWidthPx !== probe.video.displayWidth || plan.sourceHeightPx !== probe.video.displayHeight) {
+      throw new MediaJobError(
+        "INVALID_JOB",
+        `cropPlan was computed for a ${plan.sourceWidthPx}x${plan.sourceHeightPx} source but the file is ${probe.video.displayWidth}x${probe.video.displayHeight}`,
+      );
+    }
+  }
+
+  private reframeLineage(job: ClipPrepareJob): ClipPrepareReframe | null {
+    const plan = job.cropPlan;
+    if (!plan) return null;
+    return {
+      applied: isFullFrameCropPlan(plan) ? "full_frame" : "crop",
+      planVersion: plan.version,
+      mode: plan.mode,
+      zoomPermille: plan.zoomPermille,
+      cropPlanSha256: cropPlanDigest(plan),
+      primarySubjectId: plan.primarySubjectId,
+      overlayUnavoidable: plan.overlayUnavoidable,
+      residualOverlayPct: plan.residualOverlayPct,
+      subjectCoveragePct: plan.subjectCoveragePct,
+      cropProfileVersion: CLIP_CROP_PROFILE_VERSION,
+    };
+  }
+
+  /** VE2E-67: still image -> one 1080x1920 JPEG (crop-plan window, else centre-cover). */
+  private async executeImage(job: ClipPrepareJob, jobDir: string, jobRel: string): Promise<ClipPrepareSuccess> {
+    const sourcePath = await this.resolveSource(job.source.relativePath);
+    const probe = await this.probe(sourcePath, true);
+    this.assertCropPlanFits(job, probe);
+    const partialPath = join(jobDir, `${IMAGE_OUTPUT_FILE}.partial`);
+    await rm(partialPath, { force: true });
+    await this.encode(buildImageCropArgs(sourcePath, partialPath, job.target, job.cropPlan ?? null));
+    const outputProbe = await this.probe(partialPath, true).catch((error: unknown) => {
+      throw new MediaJobError("OUTPUT_INVALID", `output probe failed: ${error instanceof Error ? error.message : "unknown"}`);
+    });
+    if (outputProbe.video.displayWidth !== job.target.width || outputProbe.video.displayHeight !== job.target.height) {
+      throw new MediaJobError("OUTPUT_INVALID", `image output is ${outputProbe.video.displayWidth}x${outputProbe.video.displayHeight}, expected ${job.target.width}x${job.target.height}`);
+    }
+    const finalPath = join(jobDir, IMAGE_OUTPUT_FILE);
+    await rename(partialPath, finalPath);
+    const info = await stat(finalPath);
+    const sha256 = await sha256File(finalPath);
+    const completedAt = this.now();
+    const expiresAt = computeExpiresAt("working", completedAt);
+    if (!expiresAt) throw new MediaJobError("INTERNAL", "working retention must expire");
+    return {
+      schemaVersion: MEDIA_JOB_SCHEMA_VERSION,
+      type: CLIP_PREPARE_RESULT_TYPE,
+      ok: true,
+      jobKey: job.jobKey,
+      reused: false,
+      mode: "reencode",
+      reencodeReasons: [job.cropPlan ? "still_image_crop" : "still_image_cover"],
+      cut: { startMs: 0, durationMs: 0 },
+      drift: { startMs: 0, durationMs: 0 },
+      toleranceMs: this.deps.config.copyToleranceMs,
+      source: {
+        relativePath: job.source.relativePath,
+        mediaAssetVersionId: job.source.mediaAssetVersionId ?? null,
+        durationMs: 0,
+        width: probe.video.displayWidth,
+        height: probe.video.displayHeight,
+        videoCodec: probe.video.codec,
+        audioCodec: null,
+        kind: "image",
+      },
+      output: {
+        relativePath: toPosix(`${jobRel}/${IMAGE_OUTPUT_FILE}`),
+        mimeType: "image/jpeg",
+        sha256,
+        bytes: info.size,
+        durationMs: 0,
+        width: outputProbe.video.displayWidth,
+        height: outputProbe.video.displayHeight,
+        videoCodec: outputProbe.video.codec,
+        hasAudio: false,
+        retentionClass: "working",
+        expiresAt: expiresAt.toISOString(),
+      },
+      ...(job.cropPlan ? { reframe: this.reframeLineage(job) } : {}),
+      tool: { profileVersion: CLIP_PREPARE_PROFILE_VERSION, ffmpegVersion: this.deps.ffmpegVersion },
+      completedAt: completedAt.toISOString(),
+    };
+  }
+
   private async execute(job: ClipPrepareJob, jobDir: string, jobRel: string): Promise<ClipPrepareSuccess> {
+    if (job.source.kind === "image") return this.executeImage(job, jobDir, jobRel);
     const { copyToleranceMs } = this.deps.config;
     const sourcePath = await this.resolveSource(job.source.relativePath);
     const probe = await this.probe(sourcePath);
+    this.assertCropPlanFits(job, probe);
     const range = checkRange(probe.durationMs, job.startMs, job.durationMs, copyToleranceMs);
     if (!range.ok) throw new MediaJobError("RANGE_OUT_OF_BOUNDS", range.message);
 
@@ -232,6 +341,7 @@ export class ClipPrepareProcessor {
       stripAudio: job.stripAudio,
       target: job.target,
       toleranceMs: copyToleranceMs,
+      cropPlan: job.cropPlan ?? null,
     });
 
     const partialPath = join(jobDir, `${OUTPUT_FILE}.partial`);
@@ -244,7 +354,7 @@ export class ClipPrepareProcessor {
       await this.encode(
         current.mode === "copy"
           ? buildCopyArgs(current, sourcePath, partialPath, job.stripAudio)
-          : buildReencodeArgs(current, sourcePath, partialPath, job.stripAudio, job.target, probe.video.fps),
+          : buildReencodeArgs(current, sourcePath, partialPath, job.stripAudio, job.target, probe.video.fps, job.cropPlan ?? null),
       );
       return this.probe(partialPath).catch((error: unknown) => {
         throw new MediaJobError("OUTPUT_INVALID", `output probe failed: ${error instanceof Error ? error.message : "unknown"}`);
@@ -305,6 +415,7 @@ export class ClipPrepareProcessor {
         retentionClass: "working",
         expiresAt: expiresAt.toISOString(),
       },
+      ...(job.cropPlan ? { reframe: this.reframeLineage(job) } : {}),
       tool: { profileVersion: CLIP_PREPARE_PROFILE_VERSION, ffmpegVersion: this.deps.ffmpegVersion },
       completedAt: completedAt.toISOString(),
     };
