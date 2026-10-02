@@ -55,6 +55,8 @@ import {
   type EditOutcome,
 } from "../studio/timeline-edit-actions";
 import { TimelineEditToolbar } from "../studio/TimelineEditToolbar";
+import { SceneTimelineTrack, TIMELINE_BAR_LANE_PX, type TimelineClip } from "../studio/SceneTimelineTrack";
+import { moveItem } from "../studio/timeline-track-math";
 import { applyMediaPlan, assignSceneOnly, inPointShortfall, replaceSegmentSource } from "../studio/media-segments";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import {
@@ -544,6 +546,22 @@ export function StudioProPage() {
         durationMs: asset?.durationMs ?? null,
       });
     });
+
+  const reorderScene = (sceneId: string, toIndex: number) =>
+    mutate((prev) => {
+      const from = prev.scenes.findIndex((row) => row.sceneId === sceneId);
+      return from < 0 ? prev : { ...prev, scenes: moveItem(prev.scenes, from, toIndex) };
+    });
+  // Insert after a specific clip; `null` = before the first clip (the domain op appends, so move the new scene to the front).
+  const handleInsertScene = (afterSceneId: string | null, narration: string) =>
+    runEdit((current) => {
+      const outcome = addBlankScene(current, { afterSceneId, narration });
+      if (!outcome.ok || afterSceneId !== null) return outcome;
+      const at = outcome.draft.scenes.findIndex((row) => row.sceneId === outcome.selectSceneId);
+      return { ...outcome, draft: { ...outcome.draft, scenes: moveItem(outcome.draft.scenes, at, 0) } };
+    });
+  const handleDuplicateById = (sceneId: string) => runEdit((current) => duplicateSelectedScene(current, sceneId, context?.scenes ?? []));
+  const handleRemoveById = (sceneId: string) => runEdit((current) => removeSelectedScene(current, sceneId));
 
   const handleUndo = () => setDraft((prev) => undoStack.current.undo(prev) ?? prev);
   const handleRedo = () => setDraft((prev) => undoStack.current.redo(prev) ?? prev);
@@ -1200,17 +1218,11 @@ export function StudioProPage() {
 
       <div className="mx-5 mb-2">
         <TimelineEditToolbar
-          selectedScene={selectedScene}
-          sceneCount={draft.scenes.length}
           removedScenes={removedScenes}
           missingVoiceCount={draft.scenes.filter((row) => !row.excluded && !row.audioVersionId).length}
           voiceReady={Boolean(voiceAccountId && selectedVoiceId)}
           voiceBusy={voiceApplyBusy !== null || audioBusySceneId !== null}
           message={editMessage}
-          onAdd={handleAddScene}
-          onDuplicate={handleDuplicateScene}
-          onRemove={handleRemoveScene}
-          onSplit={handleSplitScene}
           onRestore={handleRestoreScene}
           onGenerateMissingVoices={() => void generateMissingVoices()}
         />
@@ -1590,45 +1602,39 @@ export function StudioProPage() {
 
             <div className="flex gap-2">
               <div className="flex w-[84px] shrink-0 flex-col gap-1 text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">
-                <div className="flex h-[52px] items-center">{t("studioPro.trackVideo")}</div>
+                <div className="flex items-end" style={{ height: TIMELINE_BAR_LANE_PX + 52 }}><span className="flex h-[52px] items-center">{t("studioPro.trackVideo")}</span></div>
                 <div className="flex h-[30px] items-center">{t("studioPro.trackVoice")}</div>
                 <div className="flex h-4 items-center">{t("studioPro.trackMusic")}</div>
               </div>
               <div className="min-w-0 flex-1 overflow-x-auto">
                 <div className="flex w-max flex-col gap-1">
-                  <div className="flex gap-1">
-                    {orderedScenes.map((scene, index) => {
+                  <SceneTimelineTrack
+                    clips={orderedScenes.map((scene): TimelineClip => {
                       const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
-                      const url = bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined;
                       const asset = bound?.mediaAssetVersionId ? mediaAssetById.get(bound.mediaAssetVersionId) : undefined;
-                      const segmentIndex = bound?.segmentId ? draft.segments.findIndex((row) => row.segmentId === bound.segmentId) : -1;
-                      const excluded = Boolean(bound?.excluded);
-                      const clipWidth = Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4));
-                      return (
-                        <button
-                          key={scene.sceneId}
-                          type="button"
-                          onClick={() => setSelectedSceneId(scene.sceneId)}
-                          title={`${index + 1} · ${Math.round(scene.durationHintMs / 1000)}s${segmentIndex >= 0 ? ` · ${t("studioPro.backgroundSegments")} ${segmentIndex + 1}` : ""}`}
-                          className={`relative h-[52px] shrink-0 overflow-hidden rounded-[6px] border text-left ${segmentIndex >= 0 ? "border-violet-400" : ""} ${excluded ? "opacity-35" : ""} ${
-                            scene.sceneId === selectedScene?.sceneId ? "outline outline-2 outline-offset-1 outline-lyx-fg" : "border-lyx-border"
-                          }`}
-                          style={{ width: clipWidth, background: "linear-gradient(160deg,#3a3a38,#1c1c1b)" }}
-                        >
-                          {url ? (
-                            <LazyThumb kind={asset?.kind === "video" ? "video" : "image"} url={url} className="absolute inset-0 h-full w-full opacity-80" />
-                          ) : null}
-                          {asset?.kind === "video" || (!asset && bound?.mediaAssetVersionId) ? (
-                            <span className="absolute right-1 top-1 rounded bg-black/50 px-1 text-[9px] text-white" title={t("studioPro.originalAudioMutedHint")}>🔇</span>
-                          ) : null}
-                          {segmentIndex >= 0 ? <span className="absolute left-1 top-1 rounded bg-violet-700/85 px-1 text-[8px] font-semibold text-white">B{segmentIndex + 1}</span> : null}
-                          <span className="absolute bottom-1 left-1 rounded bg-black/35 px-1 text-[9px] font-bold text-white">
-                            {index + 1} · {Math.round(scene.durationHintMs / 1000)}s
-                          </span>
-                        </button>
-                      );
+                      return {
+                        sceneId: scene.sceneId,
+                        widthPx: Math.max(56, Math.round((scene.durationHintMs / 1000) * TIMELINE_PX_PER_SECOND[timelineZoomIdx]! * 4)),
+                        durationSec: scene.durationHintMs / 1000,
+                        narration: scene.narration,
+                        thumbUrl: bound?.mediaAssetVersionId ? thumbCache[bound.mediaAssetVersionId] : undefined,
+                        thumbKind: asset?.kind === "video" ? "video" : "image",
+                        muted: asset?.kind === "video" || (!asset && Boolean(bound?.mediaAssetVersionId)),
+                        segmentIndex: bound?.segmentId ? draft.segments.findIndex((row) => row.segmentId === bound.segmentId) : -1,
+                        excluded: Boolean(bound?.excluded),
+                      };
                     })}
-                  </div>
+                    selectedId={selectedScene?.sceneId ?? null}
+                    gapPx={4}
+                    onSelect={setSelectedSceneId}
+                    onReorder={reorderScene}
+                    onInsert={handleInsertScene}
+                    onDuplicate={handleDuplicateById}
+                    onRemove={handleRemoveById}
+                    onSplit={handleSplitScene}
+                    onUndo={handleUndo}
+                    onRedo={handleRedo}
+                  />
                   <div className="flex gap-1">
                     {orderedScenes.map((scene) => {
                       const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
