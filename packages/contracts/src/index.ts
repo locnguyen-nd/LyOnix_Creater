@@ -774,6 +774,26 @@ export type MediaPlanSegmentDiagnostics = {
 /** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
 export type MediaPlanVisionUsage = { calls: number; moderated: number; skippedSegments: number; maxCalls: number; modelId: string | null };
 
+/**
+ * VE2E-67 (CR-SUBJECT-REFRAME-2026-10-02 §6 Q5): result of the plan-time subject/overlay check of an Apify candidate (local `reframe.analyze`).
+ * `overlay_unavoidable` = even at the maximum zoom some logo/caption area stays in the 9:16 window. Auto (`swapped: true`) treats the
+ * candidate as failed and moves on to the next source; Studio keeps the candidate and shows this flag + `residualOverlayPct`.
+ */
+export type MediaPlanReframeCheck = {
+  status: "ok" | "overlay_unavoidable" | "analysis_unavailable";
+  overlayUnavoidable: boolean;
+  /** Worst-case share (0-100) of the overlay area still inside the window; 0 when not analysed. */
+  residualOverlayPct: number;
+  subjectCoveragePct: number;
+  zoomPermille: number | null;
+  confidenceLevel: "high" | "medium" | "low" | null;
+  /** Auto only: the candidate was rejected because of the unavoidable overlay (the next source was tried). */
+  swapped: boolean;
+  /** `analysis_unavailable`: the worker error code (e.g. `MODEL_NOT_AVAILABLE`); the candidate is kept and the render step decides. */
+  reason?: string;
+  warnings?: string[];
+};
+
 /** VE2E-51: why Apify candidates were kept/rejected before download, and how the chosen clip was obtained. */
 export type MediaPlanApifyQuality = {
   considered: number;
@@ -791,6 +811,8 @@ export type MediaPlanApifyQuality = {
   searchReused: boolean;
   /** VE2E-30: vision verdict over frames extracted from the imported video (`unchecked` = not run: flag off, no vision account/budget, or no frames). */
   frameCheck?: "accepted" | "rejected" | "unchecked";
+  /** VE2E-67: plan-time crop/overlay check (absent when reframing is off for this source). */
+  reframe?: MediaPlanReframeCheck | null;
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */

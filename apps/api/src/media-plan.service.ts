@@ -445,6 +445,8 @@ export class MediaPlanService {
       if (pending.length > 0) extractionReason = (await input.beforeSourcing(pending)) ?? null;
     }
     const job = new ApifyJobContext();
+    // VE2E-67 (CR-SUBJECT-REFRAME Q5): Auto (`stopOnFailure`) swaps a candidate whose overlay cannot be avoided; Studio only flags it.
+    job.overlayPolicy = input.stopOnFailure ? "swap" : "flag";
     const results: Array<SourcedSegment[] | undefined> = new Array(input.segments.length).fill(undefined);
     let failure: { index: number; error: unknown } | null = null;
     let next = 0;
