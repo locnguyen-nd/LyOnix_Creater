@@ -18,6 +18,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm --filter @lyonix/db prisma:generate
       - run: corepack pnpm lint
       - run: corepack pnpm typecheck
       - run: corepack pnpm test
