@@ -39,6 +39,9 @@ blob-report/
 .memory/private/
 data/media/**
 data/system-settings.json
+# VE2E-66: detector models (OpenCV Zoo ONNX) are downloaded, never committed.
+data/models/**
+!data/models/.gitkeep
 !data/media/.gitkeep
 pipeline/.lock
 pipeline/*.tmp
