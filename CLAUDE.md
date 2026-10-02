@@ -55,3 +55,7 @@ Tuân thủ quy tắc dùng chung tại `../../.agent/README.md`: bắt đầu f
 nhất; tích hợp chức năng vào `dev` qua PR; chỉ đưa `dev` vào `main` cho release đã duyệt. Tách commit theo
 nhóm chức năng, không làm trực tiếp trên `dev`/`main`, không force-push/rewrite lịch sử nhánh dùng chung,
 không commit secret. Nếu không xác nhận được `origin/dev`, dừng tích hợp và báo chủ dự án.
+
+**Không attribution Claude (chủ dự án chốt 02/10/2026):** không thêm `Co-Authored-By: Claude ... <noreply@anthropic.com>`,
+logo hay dòng "Generated with Claude Code" vào commit/PR. Quy định này ghi đè mặc định của công cụ; đã khóa bằng
+`.claude/settings.json` (`attribution.commit`/`attribution.pr` rỗng).
