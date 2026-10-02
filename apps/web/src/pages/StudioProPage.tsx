@@ -195,7 +195,15 @@ export function StudioProPage() {
   // audio-generation poll, which has no interval/effect of its own to clear) stops rescheduling
   // itself and stops calling setState instead of leaking a `setTimeout` chain forever.
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // Re-entrancy guard: ElevenLabs is billed per call, so a second click while a voice run is in flight is ignored.
+  const voiceRunRef = useRef(false);
+  const runVoiceExclusive = async (fn: () => Promise<void>): Promise<void> => {
+    if (voiceRunRef.current) return;
+    voiceRunRef.current = true;
+    try { await fn(); } finally { voiceRunRef.current = false; }
+  };
+  // StrictMode (dev) runs effect -> cleanup -> effect; the effect body must re-arm the flag or polling is silently dropped.
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const [context, setContext] = useState<StudioContextResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -867,11 +875,11 @@ export function StudioProPage() {
     return generateAudioForSceneRow(scene, sceneRowId);
   };
 
-  const generateAudioForSelectedScene = () => (selectedScene ? generateAudioForScene(selectedScene) : Promise.resolve());
+  const generateAudioForSelectedScene = () => (selectedScene ? runVoiceExclusive(() => generateAudioForScene(selectedScene)) : Promise.resolve());
 
   // VE2E-59: voice ONLY for non-excluded scenes that have none (new/split scenes); a scene that
   // already has audio is never regenerated, so no repeated ElevenLabs charge. Sequential, like the bulk action.
-  const generateMissingVoices = async () => {
+  const generateMissingVoices = () => runVoiceExclusive(async () => {
     if (!voiceAccountId || !selectedVoiceId) return;
     const missing = draft.scenes.filter((row) => !row.excluded && !row.audioVersionId).map((row) => row.sceneId);
     if (missing.length === 0) return;
@@ -888,11 +896,11 @@ export function StudioProPage() {
       setVoiceApplyBusy({ done: i + 1, total: missing.length });
     }
     setVoiceApplyBusy(null);
-  };
+  });
 
   // Auto mode: one voice pick, generated narration for every scene in order (sequential -
   // ElevenLabs is billed per call, so no fan-out) instead of clicking "generate" per scene.
-  const applyVoiceToAllScenes = async () => {
+  const applyVoiceToAllScenes = () => runVoiceExclusive(async () => {
     if (!voiceAccountId || !selectedVoiceId || scenes.length === 0) return;
     setVoiceApplyBusy({ done: 0, total: scenes.length });
     for (let i = 0; i < scenes.length; i++) {
@@ -900,7 +908,7 @@ export function StudioProPage() {
       setVoiceApplyBusy({ done: i + 1, total: scenes.length });
     }
     setVoiceApplyBusy(null);
-  };
+  });
 
   const playVoicePreview = () => {
     const voice = voices.find((row) => row.voiceId === selectedVoiceId);
@@ -1144,7 +1152,7 @@ export function StudioProPage() {
           {t("studioPro.conflict")} <button type="button" className="underline" onClick={reloadAfterConflict}>{t("studioPro.reload")}</button>
         </Banner>
       ) : null}
-      {preview && !preview.ready ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
+      {preview && !preview.ready && preview.missingRequiredModificationKeys.length > 0 ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
       {layoutWarnings.includes("template_layout_fallback") ? <Banner variant="warn">{t("studioPro.layoutFallbackWarning")}</Banner> : null}
       {layoutWarnings.includes("rank_badges_renumbered") ? <Banner variant="warn">{t("studioPro.rankBadgesRenumbered", { count: layoutSceneCount })}</Banner> : null}
       {renderJob ? <RenderProgress job={renderJob} /> : null}

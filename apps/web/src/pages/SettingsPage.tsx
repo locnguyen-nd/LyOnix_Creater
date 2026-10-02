@@ -1,7 +1,7 @@
 import { Cog, Server, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button, Field, Select, TextInput } from "../components/ui";
 import { ProvidersPage } from "./ProvidersPage";
@@ -22,7 +22,10 @@ export function SettingsPage() {
   const { t } = useTranslation();
   const me = useMe();
   const { state, updateState } = useSession();
-  const [tab, setTab] = useState<Tab>("general");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryTab = searchParams.get("tab");
+  const tab: Tab = queryTab === "providers" || queryTab === "operations" ? queryTab : "general";
+  const setTab = (next: Tab) => setSearchParams(next === "general" ? {} : { tab: next }, { replace: true });
   const [timezone, setTimezone] = useState(state.orgTimezone);
   const [jobs, setJobs] = useState<ApiJob[]>([]);
   const [providers, setProviders] = useState<ApiProvider[]>([]);

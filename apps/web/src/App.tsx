@@ -82,7 +82,7 @@ export function App() {
         <Route path="assets" element={<AssetsPage />} />
         <Route path="library" element={<Navigate to="/jobs" replace />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="settings/providers" element={<Navigate to="/settings" replace />} />
+        <Route path="settings/providers" element={<Navigate to="/settings?tab=providers" replace />} />
         <Route path="settings/org" element={<Navigate to="/settings" replace />} />
         <Route path="settings/users" element={<Navigate to="/people" replace />} />
         <Route path="settings/teams" element={<Navigate to="/people" replace />} />

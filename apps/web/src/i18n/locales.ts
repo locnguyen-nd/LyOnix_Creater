@@ -381,7 +381,7 @@ const vi = {
     review: "Duyệt",
     produce: "Sản xuất",
     edit: "Sửa",
-    vrew: "Vrew",
+    vrew: "Render",
     done: "Xong",
   },
   script: {
@@ -425,7 +425,7 @@ const vi = {
   assets: {
     title: "Tư liệu",
     subtitle: "{{count}} tư liệu trong phiên làm việc hiện tại",
-    banner: "File tạm xóa sau 7 ngày; thành phẩm nằm trên Vrew.",
+    banner: "File tạm xóa sau 7 ngày; thành phẩm lưu trong thư viện video.",
     name: "Tên",
     kind: "Loại",
     job: "Job",
@@ -516,7 +516,7 @@ const vi = {
     delete: "Xóa",
     multiTeamHint: "Một người có thể thuộc nhiều nhóm. Giữ Ctrl/Cmd để chọn nhiều.",
     multiChannelHint: "Một người hoặc một nhóm có thể quản lý nhiều kênh.",
-    retention: "TTL tư liệu 7 ngày. Thành phẩm trên Vrew. Không S3.",
+    retention: "TTL tư liệu 7 ngày. Thành phẩm lưu trong thư viện video. Không S3.",
     active: "Hoạt động",
     disabled: "Đã vô hiệu",
     pendingApproval: "Chờ duyệt",
