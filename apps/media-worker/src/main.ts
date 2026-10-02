@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { connectMediaJobBroker, redactBrokerUrl, type MediaJobBrokerConnection } from "@lyonix/media-jobs";
 import { ClipPrepareProcessor, MEDIA_JOBS_DIR } from "./clip-prepare.js";
 import { FrameExtractProcessor } from "./frame-extract.js";
+import { ReframeAnalyzeProcessor } from "./reframe-analyze.js";
+import { loadReframeConfig } from "./reframe/config.js";
+import { OnnxFrameDetector } from "./reframe/onnx-detector.js";
 import { loadMediaWorkerConfig, MediaWorkerConfigError } from "./config.js";
 import { startClipPrepareConsumer, type ConsumerHandle } from "./consumer.js";
 import { BinaryNotFoundError, readToolVersion, runProcess } from "./process.js";
@@ -76,6 +79,12 @@ const bootstrap = async () => {
 
   const processor = new ClipPrepareProcessor({ config: cfg, runner: runProcess, ffmpegVersion, log });
   const frameProcessor = new FrameExtractProcessor({ config: cfg, runner: runProcess, ffmpegVersion, log });
+  // VE2E-66: local detectors (onnxruntime-node). Models are loaded lazily on the first reframe.analyze job; a missing model fails that
+  // job with MODEL_NOT_AVAILABLE (never a silent fallback), it does not stop clip.prepare/frame.extract.
+  const reframeCfg = loadReframeConfig(process.env, repoRoot);
+  const detector = new OnnxFrameDetector({ modelsDir: reframeCfg.modelsDir, threads: reframeCfg.ortThreads });
+  const reframeProcessor = new ReframeAnalyzeProcessor({ config: cfg, reframe: reframeCfg, runner: runProcess, ffmpegVersion, detector, log });
+  log(`reframe.analyze: models=${reframeCfg.modelsDir} concurrency=${reframeCfg.concurrency} ortThreads=${reframeCfg.ortThreads} analysisLongSide=${reframeCfg.analysisLongSide}px maxZoom=${reframeCfg.plan.maxZoomPermille / 1000}`);
 
   let stopping = false;
   let connection: MediaJobBrokerConnection | null = null;
@@ -108,9 +117,7 @@ const bootstrap = async () => {
         resolveClosed();
       });
     });
-    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, frameProcessor, log });
-    log(`ready on queue ${cfg.queue} (${brokerLabel}); FFmpeg runs here only`);
-    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, log });
+    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, frameProcessor, reframeProcessor, log });
     log(`ready on queue ${cfg.queue} (${brokerLabel}); prefetch=${cfg.prefetch} ffmpegThreads=${cfg.ffmpegThreads}; FFmpeg runs here only`);
     await Promise.race([closed, new Promise<void>((r) => { wake = r; })]);
     if (stopping) {
@@ -119,6 +126,7 @@ const bootstrap = async () => {
     }
     consumer = null;
   }
+  await detector.close();
   clearInterval(sweepTimer);
   log("stopped");
 };
