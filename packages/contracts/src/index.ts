@@ -1097,3 +1097,33 @@ export type StudioContextResponse = {
   /** VE2E-38: the bridged script version's `visualPlan` (segments + ja/en keywords to prefill Studio search), `null` when none. */
   visualPlan: ScriptVisualPlanResponse | null;
 };
+
+/** VE2E-65 (CR-SUBJECT-REFRAME-2026-10-02): reframe contracts. Structurally identical to the types in `@lyonix/domain` `reframe-plan.ts` (additive; no existing contract changes). */
+export type ReframePixelBox = { xPx: number; yPx: number; widthPx: number; heightPx: number };
+export type SubjectTrack = {
+  subjectId: string;
+  kind: "person" | "salient";
+  samples: { tMs: number; box: ReframePixelBox }[];
+};
+export type ExclusionRegion = {
+  kind: "logo" | "text";
+  box: ReframePixelBox;
+  startMs?: number;
+  endMs?: number;
+};
+export type CropKeyframe = { tMs: number; xPx: number; yPx: number; widthPx: number; heightPx: number };
+export type CropPlan = {
+  version: "crop-plan.v1";
+  sourceWidthPx: number;
+  sourceHeightPx: number;
+  targetWidthPx: number;
+  targetHeightPx: number;
+  durationMs: number;
+  zoomPermille: number;
+  mode: "static" | "keyframes";
+  keyframes: CropKeyframe[];
+  primarySubjectId: string | null;
+  overlayUnavoidable: boolean;
+  residualOverlayPct: number;
+  subjectCoveragePct: number;
+};
