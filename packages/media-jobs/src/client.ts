@@ -19,6 +19,15 @@ import {
   type FrameExtractJobInput,
   type FrameExtractResult,
 } from "./frame-contract.js";
+import {
+  buildReframeAnalyzeJob,
+  parseReframeAnalyzeResult,
+  REFRAME_ANALYZE_JOB_TYPE,
+  validateReframeAnalyzeJob,
+  type ReframeAnalyzeJob,
+  type ReframeAnalyzeJobInput,
+  type ReframeAnalyzeResult,
+} from "./reframe-contract.js";
 import { assertMediaJobQueue, connectMediaJobBroker, type MediaJobBrokerConnection, type MediaJobChannel, type MediaJobMessage } from "./transport.js";
 
 /** Worker defaults: 120s per attempt x 2 attempts; client waits a bit longer than that. */
@@ -112,6 +121,17 @@ export class MediaJobClient {
     const validation = validateFrameExtractJob(candidate);
     if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
     return this.request<FrameExtractResult>(FRAME_EXTRACT_JOB_TYPE, validation.value, parseFrameExtractResult, options);
+  }
+
+  /**
+   * VE2E-66: analyses subject + overlay of a stored video/image and returns a `CropPlan` (no cutting). Local detectors run in the
+   * worker, so a first analysis can take several seconds: pass a larger `timeoutMs` for long clips. Idempotent by `jobKey`.
+   */
+  analyzeReframe(job: ReframeAnalyzeJob | ReframeAnalyzeJobInput, options: PrepareClipOptions = {}): Promise<ReframeAnalyzeResult> {
+    const candidate = "schemaVersion" in job ? job : buildReframeAnalyzeJob(job);
+    const validation = validateReframeAnalyzeJob(candidate);
+    if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
+    return this.request<ReframeAnalyzeResult>(REFRAME_ANALYZE_JOB_TYPE, validation.value, parseReframeAnalyzeResult, options);
   }
 
   private request<TResult extends { jobKey: string }>(

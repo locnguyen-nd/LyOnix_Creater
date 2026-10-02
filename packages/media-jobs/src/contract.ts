@@ -103,6 +103,10 @@ export const MEDIA_JOB_ERROR_CODES = [
   "FFMPEG_FAILED",
   "FFMPEG_TIMEOUT",
   "OUTPUT_INVALID",
+  /** VE2E-66: a detector model file is missing/corrupt (checksum) or the detector runtime is not installed. Never silently degraded. */
+  "MODEL_NOT_AVAILABLE",
+  "DETECTOR_FAILED",
+  "DETECTOR_TIMEOUT",
   "INTERNAL",
 ] as const;
 export type MediaJobErrorCode = (typeof MEDIA_JOB_ERROR_CODES)[number];
