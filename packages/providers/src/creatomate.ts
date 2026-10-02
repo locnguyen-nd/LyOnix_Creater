@@ -214,6 +214,29 @@ export function resolveCreatomateRenderScale(env: Record<string, string | undefi
   return Number.isFinite(value) && value >= 0.1 && value <= 1 ? value : 1;
 }
 
+/**
+ * Capacity: Creatomate bills a video as `width x height x frame_rate x seconds / 100,000,000` credits and renders it proportionally
+ * slower, so a 60 fps template costs twice a 30 fps one. `frame_rate` is NOT a render option (only `render_scale`, `max_width`,
+ * `max_height`, `metadata`, `webhook_url`, `dry_run` are) - it lives in the `source`/template root. Env `CREATOMATE_FRAME_RATE`
+ * (valid 1..60; unset/invalid = keep the template's own value) caps the root `frame_rate` of dynamic (source) renders only: it never raises
+ * a template's rate, and template_id renders are unchanged (edit the template itself for those).
+ */
+export function resolveCreatomateFrameRateCap(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env.CREATOMATE_FRAME_RATE?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 1 && value <= 60 ? value : null;
+}
+
+/** Returns `source` with its root `frame_rate` capped at `CREATOMATE_FRAME_RATE` (no-op when unset, or when the source is already at/below the cap). */
+export function applyCreatomateFrameRateCap<T extends Record<string, unknown>>(source: T, env: Record<string, string | undefined> = process.env): T {
+  const cap = resolveCreatomateFrameRateCap(env);
+  if (cap === null) return source;
+  const current = finiteNumber(source.frame_rate);
+  if (current !== null && current <= cap) return source;
+  return { ...source, frame_rate: cap };
+}
+
 /** Canvas (`width`/`height`) declared by a Creatomate template/source document, or null when absent. */
 export function readCreatomateCanvas(rawTemplate: unknown): { width: number; height: number } | null {
   if (!rawTemplate || typeof rawTemplate !== "object") return null;

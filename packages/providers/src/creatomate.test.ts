@@ -10,6 +10,8 @@ import {
   submitCreatomateRender,
   submitCreatomateSourceRender,
   resolveCreatomateRenderScale,
+  resolveCreatomateFrameRateCap,
+  applyCreatomateFrameRateCap,
   readCreatomateCanvas,
   isRenderOutputBelowCanvas,
 } from "./creatomate.js";
@@ -173,6 +175,21 @@ describe("submitCreatomateRender / getCreatomateRender", () => {
 });
 
 describe("VE2E-52b render scale / canvas helpers", () => {
+  it("CREATOMATE_FRAME_RATE caps the root frame_rate of a source and never raises it", () => {
+    expect(resolveCreatomateFrameRateCap({})).toBeNull();
+    expect(resolveCreatomateFrameRateCap({ CREATOMATE_FRAME_RATE: "0" })).toBeNull();
+    expect(resolveCreatomateFrameRateCap({ CREATOMATE_FRAME_RATE: "61" })).toBeNull();
+    expect(resolveCreatomateFrameRateCap({ CREATOMATE_FRAME_RATE: "abc" })).toBeNull();
+    expect(resolveCreatomateFrameRateCap({ CREATOMATE_FRAME_RATE: "30" })).toBe(30);
+    const source = { width: 1080, height: 1920, frame_rate: 60, elements: [] };
+    expect(applyCreatomateFrameRateCap(source, {})).toBe(source);
+    expect(applyCreatomateFrameRateCap(source, { CREATOMATE_FRAME_RATE: "30" })).toEqual({ ...source, frame_rate: 30 });
+    expect(source.frame_rate).toBe(60);
+    const low = { frame_rate: 24 };
+    expect(applyCreatomateFrameRateCap(low, { CREATOMATE_FRAME_RATE: "30" })).toBe(low);
+    expect(applyCreatomateFrameRateCap({ width: 1 }, { CREATOMATE_FRAME_RATE: "30" })).toEqual({ width: 1, frame_rate: 30 });
+  });
+
   it("resolveCreatomateRenderScale defaults to 1, accepts 0.1..1, rejects out of range", () => {
     expect(resolveCreatomateRenderScale({})).toBe(1);
     expect(resolveCreatomateRenderScale({ CREATOMATE_RENDER_SCALE: "0.5" })).toBe(0.5);

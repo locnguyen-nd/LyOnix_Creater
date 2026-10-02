@@ -236,6 +236,8 @@ export {
   type TemplateTtsElement,
   submitCreatomateRender,
   resolveCreatomateRenderScale,
+  resolveCreatomateFrameRateCap,
+  applyCreatomateFrameRateCap,
   readCreatomateCanvas,
   isRenderOutputBelowCanvas,
   submitCreatomateSourceRender,
