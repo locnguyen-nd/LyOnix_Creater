@@ -63,6 +63,7 @@ const DYNAMIC_RENDER_HEIGHT = 1920;
 const providerErrorMessage: Record<string, string> = {
   PROVIDER_AUTH_INVALID: "Khóa Creatomate bị từ chối. Verify lại tài khoản.",
   PROVIDER_RATE_LIMITED: "Creatomate giới hạn tốc độ, thử lại sau.",
+  PROVIDER_QUOTA_EXHAUSTED: "Tài khoản Creatomate đã hết credit. Nạp thêm credit hoặc đổi gói rồi thử lại.",
   PROVIDER_CAPABILITY_UNAVAILABLE: "Creatomate không tìm thấy template/render này.",
   PROVIDER_TIMEOUT: "Yêu cầu Creatomate hết thời gian chờ.",
   PROVIDER_SCHEMA_INVALID: "Creatomate từ chối payload render.",
@@ -71,7 +72,7 @@ const providerErrorMessage: Record<string, string> = {
 const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
   if (error instanceof ProviderError) {
     const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_AUTH_INVALID";
-    return { code: error.code, message: providerErrorMessage[error.code] ?? "Creatomate từ chối yêu cầu", status: switchable ? 429 : 502, retryable: error.retryable };
+    return { code: error.code, message: providerErrorMessage[error.code] ?? `Creatomate từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
   }
   return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Creatomate", status: 502, retryable: true };
 };

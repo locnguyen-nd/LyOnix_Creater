@@ -139,7 +139,7 @@ export function ChannelsPage() {
             },
           },
           { key: "auth", header: t("channels.auth"), render: (row) => <StatusPill tone="neutral">{row.authType}</StatusPill> },
-          { key: "sync", header: t("channels.lastSync"), render: (row) => row.lastSyncAt ?? "—" },
+          { key: "sync", header: t("channels.lastSync"), render: (row) => (row.lastSyncAt ? new Date(row.lastSyncAt).toLocaleString("vi-VN") : "—") },
         ]}
       />
       {open ? (

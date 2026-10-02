@@ -63,7 +63,15 @@ export function AppShell() {
   const [q, setQ] = useState("");
   const [navCollapsed, setNavCollapsed] = useState(() => (typeof localStorage === "undefined" ? false : localStorage.getItem(NAV_COLLAPSE_KEY) === "1"));
   const isAdmin = me.role === "admin";
-  const sidebarWidth = navCollapsed ? "72px" : "var(--lyx-sidebar)";
+  // Phones: always use the compact rail so the content area keeps the width it needs.
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const onChange = () => setNarrow(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const sidebarWidth = navCollapsed || narrow ? "72px" : "var(--lyx-sidebar)";
 
   useEffect(() => {
     applyTheme(theme);
@@ -123,9 +131,9 @@ export function AppShell() {
           {navCollapsed ? null : t("topbar.logout")}
         </button>
       </aside>
-      <header className="fixed inset-x-0 top-0 z-10 flex h-[var(--lyx-topbar)] items-center justify-between gap-3 border-b border-lyx-border bg-lyx-bg pl-[calc(var(--lyx-sidebar-current)+24px)] pr-6 transition-[padding] duration-150">
+      <header className="fixed inset-x-0 top-0 z-10 flex h-[var(--lyx-topbar)] items-center justify-between gap-3 border-b border-lyx-border bg-lyx-bg pl-[calc(var(--lyx-sidebar-current)+12px)] pr-3 sm:pl-[calc(var(--lyx-sidebar-current)+24px)] sm:pr-6 transition-[padding] duration-150">
         <form
-          className="flex h-9 min-w-[260px] items-center gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-muted px-3 text-[12.5px] text-lyx-fg-muted"
+          className="flex h-9 min-w-0 flex-1 items-center sm:min-w-[260px] sm:flex-none gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-muted px-3 text-[12.5px] text-lyx-fg-muted"
           onSubmit={(event) => {
             event.preventDefault();
             navigate(`/jobs?q=${encodeURIComponent(q)}`);
@@ -175,7 +183,7 @@ export function AppShell() {
           </button>
         </div>
       </header>
-      <main className="ml-[var(--lyx-sidebar-current)] pt-[var(--lyx-topbar)] transition-[margin] duration-150">
+      <main className="ml-[var(--lyx-sidebar-current)] min-w-0 pt-[var(--lyx-topbar)] transition-[margin] duration-150">
         <div className="p-7">
           <Outlet />
         </div>

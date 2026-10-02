@@ -32,7 +32,7 @@ const providerErrorMessage: Record<string, string> = {
 const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
   if (error instanceof ProviderError) {
     const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_QUOTA_EXHAUSTED" || error.code === "PROVIDER_AUTH_INVALID";
-    return { code: error.code, message: providerErrorMessage[error.code] ?? "ElevenLabs từ chối yêu cầu", status: switchable ? 429 : 502, retryable: error.retryable };
+    return { code: error.code, message: providerErrorMessage[error.code] ?? `ElevenLabs từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
   }
   return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi ElevenLabs", status: 502, retryable: true };
 };
