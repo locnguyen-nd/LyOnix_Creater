@@ -239,6 +239,17 @@ export type MediaAssetTransform = {
   stripAudio: boolean;
   tool: { name: string; version: string } | null;
   profileVersion: string | null;
+  /** VE2E-67: summary of the crop plan applied to this derivative (the full plan is in the server-side provenance); absent when no plan was applied. */
+  crop?: {
+    planSha256: string;
+    planVersion: string;
+    mode: "static" | "keyframes";
+    zoomPermille: number;
+    overlayUnavoidable: boolean;
+    residualOverlayPct: number;
+    subjectCoveragePct: number;
+    cropProfileVersion: string;
+  };
 };
 
 // --- VE2E-04: Pexels search/import + media library extras ---
