@@ -8,6 +8,7 @@
     "dev": "tsx watch src/main.ts",
     "worker:audio": "tsx src/audio-worker-main.ts",
     "worker:workflow": "tsx src/workflow-worker-main.ts",
+    "report:capacity": "tsx src/capacity-report-main.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
     "test": "vitest run",
