@@ -36,6 +36,11 @@ describe("probeCreatomateAccount", () => {
     await expect(probeCreatomateAccount("key")).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED" } satisfies Partial<ProviderError>);
   });
 
+  it("maps 402 to PROVIDER_QUOTA_EXHAUSTED (out of credits, not retryable)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ hint: "Insufficient credits" }), { status: 402 })));
+    await expect(probeCreatomateAccount("key")).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED", retryable: false } satisfies Partial<ProviderError>);
+  });
+
   it("maps network failure to PROVIDER_TIMEOUT", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
     await expect(probeCreatomateAccount("key")).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT" } satisfies Partial<ProviderError>);

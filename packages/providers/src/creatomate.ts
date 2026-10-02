@@ -18,10 +18,11 @@ const redact = (value: string) => value.replace(/[A-Za-z0-9_-]{24,}/g, "[redacte
 
 const fail = (status: number, retryAfter: string | null, body: unknown): never => {
   const record = (body ?? {}) as Record<string, unknown>;
-  const message = typeof record.message === "string" ? record.message : typeof record.error === "string" ? record.error : "";
+  const message = typeof record.message === "string" ? record.message : typeof record.error === "string" ? record.error : typeof record.hint === "string" ? record.hint : "";
   const suffix = message ? `: ${redact(message)}` : "";
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Creatomate authentication failed${suffix}`, false);
   if (status === 404) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Creatomate template or render not found${suffix}`, false);
+  if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Creatomate credits exhausted${suffix}`, false);
   if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Creatomate rate limit reached${suffix}`, true, Number(retryAfter ?? 0) * 1000 || undefined);
   if (status === 400 || status === 422) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Creatomate rejected the request${suffix}`, false);
   throw new ProviderError("PROVIDER_UNAVAILABLE", `Creatomate request failed (${status})${suffix}`, status >= 500);
