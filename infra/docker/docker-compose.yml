@@ -1,0 +1,137 @@
+# LyOnix — full stack in Docker. Run from this folder: docker compose up -d
+# Images are built by GitHub Actions (.github/workflows/docker-dev.yml) and auto-updated by Watchtower.
+# Public access: Cloudflare Tunnel (profile "tunnel", default via COMPOSE_PROFILES) or Caddy (profile "caddy").
+
+x-app-env: &app-env
+  NODE_ENV: production
+  DATABASE_URL: postgresql://lyonix:${POSTGRES_PASSWORD}@postgres:5432/lyonix
+  RABBITMQ_URL: amqp://lyonix:${RABBITMQ_PASSWORD}@rabbitmq:5672
+  MEDIA_ROOT: ./data/media
+  WEB_ORIGIN: https://app.${DOMAIN}
+  PUBLIC_BASE_URL: https://api.${DOMAIN}
+  TIKTOK_REDIRECT_URI: https://app.${DOMAIN}/callback/
+
+x-app: &app
+  image: ${IMAGE_PREFIX}-app:${IMAGE_TAG:-dev}
+  env_file: .env
+  restart: unless-stopped
+  labels: ["com.centurylinklabs.watchtower.enable=true"]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lyonix
+      POSTGRES_USER: lyonix
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lyonix -d lyonix"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: lyonix
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # api applies Prisma migrations on every start, so a Watchtower update migrates the DB too.
+  api:
+    <<: *app
+    command: >
+      sh -c "corepack pnpm --filter @lyonix/db prisma:deploy &&
+             exec corepack pnpm --filter @lyonix/api exec tsx src/main.ts"
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    volumes: [app-data:/app/data]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  worker-workflow:
+    <<: *app
+    command: ["corepack", "pnpm", "--filter", "@lyonix/api", "exec", "tsx", "src/workflow-worker-main.ts"]
+    environment: *app-env
+    depends_on:
+      api: { condition: service_healthy }
+    volumes: [app-data:/app/data]
+
+  worker-audio:
+    <<: *app
+    command: ["corepack", "pnpm", "--filter", "@lyonix/api", "exec", "tsx", "src/audio-worker-main.ts"]
+    environment: *app-env
+    depends_on:
+      api: { condition: service_healthy }
+    volumes: [app-data:/app/data]
+
+  # The only container with FFmpeg.
+  media-worker:
+    image: ${IMAGE_PREFIX}-media-worker:${IMAGE_TAG:-dev}
+    env_file: .env
+    environment: *app-env
+    restart: unless-stopped
+    labels: ["com.centurylinklabs.watchtower.enable=true"]
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      api: { condition: service_healthy }
+    volumes: [app-data:/app/data]
+
+  web:
+    image: ${IMAGE_PREFIX}-web:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    labels: ["com.centurylinklabs.watchtower.enable=true"]
+
+  # --- public access (pick one via COMPOSE_PROFILES) ---
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [web, api]
+
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [web, api]
+
+  # Auto-update: polls GHCR, pulls new :dev digests, restarts only labelled containers.
+  watchtower:
+    image: nickfedor/watchtower:latest
+    restart: unless-stopped
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-60}
+      WATCHTOWER_CLEANUP: "true"
+      REPO_USER: ${GHCR_USER:-}
+      REPO_PASS: ${GHCR_TOKEN:-}
+
+volumes:
+  postgres-data:
+  rabbitmq-data:
+  app-data:
+  caddy-data:
