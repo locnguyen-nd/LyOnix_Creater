@@ -13,12 +13,19 @@ describe("resolveConcurrencyConfig", () => {
     expect(config.providerLimits).toMatchObject({ elevenlabs: 5, creatomate: 1, content: 3 });
   });
 
+  it("accepts 50 concurrent runs and plan-sized provider limits (ceiling raised for DEC-2026-10-02-CAPACITY-250)", () => {
+    const config = resolveConcurrencyConfig({ WORKFLOW_CONCURRENCY: "50", PROVIDER_CONCURRENCY_CONTENT: "25", PROVIDER_CONCURRENCY_ELEVENLABS: "15", PROVIDER_CONCURRENCY_CREATOMATE: "20", PROVIDER_LIMIT_WAIT_TIMEOUT_MS: "600000" });
+    expect(config.warnings).toEqual([]);
+    expect(config).toMatchObject({ workflow: 50, providerWaitTimeoutMs: 600_000 });
+    expect(config.providerLimits).toMatchObject({ content: 25, elevenlabs: 15, creatomate: 20 });
+  });
+
   it("falls back to defaults on invalid values and reports them", () => {
-    const config = resolveConcurrencyConfig({ WORKFLOW_CONCURRENCY: "99", WORKFLOW_VOICE_PARALLELISM: "abc", PROVIDER_CONCURRENCY_APIFY: "0", PROVIDER_LIMIT_WAIT_TIMEOUT_MS: "5" });
+    const config = resolveConcurrencyConfig({ WORKFLOW_CONCURRENCY: "65", WORKFLOW_VOICE_PARALLELISM: "abc", PROVIDER_CONCURRENCY_APIFY: "0", PROVIDER_LIMIT_WAIT_TIMEOUT_MS: "5" });
     expect(config).toMatchObject({ workflow: 5, voiceParallelism: 3, providerWaitTimeoutMs: 120_000 });
     expect(config.providerLimits.apify).toBe(3);
     expect(config.warnings).toHaveLength(4);
-    expect(resolveWorkflowConcurrency({ WORKFLOW_CONCURRENCY: "10" })).toBe(10);
+    expect(resolveWorkflowConcurrency({ WORKFLOW_CONCURRENCY: "64" })).toBe(64);
   });
 
   it("builds the limiter from config and exposes a replaceable shared instance", () => {

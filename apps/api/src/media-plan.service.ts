@@ -329,7 +329,8 @@ export class MediaPlanService {
       // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
       const visualKind = segmentVisualKind(input.segment);
       for (const platform of visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv()) {
-        const attempt = await this.apify.autoImportForSegment(projectId, userId, role, account, {
+        // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
+        const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
           platform,
           mediaType: visualKind,
           keyword,
@@ -339,22 +340,11 @@ export class MediaPlanService {
           scriptLanguage: input.script.language,
           segmentDurationSeconds: input.segment.durationMs / 1000,
           ...(input.job ? { job: input.job } : {}),
-        });
+        }));
         if (attempt.ok) { outcome = attempt; break; }
         firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
       }
       if (!outcome) return { reason: firstFailure?.reason ?? "apify_no_platform", quality: firstFailure?.quality ?? null };
-      const outcome = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
-        platform: apifyAutoPlatformFromEnv(),
-        keyword,
-        brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
-        sceneId: input.segment.sceneIds[0]!,
-        usedExternalIds,
-        scriptLanguage: input.script.language,
-        segmentDurationSeconds: input.segment.durationMs / 1000,
-        ...(input.job ? { job: input.job } : {}),
-      }));
-      if (!outcome.ok) return { reason: outcome.reason, quality: outcome.quality ?? null };
       const asset = outcome.data.asset;
       if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
         // Release the reservation made by ApifyService (the ledger itself never held this clip).

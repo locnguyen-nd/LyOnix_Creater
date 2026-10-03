@@ -24,6 +24,7 @@ import {
   templateResolution,
   submitCreatomateRender,
   submitCreatomateSourceRender,
+  applyCreatomateFrameRateCap,
   type CreatomateRenderResult,
   type DynamicSceneInput,
 } from "@lyonix/providers";
@@ -599,7 +600,7 @@ export class RenderJobsService {
     const resolution = templateResolution(snapshot.rawTemplate) ?? { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT };
     const composed = buildDynamicCompositionWithWarnings(dynamicScenes, style, { width: resolution.width, height: resolution.height, ...(outputFormat ? { outputFormat } : {}) });
     const layout = { mode: style.layout ? ("template_scaled" as const) : ("style_only" as const), templateSceneSlots: style.layout?.scenes.length ?? 0, warnings: composed.warnings as string[] };
-    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source: composed.source, style, renderable, totalSceneCount: scenes.length, layout } };
+    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source: applyCreatomateFrameRateCap(composed.source as Record<string, unknown>) as typeof composed.source, style, renderable, totalSceneCount: scenes.length, layout } };
   }
 
   /**
