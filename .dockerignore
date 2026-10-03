@@ -1,0 +1,14 @@
+**/node_modules
+**/dist
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+data/media
+data/system-settings.json
+infra
+**/*.log
+**/coverage
+**/.vite
