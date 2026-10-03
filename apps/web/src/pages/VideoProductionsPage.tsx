@@ -9,14 +9,9 @@ import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { AutoRunTimeline } from "../components/AutoRunTimeline";
 import { ApiError } from "../api";
 import type { VideoProductionListItemResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
-import { deleteVideoProduction, listVideoProductionEvents, listVideoProductions, retryVideoProduction } from "../video-productions-api";
+import { cancelQueuedVideoProduction, deleteVideoProduction, listVideoProductionEvents, listVideoProductions, retryVideoProduction } from "../video-productions-api";
 import { isTerminalRun } from "../video-production-stages";
-import type { VideoProductionListItemResponse, WorkflowRunStatus } from "@lyonix/contracts";
-import { cancelQueuedVideoProduction, deleteVideoProduction, listVideoProductions, retryVideoProduction } from "../video-productions-api";
-import { hasLiveRuns, isWaitingInQueue } from "../queue-display";
-
-/** How often the list refreshes while some run is still queued/running, so "#N" and the status stay current without a manual reload. */
-const LIST_POLL_MS = 5000;
+import { isWaitingInQueue } from "../queue-display";
 
 const filters = ["all", "completed", "active", "attention"] as const;
 type Filter = (typeof filters)[number];
@@ -107,15 +102,7 @@ export function VideoProductionsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, timelineKey]);
 
-  // VE2E-62: keep the queue position / status fresh while anything is still queued or running.
-  const live = useMemo(() => hasLiveRuns(rows), [rows]);
-  useEffect(() => {
-    if (!live) return;
-    const timer = setInterval(() => {
-      void listVideoProductions().then(setRows).catch(() => undefined);
-    }, LIST_POLL_MS);
-    return () => clearInterval(timer);
-  }, [live]);
+  // VE2E-62: the live polling above also keeps the queue position fresh (rows carry `queue`).
 
   const [cancelling, setCancelling] = useState<string | null>(null);
   // Only a run still waiting in the queue can be cancelled; the API refuses (409) once a worker claimed it, in which case the list is refreshed.
