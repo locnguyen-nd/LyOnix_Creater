@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/main.ts",
+    "models:download": "tsx scripts/download-models.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "tsx src/main.ts",
     "test": "vitest run",
@@ -20,6 +21,8 @@
   "dependencies": {
     "@lyonix/domain": "workspace:*",
     "@lyonix/media-jobs": "workspace:*",
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "jpeg-js": "^0.4.4",
+    "onnxruntime-node": "^1.30.0"
   }
 }

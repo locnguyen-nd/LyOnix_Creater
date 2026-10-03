@@ -5,13 +5,17 @@ import {
   FRAME_EXTRACT_JOB_TYPE,
   FRAME_EXTRACT_RESULT_TYPE,
   MEDIA_JOB_SCHEMA_VERSION,
+  REFRAME_ANALYZE_JOB_TYPE,
+  REFRAME_ANALYZE_RESULT_TYPE,
   type ClipPrepareResult,
   type FrameExtractResult,
   type MediaJobChannel,
   type MediaJobMessage,
+  type ReframeAnalyzeResult,
 } from "@lyonix/media-jobs";
 import type { ClipPrepareProcessor } from "./clip-prepare.js";
 import type { FrameExtractProcessor } from "./frame-extract.js";
+import type { ReframeAnalyzeProcessor } from "./reframe-analyze.js";
 import { JobLockBusyError } from "./job-errors.js";
 
 export type ConsumerHandle = {
@@ -21,7 +25,8 @@ export type ConsumerHandle = {
   drain(): Promise<void>;
 };
 
-type AnyResult = ClipPrepareResult | FrameExtractResult;
+type AnyResult = ClipPrepareResult | FrameExtractResult | ReframeAnalyzeResult;
+type ResultType = typeof CLIP_PREPARE_RESULT_TYPE | typeof FRAME_EXTRACT_RESULT_TYPE | typeof REFRAME_ANALYZE_RESULT_TYPE;
 
 /**
  * Wires the media processors to the media queue: parse -> process -> publish result to
@@ -37,10 +42,12 @@ export async function startClipPrepareConsumer(input: {
   processor: ClipPrepareProcessor;
   /** VE2E-30: when absent, `frame.extract` messages are answered with INVALID_JOB (unsupported). */
   frameProcessor?: FrameExtractProcessor;
+  /** VE2E-66: when absent, `reframe.analyze` messages are answered with INVALID_JOB (unsupported). */
+  reframeProcessor?: ReframeAnalyzeProcessor;
   lockRetryDelayMs?: number;
   log?: (message: string) => void;
 }): Promise<ConsumerHandle> {
-  const { channel, processor, frameProcessor } = input;
+  const { channel, processor, frameProcessor, reframeProcessor } = input;
   const log = input.log ?? (() => undefined);
   const lockRetryDelayMs = input.lockRetryDelayMs ?? 2_000;
   const inflight = new Set<Promise<void>>();
@@ -62,7 +69,7 @@ export async function startClipPrepareConsumer(input: {
     });
   };
 
-  const invalid = (jobKey: string, message: string, resultType: typeof CLIP_PREPARE_RESULT_TYPE | typeof FRAME_EXTRACT_RESULT_TYPE = CLIP_PREPARE_RESULT_TYPE): AnyResult => ({
+  const invalid = (jobKey: string, message: string, resultType: ResultType = CLIP_PREPARE_RESULT_TYPE): AnyResult => ({
     schemaVersion: MEDIA_JOB_SCHEMA_VERSION,
     type: resultType,
     ok: false,
@@ -75,6 +82,9 @@ export async function startClipPrepareConsumer(input: {
     if (!result.ok) return `${result.type.replace(".result", "")} ${result.jobKey} failed ${result.error.code}: ${result.error.message}`;
     if (result.type === CLIP_PREPARE_RESULT_TYPE) {
       return `clip.prepare ${result.jobKey} ok mode=${result.mode} reused=${result.reused} bytes=${result.output.bytes} driftStart=${result.drift.startMs}ms driftDuration=${result.drift.durationMs}ms`;
+    }
+    if (result.type === REFRAME_ANALYZE_RESULT_TYPE) {
+      return `reframe.analyze ${result.jobKey} ok reused=${result.reused} subject=${result.analysis.subjectSource} zoom=${result.cropPlan.zoomPermille} unavoidable=${result.overlayUnavoidable} confidence=${result.confidence.level} totalMs=${result.metrics.totalMs}`;
     }
     return `frame.extract ${result.jobKey} ok reused=${result.reused} frames=${result.frames.length} skipped=${result.skippedFrames}`;
   };
@@ -89,14 +99,15 @@ export async function startClipPrepareConsumer(input: {
       return;
     }
     const type = (body as { type?: unknown } | null)?.type;
-    if (type !== CLIP_PREPARE_JOB_TYPE && !(type === FRAME_EXTRACT_JOB_TYPE && frameProcessor)) {
-      reply(message, invalid(message.properties.messageId ?? "invalid", `unsupported media job type ${String(type)}`, type === FRAME_EXTRACT_JOB_TYPE ? FRAME_EXTRACT_RESULT_TYPE : CLIP_PREPARE_RESULT_TYPE));
+    const resultTypeFor = (t: unknown): ResultType => (t === FRAME_EXTRACT_JOB_TYPE ? FRAME_EXTRACT_RESULT_TYPE : t === REFRAME_ANALYZE_JOB_TYPE ? REFRAME_ANALYZE_RESULT_TYPE : CLIP_PREPARE_RESULT_TYPE);
+    if (type !== CLIP_PREPARE_JOB_TYPE && !(type === FRAME_EXTRACT_JOB_TYPE && frameProcessor) && !(type === REFRAME_ANALYZE_JOB_TYPE && reframeProcessor)) {
+      reply(message, invalid(message.properties.messageId ?? "invalid", `unsupported media job type ${String(type)}`, resultTypeFor(type)));
       channel.ack(message);
       return;
     }
-    const resultType = type === FRAME_EXTRACT_JOB_TYPE ? FRAME_EXTRACT_RESULT_TYPE : CLIP_PREPARE_RESULT_TYPE;
+    const resultType = resultTypeFor(type);
     try {
-      const result: AnyResult = type === FRAME_EXTRACT_JOB_TYPE ? await frameProcessor!.handle(body) : await processor.handle(body);
+      const result: AnyResult = type === FRAME_EXTRACT_JOB_TYPE ? await frameProcessor!.handle(body) : type === REFRAME_ANALYZE_JOB_TYPE ? await reframeProcessor!.handle(body) : await processor.handle(body);
       log(describe(result));
       reply(message, result);
       channel.ack(message);
