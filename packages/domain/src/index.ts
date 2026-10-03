@@ -258,3 +258,21 @@ export {
   type NarrationBudget,
   type DurationBandCheck,
 } from "./duration-budget.js";
+
+export {
+  planReframe,
+  reframeOptionsFromEnv,
+  REFRAME_PLAN_VERSION,
+  REFRAME_MAX_ZOOM_DEFAULT,
+  REFRAME_ZOOM_STEP_PERMILLE,
+  REFRAME_SMOOTHING_MS_DEFAULT,
+  REFRAME_MAX_PAN_PCT_PER_SEC_DEFAULT,
+  type PixelBox,
+  type SubjectTrack,
+  type SubjectTrackSample,
+  type ExclusionRegion,
+  type CropKeyframe,
+  type CropPlan,
+  type PlanReframeInput,
+  type PlanReframeOptions,
+} from "./reframe-plan.js";
