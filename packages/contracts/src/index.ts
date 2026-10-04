@@ -1224,3 +1224,37 @@ export type CropPlan = {
   residualOverlayPct: number;
   subjectCoveragePct: number;
 };
+
+/** VE2E-118: admin view of the self-render engine (GET /admin/render-engine). */
+export type RenderEngineMetricsResponse = {
+  windowDays: number;
+  since: string;
+  totalJobs: number;
+  byEngine: Record<RenderEngine, { jobs: number; completed: number; failed: number }>;
+  internal: {
+    jobs: number;
+    completed: number;
+    failed: number;
+    qcFailed: number;
+    qcFailuresByCode: Record<string, number>;
+    renderMs: { samples: number; p50: number | null; p95: number | null };
+  };
+  fallbacks: { total: number; byReason: Record<string, number>; shareOfInternalAttempts: number | null };
+  costByDay: Array<{ date: string; lyonix: number; creatomate: number; orshot: number; total: number }>;
+  budget: { fallbackTodayUsd: number; fallbackMonthUsd: number; dailyCeilingUsd: number; monthlyCeilingUsd: number | null };
+};
+
+export type RenderEngineAdminTemplateResponse = {
+  snapshotId: string;
+  name: string;
+  externalTemplateId: string;
+  rolloutPercent: number;
+  fallbackSnapshotIds: string[];
+  /** Provider snapshots that may be chosen as fallback (empty in the PATCH response). */
+  fallbackCandidates: Array<{ snapshotId: string; name: string; engine: string }>;
+};
+
+export type RenderEngineAdminOverviewResponse = { templates: RenderEngineAdminTemplateResponse[]; metrics: RenderEngineMetricsResponse };
+
+/** PATCH /admin/render-engine/templates/:snapshotId - rollout > 0 needs at least one provider fallback. */
+export type UpdateRenderEngineTemplateRequest = { rolloutPercent?: number; fallbackSnapshotIds?: string[] };

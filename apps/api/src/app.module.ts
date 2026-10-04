@@ -40,6 +40,8 @@ import { ApifyService } from "./apify.service.js";
 import { CreatomateTemplatesController } from "./creatomate-templates.controller.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderEngineStoreService } from "./render-engine-store.service.js";
+import { RenderEngineAdminController } from "./render-engine-admin.controller.js";
+import { RenderEngineAdminService } from "./render-engine-admin.service.js";
 import { RenderJobsController } from "./render-jobs.controller.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { InternalRenderService } from "./internal-render.service.js";
@@ -86,6 +88,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ApifyController,
     MediaPlanController,
     CreatomateTemplatesController,
+    RenderEngineAdminController,
     RenderJobsController,
     ScriptVersionsController,
     AudioVersionsController,
@@ -115,6 +118,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ApifyService,
     MediaPlanService,
     RenderEngineStoreService,
+    RenderEngineAdminService,
     CreatomateTemplatesService,
     RenderJobsService,
     // VE2E-110: internal `lyonix` render engine (Render Router -> video.compose on lyonix.render).
