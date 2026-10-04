@@ -22,6 +22,7 @@ import { BinaryNotFoundError, ProcessTimeoutError, type ProcessRunner } from "..
 import { buildAudioGraph, parseLoudnormMeasurement, type LoudnormMeasurement } from "./audio-graph.js";
 import type { ComposeConfig } from "./config.js";
 import { ComposeJobError } from "./errors.js";
+import { checkFontsAvailable } from "./fonts.js";
 import { buildVideoGraph, filterComplexFileArgs, FPS, motionFor } from "./filtergraph.js";
 import { buildOverlayDocuments } from "./overlays.js";
 import { FfmpegProgressParser, progressPercent, type ProgressStage } from "./progress.js";
@@ -201,6 +202,12 @@ export class ComposeProcessor {
     const { plan } = job;
     const recipe = this.recipeFor(job);
     this.emit(job, onProgress, "preparing", null, null);
+
+    // fonts: libass would silently substitute a missing family; fail fast instead (the Router falls back to a provider)
+    const requiredFonts = [...new Set([...recipe.fonts, recipe.captions.fontFamily, ...(plan.params["dynamicStyle.captionFontFamily"]?.trim() ? [plan.params["dynamicStyle.captionFontFamily"]!.trim()] : [])])];
+    const fonts = await checkFontsAvailable(this.deps.runner, requiredFonts, this.deps.compose.fontsDir);
+    if (!fonts.ok) throw new ComposeJobError("FONT_MISSING", `font(s) not installed on the render host: ${fonts.missing.join(", ")} (install them or set RENDER_FONTS_DIR)`);
+    if (!fonts.checked) this.log("video.compose: fontconfig tools not found; font availability was not checked");
 
     // 1. sources: real files inside MEDIA_ROOT with the right streams
     const mediaPaths: string[] = [];

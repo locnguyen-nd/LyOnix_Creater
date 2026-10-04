@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildVideoComposeJob, composeFingerprint, type VideoComposeProgress, type VideoComposeSuccess } from "@lyonix/media-jobs";
-import { RecipeRegistry } from "@lyonix/render-recipes";
+import { NEWS_RECAP_BROADCAST_TELOP_JP_V1, RecipeRegistry, type RenderRecipe } from "@lyonix/render-recipes";
 import { runProcess } from "../process.js";
 import { ComposeProcessor } from "./compose-processor.js";
 import { detectFfmpeg, ffmpegPath, ffprobePath, findJapaneseFont, generate, makeFixtures, makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
@@ -18,6 +18,15 @@ if (!availability.ok) console.warn(`[media-worker] SKIPPING compose integration 
 
 const japaneseFont = findJapaneseFont();
 const FONT = japaneseFont ?? "DejaVu Sans";
+
+/** The released recipe with this host's font substituted (CI/dev machines do not have Noto Sans CJK JP): geometry, timing and audio policy are untouched. */
+const releasedWithHostFont = (): RenderRecipe => {
+  const recipe = structuredClone(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
+  recipe.captions.fontFamily = FONT;
+  recipe.fonts = [FONT];
+  for (const layer of recipe.layers) if (layer.type === "text") layer.fontFamily = FONT;
+  return recipe;
+};
 
 describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
   let root: string;
@@ -33,7 +42,7 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       compose: { queue: "lyonix.render.test", prefetch: 1, timeoutMs: 180_000, x264Preset: "ultrafast", x264Threads: 0, fontsDir: null },
       runner: runProcess,
       ffmpegVersion: version,
-      recipes: new RecipeRegistry([testRecipe(FONT)]),
+      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont()]),
     });
   }, 120_000);
 
@@ -88,6 +97,35 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
     expect([...percents].sort((x, y) => x - y)).toEqual(percents);
     expect((await stat(join(root, result.output.relativePath))).size).toBe(result.output.bytes);
   }, 240_000);
+
+  it("renders the released recipe news-recap-broadcast-telop-jp@1 and passes the full QC gate (default badge, with and without a headline)", async () => {
+    const texts = japaneseFont ? ["政府は新しい経済対策を発表しました。", "物価高への対応を急ぐ方針です。", "来月から実施される見通しです。"] : ["First scene text", "Second scene text", "Third scene text"];
+    const plan = makePlan(files, { texts, withMusic: true, params: { headline: japaneseFont ? "経済対策を発表" : "NEWS HEADLINE" }, padStartMs: 300, padEndMs: 800 });
+    const result = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-released", recipe: { id: NEWS_RECAP_BROADCAST_TELOP_JP_V1.id, version: 1 }, plan }));
+    if (!result.ok) throw new Error(`released recipe failed: ${result.error.code}: ${result.error.message}`);
+    expect(result.qc.passed).toBe(true);
+    expect(result.tool.recipe).toEqual({ id: "news-recap-broadcast-telop-jp", version: 1 });
+    if (process.env.LYONIX_KEEP_RENDER) console.info(`released-recipe render kept at ${join(root, result.output.relativePath)}`);
+
+    const noHeadline = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-released-2", recipe: { id: NEWS_RECAP_BROADCAST_TELOP_JP_V1.id, version: 1 }, plan: { ...plan, params: {} } }));
+    expect(noHeadline.ok).toBe(true);
+    if (noHeadline.ok) expect(noHeadline.output.sha256).not.toBe(result.output.sha256); // the band/badge layers really change the picture
+  }, 300_000);
+
+  it("fails fast with FONT_MISSING (a technical failure: the Router falls back) when the recipe font is not installed", async () => {
+    const ghost = { ...testRecipe("Definitely Not Installed Font"), id: "ghost-font" };
+    const missing = new ComposeProcessor({
+      config: { mediaRoot: root, ffmpegPath, ffprobePath, maxAttempts: 1 },
+      compose: { queue: "q", prefetch: 1, timeoutMs: 60_000, x264Preset: "ultrafast", x264Threads: 0, fontsDir: null },
+      runner: runProcess,
+      ffmpegVersion: version,
+      recipes: new RecipeRegistry([ghost]),
+    });
+    const hasFontconfig = spawnSync("fc-list", [":", "family"], { encoding: "utf8" }).status === 0;
+    const result = await missing.handle(buildVideoComposeJob({ jobKey: "compose:it-ghost", recipe: { id: "ghost-font", version: 1 }, plan: makePlan(files, { voiceSeconds: [1, 1, 1] }) }));
+    if (hasFontconfig) expect(result).toMatchObject({ ok: false, error: { code: "FONT_MISSING", retryable: false } });
+    else expect(result.ok).toBe(true); // without fontconfig the check is skipped (documented), the render proceeds
+  }, 120_000);
 
   it("a slowly zooming smooth photo is not flagged as frozen, while the same photo with the animation switched off is allowed to be still", async () => {
     generate(["-f", "lavfi", "-i", "gradients=size=1920x1080:rate=1:duration=1:seed=7:n=4", "-frames:v", "1", join(root, "projects/p/smooth.jpg")]);

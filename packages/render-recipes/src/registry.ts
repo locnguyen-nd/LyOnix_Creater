@@ -1,3 +1,4 @@
+import { NEWS_RECAP_BROADCAST_TELOP_JP_V1 } from "./recipes/news-recap-broadcast-telop-jp.v1.js";
 import { validateRecipe, type RenderRecipe } from "./schema.js";
 
 /**
@@ -34,5 +35,5 @@ export class RecipeRegistry {
   }
 }
 
-export const RELEASED_RECIPES: RenderRecipe[] = [];
+export const RELEASED_RECIPES: RenderRecipe[] = [NEWS_RECAP_BROADCAST_TELOP_JP_V1];
 export const recipeRegistry = new RecipeRegistry(RELEASED_RECIPES);

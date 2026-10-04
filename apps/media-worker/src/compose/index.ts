@@ -8,3 +8,4 @@ export * from "./overlays.js";
 export * from "./progress.js";
 export * from "./qc.js";
 export * from "./qc-signal.js";
+export * from "./fonts.js";
