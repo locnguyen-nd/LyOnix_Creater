@@ -1,6 +1,7 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, Inject, Param, Post, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
-import type { CreatomatePreviewConfigResponse, OrshotRenderOptions, RenderAssignmentInput } from "@lyonix/contracts";
+import { createReadStream } from "node:fs";
+import type { CreatomatePreviewConfigResponse, OrshotRenderOptions, RenderAssignmentInput, RenderEngine } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { creatomatePreviewConfigured, creatomatePreviewPublicToken } from "./creatomate-preview.config.js";
@@ -15,7 +16,12 @@ type SubmitBody = {
   idempotencyKey?: string;
   allowTemplateTts?: boolean;
   orshot?: OrshotRenderOptions;
+  /** VE2E-113: admin-only engine override; omitted = the Router decides. */
+  forceEngine?: RenderEngine;
 };
+
+const RANGE_RE = /^bytes=(\d*)-(\d*)$/;
+const ENGINES: readonly string[] = ["lyonix", "creatomate", "orshot"];
 
 @Controller()
 export class RenderJobsController {
@@ -61,6 +67,7 @@ export class RenderJobsController {
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
       ...(body.allowTemplateTts === true ? { allowTemplateTts: true } : {}),
       ...(body.orshot ? { orshot: body.orshot } : {}),
+      ...(body.forceEngine && ENGINES.includes(body.forceEngine) ? { forceEngine: body.forceEngine } : {}),
     }, "template");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     response.status(202);
@@ -102,6 +109,7 @@ export class RenderJobsController {
       providerAccountId: body.providerAccountId,
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+      ...(body.forceEngine && ENGINES.includes(body.forceEngine) ? { forceEngine: body.forceEngine } : {}),
     }, "dynamic");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     response.status(202);
@@ -144,6 +152,45 @@ export class RenderJobsController {
     const outcome = await this.renders.get(id, user.id, user.role);
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     return success(outcome.data, requestId(response));
+  }
+
+  /** VE2E-110: streams the finished video of an internal render (Range supported, so `<video>` can seek). Auth + project access; never a path from the client. */
+  @Get("render-jobs/:id/file")
+  async file(@Param("id") id: string, @Headers("range") range: string | undefined, @Req() request: Request, @Res() response: Response) {
+    await this.streamOutput(id, "video", range, request, response);
+  }
+
+  /** VE2E-110: the cover image (JPG 1080x1920) of an internal render. */
+  @Get("render-jobs/:id/thumbnail")
+  async thumbnail(@Param("id") id: string, @Req() request: Request, @Res() response: Response) {
+    await this.streamOutput(id, "thumbnail", undefined, request, response);
+  }
+
+  private async streamOutput(id: string, kind: "video" | "thumbnail", range: string | undefined, request: Request, response: Response) {
+    const { user } = await requireUser(request, response, this.auth);
+    const outcome = await this.renders.resolveInternalOutput(id, user.id, user.role, kind);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    const file = outcome.data;
+    response.setHeader("Content-Type", file.mimeType);
+    response.setHeader("Content-Disposition", `inline; filename="${file.fileName}"`);
+    response.setHeader("Cache-Control", "private, no-store");
+    response.setHeader("Accept-Ranges", "bytes");
+    const match = range ? RANGE_RE.exec(range) : null;
+    if (match) {
+      const start = match[1] ? Number(match[1]) : 0;
+      const end = match[2] ? Number(match[2]) : file.bytes - 1;
+      if (Number.isNaN(start) || Number.isNaN(end) || start > end || end >= file.bytes) {
+        response.status(416).setHeader("Content-Range", `bytes */${file.bytes}`).end();
+        return;
+      }
+      response.status(206);
+      response.setHeader("Content-Range", `bytes ${start}-${end}/${file.bytes}`);
+      response.setHeader("Content-Length", String(end - start + 1));
+      createReadStream(file.absolutePath, { start, end }).pipe(response);
+      return;
+    }
+    response.setHeader("Content-Length", String(file.bytes));
+    createReadStream(file.absolutePath).pipe(response);
   }
 
   /** Manual poll/reconcile fallback trigger for one job — periodic invocation across all pending jobs is left to an external scheduler (see handoff). */

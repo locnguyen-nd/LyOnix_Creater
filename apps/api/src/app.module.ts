@@ -42,6 +42,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderEngineStoreService } from "./render-engine-store.service.js";
 import { RenderJobsController } from "./render-jobs.controller.js";
 import { RenderJobsService } from "./render-jobs.service.js";
+import { InternalRenderService } from "./internal-render.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
 import { VideoFramesService } from "./video-frames.service.js";
@@ -116,6 +117,8 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     RenderEngineStoreService,
     CreatomateTemplatesService,
     RenderJobsService,
+    // VE2E-110: internal `lyonix` render engine (Render Router -> video.compose on lyonix.render).
+    InternalRenderService,
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
     MediaJobsGateway,
     ClipDerivativesService,

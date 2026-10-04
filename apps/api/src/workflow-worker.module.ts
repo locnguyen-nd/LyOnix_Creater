@@ -14,6 +14,7 @@ import { ApifyService } from "./apify.service.js";
 import { MediaPlanService } from "./media-plan.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
+import { InternalRenderService } from "./internal-render.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
 import { VideoFramesService } from "./video-frames.service.js";
@@ -39,6 +40,8 @@ import { WorkflowRunnerService } from "./workflow-runner.service.js";
     MediaPlanService,
     CreatomateTemplatesService,
     RenderJobsService,
+    // VE2E-110: internal `lyonix` render engine (Render Router -> video.compose on lyonix.render).
+    InternalRenderService,
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
     MediaJobsGateway,
     ClipDerivativesService,

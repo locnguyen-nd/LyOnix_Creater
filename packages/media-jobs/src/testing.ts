@@ -19,6 +19,11 @@ export class InMemoryMediaJobBroker {
     return new InMemoryChannel(this);
   }
 
+  /** Attached consumers of a queue (what amqplib `checkQueue` reports as `consumerCount`). */
+  consumerCount(queue: string): number {
+    return this.queues.get(queue)?.consumers.length ?? 0;
+  }
+
   /** Messages currently waiting (not delivered) on a queue. */
   depth(queue: string): number {
     return this.queues.get(queue)?.ready.length ?? 0;
@@ -93,6 +98,10 @@ export class InMemoryChannel implements MediaJobChannel {
 
   async assertQueue(queue: string): Promise<{ queue: string }> {
     return { queue: this.broker.ensureQueue(queue) };
+  }
+
+  async checkQueue(queue: string): Promise<{ messageCount: number; consumerCount: number }> {
+    return { messageCount: this.broker.depth(queue), consumerCount: this.broker.consumerCount(queue) };
   }
 
   sendToQueue(queue: string, content: Buffer, options: MediaJobPublishOptions = {}): boolean {

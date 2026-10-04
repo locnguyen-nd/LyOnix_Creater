@@ -207,6 +207,18 @@ describe("MediaJobClient.composeVideo", () => {
     expect(broker.published).toHaveLength(0);
   });
 
+  it("reports the render queue's consumers and backlog (0 consumers = the internal engine is not running)", async () => {
+    const broker = new InMemoryMediaJobBroker();
+    const client = await MediaJobClient.create({ channel: broker.createChannel(), queue: "lyonix.media.test" });
+    expect(await client.renderQueueStatus()).toEqual({ consumers: 0, queued: 0 });
+    await startWorker(broker, () => undefined);
+    expect(await client.renderQueueStatus()).toEqual({ consumers: 1, queued: 0 });
+    const plain = broker.createChannel();
+    Object.defineProperty(plain, "checkQueue", { value: undefined }); // a channel double that cannot inspect queues
+    const noInspection = await MediaJobClient.create({ channel: plain, queue: "q" });
+    expect(await noInspection.renderQueueStatus()).toBeNull();
+  });
+
   it("parses progress messages strictly", () => {
     expect(parseVideoComposeProgress({ schemaVersion: MEDIA_JOB_SCHEMA_VERSION, type: VIDEO_COMPOSE_PROGRESS_TYPE, jobKey: "k", percent: 5 })).not.toBeNull();
     expect(parseVideoComposeProgress({ schemaVersion: MEDIA_JOB_SCHEMA_VERSION, type: "other", jobKey: "k", percent: 5 })).toBeNull();

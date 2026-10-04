@@ -580,6 +580,12 @@ export type RenderJobResponse = {
   routeReason?: RenderRouteReason | null;
   /** VE2E-108: for a fallback job, the internal-engine job it replaces. */
   fallbackOfJobId?: string | null;
+  /** VE2E-110: internal-engine output integrity + the profile that produced it; null for provider engines. */
+  outputSha256?: string | null;
+  outputBytes?: number | null;
+  outputProfileVersion?: string | null;
+  /** VE2E-110: summary of the failed QC checks of an internal render (codes only); empty/absent when QC passed or the job is not internal. */
+  qcFailedCodes?: string[];
   externalJobId: string | null;
   progress: number | null;
   clipPreparation: { clipsTotal: number; clipsReady: number; failed: Array<{ sceneId: string; code: string; message: string }> };
@@ -1118,6 +1124,8 @@ export type OrshotCostEstimateResponse = {
 };
 
 export type RenderSubmitFromTimelineRequest = {
+  /** VE2E-113: admin-only engine override ("Tự động chọn" = omitted). Ignored/rejected for staff. */
+  forceEngine?: RenderEngine;
   providerAccountId: string;
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
