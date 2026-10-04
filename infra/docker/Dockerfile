@@ -30,7 +30,9 @@ CMD ["corepack", "pnpm", "--filter", "@lyonix/api", "exec", "tsx", "src/main.ts"
 
 # ---- media-worker: the ONLY image that contains FFmpeg
 FROM app AS media-worker
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# fonts-noto-cjk = "Noto Sans CJK JP" (burned-in Japanese text of the internal render engine, recipes in packages/render-recipes);
+# fontconfig provides fc-list, which the worker uses to fail fast with FONT_MISSING instead of silently rendering tofu/fallback glyphs.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fontconfig fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 CMD ["corepack", "pnpm", "--filter", "@lyonix/media-worker", "start"]
 

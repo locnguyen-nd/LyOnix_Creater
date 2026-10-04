@@ -195,6 +195,8 @@ export class ProviderAccountsService {
   private async manageable(id: string, userId: string, role: "admin" | "staff") {
     const row = await this.prisma.providerAccount.findFirst({ where: { id, deletedAt: null } });
     if (!row) return null;
+    // VE2E-111: the internal engine's system account (`lyonix`) is created by the API itself and is never edited, verified or deleted by users.
+    if (row.provider === "lyonix") return "forbidden" as const;
     // Staff may use an organization account, but only its administrator may alter it.
     if (role !== "admin" && (row.scope !== "personal" || row.ownerUserId !== userId)) return "forbidden" as const;
     return row;

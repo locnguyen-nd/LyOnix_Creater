@@ -59,6 +59,16 @@ describe("overlays", () => {
     expect(cues[1]!.startMs).toBeCloseTo((plan.scenes[1]!.startFrame * 1000) / 60 + 100, 3);
     expect(cues[0]!.startMs).toBeCloseTo((plan.scenes[0]!.startFrame * 1000) / 60, 3);
   });
+  it("cycles caption colours per scene and anchors the captions from the recipe placement (VE2E-115)", () => {
+    const plan = makePlan(files, { texts: ["一つ目", "二つ目", "三つ目"] });
+    const cues = captionCuesFromComposePlan(plan, ["#FFFFFF", "#FFE600"]);
+    expect(cues.map((c) => c.color)).toEqual(["#FFFFFF", "#FFE600", "#FFFFFF"]);
+    expect(captionCuesFromComposePlan(plan).every((c) => c.color === undefined)).toBe(true);
+    const recipe = testRecipe("Noto Sans JP");
+    const top = buildOverlayDocuments(plan, { ...recipe, captions: { ...recipe.captions, highlight: "none", placement: { anchor: "top", marginPct: 12 }, colorCycle: ["#FFFFFF", "#FFE600"] } }, {});
+    expect(/Style: Sub,.*/.exec(top.captions!.ass)![0].split(",")[18]).toBe("8");
+    expect(top.captions!.ass).toContain("\\1c&H00E6FF&");
+  });
   it("renders the headline layer centred in its rectangle only when the slot has a value, and honours Studio caption overrides", () => {
     const plan = makePlan(files, { texts: ["一つ目", "二つ目", "三つ目"] });
     const recipe = testRecipe("Noto Sans JP");
@@ -174,5 +184,25 @@ describe("startComposeConsumer", () => {
     await new Promise((r) => setTimeout(r, 80));
     expect(calls).toBe(2); // 1st: lock busy -> requeued; 2nd: boom -> INTERNAL result and ack
     expect((received[0]!.body as { error: { code: string; retryable: boolean } }).error).toMatchObject({ code: "INTERNAL", retryable: true });
+  });
+});
+
+describe("TTL sweep covers video.compose renders", () => {
+  it("removes an expired render directory and keeps a live one", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { sweepExpiredMediaJobs } = await import("../ttl-sweep.js");
+    const root = await mkdtemp(join(tmpdir(), "lyonix-sweep-"));
+    try {
+      for (const [name, expiresAt] of [["old", "2026-10-01T00:00:00.000Z"], ["live", "2026-10-20T00:00:00.000Z"]] as const) {
+        const dir = join(root, "working/renders", name);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, "result.json"), JSON.stringify({ fingerprint: "f", result: { expiresAt, output: { relativePath: "x" } } }));
+      }
+      expect((await sweepExpiredMediaJobs(root, new Date("2026-10-10T00:00:00Z"))).removed).toBe(1);
+      const { readdir } = await import("node:fs/promises");
+      expect(await readdir(join(root, "working/renders"))).toEqual(["live"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -14,7 +14,8 @@
     "./media-lineage": "./src/media-lineage.ts",
     "./background-segments": "./src/background-segments.ts",
     "./render-plan": "./src/render-plan.ts",
-    "./caption-ass": "./src/caption-ass.ts"
+    "./caption-ass": "./src/caption-ass.ts",
+    "./render-router": "./src/render-router.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

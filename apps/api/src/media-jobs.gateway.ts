@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { MediaJobClient, MediaJobClientError, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
+import { MediaJobClient, MediaJobClientError, type ComposeVideoOptions, type VideoComposeJobInput, type VideoComposeResult, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
 
 /** Per-clip wait for a media-worker result (env `MEDIA_PREPARE_TIMEOUT_MS`, default 180s). */
 export const mediaPrepareTimeoutMs = (): number => {
@@ -22,18 +22,27 @@ export interface ReframeAnalyzer {
 }
 
 /**
+ * VE2E-110: the internal render engine (`video.compose` on `lyonix.render`). `renderQueueStatus` reports whether any render worker is attached
+ * (`consumers: 0` = the engine is not running) and the backlog, which the Render Router uses for `local_unhealthy` / overflow.
+ */
+export interface VideoComposer {
+  composeVideo(job: VideoComposeJobInput, options?: ComposeVideoOptions): Promise<VideoComposeResult>;
+  renderQueueStatus(): Promise<{ consumers: number; queued: number } | null>;
+}
+
+/**
  * VE2E-37: API-side handle on `apps/media-worker` (the only FFmpeg process). Connects to
  * RabbitMQ lazily on the first clip request, so renders without source ranges never need a
  * broker. Throws `MediaJobClientError` (`MEDIA_WORKER_NOT_CONFIGURED`, `BROKER_UNAVAILABLE`,
  * `RESULT_TIMEOUT`, ...) — callers map it to a render error, never to a full-source fallback.
  */
 @Injectable()
-export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAnalyzer, OnModuleDestroy {
+export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAnalyzer, VideoComposer, OnModuleDestroy {
   private client: Promise<MediaJobClient> | null = null;
 
   private connect(): Promise<MediaJobClient> {
     if (!this.client) {
-      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE });
+      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE, renderQueue: process.env.MEDIA_WORKER_RENDER_QUEUE });
       this.client = pending;
       pending.catch(() => {
         if (this.client === pending) this.client = null; // next call retries the connection
@@ -72,6 +81,28 @@ export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAn
     const client = await this.connect();
     try {
       return await client.analyzeReframe(job, { timeoutMs: options.timeoutMs ?? mediaPrepareTimeoutMs() });
+    } catch (error) {
+      if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
+        this.client = null;
+        await client.close().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  /** Never throws for a missing/unreachable broker: the router treats `null` as "engine unavailable". */
+  async renderQueueStatus(): Promise<{ consumers: number; queued: number } | null> {
+    try {
+      return await (await this.connect()).renderQueueStatus();
+    } catch {
+      return null;
+    }
+  }
+
+  async composeVideo(job: VideoComposeJobInput, options: ComposeVideoOptions = {}): Promise<VideoComposeResult> {
+    const client = await this.connect();
+    try {
+      return await client.composeVideo(job, options);
     } catch (error) {
       if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
         this.client = null;

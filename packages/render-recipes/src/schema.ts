@@ -60,6 +60,23 @@ export type RecipeTextLayer = LayerBase & {
 
 export type RecipeLayer = RecipeBoxLayer | RecipeTextLayer;
 
+/** Optional: the background does not fill the canvas but sits in a horizontal band on a solid canvas colour (e.g. a 44 % tall video on dark). */
+export type RecipeBackgroundFrame = {
+  mode: "band";
+  /** Band height, % of the canvas height (10..100). */
+  heightPct: number;
+  /** Vertical centre of the band, % of the canvas height. */
+  centerYPct: number;
+  canvasColor: string;
+};
+
+export type RecipeCaptionPlacement = {
+  /** `bottom` (default) keeps the caption's bottom edge `marginPct` above the canvas bottom, `top` keeps its top edge `marginPct` below the top. */
+  anchor: "top" | "bottom";
+  /** 0..40 % of the canvas height. The TikTok safe zones are 10 % at the top and 20 % at the bottom. */
+  marginPct: number;
+};
+
 export type RecipeCaptions = {
   enabled: boolean;
   fontFamily: string;
@@ -74,6 +91,10 @@ export type RecipeCaptions = {
   outlineColor: string;
   outlinePx: number;
   highlight: "word" | "none";
+  /** Optional placement; omitted = bottom, 20 % margin (the safe zone). */
+  placement?: RecipeCaptionPlacement;
+  /** Optional: scene i uses colour `colorCycle[i % n]` as its caption colour (only with `highlight: "none"`). */
+  colorCycle?: string[];
 };
 
 export type RenderRecipe = {
@@ -91,6 +112,7 @@ export type RenderRecipe = {
     image: { motion: RecipeMotion; /** 0..0.2 extra scale reached at the end of the scene. */ intensity: number; alternate: boolean };
     video: { motion: RecipeMotion; intensity: number };
     tint: { color: string; opacity: number } | null;
+    frame?: RecipeBackgroundFrame;
   };
   layers: RecipeLayer[];
   captions: RecipeCaptions;
@@ -144,6 +166,14 @@ export function validateRecipe(input: unknown): RecipeValidation {
       if (!isRecord(motion) || typeof motion.motion !== "string" || !MOTIONS.includes(motion.motion) || !isNum(motion.intensity, 0, 0.2)) errors.push(`background.${kind} must be {motion, intensity 0..0.2}`);
     }
     if (isRecord(background.image) && typeof background.image.alternate !== "boolean") errors.push("background.image.alternate must be a boolean");
+    const frame = background.frame;
+    if (frame !== undefined) {
+      if (!isRecord(frame) || frame.mode !== "band" || !isInt(frame.heightPct, 10, 100) || !isNum(frame.centerYPct, 0, 100) || typeof frame.canvasColor !== "string" || !HEX_RE.test(frame.canvasColor)) {
+        errors.push("background.frame must be {mode:'band', heightPct 10..100, centerYPct 0..100, canvasColor #RRGGBB}");
+      } else if ((frame.centerYPct as number) - (frame.heightPct as number) / 2 < 0 || (frame.centerYPct as number) + (frame.heightPct as number) / 2 > 100) {
+        errors.push("background.frame band must lie inside the canvas");
+      }
+    }
     const tint = background.tint;
     if (tint !== null && (!isRecord(tint) || typeof tint.color !== "string" || !HEX_RE.test(tint.color) || !isNum(tint.opacity, 0, 1))) errors.push("background.tint must be null or {color #RRGGBB, opacity 0..1}");
   }
@@ -204,6 +234,13 @@ export function validateRecipe(input: unknown): RecipeValidation {
     for (const key of ["textColor", "highlightColor", "outlineColor"] as const) if (typeof captions[key] !== "string" || !HEX_RE.test(captions[key] as string)) errors.push(`captions.${key} must be #RRGGBB`);
     if (!isNum(captions.outlinePx, 0, 20)) errors.push("captions.outlinePx must be 0..20");
     if (captions.highlight !== "word" && captions.highlight !== "none") errors.push("captions.highlight must be word|none");
+    const placement = captions.placement;
+    if (placement !== undefined && (!isRecord(placement) || (placement.anchor !== "top" && placement.anchor !== "bottom") || !isNum(placement.marginPct, 0, 40))) errors.push("captions.placement must be {anchor top|bottom, marginPct 0..40}");
+    const cycle = captions.colorCycle;
+    if (cycle !== undefined) {
+      if (!Array.isArray(cycle) || cycle.length < 1 || cycle.length > 4 || cycle.some((c) => typeof c !== "string" || !HEX_RE.test(c))) errors.push("captions.colorCycle must be 1..4 #RRGGBB colours");
+      else if (captions.highlight !== "none") errors.push("captions.colorCycle needs highlight: none");
+    }
   }
 
   const audio = input.audio;

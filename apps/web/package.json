@@ -14,6 +14,7 @@
     "@creatomate/preview": "^1.6.1",
     "@lyonix/contracts": "workspace:^",
     "@lyonix/domain": "workspace:^",
+    "@lyonix/render-recipes": "workspace:^",
     "@vitejs/plugin-react": "^5.0.4",
     "i18next": "^26.4.2",
     "lucide-react": "^1.47.0",

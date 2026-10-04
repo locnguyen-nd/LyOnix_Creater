@@ -1,16 +1,17 @@
-import { Cog, Server, SlidersHorizontal, type LucideIcon } from "lucide-react";
+import { Cog, Film, Server, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button, Field, Select, TextInput } from "../components/ui";
+import { RenderEnginePanel } from "../components/RenderEnginePanel";
 import { ProvidersPage } from "./ProvidersPage";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import { useMe, useSession } from "../session";
 import { updateOrgSettings } from "../studio/store";
 
-type Tab = "general" | "providers" | "operations";
+type Tab = "general" | "providers" | "operations" | "render";
 
 type SystemSettings = {
   channelSyncIntervalMinutes: number;
@@ -24,7 +25,7 @@ export function SettingsPage() {
   const { state, updateState } = useSession();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryTab = searchParams.get("tab");
-  const tab: Tab = queryTab === "providers" || queryTab === "operations" ? queryTab : "general";
+  const tab: Tab = queryTab === "providers" || queryTab === "operations" || (queryTab === "render" && me.role === "admin") ? queryTab : "general";
   const setTab = (next: Tab) => setSearchParams(next === "general" ? {} : { tab: next }, { replace: true });
   const [timezone, setTimezone] = useState(state.orgTimezone);
   const [jobs, setJobs] = useState<ApiJob[]>([]);
@@ -52,6 +53,7 @@ export function SettingsPage() {
     { id: "general", label: t("org.settingsTabGeneral"), icon: Cog },
     { id: "providers", label: t("providers.title"), icon: SlidersHorizontal },
     { id: "operations", label: t("org.settingsTabOps"), icon: Server },
+    ...(me.role === "admin" ? [{ id: "render" as const, label: t("renderEngineAdmin.tab"), icon: Film }] : []),
   ];
 
   return (
@@ -150,6 +152,8 @@ export function SettingsPage() {
       ) : null}
 
       {tab === "providers" ? <ProvidersPage embedded /> : null}
+
+      {tab === "render" ? <RenderEnginePanel /> : null}
 
       {tab === "operations" ? (
         <div className="grid gap-4 md:grid-cols-2">

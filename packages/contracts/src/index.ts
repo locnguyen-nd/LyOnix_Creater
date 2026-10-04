@@ -503,6 +503,8 @@ export type TemplateSnapshotResponse = {
   previewUrl: string | null;
   modifications: TemplateModificationSlotResponse[];
   capturedAt: string;
+  /** VE2E-113: the render account this snapshot belongs to (Studio selects it automatically so the account always matches the pinned template). */
+  providerAccountId?: string;
   /** VE2E-108: engine that renders this template; omitted on pre-VE2E-108 clients = the account's provider. */
   engine?: RenderEngine;
   /** VE2E-108: 0..100 share of eligible jobs routed to the internal engine for this template (internal templates only). */
@@ -580,6 +582,12 @@ export type RenderJobResponse = {
   routeReason?: RenderRouteReason | null;
   /** VE2E-108: for a fallback job, the internal-engine job it replaces. */
   fallbackOfJobId?: string | null;
+  /** VE2E-110: internal-engine output integrity + the profile that produced it; null for provider engines. */
+  outputSha256?: string | null;
+  outputBytes?: number | null;
+  outputProfileVersion?: string | null;
+  /** VE2E-110: summary of the failed QC checks of an internal render (codes only); empty/absent when QC passed or the job is not internal. */
+  qcFailedCodes?: string[];
   externalJobId: string | null;
   progress: number | null;
   clipPreparation: { clipsTotal: number; clipsReady: number; failed: Array<{ sceneId: string; code: string; message: string }> };
@@ -1118,6 +1126,8 @@ export type OrshotCostEstimateResponse = {
 };
 
 export type RenderSubmitFromTimelineRequest = {
+  /** VE2E-113: admin-only engine override ("Tự động chọn" = omitted). Ignored/rejected for staff. */
+  forceEngine?: RenderEngine;
   providerAccountId: string;
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
@@ -1214,3 +1224,37 @@ export type CropPlan = {
   residualOverlayPct: number;
   subjectCoveragePct: number;
 };
+
+/** VE2E-118: admin view of the self-render engine (GET /admin/render-engine). */
+export type RenderEngineMetricsResponse = {
+  windowDays: number;
+  since: string;
+  totalJobs: number;
+  byEngine: Record<RenderEngine, { jobs: number; completed: number; failed: number }>;
+  internal: {
+    jobs: number;
+    completed: number;
+    failed: number;
+    qcFailed: number;
+    qcFailuresByCode: Record<string, number>;
+    renderMs: { samples: number; p50: number | null; p95: number | null };
+  };
+  fallbacks: { total: number; byReason: Record<string, number>; shareOfInternalAttempts: number | null };
+  costByDay: Array<{ date: string; lyonix: number; creatomate: number; orshot: number; total: number }>;
+  budget: { fallbackTodayUsd: number; fallbackMonthUsd: number; dailyCeilingUsd: number; monthlyCeilingUsd: number | null };
+};
+
+export type RenderEngineAdminTemplateResponse = {
+  snapshotId: string;
+  name: string;
+  externalTemplateId: string;
+  rolloutPercent: number;
+  fallbackSnapshotIds: string[];
+  /** Provider snapshots that may be chosen as fallback (empty in the PATCH response). */
+  fallbackCandidates: Array<{ snapshotId: string; name: string; engine: string }>;
+};
+
+export type RenderEngineAdminOverviewResponse = { templates: RenderEngineAdminTemplateResponse[]; metrics: RenderEngineMetricsResponse };
+
+/** PATCH /admin/render-engine/templates/:snapshotId - rollout > 0 needs at least one provider fallback. */
+export type UpdateRenderEngineTemplateRequest = { rolloutPercent?: number; fallbackSnapshotIds?: string[] };

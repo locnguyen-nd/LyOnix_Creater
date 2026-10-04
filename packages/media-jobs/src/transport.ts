@@ -29,6 +29,8 @@ export interface MediaJobChannel {
   ack(message: MediaJobMessage): void;
   nack(message: MediaJobMessage, allUpTo?: boolean, requeue?: boolean): void;
   prefetch(count: number): Promise<unknown>;
+  /** Passive queue inspection (amqplib `checkQueue`): ready messages and attached consumers. Optional so minimal channel doubles keep working. */
+  checkQueue?(queue: string): Promise<{ messageCount: number; consumerCount: number }>;
   on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
   close(): Promise<void>;

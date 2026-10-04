@@ -24,6 +24,14 @@ Luồng: `git push dev` → GitHub Actions build image (amd64+arm64) → GHCR `:
 - Rollback: đặt `IMAGE_TAG=sha-<commit>` trong `.env` rồi `docker compose up -d` (Watchtower sẽ không đè tag cố định).
 - Log: `docker compose logs -f api media-worker`.
 
+## Engine tự render (media-worker)
+
+- Image `media-worker` có FFmpeg và phông Noto Sans CJK; render nội bộ chạy ở queue `lyonix.render` (biến `MEDIA_WORKER_RENDER_*`, `RENDER_*` trong `.env`, xem `.env.example`). Chi tiết: [`docs/self-render-engine.md`](../../docs/self-render-engine.md).
+- Video ra nằm ở volume `app-data` (`working/renders/`), tự xoá sau 7 ngày; API phát lại qua `/render-jobs/:id/file`.
+- Mặc định **không job nào** dùng engine nội bộ (`rolloutPercent = 0`): bật theo mẫu ở Settings → *Render nội bộ* (admin) sau khi đã gắn mẫu provider dự phòng.
+- Một render 1080p60 dùng hết các lõi CPU: giữ `MEDIA_WORKER_RENDER_PREFETCH=1` trên máy PC; máy yếu thì đổi `RENDER_X264_PRESET` sang `veryfast`.
+- Trần chi phí dự phòng sang provider: `RENDER_FALLBACK_DAILY_USD` (mặc định 50 USD/ngày).
+
 ## Chuyển sang VPS
 
 Copy `docker-compose.yml` + `.env` (+ `Caddyfile`). Không mở được cổng thì giữ `COMPOSE_PROFILES=tunnel`; có IP/domain công khai thì đặt `COMPOSE_PROFILES=caddy`.

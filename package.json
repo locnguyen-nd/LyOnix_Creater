@@ -15,6 +15,8 @@
     "dev": "corepack pnpm --parallel --filter @lyonix/api --filter @lyonix/web --filter @lyonix/worker dev",
     "lint": "corepack pnpm -r lint",
     "test": "corepack pnpm -r test",
-    "typecheck": "corepack pnpm -r typecheck"
+    "typecheck": "corepack pnpm -r typecheck",
+    "render:parity": "corepack pnpm --filter @lyonix/media-worker exec tsx scripts/render-parity.ts",
+    "template:lint": "corepack pnpm --filter @lyonix/providers exec tsx scripts/template-lint.ts"
   }
 }

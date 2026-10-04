@@ -130,6 +130,24 @@ export class MediaJobClient {
     return client;
   }
 
+  /**
+   * VE2E-110: state of the render queue as the Render Router sees it: `consumers` = render workers attached (0 => the internal engine is not
+   * running), `queued` = renders waiting for one. `null` when the channel cannot inspect queues. Declares the queue first (idempotent) so
+   * inspecting a never-used queue does not close the channel.
+   */
+  async renderQueueStatus(): Promise<{ consumers: number; queued: number } | null> {
+    if (!this.channel.checkQueue) return null;
+    try {
+      this.renderQueueReady ??= assertMediaJobQueue(this.channel, this.renderQueue);
+      await this.renderQueueReady;
+      const state = await this.channel.checkQueue(this.renderQueue);
+      return { consumers: state.consumerCount, queued: state.messageCount };
+    } catch {
+      this.renderQueueReady = null;
+      return null;
+    }
+  }
+
   /** Number of jobs currently awaiting a result (diagnostics/tests). */
   get inFlight(): number {
     return this.pending.size;

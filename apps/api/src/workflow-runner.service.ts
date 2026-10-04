@@ -693,7 +693,8 @@ export class WorkflowRunnerService {
           sourceDurationMs: planByScene.get(scene.sceneId)?.sourceDurationMs ?? null,
         })),
         segments: mediaPlan.segments,
-        optionValues: buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
+        // Internal (`lyonix`) recipes have no positional text slots: the script title is the telop headline.
+        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
       });
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
       return outcome.data;

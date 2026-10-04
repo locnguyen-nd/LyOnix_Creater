@@ -9,9 +9,12 @@
  * Creatomate never sees a filesystem path.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
+import { mediaRoot } from "./handoff-workspace.js";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
-import { canAccessProject, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
+import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
 import {
   ProviderError,
   applyDynamicStyleOverrides,
@@ -43,6 +46,7 @@ import type {
   TemplateModificationSlotResponse,
   TimelineSceneBindingResponse,
 } from "@lyonix/contracts";
+import { InternalRenderService } from "./internal-render.service.js";
 import { ClipDerivativesService, type ClipDerivativeRequest } from "./clip-derivatives.service.js";
 import { CreatomateTemplatesService, type RenderProviderName } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
@@ -108,6 +112,12 @@ const outputResolutionData = (r: { renderScale?: number | null; width?: number |
   ...(r.height != null ? { outputHeight: Math.round(r.height) } : {}),
 });
 
+/** Codes of the QC checks that failed in a stored report (empty when passed / not an internal render). */
+const failedQcCodes = (report: unknown): string[] => {
+  const checks = report && typeof report === "object" ? (report as { checks?: unknown }).checks : null;
+  return Array.isArray(checks) ? checks.filter((c): c is { code: string; ok: boolean } => Boolean(c) && typeof c === "object" && (c as { ok?: unknown }).ok === false && typeof (c as { code?: unknown }).code === "string").map((c) => c.code) : [];
+};
+
 const toJobResponse = (row: {
   id: string; projectId: string; templateSnapshotId: string; status: string; externalJobId: string | null; progress: number | null;
   clipsTotal?: number; clipsReady?: number; clipFailures?: unknown;
@@ -115,7 +125,10 @@ const toJobResponse = (row: {
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
   outputRenderScale?: number | null; outputWidth?: number | null; outputHeight?: number | null; canvasWidth?: number | null; canvasHeight?: number | null;
   engine?: string; routeReason?: string | null; fallbackOfJobId?: string | null;
+  outputSha256?: string | null; outputBytes?: number | null; outputProfileVersion?: string | null; qcReport?: unknown;
 }): RenderJobResponse => ({
+  ...(row.outputSha256 ? { outputSha256: row.outputSha256, outputBytes: row.outputBytes ?? null, outputProfileVersion: row.outputProfileVersion ?? null } : {}),
+  ...(failedQcCodes(row.qcReport).length ? { qcFailedCodes: failedQcCodes(row.qcReport) } : {}),
   ...(row.engine ? { engine: row.engine as RenderEngine, routeReason: (row.routeReason ?? null) as RenderRouteReason | null, fallbackOfJobId: row.fallbackOfJobId ?? null } : {}),
   outputRenderScale: row.outputRenderScale ?? null,
   outputWidth: row.outputWidth ?? null,
@@ -142,6 +155,9 @@ const toJobResponse = (row: {
   updatedAt: row.updatedAt.toISOString(),
 });
 
+/** Why a provider-owned template renders on its provider (Router rule 2, VE2E-109); recorded so the Jobs UI can show it. */
+const providerRouteReason = (provider: RenderProviderName | undefined): RenderRouteReason => (provider === "orshot" ? "orshot_template" : "template_requires_provider");
+
 @Injectable()
 export class RenderJobsService {
   constructor(
@@ -152,6 +168,8 @@ export class RenderJobsService {
     // VE2E-37: optional only so pre-VE2E-37 unit tests can construct the service with 4 args; both
     // Nest modules register it. Without it, a timeline with source ranges fails (never full-source fallback).
     @Inject(ClipDerivativesService) private readonly clipDerivatives?: ClipDerivativesService,
+    // VE2E-110: the internal (`lyonix`) render engine. Optional so provider-only unit tests keep constructing the service unchanged.
+    @Optional() @Inject(InternalRenderService) private readonly internal?: InternalRenderService,
   ) {}
 
   /** VE2E-47: pinned slots with `ttsProvider` backfilled from `rawTemplate` for snapshots pinned before this field existed. */
@@ -362,6 +380,8 @@ export class RenderJobsService {
           requestFingerprint: params.fingerprint,
           webhookToken: randomBytes(24).toString("base64url"),
           status: "accepted",
+          engine: params.provider ?? "creatomate",
+          routeReason: providerRouteReason(params.provider),
           modificationsPayload: params.payload as unknown as Prisma.InputJsonValue,
           createdByUserId: params.userId,
           ...(params.workflowRunId ? { workflowRunId: params.workflowRunId } : {}),
@@ -556,7 +576,7 @@ export class RenderJobsService {
     userId: string,
     role: "admin" | "staff",
     outputFormat?: "mp4" | "mov" | "gif",
-    options: { prepareClipDerivatives?: boolean; preparationJobId?: string } = {},
+    options: { prepareClipDerivatives?: boolean; preparationJobId?: string; snapshotIdOverride?: string } = {},
   ): Promise<
     RenderOutcome<{
       templateSnapshotId: string;
@@ -571,7 +591,9 @@ export class RenderJobsService {
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template (dùng để lấy style hiển thị)" };
-    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
+    // VE2E-110: a Router fallback renders a timeline pinned to an internal template with the provider snapshot linked to it.
+    const styleSnapshotId = options.snapshotIdOverride ?? timeline.templateSnapshotId;
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: styleSnapshotId } });
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
 
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
@@ -666,7 +688,7 @@ export class RenderJobsService {
     const resolution = templateResolution(snapshot.rawTemplate) ?? { width: DYNAMIC_RENDER_WIDTH, height: DYNAMIC_RENDER_HEIGHT };
     const composed = buildDynamicCompositionWithWarnings(dynamicScenes, style, { width: resolution.width, height: resolution.height, ...(outputFormat ? { outputFormat } : {}) });
     const layout = { mode: style.layout ? ("template_scaled" as const) : ("style_only" as const), templateSceneSlots: style.layout?.scenes.length ?? 0, warnings: composed.warnings as string[] };
-    return { ok: true, data: { templateSnapshotId: timeline.templateSnapshotId, source: applyCreatomateFrameRateCap(composed.source as Record<string, unknown>) as typeof composed.source, style, renderable, totalSceneCount: scenes.length, layout } };
+    return { ok: true, data: { templateSnapshotId: styleSnapshotId, source: applyCreatomateFrameRateCap(composed.source as Record<string, unknown>) as typeof composed.source, style, renderable, totalSceneCount: scenes.length, layout } };
   }
 
   /**
@@ -693,7 +715,10 @@ export class RenderJobsService {
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
 
-    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}) });
+    // A converted/fallback job carries its own snapshot (the provider template linked to the internal one the timeline is pinned to).
+    const queuedRow = queuedJobId ? await this.prisma.renderJob.findUnique({ where: { id: queuedJobId }, select: { templateSnapshotId: true } }) : null;
+    const snapshotIdOverride = queuedRow && queuedRow.templateSnapshotId !== timeline.templateSnapshotId ? queuedRow.templateSnapshotId : undefined;
+    const resolvedComposition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat, { prepareClipDerivatives: true, ...(queuedJobId ? { preparationJobId: queuedJobId } : {}), ...(snapshotIdOverride ? { snapshotIdOverride } : {}) });
     if (!resolvedComposition.ok) return resolvedComposition;
     const { templateSnapshotId, source, style, renderable } = resolvedComposition.data;
     const { layout: templateLayout, ...styleWithoutLayout } = style;
@@ -728,7 +753,11 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId, canvas: readCreatomateCanvas(source) },
+      {
+        projectId, templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: source, queuedJobId, canvas: readCreatomateCanvas(source),
+        // Estimated from the pricing formula (w x h x fps x s / 1e8 credits) - recorded at submit like Orshot's estimate; the provider's own bill is the truth.
+        cost: { amount: String(estimateProviderCostUsd("creatomate", { durationSec: renderable.reduce((sum, scene) => sum + (scene.audioDurationMs ?? 0), 0) / 1000, width: readCreatomateCanvas(source)?.width ?? 1080, height: readCreatomateCanvas(source)?.height ?? 1920, fps: Number((source as { frame_rate?: unknown }).frame_rate) || 30 })), currency: "USD" },
+      },
       (webhookUrl) => submitCreatomateSourceRender(decryptSecret(account.data.encryptedSecret), { source, webhookUrl }),
     );
   }
@@ -779,6 +808,14 @@ export class RenderJobsService {
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
     if (timeline.status !== "approved") return { ok: false, code: "INVALID_STATE", message: "Timeline chưa được duyệt", status: 409 };
     if (!timeline.templateSnapshotId) return { ok: false, code: "VALIDATION_FAILED", message: "Timeline chưa chọn template" };
+    if (input.forceEngine && role !== "admin") return { ok: false, code: "FORBIDDEN", message: "Chỉ admin được ép engine render", status: 403 };
+    // VE2E-110: the internal engine's system account takes its own path (Router -> media-worker); provider accounts below are unchanged.
+    const internalAccount = await this.prisma.providerAccount.findFirst({ where: { id: input.providerAccountId, deletedAt: null }, select: { provider: true } });
+    if (internalAccount?.provider === "lyonix") {
+      if (!this.internal) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Engine render nội bộ chưa được bật trên server này", status: 503 };
+      return this.internal.enqueue({ projectId, timelineVersionId, userId, role, input, ...(workflowRunId ? { workflowRunId } : {}) });
+    }
+    if (input.forceEngine === "lyonix") return { ok: false, code: "VALIDATION_FAILED", message: "Mẫu của provider không có bản render nội bộ tương đương" };
     const account = await this.templates.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
     if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
@@ -839,6 +876,7 @@ export class RenderJobsService {
       const row = await this.prisma.renderJob.create({ data: {
         projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId,
         requestFingerprint: fingerprint, webhookToken: randomBytes(24).toString("base64url"), status: "preparing_clips",
+        engine: account.data.provider, routeReason: providerRouteReason(account.data.provider),
         modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), ...(orshotPayload ? { orshot: orshotPayload } : {}) },
         createdByUserId: userId, clipsTotal, clipsReady: 0,
         ...(workflowRunId ? { workflowRunId } : {}),
@@ -863,10 +901,18 @@ export class RenderJobsService {
       await this.prisma.renderJob.updateMany({ where: { id: uncertain.id, status: "accepted", externalJobId: null }, data: { status: "failed", lastError: { code: "PROVIDER_SUBMIT_UNKNOWN", message: "Không xác định được kết quả gửi Creatomate sau khi worker khởi động lại", retryable: false } } });
       return true;
     }
+    // VE2E-110: an internal render whose API process died is put back in the queue (compose is idempotent by jobKey).
+    if (this.internal && (await this.internal.recoverStale(now))) return true;
     const candidate = await this.prisma.renderJob.findFirst({ where: { status: "preparing_clips", OR: [{ preparationLeaseUntil: null }, { preparationLeaseUntil: { lt: now } }] }, orderBy: { createdAt: "asc" } });
     if (!candidate) return false;
     const claimed = await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips", preparationLeaseUntil: candidate.preparationLeaseUntil }, data: { preparationLeaseUntil: new Date(Date.now() + 10 * 60_000), clipsReady: 0, clipFailures: [] } });
     if (claimed.count !== 1) return true;
+    if (candidate.engine === "lyonix") {
+      // Internal engine: the Router decides (internal render, or convert this row to a provider job). Returns once the compose is launched.
+      if (!this.internal) await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: "PROVIDER_NOT_CONFIGURED", message: "Engine render nội bộ chưa được bật trên server này", retryable: false } } });
+      else await this.internal.processJob(candidate);
+      return true;
+    }
     const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null; allowTemplateTts?: boolean; orshot?: OrshotRenderOptions };
     try {
       const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}), ...(payload.allowTemplateTts ? { allowTemplateTts: true } : {}), ...(payload.orshot ? { orshot: payload.orshot } : {}) };
@@ -890,6 +936,22 @@ export class RenderJobsService {
       await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips" }, data: { status: "failed", preparationLeaseUntil: null, lastError: { code: "MEDIA_PREPARE_FAILED", message, retryable: true }, clipFailures: [{ sceneId: "", code: "MEDIA_PREPARE_FAILED", message }] } });
     }
     return true;
+  }
+
+  /**
+   * VE2E-110: resolves the stored output (video or cover) of a completed INTERNAL render for streaming. Access = project access; the file is
+   * under `working/renders` (7-day TTL), so an expired/swept file is a 404 with a clear message, never a broken link served from elsewhere.
+   */
+  async resolveInternalOutput(id: string, userId: string, role: "admin" | "staff", kind: "video" | "thumbnail"): Promise<RenderOutcome<{ absolutePath: string; mimeType: string; bytes: number; fileName: string }>> {
+    const row = await this.prisma.renderJob.findUnique({ where: { id } });
+    if (!row || !(await this.assertProjectAccess(row.projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy render job", status: 404 };
+    const relativePath = kind === "video" ? row.outputRelativePath : row.thumbnailRelativePath;
+    if (row.engine !== "lyonix" || row.status !== "completed" || !relativePath) return { ok: false, code: "NOT_FOUND", message: "Render này chưa có file thành phẩm", status: 404 };
+    if (!isSafeRelativePath(relativePath) || !relativePath.startsWith("working/renders/")) return { ok: false, code: "NOT_FOUND", message: "Đường dẫn thành phẩm không hợp lệ", status: 404 };
+    const absolutePath = join(mediaRoot(), relativePath);
+    const info = await stat(absolutePath).catch(() => null);
+    if (!info?.isFile()) return { ok: false, code: "NOT_FOUND", message: "File thành phẩm đã hết hạn (lưu 7 ngày) hoặc bị xóa", status: 404 };
+    return { ok: true, data: { absolutePath, mimeType: kind === "video" ? "video/mp4" : "image/jpeg", bytes: info.size, fileName: `lyonix-${id}.${kind === "video" ? "mp4" : "jpg"}` } };
   }
 
   async get(id: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<RenderJobResponse>> {

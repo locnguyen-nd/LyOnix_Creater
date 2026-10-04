@@ -20,6 +20,7 @@ import type {
   OrshotRenderOptions,
   PexelsMediaType,
   PexelsSearchResponse,
+  RenderEngine,
   RenderJobResponse,
   SaveTimelineVersionRequest,
   StudioContextResponse,
@@ -138,7 +139,7 @@ export async function getTemplateSnapshot(id: string): Promise<TemplateSnapshotR
 export async function submitRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string; orshot?: OrshotRenderOptions },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string; orshot?: OrshotRenderOptions; forceEngine?: RenderEngine },
 ): Promise<RenderJobResponse> {
   // The server deduplicates identical requests; a caller can supply a fresh key for an
   // intentional retry after a failed job.
@@ -153,7 +154,7 @@ export async function submitRenderFromTimeline(
 export async function submitDynamicRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string; forceEngine?: RenderEngine },
 ): Promise<RenderJobResponse> {
   return api<RenderJobResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/dynamic-render-jobs`, {
     method: "POST",

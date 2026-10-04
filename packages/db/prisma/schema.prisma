@@ -748,6 +748,15 @@ model RenderJob {
   clipFailures         Json?
   preparationLeaseUntil DateTime?
   resultUrl            String?
+  // VE2E-110: internal (`lyonix`) engine output, relative to MEDIA_ROOT (`working/renders/...`, 7-day TTL): the API streams it at `/render-jobs/:id/file`.
+  outputRelativePath   String?
+  outputSha256         String?
+  outputBytes          Int?
+  // `compose.v1`: version of the FFmpeg/QC profile that produced the file (bytes-affecting changes bump it).
+  outputProfileVersion String?
+  thumbnailRelativePath String?
+  // Full QC report (checks + measurements) of the internal engine; kept for failed renders too, so a rejection is explainable without the video.
+  qcReport             Json?
   // VE2E-19: Creatomate's own render-frame preview image (`snapshot_url`), captured whenever the
   // provider reports one (webhook/reconcile), for the per-channel finished-video library thumbnail.
   snapshotUrl          String?

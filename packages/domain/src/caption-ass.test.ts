@@ -213,4 +213,17 @@ describe("caption-ass (VE2E-103)", () => {
     expect(cues[0]!.startMs).toBeCloseTo(snapToFrameMs(500 + 100, 60), 5);
     expect(cues[1]!.startMs).toBeGreaterThanOrEqual(3500 - 20);
   });
+
+  it("anchors captions at the top (Alignment 8, MarginV from the percent) or the bottom (Alignment 2) and paints per-cue colours (VE2E-115)", () => {
+    const cue = { text: "今日は天気がいいですね。", startMs: 0, endMs: 2000 };
+    const top = buildCaptionAss([cue], { verticalAnchor: "top", marginVPercent: 12, highlight: "none" }).ass;
+    const style = /Style: Sub,.*/.exec(top)![0].split(",");
+    expect(style[18]).toBe("8");
+    expect(Number(style[21])).toBe(Math.round(1920 * 0.12));
+    const bottom = buildCaptionAss([cue], { highlight: "none" }).ass;
+    expect(/Style: Sub,.*/.exec(bottom)![0].split(",")[18]).toBe("2");
+    const coloured = buildCaptionAss([{ ...cue, color: "#FFE600" }], { highlight: "none" }).ass;
+    expect(coloured).toContain("{\\1c&H00E6FF&}");
+    expect(buildCaptionAss([cue], { highlight: "none" }).ass).not.toContain("\\1c&H");
+  });
 });
