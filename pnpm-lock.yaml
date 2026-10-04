@@ -114,6 +114,9 @@ importers:
       '@lyonix/domain':
         specifier: workspace:^
         version: link:../../packages/domain
+      '@lyonix/render-recipes':
+        specifier: workspace:^
+        version: link:../../packages/render-recipes
       '@vitejs/plugin-react':
         specifier: ^5.0.4
         version: 5.2.0(vite@7.3.6(@types/node@24.13.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.13))

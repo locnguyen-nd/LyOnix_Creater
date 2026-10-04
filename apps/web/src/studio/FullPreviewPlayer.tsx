@@ -12,6 +12,7 @@ import {
   videoSourceTimeSec,
   type FullPreviewSceneInput,
 } from "./full-preview";
+import { buildPreviewPlan, pageAt } from "./full-preview-plan";
 
 type Props = {
   /** Ordered timeline scenes (excluded ones are skipped by the sequencer). */
@@ -33,6 +34,8 @@ export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClo
   const { t } = useTranslation();
   const sequence = useMemo(() => buildFullPreviewSequence(scenes), [scenes]);
   const readiness = useMemo(() => summarizeReadiness(sequence), [sequence]);
+  // VE2E-114: the render engine's own plan + caption layout, so the preview wraps captions where the render will.
+  const previewPlan = useMemo(() => buildPreviewPlan(sequence.segments), [sequence]);
   const total = sequence.totalDurationMs;
 
   const [globalMs, setGlobalMs] = useState(() => {
@@ -163,13 +166,19 @@ export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClo
         <p className="border-b border-lyx-border bg-lyx-muted px-4 py-1.5 text-[11px] text-lyx-warn" data-testid="full-preview-approx">
           {t("studioPro.fullPreviewApprox")}
         </p>
+        {previewPlan.expectedRenderDurationMs !== null ? (
+          <p className="border-b border-lyx-border px-4 py-1.5 text-[11px] text-lyx-fg-muted" data-testid="full-preview-render-duration">
+            {t("studioPro.fullPreviewRenderDuration", { duration: formatClock(previewPlan.expectedRenderDurationMs), fps: previewPlan.renderPlan?.fps ?? 60 })}
+            {previewPlan.skippedSceneIds.length > 0 ? ` ${t("studioPro.fullPreviewRenderSkipped", { count: previewPlan.skippedSceneIds.length })}` : ""}
+          </p>
+        ) : null}
 
         {sequence.segments.length === 0 ? (
           <p className="px-4 py-10 text-center text-[12px] text-lyx-fg-muted">{t("studioPro.fullPreviewEmpty")}</p>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 md:flex-row">
             <div className="flex shrink-0 flex-col items-center gap-2 md:w-[300px]">
-              <div className="relative w-[240px] overflow-hidden rounded-[12px] bg-[#161616]" style={{ aspectRatio: "1080 / 1920" }}>
+              <div className="relative w-[240px] overflow-hidden rounded-[12px] bg-[#161616]" style={{ aspectRatio: "1080 / 1920", containerType: "inline-size" }}>
                 {current?.mediaKind === "video" && current.mediaUrl ? (
                   <video
                     key={`v-${current.sceneId}`}
@@ -196,11 +205,21 @@ export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClo
                 {next?.mediaKind === "video" && next.mediaUrl ? <video key={`nv-${next.sceneId}`} src={next.mediaUrl} muted preload="auto" className="hidden" /> : null}
                 {next?.mediaKind === "image" && next.mediaUrl ? <img key={`ni-${next.sceneId}`} src={next.mediaUrl} alt="" className="hidden" /> : null}
                 {next?.audioUrl ? <audio key={`na-${next.sceneId}`} src={next.audioUrl} preload="auto" className="hidden" /> : null}
-                {current?.caption ? (
-                  <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-3 pb-4 pt-10 text-center text-[12px] font-bold text-white" data-testid="full-preview-caption">
-                    {current.caption}
-                  </p>
-                ) : null}
+                {current ? (() => {
+                  const page = pageAt(previewPlan.captionPages.get(current.sceneId) ?? [], located?.offsetMs ?? 0);
+                  return page ? (
+                    <p
+                      className="absolute inset-x-0 text-center font-bold text-white"
+                      style={{ bottom: "20%", paddingInline: "12%", fontSize: `${(page.fontSizePx / 1080) * 100}cqw`, lineHeight: 1.25, textShadow: "0 0 4px #000, 0 0 2px #000" }}
+                      data-testid="full-preview-caption"
+                      data-font-px={page.fontSizePx}
+                    >
+                      {page.lines.map((line, index) => (
+                        <span key={index} className="block">{line}</span>
+                      ))}
+                    </p>
+                  ) : null;
+                })() : null}
                 {current && (current.missingMedia || current.missingVoice) ? (
                   <div className="absolute left-1.5 top-1.5 flex flex-col gap-1">
                     {current.missingMedia ? <span className="rounded bg-lyx-warn px-1.5 py-0.5 text-[9px] font-semibold text-white">{t("studioPro.fullPreviewFlagMedia")}</span> : null}
