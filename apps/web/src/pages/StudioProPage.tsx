@@ -82,6 +82,8 @@ import {
   submitRenderFromTimeline,
 } from "../studio/timeline-api";
 import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
+import { useMe } from "../session";
+import { canForceEngine, FORCE_ENGINE_CHOICES, forceEngineValue, type ForceEngineChoice } from "../studio/render-engine";
 import { OrshotStudioPanel } from "../studio/OrshotStudioPanel";
 import { DEFAULT_ORSHOT_OPTIONS, compactOrshotOptions } from "../studio/orshot-embed";
 import { UndoStack } from "../studio/undo-stack";
@@ -257,7 +259,10 @@ export function StudioProPage() {
   const [voiceApplyBusy, setVoiceApplyBusy] = useState<{ done: number; total: number } | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  const me = useMe();
   const [renderAccountId, setRenderAccountId] = useState("");
+  // VE2E-113: admin-only override of the Render Router; "auto" = the Router decides (no forceEngine is sent).
+  const [forceEngine, setForceEngine] = useState<ForceEngineChoice>("auto");
   const [renderJob, setRenderJob] = useState<RenderJobResponse | null>(null);
   const [renderSubmitting, setRenderSubmitting] = useState(false);
   const [showReview, setShowReview] = useState(false);
@@ -394,6 +399,11 @@ export function StudioProPage() {
   // Resets the inline player's error state whenever a different render job is shown - an
   // earlier failed playback attempt must not stick around and mask a newer, valid resultUrl.
   useEffect(() => { setRenderPlaybackError(false); }, [renderJob?.id]);
+  // VE2E-113: the render account must be the pinned template's own account (the API rejects a mismatch), so it follows the template.
+  useEffect(() => {
+    const accountId = template?.providerAccountId;
+    if (accountId && usableAccounts(providers, "render").some((account) => account.id === accountId)) setRenderAccountId(accountId);
+  }, [template?.providerAccountId, providers]);
 
   useEffect(() => {
     if (!renderJob || renderJob.status === "completed" || renderJob.status === "failed" || renderJob.status === "cancelled") {
@@ -969,7 +979,8 @@ export function StudioProPage() {
       // Orshot cannot take the dynamic N-scene composition: it renders the pinned template's fixed slots.
       const templateOnly = isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider);
       // Only a deliberate submit after a failed job creates a new attempt.
-      const common = { providerAccountId: renderAccountId, ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}) };
+      const forced = canForceEngine(me?.role) ? forceEngineValue(forceEngine) : undefined;
+      const common = { providerAccountId: renderAccountId, ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}), ...(forced ? { forceEngine: forced } : {}) };
       const job = templateOnly
         ? await submitRenderFromTimeline(context.projectId, baseVersionId, { ...common, orshot: compactOrshotOptions(orshotOptions) })
         : await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, common);
@@ -1165,6 +1176,13 @@ export function StudioProPage() {
             <Button variant="secondary" onClick={() => setShowReview((prev) => !prev)}>
               {t("studioPro.reviewBeforeRender")}
             </Button>
+            {canForceEngine(me?.role) ? (
+              <Select className="h-9" aria-label={t("renderEngine.forceLabel")} title={t("renderEngine.forceHint")} value={forceEngine} onChange={(event) => setForceEngine(event.target.value as ForceEngineChoice)} data-testid="force-engine">
+                {FORCE_ENGINE_CHOICES.map((choice) => (
+                  <option key={choice} value={choice}>{choice === "auto" ? t("renderEngine.forceAuto") : t(`renderEngine.name.${choice}`)}</option>
+                ))}
+              </Select>
+            ) : null}
             <Select className="h-9" value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0} title={isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? t("studioPro.orshotTemplateOnlyHint") : undefined}>
               {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate / Orshot" })}</option> : null}
               {renderAccounts.map((account) => (

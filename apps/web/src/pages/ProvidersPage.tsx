@@ -6,6 +6,7 @@ import { Button, Field, PasswordInput, Select, TextInput } from "../components/u
 import { useMe } from "../session";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
+import { isInternalRenderProvider } from "../studio/render-provider";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
 type AddableKind = "openai" | "gemini" | "xai" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate" | "orshot";
@@ -203,11 +204,15 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                       {row.role === "content" ? <div className="mt-2 space-y-1 text-[11px] text-lyx-fg-muted">{modelOptionsFor(row).map((item) => <p key={item}>{item}: {modelStatusLabel(row, item)}</p>)}</div> : null}
                     </div>
                   ) : null}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button variant="secondary" onClick={() => void verifyRow(row)}>{t("providers.verify")}</Button>
-                    <Button variant="secondary" onClick={() => beginEdit(row)}>{t("providers.edit")}</Button>
-                    <Button variant="danger" onClick={() => void remove(row)}>{t("providers.delete")}</Button>
-                  </div>
+                  {isInternalRenderProvider(row.provider) ? (
+                    <p className="mt-3 text-[12px] text-lyx-fg-muted" data-testid="system-account-note">{t("renderEngine.systemAccountNote")}</p>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button variant="secondary" onClick={() => void verifyRow(row)}>{t("providers.verify")}</Button>
+                      <Button variant="secondary" onClick={() => beginEdit(row)}>{t("providers.edit")}</Button>
+                      <Button variant="danger" onClick={() => void remove(row)}>{t("providers.delete")}</Button>
+                    </div>
+                  )}
                 </article>
               ))}
             </div>

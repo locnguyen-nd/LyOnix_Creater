@@ -163,7 +163,7 @@ describe("internal templates behind the existing template endpoints", () => {
     snapshots.push({ id: "snap-int", providerAccountId: "lyonix-acct", externalTemplateId: recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), name: "n", previewUrl: null, modifications: [{ key: "headline", kind: "text", label: "h", required: false }], rawTemplate: {}, capturedAt: new Date("2026-10-01"), engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: ["cm-1"] });
     prisma.templateSnapshot.findFirst = async ({ where }: any) => snapshots.find((s) => s.providerAccountId === where.providerAccountId && s.externalTemplateId === where.externalTemplateId) ?? null;
     const ok = await service.snapshot("lyonix-acct", recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), "user-1");
-    expect(ok).toMatchObject({ ok: true, data: { id: "snap-int", engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: ["cm-1"] } });
+    expect(ok).toMatchObject({ ok: true, data: { id: "snap-int", providerAccountId: "lyonix-acct", engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: ["cm-1"] } });
     expect(await service.snapshot("lyonix-acct", "recipe:nope@1", "user-1")).toMatchObject({ ok: false, code: "NOT_FOUND" });
   });
 });

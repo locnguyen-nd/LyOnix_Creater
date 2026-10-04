@@ -503,6 +503,8 @@ export type TemplateSnapshotResponse = {
   previewUrl: string | null;
   modifications: TemplateModificationSlotResponse[];
   capturedAt: string;
+  /** VE2E-113: the render account this snapshot belongs to (Studio selects it automatically so the account always matches the pinned template). */
+  providerAccountId?: string;
   /** VE2E-108: engine that renders this template; omitted on pre-VE2E-108 clients = the account's provider. */
   engine?: RenderEngine;
   /** VE2E-108: 0..100 share of eligible jobs routed to the internal engine for this template (internal templates only). */

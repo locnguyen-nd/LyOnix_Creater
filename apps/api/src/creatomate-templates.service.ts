@@ -54,7 +54,7 @@ const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kin
 
 const toSnapshotResponse = (row: {
   id: string; externalTemplateId: string; name: string; previewUrl: string | null; modifications: unknown; capturedAt: Date; rawTemplate?: unknown;
-  engine?: string; rolloutPercent?: number; fallbackSnapshotIds?: unknown;
+  engine?: string; rolloutPercent?: number; fallbackSnapshotIds?: unknown; providerAccountId?: string;
 }): TemplateSnapshotResponse => {
   const slots = Array.isArray(row.modifications) ? (row.modifications as TemplateSnapshotResponse["modifications"]) : [];
   const warnings = templateTtsWarnings(row.rawTemplate);
@@ -65,6 +65,7 @@ const toSnapshotResponse = (row: {
   previewUrl: row.previewUrl,
   modifications: slotsWithTtsProvider(slots, row.rawTemplate),
   capturedAt: row.capturedAt.toISOString(),
+  ...(row.providerAccountId ? { providerAccountId: row.providerAccountId } : {}),
   ...(row.engine ? { engine: row.engine as RenderEngine, rolloutPercent: row.rolloutPercent ?? 0, fallbackSnapshotIds: Array.isArray(row.fallbackSnapshotIds) ? row.fallbackSnapshotIds.filter((id): id is string => typeof id === "string") : [] } : {}),
   ...(warnings.length > 0 ? { warnings } : {}),
   };
