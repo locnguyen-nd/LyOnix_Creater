@@ -19,7 +19,7 @@ import {
   listOrshotTemplates,
   type TemplateModificationSlot,
 } from "@lyonix/providers";
-import type { CreatomateTemplateSummaryResponse, ErrorCode, TemplateSnapshotResponse } from "@lyonix/contracts";
+import type { CreatomateTemplateSummaryResponse, ErrorCode, RenderEngine, TemplateSnapshotResponse } from "@lyonix/contracts";
 import { slotsWithTtsProvider, templateTtsWarnings } from "./template-tts.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -52,6 +52,7 @@ const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kin
 
 const toSnapshotResponse = (row: {
   id: string; externalTemplateId: string; name: string; previewUrl: string | null; modifications: unknown; capturedAt: Date; rawTemplate?: unknown;
+  engine?: string; rolloutPercent?: number; fallbackSnapshotIds?: unknown;
 }): TemplateSnapshotResponse => {
   const slots = Array.isArray(row.modifications) ? (row.modifications as TemplateSnapshotResponse["modifications"]) : [];
   const warnings = templateTtsWarnings(row.rawTemplate);
@@ -62,6 +63,7 @@ const toSnapshotResponse = (row: {
   previewUrl: row.previewUrl,
   modifications: slotsWithTtsProvider(slots, row.rawTemplate),
   capturedAt: row.capturedAt.toISOString(),
+  ...(row.engine ? { engine: row.engine as RenderEngine, rolloutPercent: row.rolloutPercent ?? 0, fallbackSnapshotIds: Array.isArray(row.fallbackSnapshotIds) ? row.fallbackSnapshotIds.filter((id): id is string => typeof id === "string") : [] } : {}),
   ...(warnings.length > 0 ? { warnings } : {}),
   };
 };

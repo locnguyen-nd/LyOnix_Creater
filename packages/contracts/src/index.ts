@@ -478,6 +478,24 @@ export type CreatomateTemplateSummaryResponse = {
   tags: string[];
 };
 
+/** VE2E-108: render engines. `lyonix` = internal FFmpeg engine in apps/media-worker; the others are paid providers. */
+export const renderEngines = ["lyonix", "creatomate", "orshot"] as const;
+export type RenderEngine = (typeof renderEngines)[number];
+
+/** VE2E-108: why the Render Router picked an engine for a job (stored on `RenderJob.routeReason`). */
+export const renderRouteReasons = [
+  "forced",
+  "template_requires_provider",
+  "orshot_template",
+  "canary_holdout",
+  "overflow",
+  "local_unhealthy",
+  "default",
+  "fallback_after_error",
+  "budget_exhausted",
+] as const;
+export type RenderRouteReason = (typeof renderRouteReasons)[number];
+
 export type TemplateSnapshotResponse = {
   id: string;
   externalTemplateId: string;
@@ -485,6 +503,12 @@ export type TemplateSnapshotResponse = {
   previewUrl: string | null;
   modifications: TemplateModificationSlotResponse[];
   capturedAt: string;
+  /** VE2E-108: engine that renders this template; omitted on pre-VE2E-108 clients = the account's provider. */
+  engine?: RenderEngine;
+  /** VE2E-108: 0..100 share of eligible jobs routed to the internal engine for this template (internal templates only). */
+  rolloutPercent?: number;
+  /** VE2E-108: snapshots the Router may fall back to when this internal template fails. */
+  fallbackSnapshotIds?: string[];
   /** VE2E-47: non-blocking template problems (currently: audio elements with a Creatomate TTS provider). Omitted/empty when clean. */
   warnings?: TemplateSnapshotWarning[];
 };
@@ -551,6 +575,11 @@ export type RenderJobResponse = {
   projectId: string;
   templateSnapshotId: string;
   status: RenderJobStatus;
+  /** VE2E-108: engine that renders this job and why the Router chose it; absent on responses built before VE2E-108. */
+  engine?: RenderEngine;
+  routeReason?: RenderRouteReason | null;
+  /** VE2E-108: for a fallback job, the internal-engine job it replaces. */
+  fallbackOfJobId?: string | null;
   externalJobId: string | null;
   progress: number | null;
   clipPreparation: { clipsTotal: number; clipsReady: number; failed: Array<{ sceneId: string; code: string; message: string }> };
