@@ -11,7 +11,8 @@
     "start": "tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "compose:cli": "tsx scripts/compose-cli.ts"
+    "compose:cli": "tsx scripts/compose-cli.ts",
+    "render:parity": "tsx scripts/render-parity.ts"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
