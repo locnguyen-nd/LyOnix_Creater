@@ -33,6 +33,7 @@ import type {
   TimelineRenderPreviewResponse,
   TimelineSegmentResponse,
   MediaPlanResponse,
+  OrshotRenderOptions,
 } from "@lyonix/contracts";
 import { groupTemplateOptionsByScene } from "../studio/inspector-grouping";
 import { FullPreviewPlayer } from "../studio/FullPreviewPlayer";
@@ -81,6 +82,8 @@ import {
   submitRenderFromTimeline,
 } from "../studio/timeline-api";
 import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
+import { OrshotStudioPanel } from "../studio/OrshotStudioPanel";
+import { DEFAULT_ORSHOT_OPTIONS, compactOrshotOptions } from "../studio/orshot-embed";
 import { UndoStack } from "../studio/undo-stack";
 import { MediaPicker } from "../studio/MediaPicker";
 import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/auto-shorts";
@@ -258,6 +261,9 @@ export function StudioProPage() {
   const [renderJob, setRenderJob] = useState<RenderJobResponse | null>(null);
   const [renderSubmitting, setRenderSubmitting] = useState(false);
   const [showReview, setShowReview] = useState(false);
+  // Orshot accounts: Orshot Embed workspace (default) or back to the classic Studio editor (media/voice/script). Creatomate never sees this.
+  const [orshotWorkspace, setOrshotWorkspace] = useState(true);
+  const [orshotOptions, setOrshotOptions] = useState<OrshotRenderOptions>(DEFAULT_ORSHOT_OPTIONS);
   // VE2E-60: browser-side full-video preview (approximation, not render evidence).
   const [showFullPreview, setShowFullPreview] = useState(false);
   const [renderPlaybackError, setRenderPlaybackError] = useState(false);
@@ -961,12 +967,12 @@ export function StudioProPage() {
     setRenderSubmitting(true);
     try {
       // Orshot cannot take the dynamic N-scene composition: it renders the pinned template's fixed slots.
-      const submit = isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? submitRenderFromTimeline : submitDynamicRenderFromTimeline;
-      const job = await submit(context.projectId, baseVersionId, {
-        providerAccountId: renderAccountId,
-        // Only a deliberate submit after a failed job creates a new attempt.
-        ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}),
-      });
+      const templateOnly = isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider);
+      // Only a deliberate submit after a failed job creates a new attempt.
+      const common = { providerAccountId: renderAccountId, ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}) };
+      const job = templateOnly
+        ? await submitRenderFromTimeline(context.projectId, baseVersionId, { ...common, orshot: compactOrshotOptions(orshotOptions) })
+        : await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, common);
       setRenderJob(job);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
@@ -1069,6 +1075,14 @@ export function StudioProPage() {
   const apifyAccountId = usableAccounts(providers, "visual").find((row) => row.provider === "apify")?.id ?? null;
   const voiceAccounts = usableAccounts(providers, "tts");
   const renderAccounts = usableAccounts(providers, "render");
+  const selectedRenderAccount = renderAccounts.find((account) => account.id === renderAccountId);
+  const isOrshotAccount = selectedRenderAccount?.provider === "orshot";
+  // What the timeline can feed Orshot's fixed slots (positional per kind): included scenes, their media kinds and voices.
+  const orshotSupply = (() => {
+    const included = draft.scenes.filter((row) => !row.excluded);
+    const kindOf = (row: (typeof included)[number]) => (row.mediaAssetVersionId ? mediaLibrary.find((asset) => asset.id === row.mediaAssetVersionId)?.kind : undefined);
+    return { scenes: included.length, videos: included.filter((row) => kindOf(row) === "video").length, images: included.filter((row) => kindOf(row) === "image").length, voices: included.filter((row) => Boolean(row.audioVersionId)).length };
+  })();
   const workspaceGridClass = leftCollapsed && rightCollapsed
     ? "lg:grid-cols-[36px_minmax(0,1fr)_36px]"
     : leftCollapsed
@@ -1271,6 +1285,32 @@ export function StudioProPage() {
         </div>
       ) : null}
 
+      {isOrshotAccount && orshotWorkspace && selectedRenderAccount ? (
+        <OrshotStudioPanel
+          account={selectedRenderAccount}
+          projectId={context.projectId}
+          timelineVersionId={baseVersionId}
+          timelineApproved={timelineStatus === "approved"}
+          dirty={dirty}
+          template={template}
+          supply={orshotSupply}
+          options={orshotOptions}
+          onOptionsChange={setOrshotOptions}
+          renderJob={renderJob}
+          onRenderJobChange={setRenderJob}
+          submitting={renderSubmitting}
+          onSubmit={() => void submitRender()}
+          onPinned={(snapshot) => { setTemplate(snapshot); undoStack.current.push(draft); setDraft((prev) => ({ ...prev, templateSnapshotId: snapshot.id })); }}
+          onBackToClassic={() => setOrshotWorkspace(false)}
+        />
+      ) : (
+      <>
+      {isOrshotAccount ? (
+        <div className="mx-5 mb-2 flex items-center gap-3 text-[12px]">
+          <span className="text-lyx-fg-muted">{t("studioPro.orshotClassicNote")}</span>
+          <Button variant="secondary" className="h-8" onClick={() => setOrshotWorkspace(true)}>{t("studioPro.orshotOpenPanel")}</Button>
+        </div>
+      ) : null}
       <div className={`mx-5 mb-5 grid min-h-0 flex-1 gap-0 overflow-hidden rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg ${workspaceGridClass}`}>
         {leftCollapsed ? (
           <div className="hidden items-start justify-center border-b border-lyx-border py-2 lg:flex lg:border-b-0 lg:border-r">
@@ -1823,6 +1863,8 @@ export function StudioProPage() {
           )}
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }
