@@ -74,6 +74,9 @@ importers:
       '@lyonix/media-jobs':
         specifier: workspace:*
         version: link:../../packages/media-jobs
+      '@lyonix/render-recipes':
+        specifier: workspace:*
+        version: link:../../packages/render-recipes
       dotenv:
         specifier: ^17.2.2
         version: 17.4.2
@@ -232,6 +235,15 @@ importers:
       '@lyonix/domain':
         specifier: workspace:*
         version: link:../domain
+    devDependencies:
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@24.13.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.13)
+
+  packages/render-recipes:
     devDependencies:
       typescript:
         specifier: ^5.9.2

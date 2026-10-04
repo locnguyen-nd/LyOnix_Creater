@@ -56,6 +56,11 @@ export type CaptionStyleOptions = {
   locale?: CaptionLocale;
   /** Safety factor on the available width, compensating the estimated (not measured) glyph widths. */
   widthSafety?: number;
+  /**
+   * Overlay text (e.g. a headline band) instead of the bottom-centre caption: text is centred on `(x, y)` (canvas px, ASS `\an5\pos`)
+   * and wrapped inside `widthPx` instead of the safe-zone width. Margins are not used.
+   */
+  placement?: { x: number; y: number; widthPx: number } | undefined;
 };
 
 export type CaptionLaidOutCue = {
@@ -70,7 +75,7 @@ export type CaptionLaidOutCue = {
 
 export type CaptionAssResult = { ass: string; cues: CaptionLaidOutCue[]; warnings: string[] };
 
-const DEFAULTS = {
+const DEFAULTS: Omit<Required<CaptionStyleOptions>, "placement"> = {
   canvas: { width: 1080, height: 1920 },
   fps: 60,
   fontName: "Noto Sans JP",
@@ -82,8 +87,8 @@ const DEFAULTS = {
   highlightColor: "#FFD400",
   outlineColor: "#000000",
   outlinePx: 5,
-  highlight: "word" as const,
-  locale: "auto" as CaptionLocale,
+  highlight: "word",
+  locale: "auto",
   widthSafety: 0.94,
 };
 
@@ -279,10 +284,10 @@ function applyKinsoku(glyphs: Glyph[], lines: Range[], maxWidthEm: number): void
 }
 
 type FitResult = { fontSizePx: number; lines: Range[] } | null;
-type ResolvedOptions = Required<Omit<CaptionStyleOptions, "canvas">> & { canvas: { width: number; height: number } };
+type ResolvedOptions = Required<Omit<CaptionStyleOptions, "canvas" | "placement">> & { canvas: { width: number; height: number }; placement: CaptionStyleOptions["placement"] };
 
 function fit(glyphs: Glyph[], from: number, to: number, o: ResolvedOptions, sizes: number[]): FitResult {
-  const availablePx = o.canvas.width * (1 - 2 * CAPTION_SAFE_ZONE.side) * o.widthSafety;
+  const availablePx = (o.placement?.widthPx ?? o.canvas.width * (1 - 2 * CAPTION_SAFE_ZONE.side)) * o.widthSafety;
   for (const size of sizes) {
     const lines = wrapRange(glyphs, from, to, availablePx / size);
     applyKinsoku(glyphs, lines, availablePx / size);
@@ -330,8 +335,9 @@ function paginate(glyphs: Glyph[], o: ResolvedOptions, size: number): Range[] {
 // ---------------------------------------------------------------------------------------------------------------------
 // ASS writer
 
-function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean): string {
-  let out = fontSizePx !== baseFontSizePx ? `{\\fs${fontSizePx}}` : "";
+function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean, placement: CaptionStyleOptions["placement"]): string {
+  let out = placement ? `{\\an5\\pos(${Math.round(placement.x)},${Math.round(placement.y)})}` : "";
+  if (fontSizePx !== baseFontSizePx) out += `{\\fs${fontSizePx}}`;
   let cursorCs = 0;
   let lastUnit = -1;
   lines.forEach((line, lineIndex) => {
@@ -368,7 +374,7 @@ function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSi
 }
 
 export function buildCaptionAss(cues: readonly CaptionCueInput[], options: CaptionStyleOptions = {}): CaptionAssResult {
-  const o = { ...DEFAULTS, ...options, canvas: options.canvas ?? DEFAULTS.canvas } as ResolvedOptions;
+  const o = { ...DEFAULTS, ...options, canvas: options.canvas ?? DEFAULTS.canvas, placement: options.placement } as ResolvedOptions;
   const warnings: string[] = [];
   const frameMs = 1000 / o.fps;
   const laidOut: CaptionLaidOutCue[] = [];
@@ -405,7 +411,7 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
       if (prev && prev.endMs > startMs) prev.endMs = Math.max(prev.startMs + frameMs, startMs); // never overlap the previous event
       if (prev && prev.endMs > startMs) startMs = prev.endMs;
       if (endMs < startMs + frameMs - 0.001) endMs = startMs + frameMs;
-      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight);
+      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, o.placement);
       const lines = page.lines.map((l) => glyphs.slice(l.s, l.e).map((g) => g.ch).join("").trim());
       laidOut.push({ startMs, endMs, fontSizePx: page.size, lines, timing: prepared.timing, split: pages.length > 1 });
       bodies.push(body);
@@ -424,6 +430,8 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
     `PlayResY: ${o.canvas.height}`,
     "WrapStyle: 2",
     "ScaledBorderAndShadow: yes",
+    // the render is BT.709 limited range: without this libass would map the colours with BT.601
+    "YCbCr Matrix: TV.709",
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",

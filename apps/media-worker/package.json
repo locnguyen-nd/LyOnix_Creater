@@ -21,6 +21,7 @@
   "dependencies": {
     "@lyonix/domain": "workspace:*",
     "@lyonix/media-jobs": "workspace:*",
+    "@lyonix/render-recipes": "workspace:*",
     "dotenv": "^17.2.2",
     "jpeg-js": "^0.4.4",
     "onnxruntime-node": "^1.30.0"
