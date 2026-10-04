@@ -47,10 +47,11 @@ import {
   decideMediaSelection,
   rankMediaCandidates,
   selectSocialCandidates,
+  socialWindowOptionsFromEnv,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
-import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality } from "@lyonix/contracts";
+import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality, MediaPlanReframeCheck } from "@lyonix/contracts";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
@@ -58,6 +59,7 @@ import { MediaService, sniffMediaMimeType } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { VideoFramesService, visionVideoFramesEnabled } from "./video-frames.service.js";
+import { ReframeService } from "./reframe.service.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
@@ -96,6 +98,11 @@ export class ApifyJobContext {
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
   /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
   readonly vision = new VisionBudget();
+  /**
+   * VE2E-67: what a plan-time `overlay_unavoidable` verdict does. `swap` (Auto): the candidate fails and the existing fallback (next
+   * platform, then Pexels) supplies another source. `flag` (Studio, default): the candidate is kept and the flag is shown to the user.
+   */
+  overlayPolicy: "swap" | "flag" = "flag";
   addRun(usage: ApifyUsage) {
     addApifyUsage(this.usage, usage);
   }
@@ -159,6 +166,8 @@ export class ApifyService {
     @Optional() @Inject(ProviderAccountsService) private readonly providerAccounts?: ProviderAccountsService,
     /** VE2E-30: frames of imported videos for vision moderation (media worker). Omitted = frame check is always `unchecked`. */
     @Optional() @Inject(VideoFramesService) private readonly videoFrames?: VideoFramesService,
+    /** VE2E-67: plan-time crop/overlay check. Omitted = no check (identical to the previous behaviour). */
+    @Optional() @Inject(ReframeService) private readonly reframe?: ReframeService,
   ) {}
 
   private async access(projectId: string, userId: string, role: "admin" | "staff", write: boolean) {
@@ -473,6 +482,48 @@ export class ApifyService {
     }
   }
 
+  /**
+   * VE2E-67: plan-time screen of an Apify candidate with the worker's `reframe.analyze` (subject + logo/caption overlay). The analysed
+   * window is the one the segment will use (start guard, segment duration). Records `quality.reframe` (shown to Studio users) and returns
+   * `reject` ONLY for an unavoidable overlay under the Auto `swap` policy; an analysis that cannot run never blocks sourcing here (it is
+   * flagged `analysis_unavailable` + logged by ReframeService; the render step applies REFRAME_LEGACY_FALLBACK).
+   */
+  private async reframeCheck(asset: AutoImportedAsset, input: { segmentDurationSeconds?: number }, job: ApifyJobContext, quality: MediaPlanApifyQuality): Promise<"keep" | "reject"> {
+    if (!this.reframe || !this.reframe.enabledFor("apify")) return "keep";
+    try {
+      const row = await this.prisma.mediaAssetVersion.findFirst({ where: { id: asset.id, deletedAt: null } });
+      if (!row || (row.kind !== "video" && row.kind !== "image")) return "keep";
+      let window: { startMs: number; durationMs: number } | null = null;
+      if (row.kind === "video" && row.durationMs && row.durationMs > 0) {
+        const guard = socialWindowOptionsFromEnv();
+        const startMs = Math.min(guard.startGuardMs, Math.max(0, row.durationMs - 1000));
+        const wanted = input.segmentDurationSeconds && input.segmentDurationSeconds > 0 ? Math.round(input.segmentDurationSeconds * 1000) : row.durationMs;
+        window = { startMs, durationMs: Math.max(100, Math.min(wanted, 60_000, row.durationMs - startMs)) };
+      }
+      const decision = await this.reframe.plan({ id: row.id, kind: row.kind as "video" | "image", origin: row.origin, relativePath: row.relativePath, checksumSha256: row.checksumSha256 ?? null }, window);
+      if (decision.status === "skipped") return "keep";
+      if (decision.status === "legacy_fallback" || decision.status === "failed") {
+        quality.reframe = { status: "analysis_unavailable", overlayUnavoidable: false, residualOverlayPct: 0, subjectCoveragePct: 100, zoomPermille: null, confidenceLevel: null, swapped: false, reason: decision.code };
+        return "keep";
+      }
+      const swap = decision.overlayUnavoidable && job.overlayPolicy === "swap" && this.reframe.policy().autoSwapOnOverlay;
+      const check: MediaPlanReframeCheck = {
+        status: decision.overlayUnavoidable ? "overlay_unavoidable" : "ok",
+        overlayUnavoidable: decision.overlayUnavoidable,
+        residualOverlayPct: decision.residualOverlayPct,
+        subjectCoveragePct: decision.subjectCoveragePct,
+        zoomPermille: decision.zoomPermille,
+        confidenceLevel: decision.confidenceLevel,
+        swapped: swap,
+        ...(decision.warnings.length > 0 ? { warnings: decision.warnings } : {}),
+      };
+      quality.reframe = check;
+      return swap ? "reject" : "keep";
+    } catch {
+      return "keep"; // best-effort screen: never fail sourcing because the check itself broke
+    }
+  }
+
   /** VE2E-51: an asset of this project already imported from the same platform video (no second download). */
   private async findLibraryAsset(projectId: string, platform: ApifyPlatform, externalId: string): Promise<AutoImportedAsset | null> {
     const safeId = externalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
@@ -604,6 +655,7 @@ export class ApifyService {
       job.usage.libraryReuses += 1;
       quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
       if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
+      if ((await this.reframeCheck(library, input, job, quality)) === "reject") return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
       return done(library, decision.chosen);
     }
 
@@ -652,6 +704,11 @@ export class ApifyService {
       // Unbind the rejected clip from its scene so a retry never reuses it through the library shortcut; the video id stays reserved.
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
       return fail("apify_frames_rejected");
+    }
+    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject") {
+      // Auto + overlay_unavoidable (CR-SUBJECT-REFRAME Q5): same handling as a rejected candidate - unbind it and let the existing fallback pick another source.
+      await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
+      return fail("apify_overlay_unavoidable");
     }
     return {
       ok: true,

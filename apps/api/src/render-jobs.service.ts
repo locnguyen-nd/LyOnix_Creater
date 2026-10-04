@@ -555,6 +555,15 @@ export class RenderJobsService {
         durationMs: scene.sourceDurationMs!,
         stripAudio: true,
       }));
+      // VE2E-67: still images are reframed (subject crop, one JPEG) only when REFRAME is enabled for their origin; the service drops the
+      // request otherwise, so these OPTIONAL requests never change a render that does not use the feature.
+      if (this.clipDerivatives) {
+        for (const scene of renderable) {
+          if (scene.mediaKind === "image" && scene.mediaAssetVersionId) {
+            clipRequests.push({ sceneId: scene.sceneId, parentMediaAssetVersionId: scene.mediaAssetVersionId, startMs: 0, durationMs: 0, stripAudio: true, mediaKind: "image" });
+          }
+        }
+      }
       const withDerivatives = await this.withClipDerivatives(projectId, userId, renderable, clipRequests, options.preparationJobId);
       if (!withDerivatives.ok) return withDerivatives;
       renderable = withDerivatives.data;
