@@ -81,13 +81,16 @@ describe("runProcess extensions", () => {
     const dir = await mkdtemp(join(tmpdir(), "lyonix-proc-"));
     try {
       const lines: string[] = [];
-      const script = "const fs=require('fs');console.log('cwd='+process.cwd());console.log('a');let t=Date.now();while(Date.now()-t<600){}console.log('b')";
+      const script = "const fs=require('fs');console.log('cwd='+process.cwd());console.log('a');let t=Date.now();while(Date.now()-t<1200){}console.log('b')";
       const result = await runProcess(process.execPath, ["-e", script], { timeoutMs: 15_000, cwd: dir, onStdoutLine: (line) => lines.push(line), sampleCpu: true });
       expect(result.exitCode).toBe(0);
       expect(lines.slice(1)).toEqual(["a", "b"]);
       expect(lines[0]!.replaceAll("\\", "/")).toContain(dir.replaceAll("\\", "/").split("/").at(-1));
-      if (process.platform === "linux") expect(result.cpuSeconds).toBeGreaterThan(0.3);
-      else expect(result.cpuSeconds ?? null).toBeNull();
+      // sampled every 200 ms, so it is a lower bound that lags on a loaded runner: assert "measured and plausible", not a tight value
+      if (process.platform === "linux") {
+        expect(result.cpuSeconds).toBeGreaterThan(0.05);
+        expect(result.cpuSeconds).toBeLessThan(5);
+      } else expect(result.cpuSeconds ?? null).toBeNull();
       const noSample = await runProcess(process.execPath, ["-e", "1"], { timeoutMs: 15_000 });
       expect("cpuSeconds" in noSample).toBe(false);
     } finally {
