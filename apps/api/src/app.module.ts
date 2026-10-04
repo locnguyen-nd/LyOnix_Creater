@@ -44,6 +44,7 @@ import { RenderJobsService } from "./render-jobs.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
 import { VideoFramesService } from "./video-frames.service.js";
+import { ReframeService } from "./reframe.service.js";
 import { ScriptVersionsController } from "./script-versions.controller.js";
 import { ScriptVersionsService } from "./script-versions.service.js";
 import { AudioVersionsController } from "./audio-versions.controller.js";
@@ -117,6 +118,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     MediaJobsGateway,
     ClipDerivativesService,
     VideoFramesService,
+    ReframeService,
     ScriptVersionsService,
     AudioVersionsService,
     VideoProductionsService,

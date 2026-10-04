@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { MediaJobClient, MediaJobClientError, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult } from "@lyonix/media-jobs";
+import { MediaJobClient, MediaJobClientError, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
 
 /** Per-clip wait for a media-worker result (env `MEDIA_PREPARE_TIMEOUT_MS`, default 180s). */
 export const mediaPrepareTimeoutMs = (): number => {
@@ -16,6 +16,11 @@ export interface FrameExtractor {
   extractFrames(job: FrameExtractJobInput, options?: { timeoutMs?: number }): Promise<FrameExtractResult>;
 }
 
+/** VE2E-67: subject/overlay analysis (crop plan) from the media worker's local detectors. */
+export interface ReframeAnalyzer {
+  analyzeReframe(job: ReframeAnalyzeJobInput, options?: { timeoutMs?: number }): Promise<ReframeAnalyzeResult>;
+}
+
 /**
  * VE2E-37: API-side handle on `apps/media-worker` (the only FFmpeg process). Connects to
  * RabbitMQ lazily on the first clip request, so renders without source ranges never need a
@@ -23,7 +28,7 @@ export interface FrameExtractor {
  * `RESULT_TIMEOUT`, ...) — callers map it to a render error, never to a full-source fallback.
  */
 @Injectable()
-export class MediaJobsGateway implements ClipPreparer, FrameExtractor, OnModuleDestroy {
+export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAnalyzer, OnModuleDestroy {
   private client: Promise<MediaJobClient> | null = null;
 
   private connect(): Promise<MediaJobClient> {
@@ -54,6 +59,19 @@ export class MediaJobsGateway implements ClipPreparer, FrameExtractor, OnModuleD
     const client = await this.connect();
     try {
       return await client.extractFrames(job, { timeoutMs: options.timeoutMs ?? mediaPrepareTimeoutMs() });
+    } catch (error) {
+      if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
+        this.client = null;
+        await client.close().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async analyzeReframe(job: ReframeAnalyzeJobInput, options: { timeoutMs?: number } = {}): Promise<ReframeAnalyzeResult> {
+    const client = await this.connect();
+    try {
+      return await client.analyzeReframe(job, { timeoutMs: options.timeoutMs ?? mediaPrepareTimeoutMs() });
     } catch (error) {
       if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
         this.client = null;

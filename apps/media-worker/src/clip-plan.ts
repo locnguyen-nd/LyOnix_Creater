@@ -1,4 +1,4 @@
-import type { ClipPrepareMode, ClipTarget } from "@lyonix/media-jobs";
+import type { ClipPrepareMode, ClipTarget, ReframeCropPlan } from "@lyonix/media-jobs";
 
 /**
  * VE2E-36 pure logic: ffprobe parsing, range validation, the hybrid copy-vs-reencode
@@ -163,6 +163,8 @@ export const planClip = (input: {
   stripAudio: boolean;
   target: ClipTarget;
   toleranceMs: number;
+  /** VE2E-67: a plan that removes pixels (not the whole frame) can never be stream-copied. */
+  cropPlan?: ReframeCropPlan | null;
 }): ClipPlan => {
   const { probe, startMs, durationMs, toleranceMs } = input;
   const reencode = (reasons: string[]): ClipPlan => {
@@ -170,6 +172,7 @@ export const planClip = (input: {
     return { mode: "reencode", reencodeReasons: reasons, cutStartMs: startMs, cutDurationMs, startDriftMs: 0, durationDriftMs: cutDurationMs - durationMs };
   };
   const staticReasons = copyIneligibilityReasons(probe, input.target, input.stripAudio);
+  if (input.cropPlan && !isFullFrameCropPlan(input.cropPlan)) staticReasons.unshift("crop_plan");
   if (staticReasons.length > 0) return reencode(staticReasons);
   const keyframes = input.keyframesMs ?? [];
   if (keyframes.length === 0) return reencode(["no_keyframe_index"]);
@@ -242,8 +245,50 @@ export const buildCopyArgs = (plan: ClipPlan, inputPath: string, outputPath: str
   ...commonTail(outputPath),
 ];
 
-export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null): string => {
-  const parts = [
+/** True when every keyframe window is the whole source frame (nothing is cut away, stream copy stays legal). */
+export const isFullFrameCropPlan = (plan: ReframeCropPlan): boolean =>
+  plan.keyframes.every((k) => k.xPx === 0 && k.yPx === 0 && k.widthPx === plan.sourceWidthPx && k.heightPx === plan.sourceHeightPx);
+
+/** Rounds seconds for filter expressions (ms precision; no exponent notation). */
+const sec = (ms: number): string => String(Number((ms / 1000).toFixed(3)));
+
+/**
+ * ffmpeg expression of one crop axis over time `t` (seconds, relative to the cut start): linear interpolation between keyframes,
+ * clamped to the first/last keyframe outside their range. Constant axes collapse to the number.
+ */
+export const buildAxisExpression = (frames: ReadonlyArray<{ tMs: number }>, values: readonly number[]): string => {
+  if (values.every((value) => value === values[0])) return String(values[0]);
+  let expression = String(values[values.length - 1]);
+  for (let index = values.length - 2; index >= 0; index -= 1) {
+    const t0 = frames[index]!.tMs;
+    const t1 = frames[index + 1]!.tMs;
+    const v0 = values[index]!;
+    const v1 = values[index + 1]!;
+    const segment = v0 === v1 ? String(v0) : `${v0}+(${v1 - v0})*(t-${sec(t0)})/${sec(t1 - t0)}`;
+    expression = `if(lt(t,${sec(t1)}),${segment},${expression})`;
+  }
+  return expression;
+};
+
+/**
+ * `crop=...` (+ lanczos scale to the target) for a crop plan. Window size is constant (validated by the contract), only x/y move.
+ * Expressions are single-quoted so their commas are not filtergraph separators. Returns null for a full-frame plan.
+ */
+export const buildCropFilterParts = (plan: ReframeCropPlan, target: ClipTarget, options: { still?: boolean } = {}): string[] | null => {
+  if (isFullFrameCropPlan(plan)) return null;
+  const frames = options.still ? [plan.keyframes[0]!] : plan.keyframes;
+  const first = frames[0]!;
+  const xs = buildAxisExpression(frames, frames.map((k) => k.xPx));
+  const ys = buildAxisExpression(frames, frames.map((k) => k.yPx));
+  const quote = (value: string) => (/^\d+$/.test(value) ? value : `'${value}'`);
+  const parts = [`crop=w=${first.widthPx}:h=${first.heightPx}:x=${quote(xs)}:y=${quote(ys)}`];
+  if (first.widthPx !== target.width || first.heightPx !== target.height) parts.push(`scale=${target.width}:${target.height}:flags=lanczos`);
+  parts.push("setsar=1");
+  return parts;
+};
+
+export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null, cropPlan?: ReframeCropPlan | null): string => {
+  const parts = (cropPlan ? buildCropFilterParts(cropPlan, target) : null) ?? [
     `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
     `crop=${target.width}:${target.height}`,
     "setsar=1",
@@ -259,12 +304,30 @@ export const buildReencodeArgs = (
   stripAudio: boolean,
   target: ClipTarget,
   sourceFps: number | null,
+  cropPlan?: ReframeCropPlan | null,
 ): string[] => [
   ...commonHead(plan.cutStartMs, inputPath, plan.cutDurationMs),
   ...audioArgs(stripAudio, "reencode"),
-  "-vf", buildReencodeFilter(target, sourceFps),
+  "-vf", buildReencodeFilter(target, sourceFps, cropPlan),
   "-c:v", "libx264", "-preset", REENCODE_PROFILE.preset, "-crf", String(REENCODE_PROFILE.crf),
   "-maxrate", REENCODE_PROFILE.maxrate, "-bufsize", REENCODE_PROFILE.bufsize,
   "-pix_fmt", "yuv420p", "-profile:v", "high",
   ...commonTail(outputPath),
 ];
+
+/** VE2E-67: one 1080x1920 JPEG from a still image (crop plan window, else centre-cover). Never writes audio/metadata. */
+export const buildImageCropArgs = (inputPath: string, outputPath: string, target: ClipTarget, cropPlan?: ReframeCropPlan | null): string[] => {
+  const parts = (cropPlan ? buildCropFilterParts(cropPlan, target, { still: true }) : null) ?? [
+    `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
+    `crop=${target.width}:${target.height}`,
+    "setsar=1",
+  ];
+  return [
+    "-hide_banner", "-nostdin", "-v", "error", "-y",
+    "-i", inputPath, "-map", "0:v:0", "-frames:v", "1",
+    "-vf", parts.join(","),
+    "-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj420p",
+    "-an", "-sn", "-dn", "-map_metadata", "-1",
+    "-f", "image2", "-update", "1", outputPath,
+  ];
+};

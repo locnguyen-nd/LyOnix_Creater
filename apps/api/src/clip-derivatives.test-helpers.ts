@@ -8,24 +8,26 @@ import { InMemoryMediaJobBroker } from "@lyonix/media-jobs/testing";
 
 export type StubWorkerBehavior = (job: ClipPrepareJob) => ClipPrepareResult | "silent";
 
-export const okClipResult = (job: ClipPrepareJob, overrides: { bytes?: number; mode?: "copy" | "reencode"; hasAudio?: boolean } = {}): ClipPrepareResult => ({
+export const okClipResult = (job: ClipPrepareJob, overrides: { bytes?: number; mode?: "copy" | "reencode"; hasAudio?: boolean } = {}): ClipPrepareResult => {
+  const image = job.source.kind === "image";
+  return {
   schemaVersion: MEDIA_JOB_SCHEMA_VERSION,
   type: CLIP_PREPARE_RESULT_TYPE,
   ok: true,
   jobKey: job.jobKey,
   reused: false,
-  mode: overrides.mode ?? "copy",
-  reencodeReasons: [],
+  mode: image || job.cropPlan ? "reencode" : overrides.mode ?? "copy",
+  reencodeReasons: job.cropPlan ? ["crop_plan"] : [],
   cut: { startMs: job.startMs, durationMs: job.durationMs },
   drift: { startMs: 0, durationMs: 0 },
   toleranceMs: 1000,
   source: { relativePath: job.source.relativePath, mediaAssetVersionId: job.source.mediaAssetVersionId ?? null, durationMs: 30_000, width: 1080, height: 1920, videoCodec: "h264", audioCodec: "aac" },
   output: {
-    relativePath: `working/media-jobs/${job.jobKey.replace(/[^a-z0-9]/gi, "")}/clip.mp4`,
-    mimeType: "video/mp4",
+    relativePath: `working/media-jobs/${job.jobKey.replace(/[^a-z0-9]/gi, "")}/${image ? "clip.jpg" : "clip.mp4"}`,
+    mimeType: image ? "image/jpeg" : "video/mp4",
     sha256: "a".repeat(64),
     bytes: overrides.bytes ?? 2_000_000,
-    durationMs: job.durationMs,
+    durationMs: image ? 0 : job.durationMs,
     width: 1080,
     height: 1920,
     videoCodec: "h264",
@@ -33,9 +35,13 @@ export const okClipResult = (job: ClipPrepareJob, overrides: { bytes?: number; m
     retentionClass: "working",
     expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
   },
+  ...(job.cropPlan
+    ? { reframe: { applied: "crop" as const, planVersion: job.cropPlan.version, mode: job.cropPlan.mode, zoomPermille: job.cropPlan.zoomPermille, cropPlanSha256: "b".repeat(64), primarySubjectId: job.cropPlan.primarySubjectId, overlayUnavoidable: job.cropPlan.overlayUnavoidable, residualOverlayPct: job.cropPlan.residualOverlayPct, subjectCoveragePct: job.cropPlan.subjectCoveragePct, cropProfileVersion: "crop-apply.v1" as const } }
+    : {}),
   tool: { profileVersion: CLIP_PREPARE_PROFILE_VERSION, ffmpegVersion: "ffmpeg version test" },
   completedAt: new Date().toISOString(),
-});
+  };
+};
 
 export const failedClipResult = (job: ClipPrepareJob, code: "FFMPEG_FAILED" | "RANGE_OUT_OF_BOUNDS", retryable: boolean): ClipPrepareResult => ({
   schemaVersion: MEDIA_JOB_SCHEMA_VERSION,
@@ -75,6 +81,7 @@ export type StoredAsset = {
   durationMs?: number | null;
   relativePath: string;
   originalFileName: string;
+  checksumSha256?: string | null;
   mimeType?: string;
   license?: string | null;
   provenance?: unknown;
