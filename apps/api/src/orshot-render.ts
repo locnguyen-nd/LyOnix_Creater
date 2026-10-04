@@ -36,11 +36,11 @@ export function sanitizeOrshotOptions(raw: unknown): { ok: true; data: OrshotRen
   const out: OrshotRenderOptions = {};
   if (input.format !== undefined) {
     if (!(ORSHOT_FORMATS as readonly unknown[]).includes(input.format)) return { ok: false, message: `Định dạng Orshot không hỗ trợ: ${String(input.format)}` };
-    out.format = input.format as OrshotRenderOptions["format"];
+    out.format = input.format as NonNullable<OrshotRenderOptions["format"]>;
   }
   if (input.fps !== undefined) {
     if (!(ORSHOT_FPS as readonly unknown[]).includes(input.fps)) return { ok: false, message: `FPS Orshot không hỗ trợ: ${String(input.fps)}` };
-    out.fps = input.fps as OrshotRenderOptions["fps"];
+    out.fps = input.fps as NonNullable<OrshotRenderOptions["fps"]>;
   }
   if (input.size !== undefined && input.size !== "") {
     if (!(ORSHOT_SIZE_PRESETS as readonly unknown[]).includes(input.size)) return { ok: false, message: `Kích thước Orshot không hỗ trợ: ${String(input.size)}` };

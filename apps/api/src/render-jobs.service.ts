@@ -317,13 +317,12 @@ export class RenderJobsService {
 
     return this.createAndSubmitRenderJob(
       { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId, canvas: readCreatomateCanvas(snapshot.rawTemplate), provider: account.data.provider, ...(orshot?.cost ? { cost: { amount: orshot.cost.amountUsd, currency: "USD" } } : {}) },
-      (webhookUrl) =>
-        (account.data.provider === "orshot" ? submitOrshotRender : submitCreatomateRender)(decryptSecret(account.data.encryptedSecret), {
-          templateId: snapshot.externalTemplateId,
-          modifications,
-          webhookUrl,
-          ...(orshot ? orshot.submit : input.outputFormat ? { outputFormat: input.outputFormat } : {}),
-        }),
+      (webhookUrl) => {
+        const apiKey = decryptSecret(account.data.encryptedSecret);
+        const base = { templateId: snapshot.externalTemplateId, modifications, webhookUrl };
+        if (orshot) return submitOrshotRender(apiKey, { ...base, ...orshot.submit });
+        return submitCreatomateRender(apiKey, { ...base, ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}) });
+      },
     );
   }
 
