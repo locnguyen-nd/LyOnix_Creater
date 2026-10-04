@@ -1077,6 +1077,7 @@ export function StudioProPage() {
   const renderAccounts = usableAccounts(providers, "render");
   const selectedRenderAccount = renderAccounts.find((account) => account.id === renderAccountId);
   const isOrshotAccount = selectedRenderAccount?.provider === "orshot";
+  const orshotPanelOpen = isOrshotAccount && orshotWorkspace;
   // What the timeline can feed Orshot's fixed slots (positional per kind): included scenes, their media kinds and voices.
   const orshotSupply = (() => {
     const included = draft.scenes.filter((row) => !row.excluded);
@@ -1191,7 +1192,7 @@ export function StudioProPage() {
       {preview && !preview.ready && preview.missingRequiredModificationKeys.length > 0 ? <Banner variant="warn">{t("studioPro.approxPreviewMissing", { keys: preview.missingRequiredModificationKeys.join(", ") })}</Banner> : null}
       {layoutWarnings.includes("template_layout_fallback") ? <Banner variant="warn">{t("studioPro.layoutFallbackWarning")}</Banner> : null}
       {layoutWarnings.includes("rank_badges_renumbered") ? <Banner variant="warn">{t("studioPro.rankBadgesRenumbered", { count: layoutSceneCount })}</Banner> : null}
-      {renderJob ? <RenderProgress job={renderJob} /> : null}
+      {renderJob && !orshotPanelOpen ? <RenderProgress job={renderJob} /> : null}
       </div>
 
       {/* VE2E-13: resultUrl plays only here, inside Studio - never as direct autoplay from a
@@ -1200,7 +1201,7 @@ export function StudioProPage() {
           the previous plain "open in a new tab" link, which some browsers/CDN response headers
           made effectively unviewable (download instead of inline playback, or a silent failure
           with no feedback at all). */}
-      {renderJob?.status === "completed" && renderJob.resultUrl ? (
+      {orshotPanelOpen ? null : renderJob?.status === "completed" && renderJob.resultUrl ? (
         <div className="mx-5 mb-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
           <p className="mb-2 text-[12px] font-medium">{t("studioPro.renderResultTitle")}</p>
           {typeof HTMLVideoElement === "undefined" ? (
@@ -1285,7 +1286,7 @@ export function StudioProPage() {
         </div>
       ) : null}
 
-      {isOrshotAccount && orshotWorkspace && selectedRenderAccount ? (
+      {orshotPanelOpen && selectedRenderAccount ? (
         <OrshotStudioPanel
           account={selectedRenderAccount}
           projectId={context.projectId}
