@@ -366,3 +366,4 @@ export {
 } from "./caption-plan-v1.js";
 
 export { ProviderLimiter, providerLimiterKeys, type ProviderLimiterKey, type ProviderLimiterOptions, type ProviderLimiterSnapshot } from "./provider-limiter.js";
+export * from "./template-lint.js";
