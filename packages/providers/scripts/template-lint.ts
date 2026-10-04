@@ -14,9 +14,11 @@ if (inputs.length === 0) {
   console.error("usage: template-lint.ts <template.json | directory> [...] [--json]");
   process.exit(2);
 }
+// `pnpm template:lint` runs inside the package directory: relative inputs are relative to where the user typed the command
+const baseDir = process.env.INIT_CWD || process.cwd();
 const files: string[] = [];
 for (const input of inputs) {
-  const path = resolve(input);
+  const path = resolve(baseDir, input);
   if (!existsSync(path)) {
     console.error(`not found: ${input}`);
     process.exit(2);

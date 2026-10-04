@@ -22,10 +22,11 @@ if (files.length !== 2) {
   console.error("usage: render-parity.ts <a.mp4> <b.mp4> [--out report.html] [--frames 8] [--label-a A] [--label-b B] [--caption-band 0.58:0.22]");
   process.exit(2);
 }
-const [fileA, fileB] = files.map((f) => resolve(f)) as [string, string];
+const baseDir = process.env.INIT_CWD || process.cwd(); // `pnpm render:parity` runs in the package directory
+const [fileA, fileB] = files.map((f) => resolve(baseDir, f)) as [string, string];
 const ffmpeg = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
 const ffprobe = process.env.FFPROBE_PATH?.trim() || "ffprobe";
-const out = resolve(flag("out", "render-parity.html")!);
+const out = resolve(baseDir, flag("out", "render-parity.html")!);
 const frameCount = Math.max(1, Math.min(24, Number(flag("frames", "8"))));
 const [bandTop, bandHeight] = (flag("caption-band", "0.58:0.22")!).split(":").map(Number) as [number, number];
 const work = mkdtempSync(join(tmpdir(), "lyonix-parity-"));
