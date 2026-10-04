@@ -28,6 +28,9 @@ importers:
       '@lyonix/providers':
         specifier: workspace:*
         version: link:../../packages/providers
+      '@lyonix/render-recipes':
+        specifier: workspace:*
+        version: link:../../packages/render-recipes
       '@nestjs/common':
         specifier: ^11.1.6
         version: 11.2.5(reflect-metadata@0.2.2)(rxjs@7.8.2)

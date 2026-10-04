@@ -7,7 +7,7 @@
  * replays against the exact template the user saw when they chose it, even if the
  * live Creatomate template is edited afterwards.
  */
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import type { Prisma } from "@lyonix/db";
 import {
   ProviderError,
@@ -21,7 +21,9 @@ import {
 } from "@lyonix/providers";
 import type { CreatomateTemplateSummaryResponse, ErrorCode, RenderEngine, TemplateSnapshotResponse } from "@lyonix/contracts";
 import { slotsWithTtsProvider, templateTtsWarnings } from "./template-tts.js";
+import { RELEASED_RECIPES } from "@lyonix/render-recipes";
 import { PrismaService } from "./prisma.service.js";
+import { LYONIX_PROVIDER, RenderEngineStoreService, recipeExternalId } from "./render-engine-store.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 
 export type RenderProviderName = "creatomate" | "orshot";
@@ -70,7 +72,17 @@ const toSnapshotResponse = (row: {
 
 @Injectable()
 export class CreatomateTemplatesService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    // VE2E-111: optional so provider-only unit tests keep constructing the service with one argument.
+    @Optional() @Inject(RenderEngineStoreService) private readonly engineStore?: RenderEngineStoreService,
+  ) {}
+
+  /** VE2E-111: is this the internal engine's system account? (No secret, no network: its templates are the repo's released recipes.) */
+  private async isInternalAccount(providerAccountId: string): Promise<boolean> {
+    const row = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null }, select: { provider: true } });
+    return row?.provider === LYONIX_PROVIDER;
+  }
 
   /** Any non-deleted `creatomate`|`orshot` / `render` account, verified (or fake in test) — same authorization shape as `PexelsService.usableAccount`. */
   async usableAccount(providerAccountId: string): Promise<CreatomateOutcome<{ id: string; encryptedSecret: string; provider: RenderProviderName }>> {
@@ -85,6 +97,9 @@ export class CreatomateTemplatesService {
   }
 
   async listTemplates(providerAccountId: string): Promise<CreatomateOutcome<CreatomateTemplateSummaryResponse[]>> {
+    if (await this.isInternalAccount(providerAccountId)) {
+      return { ok: true, data: RELEASED_RECIPES.map((recipe) => ({ externalTemplateId: recipeExternalId(recipe), name: recipe.name, previewUrl: null, tags: ["lyonix", `v${recipe.version}`] })) };
+    }
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
     try {
@@ -104,6 +119,17 @@ export class CreatomateTemplatesService {
    * must reference from then on.
    */
   async snapshot(providerAccountId: string, externalTemplateId: string, userId: string): Promise<CreatomateOutcome<TemplateSnapshotResponse>> {
+    if (await this.isInternalAccount(providerAccountId)) {
+      // Internal templates are pinned by the API itself (immutable recipe versions); "snapshotting" one just returns that pinned row.
+      if (!RELEASED_RECIPES.some((recipe) => recipeExternalId(recipe) === externalTemplateId)) return { ok: false, code: "NOT_FOUND", message: "Không có mẫu nội bộ này", status: 404 };
+      let row = await this.prisma.templateSnapshot.findFirst({ where: { providerAccountId, externalTemplateId } });
+      if (!row && this.engineStore) {
+        await this.engineStore.sync();
+        row = await this.prisma.templateSnapshot.findFirst({ where: { providerAccountId, externalTemplateId } });
+      }
+      if (!row) return { ok: false, code: "NOT_FOUND", message: "Mẫu nội bộ chưa được nạp vào kho mẫu", status: 404 };
+      return { ok: true, data: toSnapshotResponse(row) };
+    }
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
     if (!externalTemplateId.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu externalTemplateId" };

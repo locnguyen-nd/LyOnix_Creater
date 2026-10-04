@@ -39,6 +39,7 @@ import { ApifyController } from "./apify.controller.js";
 import { ApifyService } from "./apify.service.js";
 import { CreatomateTemplatesController } from "./creatomate-templates.controller.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
+import { RenderEngineStoreService } from "./render-engine-store.service.js";
 import { RenderJobsController } from "./render-jobs.controller.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
@@ -112,6 +113,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     PexelsService,
     ApifyService,
     MediaPlanService,
+    RenderEngineStoreService,
     CreatomateTemplatesService,
     RenderJobsService,
     // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
