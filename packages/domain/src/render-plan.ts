@@ -31,11 +31,16 @@ export type RenderPlanTransition = { kind: RenderPlanTransitionKind; durationMs:
 /** Entrance/exit effect of a scene's visual. Anything not representable here is a provider-only template feature. */
 export type RenderPlanSceneEffect = { kind: "none" | "zoom_in" | "zoom_out" | "pan"; intensity?: number };
 
+/** Per-character timing (one entry per code point of the cue text), relative to the scene start - from the real TTS alignment. */
+export type RenderPlanCharTiming = { startMs: number; endMs: number };
+
 export type RenderPlanCaptionCue = {
   text: string;
   /** Relative to the scene start, clamped into [0, scene duration]. */
   startMs: number;
   endMs: number;
+  /** Present only when the real alignment could be mapped onto this cue's text; caption-ass falls back to estimated timing otherwise. */
+  charTimings?: RenderPlanCharTiming[];
 };
 
 export type RenderPlanMediaRef = {
@@ -107,7 +112,7 @@ export type RenderPlanSceneInput = {
   screenTextOverride?: string | null;
   fallbackScreenText?: string | null;
   /** Voice-timed caption segments (SubtitleVersion.segments), relative to the scene start. */
-  captionSegments?: readonly { text: string; startMs: number; endMs: number }[] | null;
+  captionSegments?: readonly { text: string; startMs: number; endMs: number; charTimings?: readonly RenderPlanCharTiming[] | undefined }[] | null;
   effectIn?: RenderPlanSceneEffect | undefined;
   effectOut?: RenderPlanSceneEffect | undefined;
   transitionIn?: RenderPlanTransition | undefined;
@@ -143,13 +148,21 @@ export const framesToMs = (frames: number, fps: number): number => Math.round((f
 
 const isPositiveFinite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
 
-function clampCue(cue: { text: string; startMs: number; endMs: number }, durationMs: number): RenderPlanCaptionCue | null {
+function clampCue(cue: { text: string; startMs: number; endMs: number; charTimings?: readonly RenderPlanCharTiming[] | undefined }, durationMs: number): RenderPlanCaptionCue | null {
   if (typeof cue.text !== "string" || !cue.text.trim()) return null;
   if (!Number.isFinite(cue.startMs) || !Number.isFinite(cue.endMs)) return null;
-  const startMs = Math.min(Math.max(0, cue.startMs), durationMs);
-  const endMs = Math.min(Math.max(0, cue.endMs), durationMs);
+  const clamp = (value: number) => Math.min(Math.max(0, value), durationMs);
+  const startMs = clamp(cue.startMs);
+  const endMs = clamp(cue.endMs);
   if (endMs <= startMs) return null;
-  return { text: cue.text.trim(), startMs: Math.round(startMs), endMs: Math.round(endMs) };
+  // Per-character timings are indexed by the untrimmed text, so the text is only trimmed when there are none (caption-ass normalizes whitespace itself).
+  const timingsUsable = cue.charTimings && cue.charTimings.length === Array.from(cue.text).length && cue.charTimings.every((t) => Number.isFinite(t.startMs) && Number.isFinite(t.endMs));
+  return {
+    text: timingsUsable ? cue.text : cue.text.trim(),
+    startMs: Math.round(startMs),
+    endMs: Math.round(endMs),
+    ...(timingsUsable ? { charTimings: cue.charTimings!.map((t) => ({ startMs: Math.round(clamp(t.startMs)), endMs: Math.round(clamp(t.endMs)) })) } : {}),
+  };
 }
 
 /**
