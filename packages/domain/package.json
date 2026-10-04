@@ -12,7 +12,8 @@
     "./timeline-segments": "./src/timeline-segments.ts",
     "./timeline-edit": "./src/timeline-edit.ts",
     "./media-lineage": "./src/media-lineage.ts",
-    "./background-segments": "./src/background-segments.ts"
+    "./background-segments": "./src/background-segments.ts",
+    "./render-plan": "./src/render-plan.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
