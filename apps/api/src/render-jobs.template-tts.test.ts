@@ -86,7 +86,7 @@ describe("VE2E-47 RenderJobsService template TTS", () => {
       },
       renderWebhookEvent: { create: vi.fn(async () => ({})), updateMany: vi.fn(async () => ({ count: 1 })) },
     };
-    const templates = { usableAccount: vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted" } })) };
+    const templates = { usableAccount: vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "creatomate" as const } })) };
     const mediaDelivery = { issueToken: vi.fn(async () => ({ token: "tok", url: "https://api.lyonix.local/api/v1/media-delivery/tok", expiresAt: new Date().toISOString() })) };
     service = new RenderJobsService(prisma, { forUser: async () => ({ projectIds: [projectId] }) } as never, templates as unknown as CreatomateTemplatesService, mediaDelivery as unknown as MediaDeliveryService);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("ctm-test");

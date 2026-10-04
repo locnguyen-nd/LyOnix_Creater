@@ -35,6 +35,8 @@ export class ProviderAccountsController {
       // VE2E-15b: evaluated, not implemented - Google Custom Search JSON API is closed to new customers (existing customers only, until 2027-01-01); no other currently-available Google product fits a stock-media search role, so it is skipped rather than forced.
       { provider: "google", role: "visual", implementationStatus: "blocked", models: [] },
       { provider: "creatomate", role: "render", implementationStatus: "available", models: [] },
+      // Second render option (cost): template-modification renders only (no dynamic `source` composition), async video jobs.
+      { provider: "orshot", role: "render", implementationStatus: "available", models: [] },
       { provider: "vrew", role: "render", implementationStatus: "blocked", models: [] },
     ], requestId(response));
   }
@@ -54,7 +56,7 @@ export class ProviderAccountsController {
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate (render)", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate/Orshot (render)", requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {

@@ -104,7 +104,7 @@ describe("RenderJobsService", () => {
       return {};
     });
     grants = { forUser: async () => ({ projectIds: [projectId] }) };
-    templates = { usableAccount: vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted" } })) };
+    templates = { usableAccount: vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "creatomate" as const } })) };
     mediaDelivery = { issueToken: vi.fn(async () => ({ token: "tok", url: "https://api.lyonix.local/api/v1/media-delivery/tok", expiresAt: new Date().toISOString() })) };
     service = new RenderJobsService(prisma, grants, templates as CreatomateTemplatesService, mediaDelivery as MediaDeliveryService);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("ctm-test");
@@ -166,6 +166,29 @@ describe("RenderJobsService", () => {
       expect(outcome.ok).toBe(true);
       const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
       expect(submittedBody.modifications["Audio-1.source"]).toBe("https://api.lyonix.local/api/v1/media-delivery/tok");
+    });
+
+    it("submits through Orshot (async job, orshot webhook path) when the account is an Orshot account", async () => {
+      templates.usableAccount = vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "orshot" as const } }));
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 1204, status: "queued", finished: false }), { status: 202 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments });
+      expect(outcome.ok).toBe(true);
+      const [url, init] = fetchMock.mock.calls[0] as any;
+      expect(String(url)).toContain("api.orshot.com/v1/studio/render");
+      const body = JSON.parse(String(init.body));
+      expect(body.response).toEqual({ mode: "async", type: "url", format: "mp4" });
+      expect(body.webhook_url).toContain("/render-webhooks/orshot/");
+      expect(prisma.renderJob.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ externalJobId: "1204" }) }));
+    });
+
+    it("refuses the dynamic (source composition) path for an Orshot account before any provider call", async () => {
+      templates.usableAccount = vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "orshot" as const } }));
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, "tl-1", "user-1", "staff", { providerAccountId });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("Orshot") });
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it("links the created render job to a workflowRunId when the orchestrator submits directly (not part of the public contract)", async () => {

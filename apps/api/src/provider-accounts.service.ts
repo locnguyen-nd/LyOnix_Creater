@@ -7,6 +7,7 @@ import {
   pickUsableContentModel,
   probeContentModel,
   probeCreatomateAccount,
+  probeOrshotAccount,
   probeElevenLabsAccount,
   probePexelsAccount,
   probeApifyAccount,
@@ -26,8 +27,8 @@ import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
 /** `pexels`/`youtube`/`pinterest` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest is a manual-review-only candidate source with no reliable rights signal (see `packages/providers/src/pinterest.ts`). Google is still evaluated but not implemented (VE2E-15b) and stays unsupported here. */
 const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest" || provider === "apify");
-/** `creatomate`/`render` (VE2E-05) — render provider account. */
-const isSupportedRenderAccount = (provider: string, role: ProviderRole) => provider === "creatomate" && role === "render";
+/** `creatomate`/`orshot` under `render` (VE2E-05) — render provider account (Orshot = cost-optimised second option). */
+const isSupportedRenderAccount = (provider: string, role: ProviderRole) => (provider === "creatomate" || provider === "orshot") && role === "render";
 const isSupportedAccount = (provider: string, role: ProviderRole) =>
   (isLiveContentKind(provider) && role === "content") || isSupportedTtsAccount(provider, role) || isSupportedVisualAccount(provider, role) || isSupportedRenderAccount(provider, role);
 
@@ -239,7 +240,7 @@ export class ProviderAccountsService {
       if (row.provider === "apify") return this.verifyApify(row);
       return this.verifyPexels(row);
     }
-    if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row);
+    if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row, row.provider === "orshot" ? probeOrshotAccount : probeCreatomateAccount);
     if (!isLiveContentKind(row.provider)) {
       const failed = await this.prisma.providerAccount.update({ where: { id }, data: { status: "failed", version: { increment: 1 } } });
       return publicAccount(failed);
@@ -428,9 +429,9 @@ export class ProviderAccountsService {
    * real call that proves the API key works — same "real-endpoint, no static
    * assumption" principle as `verifyElevenLabs`/`verifyPexels`.
    */
-  private async verifyCreatomate(row: { id: string; model: string; encryptedSecret: string }) {
+  private async verifyCreatomate(row: { id: string; model: string; encryptedSecret: string }, probe: (apiKey: string) => Promise<unknown>) {
     try {
-      await probeCreatomateAccount(decryptSecret(row.encryptedSecret));
+      await probe(decryptSecret(row.encryptedSecret));
       return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
