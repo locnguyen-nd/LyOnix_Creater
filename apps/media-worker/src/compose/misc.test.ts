@@ -59,6 +59,16 @@ describe("overlays", () => {
     expect(cues[1]!.startMs).toBeCloseTo((plan.scenes[1]!.startFrame * 1000) / 60 + 100, 3);
     expect(cues[0]!.startMs).toBeCloseTo((plan.scenes[0]!.startFrame * 1000) / 60, 3);
   });
+  it("cycles caption colours per scene and anchors the captions from the recipe placement (VE2E-115)", () => {
+    const plan = makePlan(files, { texts: ["一つ目", "二つ目", "三つ目"] });
+    const cues = captionCuesFromComposePlan(plan, ["#FFFFFF", "#FFE600"]);
+    expect(cues.map((c) => c.color)).toEqual(["#FFFFFF", "#FFE600", "#FFFFFF"]);
+    expect(captionCuesFromComposePlan(plan).every((c) => c.color === undefined)).toBe(true);
+    const recipe = testRecipe("Noto Sans JP");
+    const top = buildOverlayDocuments(plan, { ...recipe, captions: { ...recipe.captions, highlight: "none", placement: { anchor: "top", marginPct: 12 }, colorCycle: ["#FFFFFF", "#FFE600"] } }, {});
+    expect(/Style: Sub,.*/.exec(top.captions!.ass)![0].split(",")[18]).toBe("8");
+    expect(top.captions!.ass).toContain("\\1c&H00E6FF&");
+  });
   it("renders the headline layer centred in its rectangle only when the slot has a value, and honours Studio caption overrides", () => {
     const plan = makePlan(files, { texts: ["一つ目", "二つ目", "三つ目"] });
     const recipe = testRecipe("Noto Sans JP");

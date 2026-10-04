@@ -37,6 +37,8 @@ export type CaptionCueInput = {
   endMs: number;
   /** One entry per code point of `text` (absolute ms). Without it the highlight timing is estimated. */
   charTimings?: readonly CaptionCharTiming[] | undefined;
+  /** `#RRGGBB` colour of this cue's text (overrides the style colour; only meaningful with `highlight: "none"`). */
+  color?: string | undefined;
 };
 
 export type CaptionStyleOptions = {
@@ -61,6 +63,9 @@ export type CaptionStyleOptions = {
    * and wrapped inside `widthPx` instead of the safe-zone width. Margins are not used.
    */
   placement?: { x: number; y: number; widthPx: number } | undefined;
+  /** Caption position: bottom edge (default) or top edge `marginVPercent` of the canvas height away from that side. Ignored with `placement`. */
+  verticalAnchor?: "bottom" | "top";
+  marginVPercent?: number;
 };
 
 export type CaptionLaidOutCue = {
@@ -76,6 +81,8 @@ export type CaptionLaidOutCue = {
 export type CaptionAssResult = { ass: string; cues: CaptionLaidOutCue[]; warnings: string[] };
 
 const DEFAULTS: Omit<Required<CaptionStyleOptions>, "placement"> = {
+  verticalAnchor: "bottom",
+  marginVPercent: CAPTION_SAFE_ZONE.bottom * 100,
   canvas: { width: 1080, height: 1920 },
   fps: 60,
   fontName: "Noto Sans JP",
@@ -107,6 +114,14 @@ export function formatAssTime(ms: number): string {
   const m = Math.floor(totalSeconds / 60) % 60;
   const h = Math.floor(totalSeconds / 3600);
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+
+/** `#RRGGBB` -> ASS inline override colour `&HBBGGRR&` (for `{\\1c...}` tags). */
+export function assOverrideColor(hex: string): string {
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!match) throw new Error(`invalid colour ${hex}`);
+  const value = match[1]!;
+  return `&H${value.slice(4, 6)}${value.slice(2, 4)}${value.slice(0, 2)}&`.toUpperCase();
 }
 
 /** `#RRGGBB` -> ASS `&H00BBGGRR`. */
@@ -335,8 +350,9 @@ function paginate(glyphs: Glyph[], o: ResolvedOptions, size: number): Range[] {
 // ---------------------------------------------------------------------------------------------------------------------
 // ASS writer
 
-function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean, placement: CaptionStyleOptions["placement"]): string {
-  let out = placement ? `{\\an5\\pos(${Math.round(placement.x)},${Math.round(placement.y)})}` : "";
+function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean, placement: CaptionStyleOptions["placement"], color?: string): string {
+  let out = color && !highlight ? `{\\1c${assOverrideColor(color)}}` : "";
+  out += placement ? `{\\an5\\pos(${Math.round(placement.x)},${Math.round(placement.y)})}` : "";
   if (fontSizePx !== baseFontSizePx) out += `{\\fs${fontSizePx}}`;
   let cursorCs = 0;
   let lastUnit = -1;
@@ -411,7 +427,7 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
       if (prev && prev.endMs > startMs) prev.endMs = Math.max(prev.startMs + frameMs, startMs); // never overlap the previous event
       if (prev && prev.endMs > startMs) startMs = prev.endMs;
       if (endMs < startMs + frameMs - 0.001) endMs = startMs + frameMs;
-      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, o.placement);
+      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, o.placement, cue.color);
       const lines = page.lines.map((l) => glyphs.slice(l.s, l.e).map((g) => g.ch).join("").trim());
       laidOut.push({ startMs, endMs, fontSizePx: page.size, lines, timing: prepared.timing, split: pages.length > 1 });
       bodies.push(body);
@@ -421,7 +437,8 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
   const dialogue = laidOut.map((cue, index) => `Dialogue: 0,${formatAssTime(cue.startMs)},${formatAssTime(cue.endMs)},Sub,,0,0,0,,${bodies[index]!}`);
 
   const marginLR = Math.round(o.canvas.width * CAPTION_SAFE_ZONE.side);
-  const marginV = Math.round(o.canvas.height * CAPTION_SAFE_ZONE.bottom);
+  const marginV = Math.round((o.canvas.height * o.marginVPercent) / 100);
+  const alignment = o.verticalAnchor === "top" ? 8 : 2;
   const primary = highlight ? o.highlightColor : o.textColor;
   const ass = [
     "[Script Info]",
@@ -435,7 +452,7 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-    `Style: Sub,${o.fontName},${o.fontSizePx},${assColor(primary)},${assColor(o.textColor)},${assColor(o.outlineColor)},&H64000000,${o.bold ? -1 : 0},0,0,0,100,100,0,0,1,${o.outlinePx},0,2,${marginLR},${marginLR},${marginV},1`,
+    `Style: Sub,${o.fontName},${o.fontSizePx},${assColor(primary)},${assColor(o.textColor)},${assColor(o.outlineColor)},&H64000000,${o.bold ? -1 : 0},0,0,0,100,100,0,0,1,${o.outlinePx},0,${alignment},${marginLR},${marginLR},${marginV},1`,
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",

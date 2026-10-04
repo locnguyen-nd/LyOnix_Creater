@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ComposePlan, ComposeScene } from "@lyonix/media-jobs";
-import { buildVideoGraph, filterComplexFileArgs, framesToSeconds, planSceneTimeline, quoteFilterPath } from "./filtergraph.js";
+import { buildVideoGraph, filterComplexFileArgs, framesToSeconds, pictureArea, planSceneTimeline, quoteFilterPath } from "./filtergraph.js";
 import { testRecipe } from "./test-fixtures.js";
 
 const scene = (id: string, startFrame: number, durationFrames: number, over: Partial<ComposeScene> = {}): ComposeScene => ({
@@ -140,5 +140,30 @@ describe("helpers", () => {
     expect(filterComplexFileArgs("g.txt", "ffmpeg version n8.0 Copyright")[0]).toBe("-/filter_complex");
     expect(filterComplexFileArgs("g.txt", "ffmpeg version N-118000-gabc Copyright")[0]).toBe("-/filter_complex");
     expect(filterComplexFileArgs("g.txt", "ffmpeg version 5.1.2 Copyright")[0]).toBe("-filter_complex_script");
+  });
+});
+
+describe("band picture area (VE2E-115)", () => {
+  const banded = (): ReturnType<typeof testRecipe> => ({
+    ...testRecipe("DejaVu Sans"),
+    background: { ...testRecipe("DejaVu Sans").background, frame: { mode: "band", heightPct: 44, centerYPct: 50, canvasColor: "#0B0B0B" } },
+  });
+  it("derives an even-sized band centred on the canvas, and the full canvas without a frame", () => {
+    expect(pictureArea(testRecipe("DejaVu Sans"))).toEqual({ width: 1080, height: 1920, y: 0, canvasColor: null });
+    const area = pictureArea(banded());
+    expect(area).toEqual({ width: 1080, height: 844, y: 538, canvasColor: "#0B0B0B" });
+    expect(area.height % 2).toBe(0);
+    expect(area.y % 2).toBe(0);
+    expect(area.y + area.height).toBeLessThanOrEqual(1920);
+  });
+  it("scales/crops each scene to the band and pads it onto the canvas colour; the full-bleed graph has no pad", () => {
+    const p = plan([scene("a", 15, 180), scene("b", 195, 120, { transitionIn: wipe(400) })]);
+    const input = { plan: p, params: {}, mediaPaths: p.scenes.map((s) => `/root/${s.media.relativePath}`), overlays: { layerAss: {}, captionsAss: null }, fontsDir: null };
+    const band = buildVideoGraph({ ...input, recipe: banded() }).filterComplex;
+    const area = pictureArea(banded());
+    expect(band).toContain(`scale=1080:${area.height}:force_original_aspect_ratio=increase`);
+    expect(band).toContain(`crop=1080:${area.height}`);
+    expect(band).toContain(`pad=1080:1920:0:${area.y}:color=0x0B0B0B`);
+    expect(buildVideoGraph({ ...input, recipe: testRecipe("DejaVu Sans") }).filterComplex).not.toContain("pad=1080");
   });
 });

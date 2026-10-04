@@ -96,7 +96,17 @@ export const motionFor = (kind: "image" | "video", index: number, recipe: Render
   return { direction, intensity: Math.min(config.intensity, MAX_SCENE_ZOOM) };
 };
 
+/** Geometry of the picture area: the whole canvas, or a horizontal band on a solid canvas colour (`background.frame`). */
+export function pictureArea(recipe: RenderRecipe): { width: 1080; height: number; y: number; canvasColor: string | null } {
+  const frame = recipe.background.frame;
+  if (!frame) return { width: 1080, height: 1920, y: 0, canvasColor: null };
+  const even = (value: number) => Math.round(value / 2) * 2; // yuv420p needs even sizes
+  const height = even((1920 * frame.heightPct) / 100);
+  return { width: 1080, height, y: Math.max(0, even((1920 * frame.centerYPct) / 100 - height / 2)), canvasColor: frame.canvasColor };
+}
+
 const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number, recipe: RenderRecipe, params: Record<string, string>): string => {
+  const area = pictureArea(recipe);
   const length = timeline.clipFrames;
   const seconds = length / FPS;
   const steps: string[] = [`fps=${FPS}`];
@@ -105,13 +115,15 @@ const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number,
   if (scene.media.kind === "video" && ranged) steps.push(`tpad=stop_mode=clone:stop_duration=${framesToSeconds(length)}`);
   steps.push(`trim=end_frame=${length}`, "setpts=PTS-STARTPTS");
   // cover fit to the 9:16 canvas + BT.709 limited range (the output tags say so; untagged/BT.601/full-range sources are converted here)
-  steps.push("scale=1080:1920:force_original_aspect_ratio=increase:flags=bicubic:out_color_matrix=bt709:out_range=tv", "crop=1080:1920", "setsar=1");
+  steps.push(`scale=${area.width}:${area.height}:force_original_aspect_ratio=increase:flags=bicubic:out_color_matrix=bt709:out_range=tv`, `crop=${area.width}:${area.height}`, "setsar=1");
   const motion = motionFor(scene.media.kind, timeline.index, recipe, params);
   if (motion) {
     const progress = `t/${seconds.toFixed(6)}`;
     const zoom = motion.direction === "in" ? `1+${motion.intensity}*${progress}` : `1+${motion.intensity}*(1-${progress})`;
-    steps.push(`scale=w='trunc(1080*(${zoom})/2)*2':h='trunc(1920*(${zoom})/2)*2':eval=frame:flags=bicubic`, "crop=1080:1920");
+    steps.push(`scale=w='trunc(${area.width}*(${zoom})/2)*2':h='trunc(${area.height}*(${zoom})/2)*2':eval=frame:flags=bicubic`, `crop=${area.width}:${area.height}`);
   }
+  // band mode: the picture sits on a solid canvas, so scene transitions only ever move inside the band
+  if (area.canvasColor) steps.push(`pad=1080:1920:0:${area.y}:color=${hexToFfmpeg(area.canvasColor)}`);
   steps.push("format=yuv420p");
   return `[${input}:v]${steps.join(",")}[s${timeline.index}]`;
 };

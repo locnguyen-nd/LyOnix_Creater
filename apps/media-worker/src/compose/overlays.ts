@@ -20,9 +20,10 @@ export type OverlayDocuments = {
   warnings: string[];
 };
 
-export function captionCuesFromComposePlan(plan: ComposePlan): CaptionCueInput[] {
+export function captionCuesFromComposePlan(plan: ComposePlan, colorCycle?: readonly string[]): CaptionCueInput[] {
   const cues: CaptionCueInput[] = [];
-  for (const scene of plan.scenes) {
+  for (const [sceneIndex, scene] of plan.scenes.entries()) {
+    const color = colorCycle && colorCycle.length > 0 ? colorCycle[sceneIndex % colorCycle.length] : undefined;
     const sceneStartMs = frameMs(scene.startFrame);
     const sceneEndMs = frameMs(scene.startFrame + scene.durationFrames);
     if (scene.captionCues.length > 0) {
@@ -31,11 +32,12 @@ export function captionCuesFromComposePlan(plan: ComposePlan): CaptionCueInput[]
           text: cue.text,
           startMs: sceneStartMs + cue.startMs,
           endMs: Math.min(sceneStartMs + cue.endMs, sceneEndMs),
+          ...(color ? { color } : {}),
           ...(cue.charTimings ? { charTimings: cue.charTimings.map((t) => ({ startMs: sceneStartMs + t.startMs, endMs: sceneStartMs + t.endMs })) } : {}),
         });
       }
     } else if (scene.text.trim()) {
-      cues.push({ text: scene.text, startMs: sceneStartMs, endMs: sceneEndMs });
+      cues.push({ text: scene.text, startMs: sceneStartMs, endMs: sceneEndMs, ...(color ? { color } : {}) });
     }
   }
   return cues;
@@ -63,8 +65,9 @@ export function buildOverlayDocuments(plan: ComposePlan, recipe: RenderRecipe, r
       outlineColor: recipe.captions.outlineColor,
       outlinePx: recipe.captions.outlinePx,
       highlight: recipe.captions.highlight,
+      ...(recipe.captions.placement ? { verticalAnchor: recipe.captions.placement.anchor, marginVPercent: recipe.captions.placement.marginPct } : {}),
     };
-    const cues = captionCuesFromComposePlan(plan);
+    const cues = captionCuesFromComposePlan(plan, recipe.captions.colorCycle);
     if (cues.length > 0) {
       const built = buildCaptionAss(cues, style);
       captions = { ass: built.ass, warnings: built.warnings, cueCount: built.cues.length };

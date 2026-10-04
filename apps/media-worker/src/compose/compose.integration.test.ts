@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildVideoComposeJob, composeFingerprint, type VideoComposeProgress, type VideoComposeSuccess } from "@lyonix/media-jobs";
-import { NEWS_RECAP_BROADCAST_TELOP_JP_V1, RecipeRegistry, type RenderRecipe } from "@lyonix/render-recipes";
+import { NEWS_RECAP_BROADCAST_TELOP_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1, NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1, RecipeRegistry, type RenderRecipe } from "@lyonix/render-recipes";
 import { runProcess } from "../process.js";
 import { ComposeProcessor } from "./compose-processor.js";
 import { detectFfmpeg, ffmpegPath, ffprobePath, findJapaneseFont, generate, makeFixtures, makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
@@ -20,13 +20,14 @@ const japaneseFont = findJapaneseFont();
 const FONT = japaneseFont ?? "DejaVu Sans";
 
 /** The released recipe with this host's font substituted (CI/dev machines do not have Noto Sans CJK JP): geometry, timing and audio policy are untouched. */
-const releasedWithHostFont = (): RenderRecipe => {
-  const recipe = structuredClone(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
+const withHostFont = (source: RenderRecipe): RenderRecipe => {
+  const recipe = structuredClone(source);
   recipe.captions.fontFamily = FONT;
   recipe.fonts = [FONT];
   for (const layer of recipe.layers) if (layer.type === "text") layer.fontFamily = FONT;
   return recipe;
 };
+const releasedWithHostFont = (): RenderRecipe => withHostFont(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
 
 describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
   let root: string;
@@ -42,7 +43,7 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       compose: { queue: "lyonix.render.test", prefetch: 1, timeoutMs: 180_000, x264Preset: "ultrafast", x264Threads: 0, fontsDir: null },
       runner: runProcess,
       ffmpegVersion: version,
-      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont()]),
+      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont(), withHostFont(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1), withHostFont(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1)]),
     });
   }, 120_000);
 
@@ -111,6 +112,23 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
     expect(noHeadline.ok).toBe(true);
     if (noHeadline.ok) expect(noHeadline.output.sha256).not.toBe(result.output.sha256); // the band/badge layers really change the picture
   }, 300_000);
+
+  it("renders news-recap-white-top-caption-jp@1 (picture band on a dark canvas, captions on top) and news-recap-photo-video-mix-jp@1 through the full QC gate", async () => {
+    const texts = japaneseFont ? ["政府は新しい経済対策を発表しました。", "物価高への対応を急ぐ方針です。", "来月から実施される見通しです。"] : ["First scene text", "Second scene text", "Third scene text"];
+    const plan = makePlan(files, { texts, withMusic: true, params: { badge: japaneseFont ? "速報" : "BREAKING" }, padStartMs: 300, padEndMs: 800 });
+    for (const recipe of [NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1]) {
+      const result = await processor.handle(buildVideoComposeJob({ jobKey: `compose:it-${recipe.id}`, recipe: { id: recipe.id, version: 1 }, plan }));
+      if (!result.ok) throw new Error(`${recipe.id} failed: ${result.error.code}: ${result.error.message}`);
+      expect(result.qc.passed, JSON.stringify(result.qc.checks.filter((c) => !c.ok))).toBe(true);
+      expect(result.output.fps).toBe(60);
+      if (process.env.LYONIX_KEEP_RENDER) console.info(`${recipe.id} render kept at ${join(root, result.output.relativePath)}`);
+      if (recipe.id !== NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1.id) continue;
+      // band mode: outside the 44 % picture band the canvas is the solid dark colour (probe a strip well above the captions' zone is not possible, so probe below the band)
+      const frame = spawnSync(ffmpegPath, ["-v", "error", "-ss", "1", "-i", join(root, result.output.relativePath), "-frames:v", "1", "-vf", "crop=1080:200:0:1650,scale=1:1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], { encoding: "buffer" });
+      expect(frame.stdout.length).toBe(1);
+      expect(frame.stdout[0]!).toBeLessThan(40); // limited-range dark, not picture content
+    }
+  }, 400_000);
 
   it("fails fast with FONT_MISSING (a technical failure: the Router falls back) when the recipe font is not installed", async () => {
     const ghost = { ...testRecipe("Definitely Not Installed Font"), id: "ghost-font" };
