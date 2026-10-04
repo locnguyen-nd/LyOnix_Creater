@@ -8,9 +8,10 @@ x-app-env: &app-env
   DATABASE_URL: postgresql://lyonix:${POSTGRES_PASSWORD}@postgres:5432/lyonix
   RABBITMQ_URL: amqp://lyonix:${RABBITMQ_PASSWORD}@rabbitmq:5672
   MEDIA_ROOT: ./data/media
-  WEB_ORIGIN: https://app.${DOMAIN}
-  PUBLIC_BASE_URL: https://api.${DOMAIN}
-  TIKTOK_REDIRECT_URI: https://app.${DOMAIN}/callback/
+  # Defaults derive from DOMAIN; a .env value (e.g. copied from the project's .env) wins.
+  WEB_ORIGIN: ${WEB_ORIGIN:-https://app.${DOMAIN}}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://api.${DOMAIN}}
+  TIKTOK_REDIRECT_URI: ${TIKTOK_REDIRECT_URI:-https://app.${DOMAIN}/callback/}
 
 x-app: &app
   image: ${IMAGE_PREFIX}-app:${IMAGE_TAG:-dev}
