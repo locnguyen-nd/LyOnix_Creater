@@ -176,3 +176,23 @@ describe("startComposeConsumer", () => {
     expect((received[0]!.body as { error: { code: string; retryable: boolean } }).error).toMatchObject({ code: "INTERNAL", retryable: true });
   });
 });
+
+describe("TTL sweep covers video.compose renders", () => {
+  it("removes an expired render directory and keeps a live one", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { sweepExpiredMediaJobs } = await import("../ttl-sweep.js");
+    const root = await mkdtemp(join(tmpdir(), "lyonix-sweep-"));
+    try {
+      for (const [name, expiresAt] of [["old", "2026-10-01T00:00:00.000Z"], ["live", "2026-10-20T00:00:00.000Z"]] as const) {
+        const dir = join(root, "working/renders", name);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, "result.json"), JSON.stringify({ fingerprint: "f", result: { expiresAt, output: { relativePath: "x" } } }));
+      }
+      expect((await sweepExpiredMediaJobs(root, new Date("2026-10-10T00:00:00Z"))).removed).toBe(1);
+      const { readdir } = await import("node:fs/promises");
+      expect(await readdir(join(root, "working/renders"))).toEqual(["live"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

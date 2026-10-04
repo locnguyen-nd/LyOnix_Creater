@@ -2,17 +2,26 @@ import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { WORKING_RETENTION_DAYS } from "@lyonix/domain";
 import { MEDIA_JOBS_DIR } from "./clip-prepare.js";
+import { RENDERS_DIR } from "./compose/compose-processor.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** Directories (relative to MEDIA_ROOT) holding the worker's own job outputs: clip/frame/reframe jobs and `video.compose` renders (VE2E-105). */
+export const SWEPT_JOB_DIRS = [MEDIA_JOBS_DIR, RENDERS_DIR] as const;
+
 /**
- * 7-day TTL for the media-worker's own working outputs (`MEDIA_ROOT/working/media-jobs`).
+ * 7-day TTL for the media-worker's own working outputs (`MEDIA_ROOT/working/media-jobs` and `working/renders`).
  * Deletes a job directory when its stored `expiresAt` has passed, or — for directories
  * without a manifest (failed/partial runs) — when untouched for WORKING_RETENTION_DAYS.
  * Never touches anything outside that directory (project assets are not swept here).
  */
 export async function sweepExpiredMediaJobs(mediaRoot: string, now: Date = new Date()): Promise<{ removed: number }> {
-  const root = join(mediaRoot, MEDIA_JOBS_DIR);
+  let removed = 0;
+  for (const jobsDir of SWEPT_JOB_DIRS) removed += await sweepDir(join(mediaRoot, jobsDir), now);
+  return { removed };
+}
+
+async function sweepDir(root: string, now: Date): Promise<number> {
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
   let removed = 0;
   for (const entry of entries) {
@@ -36,5 +45,5 @@ export async function sweepExpiredMediaJobs(mediaRoot: string, now: Date = new D
       removed += 1;
     }
   }
-  return { removed };
+  return removed;
 }
