@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Inject, Param, Post, Req, Res } from "@nestjs/common";
 import type { Request, Response } from "express";
-import type { CreatomatePreviewConfigResponse, RenderAssignmentInput } from "@lyonix/contracts";
+import type { CreatomatePreviewConfigResponse, OrshotRenderOptions, RenderAssignmentInput } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { creatomatePreviewConfigured, creatomatePreviewPublicToken } from "./creatomate-preview.config.js";
@@ -14,6 +14,7 @@ type SubmitBody = {
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
   allowTemplateTts?: boolean;
+  orshot?: OrshotRenderOptions;
 };
 
 @Controller()
@@ -59,9 +60,24 @@ export class RenderJobsController {
       ...(body.outputFormat ? { outputFormat: body.outputFormat } : {}),
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
       ...(body.allowTemplateTts === true ? { allowTemplateTts: true } : {}),
+      ...(body.orshot ? { orshot: body.orshot } : {}),
     }, "template");
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     response.status(202);
+    return success(outcome.data, requestId(response));
+  }
+
+  /** Orshot pre-render cost estimate (narration seconds -> credits -> USD). Read-only, never calls Orshot. */
+  @Get("projects/:projectId/timeline-versions/:timelineVersionId/orshot-estimate")
+  async orshotEstimate(
+    @Param("projectId") projectId: string,
+    @Param("timelineVersionId") timelineVersionId: string,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { user } = await requireUser(request, response, this.auth);
+    const outcome = await this.renders.estimateOrshotRender(projectId, timelineVersionId, user.id, user.role);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     return success(outcome.data, requestId(response));
   }
 
@@ -149,6 +165,14 @@ export class RenderJobsController {
    * third-party server, not a browser). Authenticated solely by the unguessable
    * per-job `token` embedded in the URL LyOnix gave Creatomate at submit time.
    */
+  @Post("render-webhooks/orshot/:token")
+  @HttpCode(200)
+  async orshotWebhook(@Param("token") token: string, @Res({ passthrough: true }) response: Response) {
+    const outcome = await this.renders.handleOrshotWebhook(token);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    return success(outcome.data, requestId(response));
+  }
+
   @Post("render-webhooks/creatomate/:token")
   @HttpCode(200)
   async webhook(@Param("token") token: string, @Body() body: unknown, @Res({ passthrough: true }) response: Response) {

@@ -1065,12 +1065,37 @@ export type TimelineRenderPreviewResponse = {
   missingRequiredModificationKeys: string[];
 };
 
+/** Orshot-only render options (ignored for Creatomate): multi-format output, social-size smart resize and narration-fit duration. */
+export type OrshotRenderOptions = {
+  format?: "mp4" | "webm" | "mov" | "gif";
+  fps?: 24 | 30 | 60;
+  /** Orshot size preset slug (smart resize), e.g. `tiktok-video`; omit to keep the template canvas. */
+  size?: string;
+  /** Default true: set the video duration to the total narration length instead of the template's fixed length. */
+  fitDurationToNarration?: boolean;
+};
+
+/** Pre-render cost estimate for an Orshot render of a timeline (1 credit = 1 second of video; USD depends on the plan's credit price). */
+export type OrshotCostEstimateResponse = {
+  durationSec: number;
+  credits: number;
+  creditUsd: number;
+  amountUsd: string;
+  maxVideoSeconds: number;
+  exceedsPlanLimit: boolean;
+  /** Narration-bearing scenes counted / total included scenes. */
+  scenesWithVoice: number;
+  scenesTotal: number;
+};
+
 export type RenderSubmitFromTimelineRequest = {
   providerAccountId: string;
   outputFormat?: "mp4" | "mov" | "gif";
   idempotencyKey?: string;
   /** VE2E-47: see `RenderSubmitRequest.allowTemplateTts`. */
   allowTemplateTts?: boolean;
+  /** Orshot accounts only. */
+  orshot?: OrshotRenderOptions;
 };
 
 /**

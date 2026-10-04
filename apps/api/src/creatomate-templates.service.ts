@@ -12,8 +12,11 @@ import type { Prisma } from "@lyonix/db";
 import {
   ProviderError,
   deriveTemplateModifications,
+  deriveOrshotModifications,
   getCreatomateTemplate,
+  getOrshotTemplate,
   listCreatomateTemplates,
+  listOrshotTemplates,
   type TemplateModificationSlot,
 } from "@lyonix/providers";
 import type { CreatomateTemplateSummaryResponse, ErrorCode, TemplateSnapshotResponse } from "@lyonix/contracts";
@@ -21,23 +24,28 @@ import { slotsWithTtsProvider, templateTtsWarnings } from "./template-tts.js";
 import { PrismaService } from "./prisma.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 
+export type RenderProviderName = "creatomate" | "orshot";
+export const isRenderProvider = (provider: string): provider is RenderProviderName => provider === "creatomate" || provider === "orshot";
+const providerLabel = (provider: string) => (provider === "orshot" ? "Orshot" : "Creatomate");
+
 export type CreatomateOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
-const providerErrorMessage: Record<string, string> = {
-  PROVIDER_AUTH_INVALID: "Khóa Creatomate bị từ chối. Verify lại tài khoản.",
-  PROVIDER_RATE_LIMITED: "Creatomate giới hạn tốc độ, thử lại sau.",
-  PROVIDER_QUOTA_EXHAUSTED: "Tài khoản Creatomate đã hết credit. Nạp thêm credit hoặc đổi gói rồi thử lại.",
-  PROVIDER_CAPABILITY_UNAVAILABLE: "Creatomate không tìm thấy template này.",
-  PROVIDER_TIMEOUT: "Yêu cầu Creatomate hết thời gian chờ.",
-  PROVIDER_SCHEMA_INVALID: "Creatomate trả về dữ liệu không hợp lệ.",
-};
+const providerErrorMessage = (label: string): Record<string, string> => ({
+  PROVIDER_AUTH_INVALID: `Khóa ${label} bị từ chối. Verify lại tài khoản.`,
+  PROVIDER_RATE_LIMITED: `${label} giới hạn tốc độ, thử lại sau.`,
+  PROVIDER_QUOTA_EXHAUSTED: `Tài khoản ${label} đã hết credit. Nạp thêm credit hoặc đổi gói rồi thử lại.`,
+  PROVIDER_CAPABILITY_UNAVAILABLE: `${label} không tìm thấy template này.`,
+  PROVIDER_TIMEOUT: `Yêu cầu ${label} hết thời gian chờ.`,
+  PROVIDER_SCHEMA_INVALID: `${label} trả về dữ liệu không hợp lệ.`,
+});
 
-const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+const mapProviderError = (error: unknown, provider: string = "creatomate"): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+  const label = providerLabel(provider);
   if (error instanceof ProviderError) {
     const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_AUTH_INVALID";
-    return { code: error.code, message: providerErrorMessage[error.code] ?? `Creatomate từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
+    return { code: error.code, message: providerErrorMessage(label)[error.code] ?? `${label} từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
   }
-  return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Creatomate", status: 502, retryable: true };
+  return { code: "PROVIDER_UNAVAILABLE", message: `Lỗi mạng hoặc timeout khi gọi ${label}`, status: 502, retryable: true };
 };
 
 const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kind: slot.kind, label: slot.label, required: slot.required, ...(slot.ttsProvider ? { ttsProvider: slot.ttsProvider } : {}) });
@@ -62,26 +70,27 @@ const toSnapshotResponse = (row: {
 export class CreatomateTemplatesService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  /** Any non-deleted `creatomate`/`render` account, verified (or fake in test) — same authorization shape as `PexelsService.usableAccount`. */
-  async usableAccount(providerAccountId: string): Promise<CreatomateOutcome<{ id: string; encryptedSecret: string }>> {
+  /** Any non-deleted `creatomate`|`orshot` / `render` account, verified (or fake in test) — same authorization shape as `PexelsService.usableAccount`. */
+  async usableAccount(providerAccountId: string): Promise<CreatomateOutcome<{ id: string; encryptedSecret: string; provider: RenderProviderName }>> {
     const account = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null } });
     if (!account) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản provider không tồn tại hoặc đã bị xóa", status: 503 };
-    if (account.role !== "render" || account.provider !== "creatomate") {
-      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải Creatomate (render)", status: 503 };
+    if (account.role !== "render" || !isRenderProvider(account.provider)) {
+      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải provider render (Creatomate/Orshot)", status: 503 };
     }
     const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
-    if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Creatomate chưa verify", status: 503 };
-    return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret } };
+    if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: `Tài khoản ${account.provider === "orshot" ? "Orshot" : "Creatomate"} chưa verify`, status: 503 };
+    return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret, provider: account.provider } };
   }
 
   async listTemplates(providerAccountId: string): Promise<CreatomateOutcome<CreatomateTemplateSummaryResponse[]>> {
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
     try {
-      const templates = await listCreatomateTemplates(decryptSecret(account.data.encryptedSecret));
+      const secret = decryptSecret(account.data.encryptedSecret);
+      const templates = account.data.provider === "orshot" ? await listOrshotTemplates(secret) : await listCreatomateTemplates(secret);
       return { ok: true, data: templates };
     } catch (error) {
-      return { ok: false, ...mapProviderError(error) };
+      return { ok: false, ...mapProviderError(error, account.data.provider) };
     }
   }
 
@@ -98,11 +107,12 @@ export class CreatomateTemplatesService {
     if (!externalTemplateId.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu externalTemplateId" };
     let detail: Awaited<ReturnType<typeof getCreatomateTemplate>>;
     try {
-      detail = await getCreatomateTemplate(decryptSecret(account.data.encryptedSecret), externalTemplateId);
+      const secret = decryptSecret(account.data.encryptedSecret);
+      detail = account.data.provider === "orshot" ? await getOrshotTemplate(secret, externalTemplateId) : await getCreatomateTemplate(secret, externalTemplateId);
     } catch (error) {
-      return { ok: false, ...mapProviderError(error) };
+      return { ok: false, ...mapProviderError(error, account.data.provider) };
     }
-    const modifications = deriveTemplateModifications(detail.source);
+    const modifications = account.data.provider === "orshot" ? deriveOrshotModifications(detail.source) : deriveTemplateModifications(detail.source);
     if (modifications.length === 0) {
       return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: "Không suy ra được modification nào từ template này", status: 502 };
     }

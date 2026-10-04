@@ -8,7 +8,7 @@ import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
-type AddableKind = "openai" | "gemini" | "xai" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate";
+type AddableKind = "openai" | "gemini" | "xai" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate" | "orshot";
 type CatalogItem = { provider: string; role: string; implementationStatus: string; models: string[] };
 
 /** Every provider kind the "Add account" form can create today, mapped to the role it fills in the video pipeline. Google is intentionally absent (evaluated, not implemented - VE2E-15b). YouTube and Pinterest (VE2E-15b) can both be added/verified here, but neither produces a candidate Auto can apply yet: YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`), and Pinterest has no reliable rights signal so every candidate is rights-unclear (see `packages/providers/src/pinterest.ts`) - both are manual-Studio-review sources only. */
@@ -22,6 +22,7 @@ const PROVIDER_ROLE: Record<AddableKind, ProviderRole> = {
   pinterest: "visual",
   apify: "visual",
   creatomate: "render",
+  orshot: "render",
 };
 const ADDABLE_PROVIDERS = Object.keys(PROVIDER_ROLE) as AddableKind[];
 const ROLE_ORDER: ProviderRole[] = ["content", "tts", "visual", "render"];
@@ -39,6 +40,7 @@ const PROVIDER_BADGE: Record<string, { label: string; bg: string; fg: string }> 
   pinterest: { label: "Pi", bg: "#e60023", fg: "#fff" },
   apify: { label: "Ap", bg: "#2b5cff", fg: "#fff" },
   creatomate: { label: "Cm", bg: "#ff5a1f", fg: "#fff" },
+  orshot: { label: "Os", bg: "#7c3aed", fg: "#fff" },
   vrew: { label: "Vr", bg: "#6b7280", fg: "#fff" },
 };
 
@@ -65,6 +67,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [provider, setProvider] = useState<AddableKind>("openai");
   const [scope, setScope] = useState<"personal" | "organization">("personal");
   const [secret, setSecret] = useState("");
+  const [embedId, setEmbedId] = useState("");
   const [editing, setEditing] = useState<ApiProvider | null>(null);
   const [editName, setEditName] = useState("");
   const [editModel, setEditModel] = useState("");
@@ -100,19 +103,19 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
     try {
       setError(null);
       const role = PROVIDER_ROLE[provider];
-      const model = modelsFor(provider)[0] ?? NO_MODEL_PLACEHOLDER;
+      const model = provider === "orshot" ? embedId.trim() || NO_MODEL_PLACEHOLDER : modelsFor(provider)[0] ?? NO_MODEL_PLACEHOLDER;
       const created = await api<ApiProvider>("/provider-accounts", { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ name, provider, role, scope, model, secret }) });
       try {
         const verified = await api<ApiProvider>(`/provider-accounts/${created.id}/verify`, { method: "POST", headers: await csrfHeaders() });
         setNotice(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`);
       } catch (err) { setError(err instanceof ApiError ? err.message : t("providers.verifyFail")); }
       await refresh();
-      setSecret(""); setOpen(false);
+      setSecret(""); setEmbedId(""); setOpen(false);
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
   };
 
   const beginEdit = (row: ApiProvider) => {
-    setEditing(row); setEditName(row.name); setEditModel(row.model); setEditVisionModel(row.visionModel ?? ""); setEditPreferredModels((row.preferredModels ?? []).join(", ")); setReplacementSecret(""); setError(null);
+    setEditing(row); setEditName(row.name); setEditModel(row.provider === "orshot" && row.model === NO_MODEL_PLACEHOLDER ? "" : row.model); setEditVisionModel(row.visionModel ?? ""); setEditPreferredModels((row.preferredModels ?? []).join(", ")); setReplacementSecret(""); setError(null);
   };
 
   const saveEdit = async () => {
@@ -122,7 +125,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       await api<ApiProvider>(`/provider-accounts/${editing.id}`, {
         method: "PATCH",
         headers: { ...(await csrfHeaders()), "If-Match": `\"${editing.version}\"` },
-        body: JSON.stringify({ name: editName, model: editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null, preferredModels: editPreferredModels.split(",").map((item) => item.trim()).filter(Boolean) } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
+        body: JSON.stringify({ name: editName, model: editing.provider === "orshot" ? editModel.trim() || NO_MODEL_PLACEHOLDER : editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null, preferredModels: editPreferredModels.split(",").map((item) => item.trim()).filter(Boolean) } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
       });
       await refresh(); setEditing(null); setReplacementSecret(""); setNotice(t("providers.updated"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
@@ -150,7 +153,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const rowsByRole = (role: ProviderRole) => rows.filter((row) => row.role === role);
-  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "pinterest" && row.provider !== "apify" && row.provider !== "creatomate";
+  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "pinterest" && row.provider !== "apify" && row.provider !== "creatomate" && row.provider !== "orshot";
 
   return (
     <>
@@ -224,6 +227,11 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
             </Field>
             <p className="text-[12px] text-lyx-fg-muted">{t("providers.autoModelHint")}</p>
             {provider === "apify" ? <p className="text-[12px] text-lyx-fg-muted">{t("providers.apifyHint")}</p> : null}
+{provider === "orshot" ? (
+              <Field label={t("providers.orshotEmbedId")} hint={t("providers.orshotEmbedHint")}>
+                <TextInput value={embedId} onChange={(e) => setEmbedId(e.target.value)} placeholder="abc123xyz" autoComplete="off" />
+              </Field>
+            ) : null}
             <Field label="scope">
               <Select value={scope} onChange={(e) => setScope(e.target.value as "personal" | "organization")}>
                 <option value="personal">{t("providers.personal")}</option>
@@ -239,6 +247,11 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
         <Modal title={t("providers.edit")} onClose={() => setEditing(null)}>
           <div className="flex flex-col gap-3">
             <Field label={t("channels.name")}><TextInput value={editName} onChange={(e) => setEditName(e.target.value)} /></Field>
+{editing.provider === "orshot" ? (
+              <Field label={t("providers.orshotEmbedId")} hint={t("providers.orshotEmbedHint")}>
+                <TextInput value={editModel} onChange={(e) => setEditModel(e.target.value)} placeholder="abc123xyz" autoComplete="off" />
+              </Field>
+            ) : null}
             {hasModelChoice(editing) ? (
               <Field label={t("providers.model")}>
                 <Select value={editModel} onChange={(e) => setEditModel(e.target.value)}>

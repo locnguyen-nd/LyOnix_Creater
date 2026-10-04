@@ -19,10 +19,12 @@ import {
   countTemplateSceneSlots,
   extractDynamicStyleFromTemplate,
   getCreatomateRender,
+  getOrshotRender,
   normalizeCreatomateStatus,
   readCreatomateCanvas,
   templateResolution,
   submitCreatomateRender,
+  submitOrshotRender,
   submitCreatomateSourceRender,
   applyCreatomateFrameRateCap,
   type CreatomateRenderResult,
@@ -30,6 +32,8 @@ import {
 } from "@lyonix/providers";
 import type {
   ErrorCode,
+  OrshotCostEstimateResponse,
+  OrshotRenderOptions,
   RenderAssignmentInput,
   RenderJobResponse,
   RenderSubmitFromTimelineRequest,
@@ -38,11 +42,12 @@ import type {
   TimelineSceneBindingResponse,
 } from "@lyonix/contracts";
 import { ClipDerivativesService, type ClipDerivativeRequest } from "./clip-derivatives.service.js";
-import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
+import { CreatomateTemplatesService, type RenderProviderName } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { fixedSlotPathApplies } from "./render-mode.js";
+import { estimateOrshotCost, narrationDurationMs, resolveOrshotPricing, sanitizeOrshotOptions } from "./orshot-render.js";
 import { QueueStatusService } from "./queue-status.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { TTS_PROVIDER_DISABLED_VALUE, classifyCreatomateRenderError, slotsWithTtsProvider, templateTtsConflictMessage, ttsProviderOverrideKey, unfilledTtsSlotKeys } from "./template-tts.js";
@@ -61,22 +66,26 @@ const DELIVERY_TOKEN_TTL_SEC = 3600;
 const DYNAMIC_RENDER_WIDTH = 1080;
 const DYNAMIC_RENDER_HEIGHT = 1920;
 
-const providerErrorMessage: Record<string, string> = {
-  PROVIDER_AUTH_INVALID: "Khóa Creatomate bị từ chối. Verify lại tài khoản.",
-  PROVIDER_RATE_LIMITED: "Creatomate giới hạn tốc độ, thử lại sau.",
-  PROVIDER_QUOTA_EXHAUSTED: "Tài khoản Creatomate đã hết credit. Nạp thêm credit hoặc đổi gói rồi thử lại.",
-  PROVIDER_CAPABILITY_UNAVAILABLE: "Creatomate không tìm thấy template/render này.",
-  PROVIDER_TIMEOUT: "Yêu cầu Creatomate hết thời gian chờ.",
-  PROVIDER_SCHEMA_INVALID: "Creatomate từ chối payload render.",
-};
+const providerErrorMessage = (label: string): Record<string, string> => ({
+  PROVIDER_AUTH_INVALID: `Khóa ${label} bị từ chối. Verify lại tài khoản.`,
+  PROVIDER_RATE_LIMITED: `${label} giới hạn tốc độ, thử lại sau.`,
+  PROVIDER_QUOTA_EXHAUSTED: `Tài khoản ${label} đã hết credit. Nạp thêm credit hoặc đổi gói rồi thử lại.`,
+  PROVIDER_CAPABILITY_UNAVAILABLE: `${label} không tìm thấy template/render này.`,
+  PROVIDER_TIMEOUT: `Yêu cầu ${label} hết thời gian chờ.`,
+  PROVIDER_SCHEMA_INVALID: `${label} từ chối payload render.`,
+});
 
-const mapProviderError = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+const mapProviderError = (error: unknown, provider: RenderProviderName = "creatomate"): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+  const label = provider === "orshot" ? "Orshot" : "Creatomate";
   if (error instanceof ProviderError) {
     const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_AUTH_INVALID";
-    return { code: error.code, message: providerErrorMessage[error.code] ?? `Creatomate từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
+    return { code: error.code, message: providerErrorMessage(label)[error.code] ?? `${label} từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
   }
-  return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Creatomate", status: 502, retryable: true };
+  return { code: "PROVIDER_UNAVAILABLE", message: `Lỗi mạng hoặc timeout khi gọi ${label}`, status: 502, retryable: true };
 };
+
+/** Orshot only renders a saved template with modifications — it cannot take the fully dynamic `source` composition Creatomate can. */
+const ORSHOT_NO_DYNAMIC_MESSAGE = "Orshot chỉ render theo template (số cảnh phải khớp slot template); dùng tài khoản Creatomate cho video có số cảnh khác slot.";
 
 const clampVolume = (value: number) => Math.max(0, Math.min(200, Math.round(value)));
 
@@ -270,7 +279,7 @@ export class RenderJobsService {
    * run) — it is only ever passed by `WorkflowRunnerService`, which calls this method
    * directly (not over HTTP) from the trusted background orchestrator.
    */
-  async submit(projectId: string, userId: string, role: "admin" | "staff", input: RenderSubmitRequest, workflowRunId?: string, queuedJobId?: string): Promise<RenderOutcome<RenderJobResponse>> {
+  async submit(projectId: string, userId: string, role: "admin" | "staff", input: RenderSubmitRequest, workflowRunId?: string, queuedJobId?: string, orshotExtra?: { options: OrshotRenderOptions; durationMs: number }): Promise<RenderOutcome<RenderJobResponse>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     // Preflight: provider account usable and PUBLIC_BASE_URL reachable *before* touching the DB or Creatomate — no charge on a preflight failure.
     const account = await this.templates.usableAccount(input.providerAccountId);
@@ -292,6 +301,11 @@ export class RenderJobsService {
     if (!built.ok) return built;
     const modifications = built.data;
 
+    // Orshot-only: fit the video length to the narration, pick format/fps/size, and estimate cost (1 credit = 1 s) BEFORE any provider call.
+    const orshotPlan = account.data.provider === "orshot" ? this.planOrshotRender(orshotExtra) : null;
+    if (orshotPlan && !orshotPlan.ok) return orshotPlan;
+    const orshot = orshotPlan?.ok ? orshotPlan.data : null;
+
     // Fingerprint must be computed from the client's stable raw input, not the resolved
     // `modifications` object: video/image assignments resolve through `issueToken()`, which
     // mints a fresh signed URL (random token + expiry) on every call. Hashing that volatile
@@ -302,14 +316,13 @@ export class RenderJobsService {
       .digest("hex");
 
     return this.createAndSubmitRenderJob(
-      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId, canvas: readCreatomateCanvas(snapshot.rawTemplate) },
-      (webhookUrl) =>
-        submitCreatomateRender(decryptSecret(account.data.encryptedSecret), {
-          templateId: snapshot.externalTemplateId,
-          modifications,
-          webhookUrl,
-          ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
-        }),
+      { projectId, templateSnapshotId: input.templateSnapshotId, providerAccountId: input.providerAccountId, userId, fingerprint, payload: modifications, workflowRunId, queuedJobId, canvas: readCreatomateCanvas(snapshot.rawTemplate), provider: account.data.provider, ...(orshot?.cost ? { cost: { amount: orshot.cost.amountUsd, currency: "USD" } } : {}) },
+      (webhookUrl) => {
+        const apiKey = decryptSecret(account.data.encryptedSecret);
+        const base = { templateId: snapshot.externalTemplateId, modifications, webhookUrl };
+        if (orshot) return submitOrshotRender(apiKey, { ...base, ...orshot.submit });
+        return submitCreatomateRender(apiKey, { ...base, ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}) });
+      },
     );
   }
 
@@ -324,7 +337,7 @@ export class RenderJobsService {
    * never the actual request if that would embed a volatile signed media-delivery URL.
    */
   private async createAndSubmitRenderJob(
-    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined; canvas?: { width: number; height: number } | null | undefined },
+    params: { projectId: string; templateSnapshotId: string; providerAccountId: string; userId: string; fingerprint: string; payload: unknown; workflowRunId?: string | undefined; queuedJobId?: string | undefined; canvas?: { width: number; height: number } | null | undefined; provider?: RenderProviderName; cost?: { amount: string; currency: string } },
     callProvider: (webhookUrl: string) => Promise<CreatomateRenderResult>,
   ): Promise<RenderOutcome<RenderJobResponse>> {
     let job: Awaited<ReturnType<typeof this.prisma.renderJob.create>>;
@@ -361,13 +374,13 @@ export class RenderJobsService {
 
     // Only the request that atomically won the fingerprint race actually calls Creatomate.
     const base = process.env.PUBLIC_BASE_URL!.replace(/\/$/, "");
-    const webhookUrl = `${base}/api/v1/render-webhooks/creatomate/${job.webhookToken}`;
+    const webhookUrl = `${base}/api/v1/render-webhooks/${params.provider ?? "creatomate"}/${job.webhookToken}`;
     let submitted: CreatomateRenderResult;
     try {
       submitted = await callProvider(webhookUrl);
     } catch (error) {
-      const mapped = mapProviderError(error);
-      if (!(error instanceof ProviderError)) console.error("[render-jobs] Creatomate submit threw a non-provider error", job.id, error);
+      const mapped = mapProviderError(error, params.provider);
+      if (!(error instanceof ProviderError)) console.error("[render-jobs] render provider submit threw a non-provider error", job.id, error);
       job = await this.prisma.renderJob.update({
         where: { id: job.id },
         data: { status: "failed", lastError: { code: mapped.code, message: mapped.message } as unknown as Prisma.InputJsonValue },
@@ -394,6 +407,7 @@ export class RenderJobsService {
           ...(submitted.snapshotUrl ? { snapshotUrl: submitted.snapshotUrl } : {}),
           ...outputResolutionData(submitted),
           ...(params.canvas ? { canvasWidth: Math.round(params.canvas.width), canvasHeight: Math.round(params.canvas.height) } : {}),
+          ...(params.cost ? { costAmount: new Prisma.Decimal(params.cost.amount), costCurrency: params.cost.currency } : {}),
         },
       });
     } catch (error) {
@@ -464,6 +478,7 @@ export class RenderJobsService {
       if (!withDerivatives.ok) return withDerivatives;
       built = buildRenderAssignmentsFromTimeline(slots, withDerivatives.data, optionValues);
     }
+    const orshotExtra = await this.orshotExtraForTimeline(input, resolved);
     return this.submit(projectId, userId, role, {
       templateSnapshotId: timeline.templateSnapshotId,
       providerAccountId: input.providerAccountId,
@@ -471,7 +486,45 @@ export class RenderJobsService {
       ...(input.outputFormat ? { outputFormat: input.outputFormat } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}),
-    }, workflowRunId, queuedJobId);
+    }, workflowRunId, queuedJobId, orshotExtra);
+  }
+
+  /** Orshot render plan for one submit: validated options, `submit` provider args and a cost estimate (null cost = no narration to fit/estimate). */
+  private planOrshotRender(extra: { options: OrshotRenderOptions; durationMs: number } | undefined): RenderOutcome<{ submit: { outputFormat?: "mp4" | "webm" | "mov" | "gif"; size?: string; videoOptions?: { duration?: number; fps?: number } }; cost: ReturnType<typeof estimateOrshotCost> | null }> {
+    const options = extra?.options ?? {};
+    const durationMs = extra?.durationMs ?? 0;
+    const pricing = resolveOrshotPricing();
+    const cost = durationMs > 0 ? estimateOrshotCost(durationMs, pricing) : null;
+    if (cost?.exceedsPlanLimit) return { ok: false, code: "VALIDATION_FAILED", message: `Video dài ${cost.durationSec}s vượt giới hạn ${cost.maxVideoSeconds}s của gói Orshot (ORSHOT_MAX_VIDEO_SECONDS). Rút ngắn kịch bản hoặc nâng gói.` };
+    const fit = options.fitDurationToNarration !== false && cost !== null;
+    const videoOptions = { ...(fit ? { duration: cost!.durationSec } : {}), ...(options.fps ? { fps: options.fps } : {}) };
+    return { ok: true, data: { submit: { ...(options.format ? { outputFormat: options.format } : {}), ...(options.size ? { size: options.size } : {}), ...(Object.keys(videoOptions).length ? { videoOptions } : {}) }, cost } };
+  }
+
+  /** Narration length of the timeline's included scenes + the sanitized Orshot options (only when the request carries any / the provider is Orshot). */
+  private async orshotExtraForTimeline(input: RenderSubmitFromTimelineRequest, scenes: SceneBindingForMapping[]): Promise<{ options: OrshotRenderOptions; durationMs: number } | undefined> {
+    const options = sanitizeOrshotOptions(input.orshot);
+    const audioIds = [...new Set(scenes.filter((scene) => !scene.excluded).map((scene) => scene.audioVersionId).filter((id): id is string => Boolean(id)))];
+    const rows = audioIds.length ? await this.prisma.audioVersion.findMany({ where: { id: { in: audioIds } }, select: { id: true, durationMs: true } }) : [];
+    const byId = new Map(rows.map((row) => [row.id, row.durationMs]));
+    const durationMs = narrationDurationMs(scenes.map((scene) => ({ excluded: scene.excluded, audioDurationMs: scene.audioVersionId ? byId.get(scene.audioVersionId) ?? 0 : 0 })));
+    return { options: options.ok ? options.data : {}, durationMs };
+  }
+
+  /**
+   * Orshot pre-render estimate for a (draft or approved) timeline: narration seconds -> credits -> USD, so the
+   * operator sees the cost before spending anything. Read-only; never calls Orshot.
+   */
+  async estimateOrshotRender(projectId: string, timelineVersionId: string, userId: string, role: "admin" | "staff"): Promise<RenderOutcome<OrshotCostEstimateResponse>> {
+    if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
+    if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
+    const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
+    const resolved = await resolveSceneBindingsForMapping(this.prisma, projectId, scenes, { fillDefaultVideoRanges: false });
+    const included = resolved.filter((scene) => !scene.excluded);
+    const extra = await this.orshotExtraForTimeline({ providerAccountId: "" }, resolved);
+    const estimate = estimateOrshotCost(extra?.durationMs ?? 0);
+    return { ok: true, data: { ...estimate, scenesTotal: included.length, scenesWithVoice: included.filter((scene) => Boolean(scene.audioVersionId)).length } };
   }
 
   /**
@@ -629,6 +682,7 @@ export class RenderJobsService {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.templates.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
+    if (account.data.provider === "orshot") return { ok: false, code: "VALIDATION_FAILED", message: ORSHOT_NO_DYNAMIC_MESSAGE };
     if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
 
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
@@ -739,7 +793,12 @@ export class RenderJobsService {
       imageSceneCount: includedScenes.filter((scene) => scene.mediaKind === "image").length,
       templateImageSlots: RenderJobsService.snapshotSlots(snapshot).filter((slot) => slot.kind === "image").length,
     });
-    const mode: "template" | "dynamic" = requestedMode === "template" && !fixedSlotsOk ? "dynamic" : requestedMode;
+    // Orshot has no dynamic composition: it always takes the fixed-slot template path (a count mismatch then surfaces as a missing-slot validation error, never a silent drop).
+    if (account.data.provider === "orshot" && requestedMode === "dynamic") return { ok: false, code: "VALIDATION_FAILED", message: ORSHOT_NO_DYNAMIC_MESSAGE };
+    const mode: "template" | "dynamic" = account.data.provider === "orshot" ? "template" : requestedMode === "template" && !fixedSlotsOk ? "dynamic" : requestedMode;
+    const orshotOptions = account.data.provider === "orshot" ? sanitizeOrshotOptions(input.orshot) : null;
+    if (orshotOptions && !orshotOptions.ok) return { ok: false, code: "VALIDATION_FAILED", message: orshotOptions.message };
+    const orshotPayload = orshotOptions?.ok && Object.keys(orshotOptions.data).length > 0 ? orshotOptions.data : null;
     if (mode === "dynamic") {
       const composition = await this.resolveDynamicComposition(projectId, timelineVersionId, userId, role, input.outputFormat);
       if (!composition.ok) return composition;
@@ -769,14 +828,14 @@ export class RenderJobsService {
       const failedJobs = await this.prisma.renderJob.count({ where: { workflowRunId, status: "failed" } });
       generation = failedJobs;
     }
-    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), scenes: timeline.scenes, options: timeline.optionValues, ...(Array.isArray(timeline.addedScenes) && timeline.addedScenes.length > 0 ? { addedScenes: timeline.addedScenes } : {}), ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
+    const fingerprint = `async:${createHash("sha256").update(stableStringify({ mode, projectId, timelineVersionId, providerAccountId: input.providerAccountId, outputFormat: input.outputFormat ?? null, idempotencyKey: input.idempotencyKey ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), scenes: timeline.scenes, options: timeline.optionValues, ...(orshotPayload ? { orshot: orshotPayload } : {}), ...(Array.isArray(timeline.addedScenes) && timeline.addedScenes.length > 0 ? { addedScenes: timeline.addedScenes } : {}), ...(generation > 0 ? { generation } : {}) })).digest("hex")}`;
     const existing = await this.prisma.renderJob.findUnique({ where: { requestFingerprint: fingerprint } });
     if (existing) return { ok: true, data: toJobResponse(existing) };
     try {
       const row = await this.prisma.renderJob.create({ data: {
         projectId, templateSnapshotId: timeline.templateSnapshotId, providerAccountId: input.providerAccountId,
         requestFingerprint: fingerprint, webhookToken: randomBytes(24).toString("base64url"), status: "preparing_clips",
-        modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}) },
+        modificationsPayload: { mode, timelineVersionId, outputFormat: input.outputFormat ?? null, ...(input.allowTemplateTts ? { allowTemplateTts: true } : {}), ...(orshotPayload ? { orshot: orshotPayload } : {}) },
         createdByUserId: userId, clipsTotal, clipsReady: 0,
         ...(workflowRunId ? { workflowRunId } : {}),
       } });
@@ -804,9 +863,9 @@ export class RenderJobsService {
     if (!candidate) return false;
     const claimed = await this.prisma.renderJob.updateMany({ where: { id: candidate.id, status: "preparing_clips", preparationLeaseUntil: candidate.preparationLeaseUntil }, data: { preparationLeaseUntil: new Date(Date.now() + 10 * 60_000), clipsReady: 0, clipFailures: [] } });
     if (claimed.count !== 1) return true;
-    const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null; allowTemplateTts?: boolean };
+    const payload = candidate.modificationsPayload as { mode: "template" | "dynamic"; timelineVersionId: string; outputFormat: "mp4" | "mov" | "gif" | null; allowTemplateTts?: boolean; orshot?: OrshotRenderOptions };
     try {
-      const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}), ...(payload.allowTemplateTts ? { allowTemplateTts: true } : {}) };
+      const input: RenderSubmitFromTimelineRequest = { providerAccountId: candidate.providerAccountId, ...(payload.outputFormat ? { outputFormat: payload.outputFormat } : {}), ...(payload.allowTemplateTts ? { allowTemplateTts: true } : {}), ...(payload.orshot ? { orshot: payload.orshot } : {}) };
       const actor = await this.prisma.user.findUnique({ where: { id: candidate.createdByUserId }, select: { role: true } });
       if (!actor) throw new Error("Render creator no longer exists");
       const role = actor.role === "admin" ? "admin" : "staff";
@@ -880,7 +939,7 @@ export class RenderJobsService {
     const account = await this.prisma.providerAccount.findFirst({ where: { id: row.providerAccountId, deletedAt: null } });
     if (!account) return { ok: true, data: toJobResponse(row) };
     try {
-      const remote = await getCreatomateRender(decryptSecret(account.encryptedSecret), row.externalJobId);
+      const remote = await (account.provider === "orshot" ? getOrshotRender : getCreatomateRender)(decryptSecret(account.encryptedSecret), row.externalJobId);
       const updated = await this.applyStatus(row.id, row.status as RenderJobStatus, {
         status: normalizeCreatomateStatus(remote.status),
         url: remote.url,
@@ -913,6 +972,17 @@ export class RenderJobsService {
    * content fingerprint before being applied, so an exact-duplicate delivery
    * (Creatomate retries webhooks) is a guaranteed no-op.
    */
+  /**
+   * Orshot webhook: polling `GET /studio/render-jobs/:id` is Orshot's documented source of truth, so the
+   * callback body is never trusted — it only (token-authenticated) triggers an immediate reconcile.
+   */
+  async handleOrshotWebhook(token: string): Promise<RenderOutcome<{ received: true }>> {
+    const job = await this.prisma.renderJob.findUnique({ where: { webhookToken: token } });
+    if (!job) return { ok: false, code: "WEBHOOK_INVALID", message: "Webhook token không hợp lệ", status: 404 };
+    await this.reconcileOne(job.id);
+    return { ok: true, data: { received: true } };
+  }
+
   async handleWebhook(token: string, rawBody: unknown): Promise<RenderOutcome<{ received: true }>> {
     const job = await this.prisma.renderJob.findUnique({ where: { webhookToken: token } });
     if (!job) return { ok: false, code: "WEBHOOK_INVALID", message: "Webhook token không hợp lệ", status: 404 };

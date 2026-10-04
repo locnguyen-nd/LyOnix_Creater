@@ -14,6 +14,7 @@ type AutoSetupBody = {
   mediaAccountId?: string;
   renderAccountId?: string;
   templateSnapshotId?: string;
+  renderOptions?: unknown;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;
@@ -42,6 +43,7 @@ export class VideoProductionsController {
       mediaAccountId: body.mediaAccountId,
       renderAccountId: body.renderAccountId,
       templateSnapshotId: body.templateSnapshotId,
+      ...(body.renderOptions !== undefined ? { renderOptions: body.renderOptions } : {}),
       ...(body.locale ? { locale: body.locale } : {}),
       ...(body.durationSec ? { durationSec: body.durationSec } : {}),
       ...(body.sceneCount ? { sceneCount: body.sceneCount } : {}),

@@ -35,6 +35,8 @@ export class ProviderAccountsController {
       // VE2E-15b: evaluated, not implemented - Google Custom Search JSON API is closed to new customers (existing customers only, until 2027-01-01); no other currently-available Google product fits a stock-media search role, so it is skipped rather than forced.
       { provider: "google", role: "visual", implementationStatus: "blocked", models: [] },
       { provider: "creatomate", role: "render", implementationStatus: "available", models: [] },
+      // Second render option (cost): template-modification renders only (no dynamic `source` composition), async video jobs.
+      { provider: "orshot", role: "render", implementationStatus: "available", models: [] },
       { provider: "vrew", role: "render", implementationStatus: "blocked", models: [] },
     ], requestId(response));
   }
@@ -54,7 +56,8 @@ export class ProviderAccountsController {
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate (render)", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate/Orshot (render)", requestId(response));
+      if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Orshot Embed ID không hợp lệ (chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {
@@ -91,7 +94,7 @@ export class ProviderAccountsController {
     if (!account) throw normalizedError("NOT_FOUND", "Không tìm thấy tài khoản provider", requestId(response), 404);
     if (account === "forbidden") throw normalizedError("FORBIDDEN", "Không có quyền sửa tài khoản provider này", requestId(response), 403);
     if (account === "conflict") throw normalizedError("VERSION_CONFLICT", "Tài khoản đã được cập nhật ở nơi khác. Hãy tải lại.", requestId(response), 409);
-    if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Tên và model không được để trống", requestId(response));
+    if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Tên/model không hợp lệ (Orshot Embed ID: chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
     if (account === "model_unavailable") throw normalizedError("PROVIDER_CAPABILITY_UNAVAILABLE", "Model không nằm trong capability đã xác thực", requestId(response));
     response.setHeader("ETag", `"${account.version}"`);
     return success(account, requestId(response));

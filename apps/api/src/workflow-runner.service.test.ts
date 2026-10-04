@@ -87,6 +87,10 @@ describe("asAccountRef / asVoiceRef / asRenderRef", () => {
     expect(asVoiceRef({ providerAccountId: "a" })).toEqual({ providerAccountId: "a" });
     expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", outputFormat: "mp4" })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1", outputFormat: "mp4" });
     expect(asRenderRef({ providerAccountId: "a" })).toBeNull();
+    expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", orshot: { format: "webm", junk: 1 } })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1", orshot: { format: "webm" } });
+    // an invalid / empty Orshot block is dropped, never forwarded
+    expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", orshot: { fps: 25 } })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1" });
+    expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", orshot: {} })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1" });
   });
 });
 

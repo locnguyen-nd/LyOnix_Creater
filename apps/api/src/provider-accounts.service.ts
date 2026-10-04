@@ -7,6 +7,7 @@ import {
   pickUsableContentModel,
   probeContentModel,
   probeCreatomateAccount,
+  probeOrshotAccount,
   probeElevenLabsAccount,
   probePexelsAccount,
   probeApifyAccount,
@@ -26,8 +27,11 @@ import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
 /** `pexels`/`youtube`/`pinterest` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest is a manual-review-only candidate source with no reliable rights signal (see `packages/providers/src/pinterest.ts`). Google is still evaluated but not implemented (VE2E-15b) and stays unsupported here. */
 const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest" || provider === "apify");
-/** `creatomate`/`render` (VE2E-05) — render provider account. */
-const isSupportedRenderAccount = (provider: string, role: ProviderRole) => provider === "creatomate" && role === "render";
+/** `creatomate`/`orshot` under `render` (VE2E-05) — render provider account (Orshot = cost-optimised second option). */
+/** Orshot stores its Embed ID (public, goes into the iframe URL — not a secret) in `model`; "n/a" = not configured. Strict charset keeps it safe to place in a URL path. */
+export const isValidOrshotModel = (model: string) => model === "n/a" || /^[A-Za-z0-9_-]{4,64}$/.test(model);
+
+const isSupportedRenderAccount = (provider: string, role: ProviderRole) => (provider === "creatomate" || provider === "orshot") && role === "render";
 const isSupportedAccount = (provider: string, role: ProviderRole) =>
   (isLiveContentKind(provider) && role === "content") || isSupportedTtsAccount(provider, role) || isSupportedVisualAccount(provider, role) || isSupportedRenderAccount(provider, role);
 
@@ -199,6 +203,7 @@ export class ProviderAccountsService {
   async create(input: { name: string; provider: string; role: ProviderRole; scope: ProviderScope; model: string; secret: string }, actorId: string, actorRole: "admin" | "staff") {
     if (input.scope === "organization" && actorRole !== "admin") return null;
     if (!isSupportedAccount(input.provider, input.role)) return "unsupported" as const;
+    if (input.provider === "orshot" && !isValidOrshotModel(input.model)) return "invalid" as const;
     const row = await this.prisma.providerAccount.create({
       data: {
         name: input.name,
@@ -239,7 +244,7 @@ export class ProviderAccountsService {
       if (row.provider === "apify") return this.verifyApify(row);
       return this.verifyPexels(row);
     }
-    if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row);
+    if (isSupportedRenderAccount(row.provider, row.role as ProviderRole)) return this.verifyCreatomate(row, row.provider === "orshot" ? probeOrshotAccount : probeCreatomateAccount);
     if (!isLiveContentKind(row.provider)) {
       const failed = await this.prisma.providerAccount.update({ where: { id }, data: { status: "failed", version: { increment: 1 } } });
       return publicAccount(failed);
@@ -428,9 +433,9 @@ export class ProviderAccountsService {
    * real call that proves the API key works — same "real-endpoint, no static
    * assumption" principle as `verifyElevenLabs`/`verifyPexels`.
    */
-  private async verifyCreatomate(row: { id: string; model: string; encryptedSecret: string }) {
+  private async verifyCreatomate(row: { id: string; model: string; encryptedSecret: string }, probe: (apiKey: string) => Promise<unknown>) {
     try {
-      await probeCreatomateAccount(decryptSecret(row.encryptedSecret));
+      await probe(decryptSecret(row.encryptedSecret));
       return publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", version: { increment: 1 } } }));
     } catch (error) {
       const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
@@ -453,6 +458,7 @@ export class ProviderAccountsService {
     const name = input.name === undefined ? row.name : input.name.trim();
     const model = input.model === undefined ? row.model : input.model.trim();
     if (!name || !model) return "invalid" as const;
+    if (row.provider === "orshot" && !isValidOrshotModel(model)) return "invalid" as const;
     if (input.model !== undefined && row.availableModels.length > 0 && !row.availableModels.includes(model)) return "model_unavailable" as const;
     const visionModel = input.visionModel === undefined ? row.visionModel : input.visionModel?.trim() || null;
     if (visionModel && (!isLiveContentKind(row.provider) || !row.availableModels.includes(visionModel))) return "model_unavailable" as const;

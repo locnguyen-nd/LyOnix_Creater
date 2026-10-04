@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "apify", "creatomate", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "apify", "creatomate", "orshot", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -252,6 +252,15 @@ export {
   type SubmitRenderInput,
   type SubmitSourceRenderInput,
 } from "./creatomate.js";
+export {
+  probeOrshotAccount,
+  listOrshotTemplates,
+  getOrshotTemplate,
+  deriveOrshotModifications,
+  submitOrshotRender,
+  getOrshotRender,
+  type SubmitOrshotRenderInput,
+} from "./orshot.js";
 export {
   extractDynamicStyleFromTemplate,
   buildDynamicComposition,

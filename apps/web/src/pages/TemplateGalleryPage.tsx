@@ -8,6 +8,7 @@ import { api, ApiError } from "../api";
 import type { ApiProvider } from "../jobs-api";
 import type { CreatomateTemplateSummaryResponse } from "@lyonix/contracts";
 import { listCreatomateTemplates, pinTemplateSnapshot } from "../studio/timeline-api";
+import { renderAccountOptionLabel } from "../studio/render-provider";
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -82,9 +83,9 @@ export function TemplateGalleryPage() {
 
       <div className="mb-4">
         <Select value={providerAccountId} onChange={(event) => setProviderAccountId(event.target.value)} disabled={renderAccounts.length === 0}>
-          {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate" })}</option> : null}
+          {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate / Orshot" })}</option> : null}
           {renderAccounts.map((account) => (
-            <option key={account.id} value={account.id}>{account.name}</option>
+            <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>
           ))}
         </Select>
       </div>

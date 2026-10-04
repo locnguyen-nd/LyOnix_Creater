@@ -16,6 +16,8 @@ import type {
   MediaDeliveryIssueResponse,
   MediaPlanRequest,
   MediaPlanResponse,
+  OrshotCostEstimateResponse,
+  OrshotRenderOptions,
   PexelsMediaType,
   PexelsSearchResponse,
   RenderJobResponse,
@@ -136,7 +138,7 @@ export async function getTemplateSnapshot(id: string): Promise<TemplateSnapshotR
 export async function submitRenderFromTimeline(
   projectId: string,
   timelineVersionId: string,
-  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string },
+  input: { providerAccountId: string; outputFormat?: "mp4" | "mov" | "gif"; idempotencyKey?: string; orshot?: OrshotRenderOptions },
 ): Promise<RenderJobResponse> {
   // The server deduplicates identical requests; a caller can supply a fresh key for an
   // intentional retry after a failed job.
@@ -172,4 +174,14 @@ export async function fetchTimelineDynamicPreviewSource(projectId: string, timel
 /** VE2E-13: whether the Creatomate Preview SDK browser public token is configured server-side (B10/B11-gated). */
 export async function fetchCreatomatePreviewConfig(): Promise<CreatomatePreviewConfigResponse> {
   return api<CreatomatePreviewConfigResponse>("/creatomate/preview-config");
+}
+
+/** Orshot only: narration seconds -> credits -> USD estimate for this timeline version. Read-only; never calls Orshot. */
+export async function fetchOrshotEstimate(projectId: string, timelineVersionId: string): Promise<OrshotCostEstimateResponse> {
+  return api<OrshotCostEstimateResponse>(`/projects/${projectId}/timeline-versions/${timelineVersionId}/orshot-estimate`);
+}
+
+/** Forces one live provider poll for a job (Orshot has no push progress; the webhook only triggers this same reconcile). */
+export async function reconcileRenderJob(id: string): Promise<RenderJobResponse> {
+  return api<RenderJobResponse>(`/render-jobs/${id}/reconcile`, { method: "POST", headers: await csrfHeaders() });
 }

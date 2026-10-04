@@ -25,7 +25,8 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
-import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, OrshotRenderOptions } from "@lyonix/contracts";
+import { sanitizeOrshotOptions } from "./orshot-render.js";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -58,7 +59,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
 
 export type ContentAccountRef = { providerAccountId: string };
 export type VoiceAccountRef = { providerAccountId: string; voiceId?: string; modelId?: string };
-export type RenderAccountRef = { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif" };
+export type RenderAccountRef = { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif"; /** Orshot accounts only: sanitized render options (format/fps/size/fit-to-narration). */ orshot?: OrshotRenderOptions };
 
 export const asAccountRef = (value: unknown): ContentAccountRef | null => {
   if (!value || typeof value !== "object") return null;
@@ -83,10 +84,12 @@ export const asRenderRef = (value: unknown): RenderAccountRef | null => {
   if (typeof record.providerAccountId !== "string" || !record.providerAccountId) return null;
   if (typeof record.templateSnapshotId !== "string" || !record.templateSnapshotId) return null;
   const outputFormat = record.outputFormat;
+  const orshot = sanitizeOrshotOptions(record.orshot);
   return {
     providerAccountId: record.providerAccountId,
     templateSnapshotId: record.templateSnapshotId,
     ...(outputFormat === "mp4" || outputFormat === "mov" || outputFormat === "gif" ? { outputFormat } : {}),
+    ...(orshot.ok && Object.keys(orshot.data).length > 0 ? { orshot: orshot.data } : {}),
   };
 };
 
@@ -713,6 +716,7 @@ export class WorkflowRunnerService {
             providerAccountId: renderConfig.providerAccountId,
             idempotencyKey: run.requestFingerprint,
             ...(renderConfig.outputFormat ? { outputFormat: renderConfig.outputFormat } : {}),
+            ...(renderConfig.orshot ? { orshot: renderConfig.orshot } : {}),
           },
           "template",
           run.id,

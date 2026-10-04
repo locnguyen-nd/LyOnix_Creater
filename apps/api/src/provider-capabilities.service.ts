@@ -6,6 +6,7 @@ import {
   probeElevenLabsTts,
   probePexelsAccount,
   probeCreatomateAccount,
+  probeOrshotAccount,
   ProviderError,
   type PreflightOperationResult,
 } from "@lyonix/providers";
@@ -167,10 +168,11 @@ export class ProviderCapabilitiesService {
     if (!accountId) return null;
     const operationRole = "render" as const;
     const operation = "render_submit";
-    const resolved = await this.resolveAccount("creatomate", "render", accountId, userId, role);
+    const resolved = await this.resolveAccount(null, "render", accountId, userId, role);
     if (!resolved.ok) return this.failureResult(operationRole, operation, resolved);
     try {
-      await probeCreatomateAccount(decryptSecret(resolved.account.encryptedSecret));
+      const probe = resolved.account.provider === "orshot" ? probeOrshotAccount : probeCreatomateAccount;
+      await probe(decryptSecret(resolved.account.encryptedSecret));
     } catch (error) {
       return this.probeFailureResult(operationRole, operation, error);
     }
