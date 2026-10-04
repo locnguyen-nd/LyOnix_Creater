@@ -432,6 +432,18 @@ describe("VideoProductionsService", () => {
       expect(outcome.data.automationProfileId).toBe(automationProfileId);
     });
 
+    it("stores sanitized Orshot render options in renderConfig and drops unknown keys", async () => {
+      const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, renderOptions: { format: "webm", size: "tiktok-video", apiKey: "leak" } });
+      expect(outcome.ok).toBe(true);
+      expect(automationProfiles.create).toHaveBeenCalledWith(userId, "staff", expect.objectContaining({ renderConfig: { providerAccountId: "render-acc", templateSnapshotId: "snap-1", orshot: { format: "webm", size: "tiktok-video" } } }));
+    });
+
+    it("rejects invalid Orshot render options before provisioning a project", async () => {
+      const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, renderOptions: { fps: 25 } });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(createdProjects).toHaveLength(0);
+    });
+
     it("rejects when any required account/voiceId/template field is missing", async () => {
       const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, voiceId: "" });
       expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });

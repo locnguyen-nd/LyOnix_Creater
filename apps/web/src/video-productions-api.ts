@@ -13,6 +13,7 @@ import type {
   VideoProductionSourceInput,
   VideoProductionSubmitResponse,
   WorkflowStepEventResponse,
+  OrshotRenderOptions,
 } from "@lyonix/contracts";
 
 export type AutoProfileSetupRequest = {
@@ -23,6 +24,8 @@ export type AutoProfileSetupRequest = {
   mediaAccountId: string;
   renderAccountId: string;
   templateSnapshotId: string;
+  /** Orshot render account only (server whitelists + ignores for Creatomate). */
+  renderOptions?: OrshotRenderOptions;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;

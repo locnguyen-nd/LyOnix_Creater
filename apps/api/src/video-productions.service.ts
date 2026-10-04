@@ -31,6 +31,7 @@ import { PrismaService } from "./prisma.service.js";
 import { QueueStatusService } from "./queue-status.service.js";
 import { SourcesService } from "./sources.service.js";
 import { asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
+import { sanitizeOrshotOptions } from "./orshot-render.js";
 
 export type VideoProductionOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number };
 
@@ -42,6 +43,8 @@ export type AutoProfileSetupInput = {
   mediaAccountId: string;
   renderAccountId: string;
   templateSnapshotId: string;
+  /** Orshot render account only: format/fps/size/fit-to-narration (sanitized below; ignored by Creatomate). */
+  renderOptions?: unknown;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;
@@ -94,6 +97,8 @@ export class VideoProductionsService {
     if (!input.name.trim() || !input.contentAccountId.trim() || !input.voiceAccountId.trim() || !input.voiceId.trim() || !input.mediaAccountId.trim() || !input.renderAccountId.trim() || !input.templateSnapshotId.trim()) {
       return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu tài khoản content/voice/media/render hoặc template đã pin cho Auto" };
     }
+    const orshotOptions = sanitizeOrshotOptions(input.renderOptions);
+    if (!orshotOptions.ok) return { ok: false, code: "VALIDATION_FAILED", message: orshotOptions.message };
     const project = await this.prisma.project.create({ data: { name: input.name.trim(), createdByUserId: userId } });
     await this.grants.replaceProjectGrants(project.id, [], [userId]);
     const profile = await this.automationProfiles.create(userId, role, {
@@ -102,7 +107,7 @@ export class VideoProductionsService {
       contentConfig: { providerAccountId: input.contentAccountId },
       voiceConfig: { providerAccountId: input.voiceAccountId, voiceId: input.voiceId },
       mediaConfig: { providerAccountId: input.mediaAccountId },
-      renderConfig: { providerAccountId: input.renderAccountId, templateSnapshotId: input.templateSnapshotId },
+      renderConfig: { providerAccountId: input.renderAccountId, templateSnapshotId: input.templateSnapshotId, ...(Object.keys(orshotOptions.data).length > 0 ? { orshot: orshotOptions.data } : {}) },
       outputPreset: { aspectRatio: "9:16", width: 1080, height: 1920, fps: 30 },
       locale: input.locale ?? "vi",
       durationSec: input.durationSec ?? 60,

@@ -6,11 +6,12 @@ import { Button, Field, Select, TextArea } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { BackgroundSegmentsSetting, CreatomateTemplateSummaryResponse, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { BackgroundSegmentsSetting, CreatomateTemplateSummaryResponse, ElevenLabsVoiceSummaryResponse, OrshotRenderOptions, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
 // Browser-safe subpath (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS, resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
 import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
+import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/orshot-embed";
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 
 const DURATION_TARGETS = ["30-45s", "45-65s", "65-90s"] as const;
@@ -81,11 +82,15 @@ export function JobNewPage() {
   const [renderAccountId, setRenderAccountId] = useState("");
   const [renderTemplates, setRenderTemplates] = useState<CreatomateTemplateSummaryResponse[]>([]);
   const [templateId, setTemplateId] = useState("");
+  // Orshot render account only: format / size preset (the rest - fit-to-narration, cost - is automatic server-side).
+  const [orshotFormat, setOrshotFormat] = useState<NonNullable<OrshotRenderOptions["format"]> | "">("");
+  const [orshotSize, setOrshotSize] = useState("");
 
   const contentAccounts = providers.filter((item) => item.role === "content" && (item.isFake || item.status === "verified"));
   const voiceAccounts = usableAccounts(providers, "tts");
   const mediaAccounts = usableAccounts(providers, "visual").filter((item) => item.provider === "pexels");
   const renderAccounts = usableAccounts(providers, "render");
+  const isOrshotRender = isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider);
   const preflight = [
     { key: "content", ok: contentAccounts.length > 0 },
     { key: "voice", ok: voiceAccounts.length > 0 && Boolean(voiceId) },
@@ -187,6 +192,7 @@ export function JobNewPage() {
                     mediaAccountId,
                     renderAccountId,
                     templateSnapshotId: snapshot.id,
+                    ...(isOrshotRender ? { renderOptions: compactOrshotOptions({ ...(orshotFormat ? { format: orshotFormat } : {}), ...(orshotSize ? { size: orshotSize } : {}) }) } : {}),
                     locale: language,
                     durationSec: midpoint(durationTarget),
                     sceneCount: midpoint(sceneCountTarget),
@@ -347,14 +353,31 @@ export function JobNewPage() {
                 </Field>
               ) : null}
               {renderAccounts.length > 1 ? (
-                <Field
-                  label={t("jobs.autoRenderAccount")}
-                  {...(isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? { hint: t("jobs.autoOrshotHint") } : {})}
-                >
+                <Field label={t("jobs.autoRenderAccount")}>
                   <Select value={renderAccountId} onChange={(e) => setRenderAccountId(e.target.value)}>
                     {renderAccounts.map((account) => <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>)}
                   </Select>
                 </Field>
+              ) : null}
+              {isOrshotRender ? (
+                <div className="flex flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border p-3">
+                  <p className="text-[12px] text-lyx-fg-muted">{t("jobs.autoOrshotHint")}</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label={t("jobs.autoOrshotFormat")}>
+                      <Select value={orshotFormat} onChange={(e) => setOrshotFormat(e.target.value as typeof orshotFormat)}>
+                        <option value="">mp4</option>
+                        {ORSHOT_FORMATS.filter((format) => format !== "mp4").map((format) => <option key={format} value={format}>{format}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label={t("jobs.autoOrshotSize")}>
+                      <Select value={orshotSize} onChange={(e) => setOrshotSize(e.target.value)}>
+                        <option value="">{t("studioPro.orshotSizeTemplate")}</option>
+                        {ORSHOT_SIZES.map((size) => <option key={size} value={size}>{size}</option>)}
+                      </Select>
+                    </Field>
+                  </div>
+                  <p className="text-[12px]">{t("jobs.autoOrshotEstimate", { credits: midpoint(durationTarget), seconds: midpoint(durationTarget) })}</p>
+                </div>
               ) : null}
               {renderAccounts.length > 0 ? (
                 <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>

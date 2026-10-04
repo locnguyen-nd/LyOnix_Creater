@@ -261,6 +261,9 @@ const vi = {
     autoNoTemplate: "Tài khoản render này chưa có template nào để chọn.",
     autoRenderAccount: "Tài khoản render",
     autoOrshotHint: "Orshot render theo template: số cảnh phải khớp số slot của template (không tự co giãn như Creatomate).",
+    autoOrshotFormat: "Định dạng (Orshot)",
+    autoOrshotSize: "Kích thước (Orshot)",
+    autoOrshotEstimate: "≈ {{credits}} credits (1 credit = 1 giây video, mục tiêu ~{{seconds}}s). Chi phí thực được ghi vào job sau khi có lời đọc; video tự khớp độ dài lời đọc.",
   },
   mediaPicker: {
     title: "Chọn hình ảnh / video",
@@ -1010,6 +1013,9 @@ const en: typeof vi = {
     autoNoTemplate: "This render account has no template to choose from.",
     autoRenderAccount: "Render account",
     autoOrshotHint: "Orshot renders the template's fixed slots: the scene count must match the template slots (no automatic scaling like Creatomate).",
+    autoOrshotFormat: "Format (Orshot)",
+    autoOrshotSize: "Size (Orshot)",
+    autoOrshotEstimate: "≈ {{credits}} credits (1 credit = 1 video second, target ~{{seconds}}s). The actual cost is recorded on the job once narration exists; the video length auto-fits the narration.",
   },
   mediaPicker: {
     title: "Pick images / video",
@@ -1678,6 +1684,10 @@ const ja: typeof vi = {
   ...en,
   jobs: {
     ...en.jobs,
+    autoOrshotHint: "Orshotはテンプレートの固定スロットをレンダーします。シーン数はテンプレートのスロット数と一致する必要があります（Creatomateのような自動調整はありません）。",
+    autoOrshotFormat: "形式（Orshot）",
+    autoOrshotSize: "サイズ（Orshot）",
+    autoOrshotEstimate: "約{{credits}}クレジット（1クレジット＝動画1秒、目標約{{seconds}}秒）。実コストはナレーション生成後にジョブへ記録され、動画の長さは自動でナレーションに合います。",
     backgroundSegments: "背景セグメント数",
     backgroundSegmentsAuto: "自動（{{min}}〜{{max}}セグメント）",
     backgroundSegmentsFixed: "{{count}}セグメント",
@@ -2049,6 +2059,10 @@ const ko: typeof vi = {
   ...en,
   jobs: {
     ...en.jobs,
+    autoOrshotHint: "Orshot은 템플릿의 고정 슬롯을 렌더합니다. 장면 수가 템플릿 슬롯 수와 같아야 합니다(Creatomate처럼 자동으로 조정되지 않음).",
+    autoOrshotFormat: "형식(Orshot)",
+    autoOrshotSize: "크기(Orshot)",
+    autoOrshotEstimate: "약 {{credits}}크레딧(1크레딧 = 영상 1초, 목표 약 {{seconds}}초). 실제 비용은 내레이션이 만들어진 뒤 작업에 기록되며, 영상 길이는 내레이션에 자동으로 맞춰집니다.",
     backgroundSegments: "배경 구간 수",
     backgroundSegmentsAuto: "자동 ({{min}}–{{max}}개 구간)",
     backgroundSegmentsFixed: "{{count}}개 구간",

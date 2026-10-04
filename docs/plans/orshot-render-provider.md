@@ -31,6 +31,17 @@ Giai đoạn B — điểm mạnh Orshot ở backend (code xong, **chưa chạy 
 6. **Tài liệu/pipeline** (`D:\LyOnix`, ngoài repo này, làm ở máy local): tạo task + thẻ Trello, ghi `STATUS.md`; env mới `ORSHOT_CREDIT_USD`, `ORSHOT_MAX_VIDEO_SECONDS` vào `.env.example` và `08-DEPLOY`.
 7. **Verify thật** (cần key Orshot của chủ dự án, không có trong cloud): render 1 template thật, xác nhận tham số `videoOptions.duration`, `response.size`, slot audio, định dạng `result.data`. Docs Orshot chưa nêu rõ audio/voiceover nên đây là rủi ro lớn nhất.
 
+## Cập nhật 04/10/2026 (cloud) — đã làm
+
+- Rebase sạch lên `origin/dev` (f612dc4); sửa 2 lỗi kiểu `exactOptionalPropertyTypes` của giai đoạn B.
+- Việc 1: test cho `orshot-render.ts`, `planOrshotRender` (qua `submit`), `estimateOrshotRender`, adapter `size`/`videoOptions`.
+- Việc 2: Embed ID lưu ở `model` (validate `^[A-Za-z0-9_-]{4,64}$` hoặc `n/a`), ô nhập ở ProvidersPage (thêm + sửa).
+- Việc 3: `apps/web/src/studio/OrshotStudioPanel.tsx` (3 tab: Embed / Template + bảng tương thích slot / Render & chi phí), logic thuần + test ở `orshot-embed.ts`; chỉ tin `postMessage` từ `https://orshot.com` **và** đúng cửa sổ iframe; tab "quay về editor cũ"; Creatomate không đổi.
+- Việc 4: Auto — chọn format/size cho tài khoản Orshot (`renderOptions` → `renderConfig.orshot` → `enqueueTimelineRender`), hiện ước tính credits theo thời lượng mục tiêu; USD thực ghi vào `costAmount` sau khi có lời đọc.
+- Việc 5: i18n vi/en/ja/ko + test parity (`orshot-i18n.test.ts`).
+
+Chưa làm / cần chủ dự án: việc 6 (ngoài repo) và việc 7 (verify với key thật). Không hiện kích thước canvas template trong lưới (API list không trả canvas). Màn Auto không hiện USD trước khi render vì giá credit phụ thuộc gói (`ORSHOT_CREDIT_USD` chỉ ở server).
+
 ## Giới hạn trung thực
 - Orshot không dựng N cảnh động; số cảnh phải khớp slot template.
 - Chi phí là ước tính (1 credit = 1 s × giá credit theo gói); không có API số dư/usage.
