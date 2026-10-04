@@ -7,7 +7,7 @@ import { buildVideoComposeJob, composeFingerprint, type VideoComposeProgress, ty
 import { RecipeRegistry } from "@lyonix/render-recipes";
 import { runProcess } from "../process.js";
 import { ComposeProcessor } from "./compose-processor.js";
-import { detectFfmpeg, ffmpegPath, ffprobePath, findJapaneseFont, makeFixtures, makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
+import { detectFfmpeg, ffmpegPath, ffprobePath, findJapaneseFont, generate, makeFixtures, makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
 
 /**
  * VE2E-105 integration: composes real videos with the REAL ffmpeg/ffprobe from synthetic lavfi fixtures (nothing committed). Skipped
@@ -87,6 +87,21 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
     const percents = progress.map((p) => p.percent);
     expect([...percents].sort((x, y) => x - y)).toEqual(percents);
     expect((await stat(join(root, result.output.relativePath))).size).toBe(result.output.bytes);
+  }, 240_000);
+
+  it("a slowly zooming smooth photo is not flagged as frozen, while the same photo with the animation switched off is allowed to be still", async () => {
+    generate(["-f", "lavfi", "-i", "gradients=size=1920x1080:rate=1:duration=1:seed=7:n=4", "-frames:v", "1", join(root, "projects/p/smooth.jpg")]);
+    const smooth = { ...files, image: "projects/p/smooth.jpg" };
+    const plan = makePlan(smooth, { voiceSeconds: [5], texts: [""] });
+    const moving = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-smooth", recipe: { id: "test-telop", version: 1 }, plan }));
+    if (!moving.ok) throw new Error(`smooth photo with zoom failed: ${moving.error.code}: ${moving.error.message}`);
+    expect(moving.qc.measured.freezeMs).toBe(0);
+
+    const still = structuredClone(plan);
+    still.params = { "dynamicStyle.imageAnimation": "none" };
+    const result = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-smooth-still", recipe: { id: "test-telop", version: 1 }, plan: still }));
+    if (!result.ok) throw new Error(`static photo failed: ${result.error.code}: ${result.error.message}`);
+    expect(result.qc.checks.find((c) => c.code === "QC_FREEZE")).toMatchObject({ ok: true, measured: "skipped (static by design)" });
   }, 240_000);
 
   it("is idempotent by jobKey: a second delivery reuses the stored render without running FFmpeg again", async () => {

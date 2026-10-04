@@ -72,7 +72,7 @@ export async function makeFixtures(root: string, voiceSeconds: number[] = [3, 2.
   const abs = (name: string) => join(dir, name);
   generate(["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=1", "-frames:v", "1", abs("still.jpg")]);
   generate(["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=5", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", abs("landscape.mp4")]);
-  generate(["-f", "lavfi", "-i", "smptebars=size=720x1280:rate=24:duration=1.2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", abs("portrait-short.mp4")]);
+  generate(["-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=24:duration=1.2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", abs("portrait-short.mp4")]);
   const voices: string[] = [];
   voiceSeconds.forEach((seconds, index) => {
     generate(["-f", "lavfi", "-i", `sine=frequency=${220 + index * 60}:sample_rate=44100:duration=${seconds}`, "-af", "volume=0.5", "-c:a", "libmp3lame", abs(`voice${index}.mp3`)]);

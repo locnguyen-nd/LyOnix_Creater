@@ -86,10 +86,13 @@ describe("buildVideoGraph", () => {
     const graph = buildVideoGraph(baseInput(p));
     expect(graph.inputArgs.slice(0, 5)).toEqual(["-loop", "1", "-framerate", "60", "-t"]);
     expect(graph.inputArgs).toContain("-ss");
+    const unranged = buildVideoGraph(baseInput(plan([scene("u", 0, 90)], 0, 0)));
+    expect(unranged.inputArgs.slice(0, 3)).toEqual(["-stream_loop", "-1", "-i"]); // too-short sources loop instead of freezing
+    expect(unranged.filterComplex).not.toContain("tpad");
     expect(graph.inputArgs[graph.inputArgs.indexOf("-ss") + 1]).toBe("2.000");
     expect(graph.filterComplex).toContain(`trim=end_frame=${graph.timeline[0]!.clipFrames}`);
-    expect(graph.filterComplex).toContain("tpad=stop_mode=clone"); // video scenes hold their last frame when the source is shorter
-    expect(graph.filterComplex).not.toMatch(/\[0:v\][^;]*tpad/); // ...but stills do not need it
+    expect(graph.filterComplex).toMatch(/\[1:v\][^;]*tpad/); // a ranged video holds its last frame when shorter than its scene
+    expect(graph.filterComplex).not.toMatch(/\[0:v\][^;]*tpad/); // ...a still does not need it
     expect(graph.filterComplex).toContain("out_color_matrix=bt709:out_range=tv");
   });
 

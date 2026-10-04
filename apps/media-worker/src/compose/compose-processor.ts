@@ -22,10 +22,11 @@ import { BinaryNotFoundError, ProcessTimeoutError, type ProcessRunner } from "..
 import { buildAudioGraph, parseLoudnormMeasurement, type LoudnormMeasurement } from "./audio-graph.js";
 import type { ComposeConfig } from "./config.js";
 import { ComposeJobError } from "./errors.js";
-import { buildVideoGraph, filterComplexFileArgs, FPS } from "./filtergraph.js";
+import { buildVideoGraph, filterComplexFileArgs, FPS, motionFor } from "./filtergraph.js";
 import { buildOverlayDocuments } from "./overlays.js";
 import { FfmpegProgressParser, progressPercent, type ProgressStage } from "./progress.js";
 import { evaluateStructure, measurementsFromProbe, parseProbedOutput, probeOutput, reportFromChecks } from "./qc.js";
+import { runFullQc, type FullQcContext } from "./qc-signal.js";
 import { acquireJobLock } from "./job-lock.js";
 
 /** Relative (to MEDIA_ROOT) directory for `video.compose` outputs - `working` retention class, swept after 7 days. */
@@ -39,17 +40,8 @@ type StoredManifest = { fingerprint: string; result: VideoComposeSuccess };
 
 export type RecipeLookup = { get(id: string, version: number): RenderRecipe | null };
 
-/** Quality control hook: structural + signal checks on the finished file. Replaced by the full QC (VE2E-106). */
-export type ComposeQcRunner = (context: {
-  videoPath: string;
-  expectedFrames: number;
-  expectedDurationMs: number;
-  recipe: RenderRecipe;
-  runner: ProcessRunner;
-  ffmpegPath: string;
-  ffprobePath: string;
-  timeoutMs: number;
-}) => Promise<ComposeQcReport>;
+/** Quality control hook run on the finished file (default: the full gate, `runFullQc`). Tests can swap it. */
+export type ComposeQcRunner = (context: FullQcContext) => Promise<ComposeQcReport>;
 
 export const structuralQc: ComposeQcRunner = async ({ videoPath, expectedFrames, expectedDurationMs, runner, ffprobePath, timeoutMs }) => {
   const probe = await probeOutput(runner, ffprobePath, videoPath, timeoutMs);
@@ -86,7 +78,7 @@ export class ComposeProcessor {
     this.now = deps.now ?? (() => new Date());
     this.log = deps.log ?? (() => undefined);
     this.recipes = deps.recipes ?? recipeRegistry;
-    this.qc = deps.qc ?? structuralQc;
+    this.qc = deps.qc ?? runFullQc;
   }
 
   /** Never rejects except with JobLockBusyError; every job failure is returned as `ok: false`. */
@@ -296,7 +288,9 @@ export class ComposeProcessor {
       videoPath,
       expectedFrames: plan.totalFrames,
       expectedDurationMs,
-      recipe,
+      targetLufs: recipe.audio.loudnessLufs,
+      // a still image with the zoom switched off is static by design: a frozen stretch is then intended, not a defect
+      freezeCheck: !(plan.scenes.some((scene) => scene.media.kind === "image") && motionFor("image", 0, recipe, { ...plan.params, ...params }) === null),
       runner: this.deps.runner,
       ffmpegPath: this.deps.config.ffmpegPath,
       ffprobePath: this.deps.config.ffprobePath,

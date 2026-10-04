@@ -87,7 +87,7 @@ export type VideoGraph = {
 /** Escapes a value placed inside single quotes in a filtergraph (`'` cannot be represented: such a path is rejected earlier). */
 export const quoteFilterPath = (path: string): string => `'${path.replaceAll("\\", "/").replaceAll(":", "\\:")}'`;
 
-const motionFor = (kind: "image" | "video", index: number, recipe: RenderRecipe, params: Record<string, string>): { direction: "in" | "out"; intensity: number } | null => {
+export const motionFor = (kind: "image" | "video", index: number, recipe: RenderRecipe, params: Record<string, string>): { direction: "in" | "out"; intensity: number } | null => {
   const config = kind === "image" ? recipe.background.image : recipe.background.video;
   if (config.motion === "none" || config.intensity <= 0) return null;
   if (kind === "image" && params["dynamicStyle.imageAnimation"] === "none") return null;
@@ -100,7 +100,9 @@ const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number,
   const length = timeline.clipFrames;
   const seconds = length / FPS;
   const steps: string[] = [`fps=${FPS}`];
-  if (scene.media.kind === "video") steps.push(`tpad=stop_mode=clone:stop_duration=${framesToSeconds(length)}`);
+  // a ranged (preview) video that is too short holds its last frame; an unranged one is looped at the input (`-stream_loop`), see buildVideoGraph
+  const ranged = scene.media.sourceStartMs != null && scene.media.sourceDurationMs != null;
+  if (scene.media.kind === "video" && ranged) steps.push(`tpad=stop_mode=clone:stop_duration=${framesToSeconds(length)}`);
   steps.push(`trim=end_frame=${length}`, "setpts=PTS-STARTPTS");
   // cover fit to the 9:16 canvas + BT.709 limited range (the output tags say so; untagged/BT.601/full-range sources are converted here)
   steps.push("scale=1080:1920:force_original_aspect_ratio=increase:flags=bicubic:out_color_matrix=bt709:out_range=tv", "crop=1080:1920", "setsar=1");
@@ -138,7 +140,8 @@ export function buildVideoGraph(input: VideoGraphInput): VideoGraph {
     } else if (scene.media.sourceStartMs != null && scene.media.sourceDurationMs != null) {
       inputArgs.push("-ss", (scene.media.sourceStartMs / 1000).toFixed(3), "-t", (scene.media.sourceDurationMs / 1000).toFixed(3), "-i", path);
     } else {
-      inputArgs.push("-i", path);
+      // a source shorter than its scene loops (a frozen frame for >1 s is a QC defect); the trim in the chain ends the loop
+      inputArgs.push("-stream_loop", "-1", "-i", path);
     }
     parts.push(sceneChain(scene, tl, index, recipe, params));
   });
