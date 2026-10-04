@@ -182,6 +182,87 @@ describe("RenderJobsService", () => {
       expect(prisma.renderJob.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ externalJobId: "1204" }) }));
     });
 
+    describe("Orshot planning (planOrshotRender via submit)", () => {
+      const orshotAccount = () => { templates.usableAccount = vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "orshot" as const } })); };
+      const queued = () => { const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 1, status: "queued" }), { status: 202 })); vi.stubGlobal("fetch", fetchMock); return fetchMock; };
+      const bodyOf = (fetchMock: ReturnType<typeof vi.fn>) => JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+
+      it("fits videoOptions.duration to narration, forwards size/fps/format and stores the USD estimate on the job", async () => {
+        orshotAccount();
+        const fetchMock = queued();
+        const outcome = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments }, undefined, undefined, { options: { format: "webm", fps: 30, size: "tiktok-video" }, durationMs: 12_300 });
+        expect(outcome.ok).toBe(true);
+        const body = bodyOf(fetchMock);
+        expect(body.response).toEqual({ mode: "async", type: "url", format: "webm", size: "tiktok-video" });
+        expect(body.videoOptions).toEqual({ duration: 13, fps: 30 });
+        const saved = (prisma.renderJob.update as any).mock.calls.at(-1)[0].data;
+        expect(saved.costCurrency).toBe("USD");
+        expect(String(saved.costAmount)).toBe("0.104");
+      });
+
+      it("does not set duration when fitDurationToNarration is false, but still records the estimate", async () => {
+        orshotAccount();
+        const fetchMock = queued();
+        await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments }, undefined, undefined, { options: { fitDurationToNarration: false }, durationMs: 5_000 });
+        expect(bodyOf(fetchMock)).not.toHaveProperty("videoOptions");
+        expect((prisma.renderJob.update as any).mock.calls.at(-1)[0].data.costCurrency).toBe("USD");
+      });
+
+      it("sends no videoOptions and no cost when there is no narration", async () => {
+        orshotAccount();
+        const fetchMock = queued();
+        await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments }, undefined, undefined, { options: {}, durationMs: 0 });
+        expect(bodyOf(fetchMock)).not.toHaveProperty("videoOptions");
+        expect((prisma.renderJob.update as any).mock.calls.at(-1)[0].data.costAmount).toBeUndefined();
+      });
+
+      it("blocks over-ceiling videos before any job row or provider call", async () => {
+        orshotAccount();
+        const fetchMock = queued();
+        const outcome = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments }, undefined, undefined, { options: {}, durationMs: 181_000 });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("180s") });
+        expect(prisma.renderJob.create).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("never applies Orshot options or cost to a Creatomate account", async () => {
+        const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+        vi.stubGlobal("fetch", fetchMock);
+        await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments }, undefined, undefined, { options: { format: "webm", size: "tiktok-video" }, durationMs: 12_000 });
+        const body = bodyOf(fetchMock);
+        expect(body).not.toHaveProperty("videoOptions");
+        expect(JSON.stringify(body)).not.toContain("tiktok-video");
+        expect((prisma.renderJob.update as any).mock.calls.at(-1)[0].data.costAmount).toBeUndefined();
+      });
+    });
+
+    describe("estimateOrshotRender", () => {
+      const tl = "timeline-est";
+      const scene = (id: string, extra: Record<string, unknown> = {}) => ({ sceneId: id, orderIndex: 0, mediaAssetVersionId: null, audioVersionId: null, subtitleVersionId: null, screenTextOverride: null, annotation: null, ...extra });
+
+      it("sums included narration (excluding excluded scenes) into credits and USD without calling any provider", async () => {
+        timelineRows.set(tl, { id: tl, projectId, status: "draft", templateSnapshotId, optionValues: {}, scenes: [scene("s1", { audioVersionId: "audio-1" }), scene("s2", { audioVersionId: "audio-1", excluded: true }), scene("s3")] });
+        const fetchMock = vi.fn();
+        vi.stubGlobal("fetch", fetchMock);
+        const outcome = await service.estimateOrshotRender(projectId, tl, "user-1", "staff");
+        expect(outcome).toMatchObject({ ok: true, data: { durationSec: 4, credits: 4, amountUsd: "0.0320", exceedsPlanLimit: false, scenesTotal: 2, scenesWithVoice: 1 } });
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("returns 404 for an unknown project, a timeline of another project, or a missing timeline", async () => {
+        timelineRows.set(tl, { id: tl, projectId: "other", status: "draft", templateSnapshotId, optionValues: {}, scenes: [] });
+        expect(await service.estimateOrshotRender("nope", tl, "user-1", "staff")).toMatchObject({ ok: false, status: 404 });
+        expect(await service.estimateOrshotRender(projectId, tl, "user-1", "staff")).toMatchObject({ ok: false, status: 404 });
+        expect(await service.estimateOrshotRender(projectId, "missing", "user-1", "staff")).toMatchObject({ ok: false, status: 404 });
+      });
+
+      it("denies staff without a project grant", async () => {
+        grants.forUser = async () => ({ projectIds: [] });
+        timelineRows.set(tl, { id: tl, projectId, status: "draft", templateSnapshotId, optionValues: {}, scenes: [] });
+        expect(await service.estimateOrshotRender(projectId, tl, "user-1", "staff")).toMatchObject({ ok: false, status: 404 });
+      });
+    });
+
     it("refuses the dynamic (source composition) path for an Orshot account before any provider call", async () => {
       templates.usableAccount = vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "orshot" as const } }));
       const fetchMock = vi.fn();

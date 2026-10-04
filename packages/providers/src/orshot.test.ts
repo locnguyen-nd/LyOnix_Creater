@@ -61,6 +61,24 @@ describe("orshot adapter", () => {
     expect(out).toMatchObject({ externalJobId: "1204", status: "waiting", url: null });
   });
 
+  it("forwards format, size preset and videoOptions (duration/fps) to Orshot", async () => {
+    const fetchMock = vi.fn(async () => json({ id: 9, status: "queued" }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    await submitOrshotRender("k", { templateId: "5", modifications: {}, webhookUrl: "https://hook", outputFormat: "webm", size: "tiktok-video", videoOptions: { duration: 13, fps: 60 } });
+    const body = JSON.parse(String(lastCall(fetchMock)[1].body));
+    expect(body.response).toEqual({ mode: "async", type: "url", format: "webm", size: "tiktok-video" });
+    expect(body.videoOptions).toEqual({ duration: 13, fps: 60 });
+  });
+
+  it("omits size and videoOptions when not provided or empty", async () => {
+    const fetchMock = vi.fn(async () => json({ id: 9, status: "queued" }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    await submitOrshotRender("k", { templateId: "5", modifications: {}, webhookUrl: "https://hook", videoOptions: {} });
+    const body = JSON.parse(String(lastCall(fetchMock)[1].body));
+    expect(body.response).not.toHaveProperty("size");
+    expect(body).not.toHaveProperty("videoOptions");
+  });
+
   it("maps succeeded (string or object result) and failed jobs", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({ id: 1, status: "succeeded", result: { data: "https://cdn/x.mp4", format: "mp4" }, started_at: "2026-01-01T00:00:00Z", completed_at: "2026-01-01T00:01:00Z" })));
     expect(await getOrshotRender("k", "1")).toMatchObject({ status: "succeeded", url: "https://cdn/x.mp4", renderDurationMs: 60_000 });
