@@ -10,6 +10,7 @@ import type { BackgroundSegmentsSetting, CreatomateTemplateSummaryResponse, Elev
 // Browser-safe subpath (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS, resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
+import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 
 const DURATION_TARGETS = ["30-45s", "45-65s", "65-90s"] as const;
@@ -342,6 +343,16 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoVoice")}>
                   <Select value={voiceId} onChange={(e) => setVoiceId(e.target.value)}>
                     {voices.map((voice) => <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>)}
+                  </Select>
+                </Field>
+              ) : null}
+              {renderAccounts.length > 1 ? (
+                <Field
+                  label={t("jobs.autoRenderAccount")}
+                  {...(isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? { hint: t("jobs.autoOrshotHint") } : {})}
+                >
+                  <Select value={renderAccountId} onChange={(e) => setRenderAccountId(e.target.value)}>
+                    {renderAccounts.map((account) => <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>)}
                   </Select>
                 </Field>
               ) : null}

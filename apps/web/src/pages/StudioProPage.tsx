@@ -78,7 +78,9 @@ import {
   saveTimelineVersion,
   searchPexels,
   submitDynamicRenderFromTimeline,
+  submitRenderFromTimeline,
 } from "../studio/timeline-api";
+import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
 import { UndoStack } from "../studio/undo-stack";
 import { MediaPicker } from "../studio/MediaPicker";
 import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/auto-shorts";
@@ -958,7 +960,9 @@ export function StudioProPage() {
     if (!context || !baseVersionId || !renderAccountId || dirty) return;
     setRenderSubmitting(true);
     try {
-      const job = await submitDynamicRenderFromTimeline(context.projectId, baseVersionId, {
+      // Orshot cannot take the dynamic N-scene composition: it renders the pinned template's fixed slots.
+      const submit = isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? submitRenderFromTimeline : submitDynamicRenderFromTimeline;
+      const job = await submit(context.projectId, baseVersionId, {
         providerAccountId: renderAccountId,
         // Only a deliberate submit after a failed job creates a new attempt.
         ...(renderJob?.status === "failed" ? { idempotencyKey: crypto.randomUUID() } : {}),
@@ -1146,10 +1150,10 @@ export function StudioProPage() {
             <Button variant="secondary" onClick={() => setShowReview((prev) => !prev)}>
               {t("studioPro.reviewBeforeRender")}
             </Button>
-            <Select className="h-9" value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0}>
-              {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate" })}</option> : null}
+            <Select className="h-9" value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0} title={isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? t("studioPro.orshotTemplateOnlyHint") : undefined}>
+              {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate / Orshot" })}</option> : null}
               {renderAccounts.map((account) => (
-                <option key={account.id} value={account.id}>{account.name}</option>
+                <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>
               ))}
             </Select>
             <Button
