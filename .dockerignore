@@ -8,7 +8,9 @@
 !.env.example
 data/media
 data/system-settings.json
-infra
+infra/compose
+infra/docker/.env
+infra/docker/README.md
 **/*.log
 **/coverage
 **/.vite

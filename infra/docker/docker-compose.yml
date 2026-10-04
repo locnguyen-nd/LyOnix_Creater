@@ -3,7 +3,8 @@
 # Public access: Cloudflare Tunnel (profile "tunnel", default via COMPOSE_PROFILES) or Caddy (profile "caddy").
 
 x-app-env: &app-env
-  NODE_ENV: production
+  # "development" seeds the 2 demo accounts (DEMO_*_PASSWORD) - test deployments only.
+  NODE_ENV: ${APP_ENV:-production}
   DATABASE_URL: postgresql://lyonix:${POSTGRES_PASSWORD}@postgres:5432/lyonix
   RABBITMQ_URL: amqp://lyonix:${RABBITMQ_PASSWORD}@rabbitmq:5672
   MEDIA_ROOT: ./data/media

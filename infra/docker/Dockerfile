@@ -5,6 +5,8 @@ ARG NODE_VERSION=24
 # ---- deps: cache pnpm store from lockfile only (re-runs only when pnpm-lock.yaml changes)
 FROM node:${NODE_VERSION}-bookworm-slim AS deps
 ENV PNPM_HOME=/pnpm CI=true
+# onnxruntime-node would download a ~GB CUDA package at install; containers here are CPU-only.
+ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
 ENV PATH=$PNPM_HOME:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/* && corepack enable
