@@ -79,7 +79,7 @@ describe("RenderEngineStoreService (VE2E-111)", () => {
     const again = await store.sync();
     expect(users).toHaveLength(1);
     expect(accounts).toHaveLength(1);
-    expect(snapshots.filter((s) => s.engine === "lyonix")).toHaveLength(1);
+    expect(snapshots.filter((s) => s.engine === "lyonix")).toHaveLength(RELEASED_RECIPES.length); // one per released recipe, none duplicated by the second sync
     expect(snapshots[0]).toMatchObject({ rolloutPercent: 25, fallbackSnapshotIds: ["admin-choice"] });
     expect(again.snapshots[0]).toMatchObject({ created: false, fallbackSnapshotIds: ["admin-choice"] });
   });
