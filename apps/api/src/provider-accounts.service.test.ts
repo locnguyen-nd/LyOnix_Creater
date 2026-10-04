@@ -439,3 +439,42 @@ describe("ProviderAccountsService Apify (visual) account - VE2E-45", () => {
     expect(store.status).toBe("failed");
   });
 });
+
+describe("ProviderAccountsService Orshot (render) account — Embed ID in `model`", () => {
+  let store: any;
+  let service: ProviderAccountsService;
+
+  beforeEach(() => {
+    process.env.PERSISTENCE_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+    store = null;
+    const prisma: any = {
+      providerAccount: {
+        create: async ({ data }: any) => { store = { id: "os-1", version: 1, configVersion: 1, isFake: false, deletedAt: null, ownerUserId: "user-1", availableModels: [], preferredModels: [], ...data }; return store; },
+        findFirst: async ({ where }: any) => (store && where.id === store.id && store.deletedAt === null ? store : null),
+        updateMany: async ({ data }: any) => { Object.assign(store, data, { version: store.version + 1 }); return { count: 1 }; },
+        findUnique: async () => store,
+      },
+    };
+    service = new ProviderAccountsService(prisma);
+  });
+
+  afterEach(() => { process.env.PERSISTENCE_ENCRYPTION_KEY = originalEncryptionKey; });
+
+  const create = (model: string) => service.create({ name: "Orshot", provider: "orshot", role: "render", scope: "personal", model, secret: "os_key" }, "user-1", "staff");
+
+  it("accepts the n/a placeholder or a URL-safe Embed ID, and rejects anything that could break the iframe URL", async () => {
+    expect(await create("n/a")).toMatchObject({ provider: "orshot", model: "n/a" });
+    expect(await create("emb_Abc-123")).toMatchObject({ model: "emb_Abc-123" });
+    for (const bad of ["a/b", "x?y=1", "ab", "has space", "a".repeat(65), "\"><script>"]) expect(await create(bad), bad).toBe("invalid");
+  });
+
+  it("validates the Embed ID on edit and bumps the version when valid", async () => {
+    await create("n/a");
+    expect(await service.update("os-1", "user-1", "staff", 1, { model: "bad/id" })).toBe("invalid");
+    expect(await service.update("os-1", "user-1", "staff", 1, { model: "embed123" })).toMatchObject({ model: "embed123", version: 2 });
+  });
+
+  it("does not apply the Embed ID rule to other providers", async () => {
+    expect(await service.create({ name: "Creatomate", provider: "creatomate", role: "render", scope: "personal", model: "n/a", secret: "ctm" }, "user-1", "staff")).toMatchObject({ provider: "creatomate" });
+  });
+});
