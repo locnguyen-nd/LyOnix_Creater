@@ -12,7 +12,9 @@
     "./timeline-segments": "./src/timeline-segments.ts",
     "./timeline-edit": "./src/timeline-edit.ts",
     "./media-lineage": "./src/media-lineage.ts",
-    "./background-segments": "./src/background-segments.ts"
+    "./background-segments": "./src/background-segments.ts",
+    "./render-plan": "./src/render-plan.ts",
+    "./caption-ass": "./src/caption-ass.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -20,5 +22,11 @@
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "devDependencies": { "typescript": "^5.9.2", "vitest": "^3.2.4" }
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "budoux": "^0.9.3"
+  }
 }

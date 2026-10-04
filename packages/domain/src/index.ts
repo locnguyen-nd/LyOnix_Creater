@@ -276,3 +276,5 @@ export {
   type PlanReframeInput,
   type PlanReframeOptions,
 } from "./reframe-plan.js";
+export * from "./render-plan.js";
+export * from "./caption-ass.js";

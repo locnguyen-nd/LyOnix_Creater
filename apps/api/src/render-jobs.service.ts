@@ -35,7 +35,9 @@ import type {
   OrshotCostEstimateResponse,
   OrshotRenderOptions,
   RenderAssignmentInput,
+  RenderEngine,
   RenderJobResponse,
+  RenderRouteReason,
   RenderSubmitFromTimelineRequest,
   RenderSubmitRequest,
   TemplateModificationSlotResponse,
@@ -112,7 +114,9 @@ const toJobResponse = (row: {
   resultUrl: string | null; snapshotUrl?: string | null; resultExpiresAt: Date | null; attempts: number; requestFingerprint: string; costAmount: Prisma.Decimal | null;
   costCurrency: string | null; renderDurationMs: number | null; lastError: unknown; createdAt: Date; updatedAt: Date;
   outputRenderScale?: number | null; outputWidth?: number | null; outputHeight?: number | null; canvasWidth?: number | null; canvasHeight?: number | null;
+  engine?: string; routeReason?: string | null; fallbackOfJobId?: string | null;
 }): RenderJobResponse => ({
+  ...(row.engine ? { engine: row.engine as RenderEngine, routeReason: (row.routeReason ?? null) as RenderRouteReason | null, fallbackOfJobId: row.fallbackOfJobId ?? null } : {}),
   outputRenderScale: row.outputRenderScale ?? null,
   outputWidth: row.outputWidth ?? null,
   outputHeight: row.outputHeight ?? null,

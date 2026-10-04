@@ -11,6 +11,19 @@ import {
   type ClipPrepareResult,
 } from "./contract.js";
 import {
+  buildVideoComposeJob,
+  DEFAULT_RENDER_QUEUE,
+  parseVideoComposeProgress,
+  parseVideoComposeResult,
+  validateVideoComposeJob,
+  VIDEO_COMPOSE_JOB_TYPE,
+  VIDEO_COMPOSE_PROGRESS_TYPE,
+  type VideoComposeJob,
+  type VideoComposeJobInput,
+  type VideoComposeProgress,
+  type VideoComposeResult,
+} from "./compose-contract.js";
+import {
   buildFrameExtractJob,
   FRAME_EXTRACT_JOB_TYPE,
   parseFrameExtractResult,
@@ -32,11 +45,18 @@ import { assertMediaJobQueue, connectMediaJobBroker, type MediaJobBrokerConnecti
 
 /** Worker defaults: 120s per attempt x 2 attempts; client waits a bit longer than that. */
 export const DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS = 300_000;
+/** VE2E-104: a render is long; the client only gives up after this long WITHOUT a progress message (each progress restarts the wait). */
+export const DEFAULT_COMPOSE_IDLE_TIMEOUT_MS = 10 * 60_000;
 
 export type PrepareClipOptions = {
   /** How long to wait for the worker's result before rejecting with RESULT_TIMEOUT. */
   timeoutMs?: number;
   signal?: AbortSignal;
+};
+
+export type ComposeVideoOptions = PrepareClipOptions & {
+  /** Called for every `video.compose.progress` message of this job (never for other jobs). */
+  onProgress?: (progress: VideoComposeProgress) => void;
 };
 
 type Pending = {
@@ -47,6 +67,8 @@ type Pending = {
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   cleanup: () => void;
+  /** VE2E-104: progress callback + idle-timer restart (only for job types that stream progress). */
+  onProgress?: (body: unknown) => boolean;
 };
 
 /**
@@ -61,18 +83,20 @@ type Pending = {
  */
 export class MediaJobClient {
   private readonly pending = new Map<string, Pending>();
+  private renderQueueReady: Promise<unknown> | null = null;
   private closed = false;
 
   private constructor(
     private readonly channel: MediaJobChannel,
     private readonly queue: string,
+    private readonly renderQueue: string,
     private readonly replyQueue: string,
     private readonly defaultTimeoutMs: number,
     private readonly connection: MediaJobBrokerConnection | null,
   ) {}
 
   /** Connects to RabbitMQ. Fails fast with MEDIA_WORKER_NOT_CONFIGURED when no URL is configured. */
-  static async connect(options: { url: string | undefined; queue?: string | undefined; defaultTimeoutMs?: number | undefined }): Promise<MediaJobClient> {
+  static async connect(options: { url: string | undefined; queue?: string | undefined; renderQueue?: string | undefined; defaultTimeoutMs?: number | undefined }): Promise<MediaJobClient> {
     const url = options.url?.trim();
     if (!url) throw new MediaJobClientError("MEDIA_WORKER_NOT_CONFIGURED", "RABBITMQ_URL is not configured; media-worker jobs cannot be enqueued");
     let connection: MediaJobBrokerConnection;
@@ -81,20 +105,23 @@ export class MediaJobClient {
     } catch (error) {
       throw new MediaJobClientError("BROKER_UNAVAILABLE", `Cannot connect to RabbitMQ: ${error instanceof Error ? error.message : "unknown error"}`);
     }
-    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, defaultTimeoutMs: options.defaultTimeoutMs, connection });
+    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, renderQueue: options.renderQueue, defaultTimeoutMs: options.defaultTimeoutMs, connection });
   }
 
   /** Builds a client over an existing channel (used by `connect` and by tests with an in-memory channel). */
   static async create(options: {
     channel: MediaJobChannel;
     queue?: string | undefined;
+    /** VE2E-104: queue for `video.compose` (default `lyonix.render`); declared lazily on the first compose so deployments without the render worker are unaffected. */
+    renderQueue?: string | undefined;
     defaultTimeoutMs?: number | undefined;
     connection?: MediaJobBrokerConnection | null;
   }): Promise<MediaJobClient> {
     const queue = options.queue?.trim() || DEFAULT_MEDIA_WORKER_QUEUE;
+    const renderQueue = options.renderQueue?.trim() || DEFAULT_RENDER_QUEUE;
     await assertMediaJobQueue(options.channel, queue);
     const reply = await options.channel.assertQueue("", { exclusive: true, autoDelete: true, durable: false });
-    const client = new MediaJobClient(options.channel, queue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null);
+    const client = new MediaJobClient(options.channel, queue, renderQueue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null);
     await options.channel.consume(reply.queue, (message) => client.onReply(message), { noAck: true });
     const onClose = (error?: Error) =>
       client.failAll(new MediaJobClientError("BROKER_UNAVAILABLE", `RabbitMQ connection closed${error ? `: ${error.message}` : ""}`));
@@ -134,11 +161,38 @@ export class MediaJobClient {
     return this.request<ReframeAnalyzeResult>(REFRAME_ANALYZE_JOB_TYPE, validation.value, parseReframeAnalyzeResult, options);
   }
 
+  /**
+   * VE2E-104: composes the final 1080x1920 60 fps video in the render worker (`video.compose`, queue `lyonix.render`) and resolves with its
+   * result (output + thumbnail + QC report, or `ok: false` with a code). Idempotent by `jobKey`. The wait is an idle timeout: each progress
+   * message restarts it, so a long render never times out while it is making progress.
+   */
+  async composeVideo(job: VideoComposeJob | VideoComposeJobInput, options: ComposeVideoOptions = {}): Promise<VideoComposeResult> {
+    const candidate = "schemaVersion" in job ? job : buildVideoComposeJob(job);
+    const validation = validateVideoComposeJob(candidate);
+    if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
+    const { onProgress, ...rest } = options;
+    try {
+      this.renderQueueReady ??= assertMediaJobQueue(this.channel, this.renderQueue);
+      await this.renderQueueReady;
+    } catch (error) {
+      this.renderQueueReady = null;
+      throw new MediaJobClientError("BROKER_UNAVAILABLE", `Cannot declare render queue ${this.renderQueue}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+    return this.request<VideoComposeResult>(VIDEO_COMPOSE_JOB_TYPE, validation.value, parseVideoComposeResult, { timeoutMs: DEFAULT_COMPOSE_IDLE_TIMEOUT_MS, ...rest }, (body, jobKey) => {
+      const progress = parseVideoComposeProgress(body);
+      if (!progress || progress.jobKey !== jobKey) return false;
+      onProgress?.(progress);
+      return true;
+    }, this.renderQueue);
+  }
+
   private request<TResult extends { jobKey: string }>(
     jobType: string,
     job: { jobKey: string },
     parse: (input: unknown) => TResult | null,
     options: PrepareClipOptions,
+    progress?: (body: unknown, jobKey: string) => boolean,
+    queue: string = this.queue,
   ): Promise<TResult> {
     if (this.closed) return Promise.reject(new MediaJobClientError("BROKER_UNAVAILABLE", "MediaJobClient is closed"));
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
@@ -161,14 +215,28 @@ export class MediaJobClient {
         reject(new MediaJobClientError("RESULT_TIMEOUT", `No ${jobType} result for jobKey ${job.jobKey} within ${timeoutMs}ms`));
       }, timeoutMs);
       const cleanup = () => {
-        clearTimeout(timer);
+        clearTimeout(this.pending.get(correlationId)?.timer ?? timer);
         options.signal?.removeEventListener("abort", onAbort);
         this.pending.delete(correlationId);
       };
-      this.pending.set(correlationId, { jobKey: job.jobKey, jobType, parse, resolve: resolve as (result: never) => void, reject, timer, cleanup });
+      const entry: Pending = { jobKey: job.jobKey, jobType, parse, resolve: resolve as (result: never) => void, reject, timer, cleanup };
+      if (progress) {
+        entry.onProgress = (body) => {
+          if (!progress(body, job.jobKey)) return false;
+          clearTimeout(entry.timer);
+          entry.timer = setTimeout(() => {
+            const current = this.pending.get(correlationId);
+            if (!current) return;
+            current.cleanup();
+            reject(new MediaJobClientError("RESULT_TIMEOUT", `No ${jobType} progress/result for jobKey ${job.jobKey} within ${timeoutMs}ms`));
+          }, timeoutMs);
+          return true;
+        };
+      }
+      this.pending.set(correlationId, entry);
       options.signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        this.channel.sendToQueue(this.queue, Buffer.from(JSON.stringify(job)), {
+        this.channel.sendToQueue(queue, Buffer.from(JSON.stringify(job)), {
           persistent: true,
           contentType: "application/json",
           type: jobType,
@@ -198,6 +266,14 @@ export class MediaJobClient {
     if (!correlationId) return;
     const entry = this.pending.get(correlationId);
     if (!entry) return; // late reply after timeout/abort — ignored; the worker's stored result is reusable by jobKey
+    if (entry.onProgress && message.properties.type === VIDEO_COMPOSE_PROGRESS_TYPE) {
+      try {
+        entry.onProgress(JSON.parse(message.content.toString("utf8")));
+      } catch {
+        // a malformed progress message never fails the job; the result is what matters
+      }
+      return;
+    }
     entry.cleanup();
     let parsed: { jobKey: string } | null = null;
     try {

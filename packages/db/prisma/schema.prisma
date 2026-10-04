@@ -698,6 +698,12 @@ model TemplateSnapshot {
   modifications      Json
   // Full raw template payload (incl. source/element tree) returned by Creatomate at capture time, kept for audit/debug.
   rawTemplate        Json
+  // VE2E-108: which engine renders this template (`lyonix` internal FFmpeg recipe | `creatomate` | `orshot`); existing rows backfilled from their account's provider.
+  engine             String          @default("creatomate")
+  // VE2E-108: snapshot ids (Json string[]) the Render Router may fall back to when this (internal) template fails; [] = none.
+  fallbackSnapshotIds Json           @default("[]")
+  // VE2E-108: 0..100 share of eligible jobs routed to the internal engine for this template; 0 = never (owner enables after A/B).
+  rolloutPercent     Int             @default(0)
   capturedAt         DateTime        @default(now())
   createdByUserId    String          @db.Uuid
   createdAt          DateTime        @default(now())
@@ -726,6 +732,12 @@ model RenderJob {
   workflowRunId        String?              @db.Uuid
   requestFingerprint   String               @unique
   webhookToken         String               @unique
+  // VE2E-108: engine that produced/will produce the video (`lyonix` | `creatomate` | `orshot`); existing rows backfilled from the account provider.
+  engine               String               @default("creatomate")
+  // VE2E-108: why the Render Router chose this engine (forced, default, template_requires_provider, fallback_after_error, budget_exhausted, ...); null on pre-router jobs.
+  routeReason          String?
+  // VE2E-108: set on a fallback job to the internal-engine job it replaces (opaque ref, no FK - same posture as TimelineVersion.workflowRunId).
+  fallbackOfJobId      String?              @db.Uuid
   status               RenderJobStatus      @default(accepted)
   externalJobId        String?
   // Actual Creatomate modifications object this job submitted (or will submit) — server-built, never client-supplied raw JSON.
@@ -766,6 +778,8 @@ model RenderJob {
   @@index([projectId, status])
   @@index([status, preparationLeaseUntil])
   @@index([externalJobId])
+  @@index([engine, createdAt])
+  @@index([fallbackOfJobId])
 }
 
 /**

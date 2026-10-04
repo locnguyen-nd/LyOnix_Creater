@@ -7,3 +7,11 @@ describe("contracts", () => {
     expect(roles).toEqual(["admin", "staff"]);
   });
 });
+
+describe("VE2E-108 render engine contracts", () => {
+  it("lists the three engines and the Router reasons used by the plan", async () => {
+    const { renderEngines, renderRouteReasons } = await import("./index.js");
+    expect(renderEngines).toEqual(["lyonix", "creatomate", "orshot"]);
+    expect(renderRouteReasons).toEqual(expect.arrayContaining(["forced", "default", "fallback_after_error", "budget_exhausted", "template_requires_provider"]));
+  });
+});
