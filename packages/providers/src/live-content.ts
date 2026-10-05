@@ -1,10 +1,23 @@
 import { ProviderError, type ContentGenerationInput, type ContentGenerationResult, type JsonSchema, type ProviderKind } from "./index.js";
 import { discoveredContentModels, normalizeModelId, resolveContentModel, suggestedModelFromError, type ContentKind } from "./content-models.js";
+import { classifyOpenRouterModels, type OpenRouterModelCapabilities } from "./openrouter-models.js";
 
 export type LiveContentInput = ContentGenerationInput & { apiKey: string };
 const usage = (body: Record<string, unknown>, requestId: string | null) => {
   const data = (body.usage ?? body.usageMetadata ?? {}) as Record<string, unknown>;
-  return { inputTokens: Number(data.input_tokens ?? data.promptTokenCount ?? 0) || null, outputTokens: Number(data.output_tokens ?? data.candidatesTokenCount ?? 0) || null, providerRequestId: requestId, cost: { amount: null, currency: null, unit: "tokens" } };
+  // VE2E-79: OpenAI Responses reports input_tokens/output_tokens, Gemini promptTokenCount/candidatesTokenCount, and
+  // OpenRouter (chat-completions) prompt_tokens/completion_tokens - read all three shapes so chat-completions no longer
+  // records null tokens (the former bug). `usage.cost` (OpenRouter, requested via `usage.include`) is the prepaid-credit
+  // spend in USD; the other providers do not send it, so their usage stays { amount: null, currency: null, unit: "tokens" }.
+  const inputTokens = Number(data.input_tokens ?? data.promptTokenCount ?? data.prompt_tokens ?? 0) || null;
+  const outputTokens = Number(data.output_tokens ?? data.candidatesTokenCount ?? data.completion_tokens ?? 0) || null;
+  const costValue = typeof data.cost === "number" && Number.isFinite(data.cost) ? data.cost : null;
+  return {
+    inputTokens,
+    outputTokens,
+    providerRequestId: requestId,
+    cost: costValue !== null ? { amount: String(costValue), currency: "USD", unit: "usd" } : { amount: null, currency: null, unit: "tokens" },
+  };
 };
 const timeoutMs = 120_000;
 const redact = (value: string) => value.replace(/sk-[a-zA-Z0-9_-]+/g, "[redacted]").replace(/AIza[a-zA-Z0-9_-]+/g, "[redacted]").slice(0, 220);
@@ -31,6 +44,8 @@ const fail = (status: number, retryAfter: string | null, detail = "") => {
   const retryAfterMs = parseRetryAfterMs(retryAfter) ?? parseRetryDelayMs(detail);
   if (quota) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, scope);
   if (retired) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Model is no longer available${suffix}`, false);
+  // VE2E-79: OpenRouter returns 402 when the prepaid credit balance can no longer cover the request - an account-level stop, like a no-credits 429.
+  if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, "account");
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Provider authentication failed${suffix}`, false);
   if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Provider rate limit reached${suffix}`, true, retryAfterMs, scope);
   if (status === 400) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Provider rejected the generate payload${suffix}`, false);
@@ -47,7 +62,7 @@ const json = async (response: Response) => {
 };
 const timedFetch = (url: string, init: RequestInit) => fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
 
-export const liveContentKinds = ["openai", "gemini", "xai"] as const;
+export const liveContentKinds = ["openai", "gemini", "xai", "openrouter"] as const;
 export type LiveContentKind = (typeof liveContentKinds)[number];
 export const isLiveContentKind = (value: string): value is LiveContentKind =>
   (liveContentKinds as readonly string[]).includes(value);
@@ -74,8 +89,129 @@ const modelIds = (kind: LiveContentKind, body: Record<string, unknown>) => {
   return discoveredContentModels(kind, ids);
 };
 
+// --- VE2E-79: OpenRouter (chat-completions) ---
+
+/**
+ * OpenRouter is one key fronting many upstream vendors over the OpenAI chat-completions wire
+ * contract (NOT the Responses API that openai/xai use here, nor Gemini's generateContent). It is a
+ * `content`-role account type additive to openai/gemini/xai - their call paths are untouched.
+ * Structured output is `response_format: json_schema` plus `provider.require_parameters` so
+ * OpenRouter only routes to an upstream endpoint that honours the schema; without a schema the
+ * request mirrors each caller's existing no-schema fallback (V1 JSON mode, V2 free text).
+ */
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+/** OpenRouter's recommended attribution headers (optional); fixed here, made configurable in the VE2E-80 wiring. */
+const OPENROUTER_ATTRIBUTION = { "HTTP-Referer": "https://lyonix.app", "X-Title": "LyOnix Creater" } as const;
+const openRouterHeaders = (apiKey: string) => ({ authorization: `Bearer ${apiKey}`, "content-type": "application/json", ...OPENROUTER_ATTRIBUTION });
+
+/** Chat-completions `response_format`: strict json_schema with a schema, JSON mode or nothing without one. */
+const chatCompletionsFormat = (schema: JsonSchema | undefined, options: ResponsesOptions) => {
+  if (schema) return { type: "json_schema", json_schema: { name: options.schemaName ?? "script_draft", strict: true, schema } };
+  return options.jsonModeWithoutSchema ? { type: "json_object" } : undefined;
+};
+
+/** One chat-completions user-message content: a plain prompt string, or mixed text + image_url parts (vision). */
+type ChatCompletionsContent = string | ReadonlyArray<Record<string, unknown>>;
+const openRouterImagePart = (part: VisionInputPart) => ({ type: "image_url", image_url: { url: `data:${part.mimeType};base64,${part.base64}` } });
+
+/**
+ * Text of a chat-completions body. OpenRouter can answer HTTP 200 with a top-level `error` object
+ * (an upstream failure after the gateway accepted the request); that is mapped through the same
+ * `fail()` as a non-200, using the error's embedded HTTP code when present. A model refusal or a
+ * `length` finish is reported as such rather than a generic "no structured text".
+ */
+const chatCompletionsText = (body: Record<string, unknown>, label: string): string => {
+  const topError = body.error as Record<string, unknown> | string | undefined;
+  if (topError) {
+    const detail = typeof topError === "string" ? topError : typeof topError.message === "string" ? topError.message : JSON.stringify(topError).slice(0, 180);
+    const status = typeof topError === "object" && typeof topError.code === "number" ? (topError.code as number) : 502;
+    fail(status, null, detail);
+  }
+  const choices = body.choices as Array<Record<string, unknown>> | undefined;
+  const choice = choices?.[0];
+  const message = choice?.message as Record<string, unknown> | undefined;
+  if (typeof message?.refusal === "string" && message.refusal) {
+    throw new ProviderError("PROVIDER_CONTENT_REFUSED", `${label} refused the request: ${redact(message.refusal)}`, false);
+  }
+  if (choice?.finish_reason === "length") {
+    throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} returned an incomplete response (length)`, false);
+  }
+  const content = message?.content;
+  if (typeof content === "string" && content.trim()) return content;
+  if (Array.isArray(content)) {
+    const joined = (content as Array<Record<string, unknown>>).map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
+    if (joined.trim()) return joined;
+  }
+  throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} did not return structured text`, false);
+};
+
+/** One structured chat-completions call to OpenRouter (text prompt or vision parts). Callers normalize network/abort failures to PROVIDER_TIMEOUT. */
+async function generateOpenRouter<T>(apiKey: string, modelId: string, content: ChatCompletionsContent, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
+  const messages: Array<Record<string, unknown>> = [];
+  if (options.instructions) messages.push({ role: "system", content: options.instructions });
+  messages.push({ role: "user", content });
+  const format = chatCompletionsFormat(schema, options);
+  const response = await timedFetch(`${OPENROUTER_BASE}/chat/completions`, {
+    method: "POST",
+    headers: openRouterHeaders(apiKey),
+    body: JSON.stringify({
+      model: modelId,
+      messages,
+      ...(format ? { response_format: format } : {}),
+      // require_parameters makes OpenRouter skip any upstream endpoint that would ignore the schema (OpenRouter docs, 2026-10-04).
+      ...(schema ? { provider: { require_parameters: true } } : {}),
+      // Ask OpenRouter to return the prepaid-credit cost in `usage` (source for the VE2E-28 cost ceilings).
+      usage: { include: true },
+    }),
+  });
+  const body = await json(response);
+  const text = chatCompletionsText(body, "OpenRouter");
+  try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
+  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenRouter did not return valid JSON", false); }
+}
+
+/** Prepaid-credit snapshot from `GET /key` (`data.limit`/`data.usage`); any field OpenRouter omits stays null. */
+export type OpenRouterCredits = { usage: number | null; limit: number | null; limitRemaining: number | null; isFreeTier: boolean | null };
+const readOpenRouterCredits = (body: Record<string, unknown>): OpenRouterCredits | null => {
+  const data = body.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== "object") return null;
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const usageValue = num(data.usage);
+  const limit = num(data.limit);
+  return {
+    usage: usageValue,
+    limit,
+    limitRemaining: num(data.limit_remaining) ?? (limit !== null && usageValue !== null ? limit - usageValue : null),
+    isFreeTier: typeof data.is_free_tier === "boolean" ? data.is_free_tier : null,
+  };
+};
+
+export type OpenRouterVerifyResult = { models: string[]; visionModels: string[]; capabilities: OpenRouterModelCapabilities; credits: OpenRouterCredits | null };
+
+/**
+ * VE2E-79 / V00-10: OpenRouter's `GET /models` works without a key, so it cannot prove the key is
+ * valid. The key is proven with an authenticated `GET /key` (401 on a bad key) - a free metadata
+ * call, no billed generation - and `/models` is then listed and split into usable sets. The content
+ * role needs structured output, so `models` is the structured-capable set (falling back to all
+ * text models when the listing reports no capability fields); `visionModels` feeds image moderation.
+ */
+export async function verifyOpenRouterKey(apiKey: string): Promise<OpenRouterVerifyResult> {
+  const keyResponse = await timedFetch(`${OPENROUTER_BASE}/key`, { headers: openRouterHeaders(apiKey) });
+  const keyBody = await json(keyResponse);
+  const credits = readOpenRouterCredits(keyBody);
+  const modelsResponse = await timedFetch(`${OPENROUTER_BASE}/models`, { headers: openRouterHeaders(apiKey) });
+  const modelsBody = await json(modelsResponse);
+  const list = Array.isArray(modelsBody.data) ? (modelsBody.data as unknown[]) : [];
+  const capabilities = classifyOpenRouterModels(list);
+  return { models: capabilities.structured.length ? capabilities.structured : capabilities.text, visionModels: capabilities.vision, capabilities, credits };
+}
+
 /** Lightweight credential check. Does not generate billed content. Discovery evidence only - see `modelIds`. */
-export async function verifyContentKey(kind: LiveContentKind | Extract<ProviderKind, "openai" | "gemini" | "xai">, apiKey: string) {
+export async function verifyContentKey(kind: LiveContentKind | Extract<ProviderKind, "openai" | "gemini" | "xai" | "openrouter">, apiKey: string) {
+  if (kind === "openrouter") {
+    const { models } = await verifyOpenRouterKey(apiKey);
+    return { models };
+  }
   const response = kind === "gemini"
     ? await timedFetch("https://generativelanguage.googleapis.com/v1beta/models", { headers: { "x-goog-api-key": apiKey } })
     : await timedFetch(kind === "openai" ? "https://api.openai.com/v1/models" : "https://api.x.ai/v1/models", { headers: { authorization: `Bearer ${apiKey}` } });
@@ -137,6 +273,7 @@ async function generateLiveStructuredOnce<T>(kind: LiveContentKind, apiKey: stri
   // VE2E-122: openai/xai V1 uses the same Responses API call as V2 and sends no `temperature` (owner decision: reasoning
   // models reject it). Only the instructions, the schema name and the JSON-mode fallback without a schema are V1-specific.
   const options: ResponsesOptions = { instructions: SCRIPT_V1_INSTRUCTIONS, schemaName: "script_draft_v1", jsonModeWithoutSchema: true };
+  if (kind === "openrouter") return generateOpenRouter<T>(apiKey, model, prompt, schema, options);
   return kind === "openai" ? generateOpenAi<T>(apiKey, model, prompt, schema, options) : generateXai<T>(apiKey, model, prompt, schema, options);
 }
 
@@ -244,6 +381,7 @@ export async function generateContentOnce<T>(kind: LiveContentKind, apiKey: stri
   try {
     if (kind === "gemini") return await generateGemini<T>(apiKey, model, prompt, schema);
     if (kind === "openai") return await generateOpenAi<T>(apiKey, model, prompt, schema);
+    if (kind === "openrouter") return await generateOpenRouter<T>(apiKey, model, prompt, schema, {});
     return await generateXai<T>(apiKey, model, prompt, schema);
   } catch (error) {
     if (error instanceof ProviderError) throw error;
@@ -285,6 +423,13 @@ export async function generateVisionStructuredOnce<T>(kind: LiveContentKind, api
       if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return structured text", false);
       try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
       catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return valid JSON", false); }
+    }
+    if (kind === "openrouter") {
+      // VE2E-79: chat-completions vision - the user message mixes a text part with `image_url` data URIs. The probe and the
+      // real moderation come through this same shape (never a separate probe-only payload). `require_parameters` is set by
+      // generateOpenRouter when a schema is present, so OpenRouter only routes to an image-capable endpoint that honours it.
+      const content = [{ type: "text", text: prompt }, ...media.map(openRouterImagePart)];
+      return await generateOpenRouter<T>(apiKey, model, content, schema, { instructions: VISION_INSTRUCTIONS, schemaName: "vision_moderation", jsonModeWithoutSchema: true });
     }
     // VE2E-123: openai/xai on the Responses API, no `temperature` (owner decision: reasoning models reject it, and a 400 here would
     // mark the whole model as not vision-capable). The probe and the real moderation both come through here, so their shapes stay identical.

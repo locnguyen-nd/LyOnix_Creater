@@ -1,4 +1,4 @@
-export type ContentKind = "openai" | "gemini" | "xai";
+export type ContentKind = "openai" | "gemini" | "xai" | "openrouter";
 
 export const CONTENT_MODEL_RANKING_VERSION = "content-ranking-2026-09-26-v1";
 
@@ -33,6 +33,20 @@ export const CURATED_CONTENT_MODELS: Record<ContentKind, readonly string[]> = {
     "grok-2-latest",
     "grok-2-1212",
   ],
+  // VE2E-79: OpenRouter model IDs are `vendor/model`. This is a quality-preference ranking and the
+  // probe default only - the usable set is always discovered per account from its live `/models`
+  // (classifyOpenRouterModels in openrouter-models.ts), never unioned with this static list (V00-10).
+  openrouter: [
+    "openai/gpt-5",
+    "openai/gpt-4.1",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "google/gemini-2.5-pro",
+    "google/gemini-2.5-flash",
+    "anthropic/claude-sonnet-4",
+    "anthropic/claude-3.5-sonnet",
+    "meta-llama/llama-3.3-70b-instruct",
+  ],
 };
 
 /** Models Google/OpenAI still list or we used to pin, but generate 404s for new keys. */
@@ -45,6 +59,9 @@ export const RETIRED_CONTENT_MODELS: Record<ContentKind, Record<string, string>>
     "gemini-pro": "gemini-3.1-pro-preview",
   },
   xai: {},
+  // VE2E-79: OpenRouter routes to upstream vendors itself, so a retired upstream model is reflected
+  // in its own `/models` listing; LyOnix keeps no static remap here.
+  openrouter: {},
 };
 
 const SKIP = /whisper|tts-|dall-e|embedding|realtime|audio|transcribe|imagen|veo|moderation|omni-moderation|babbage|davinci|tts$/i;
