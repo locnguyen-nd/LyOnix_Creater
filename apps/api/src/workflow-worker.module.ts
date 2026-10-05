@@ -1,0 +1,54 @@
+import { Module } from "@nestjs/common";
+import { PrismaService } from "./prisma.service.js";
+import { GrantsService } from "./grants.service.js";
+import { MediaService } from "./media.service.js";
+import { MediaDeliveryService } from "./media-delivery.service.js";
+import { ProviderAccountsService } from "./provider-accounts.service.js";
+import { SourcesService } from "./sources.service.js";
+import { ScriptGenerationService } from "./script-generation.service.js";
+import { ScriptVersionsService } from "./script-versions.service.js";
+import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
+import { AudioVersionsService } from "./audio-versions.service.js";
+import { PexelsService } from "./pexels.service.js";
+import { ApifyService } from "./apify.service.js";
+import { MediaPlanService } from "./media-plan.service.js";
+import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
+import { RenderJobsService } from "./render-jobs.service.js";
+import { InternalRenderService } from "./internal-render.service.js";
+import { ClipDerivativesService } from "./clip-derivatives.service.js";
+import { MediaJobsGateway } from "./media-jobs.gateway.js";
+import { VideoFramesService } from "./video-frames.service.js";
+import { ReframeService } from "./reframe.service.js";
+import { TimelineVersionsService } from "./timeline-versions.service.js";
+import { WorkflowRunnerService } from "./workflow-runner.service.js";
+
+/** VE2E-06: providers for `workflow-worker-main.ts`, the background process that actually executes the Auto DAG — never wired into `apps/api`'s HTTP `AppModule` request path. */
+@Module({
+  providers: [
+    PrismaService,
+    GrantsService,
+    MediaService,
+    MediaDeliveryService,
+    ProviderAccountsService,
+    SourcesService,
+    ScriptGenerationService,
+    ScriptVersionsService,
+    ElevenLabsVoiceService,
+    AudioVersionsService,
+    PexelsService,
+    ApifyService,
+    MediaPlanService,
+    CreatomateTemplatesService,
+    RenderJobsService,
+    // VE2E-110: internal `lyonix` render engine (Render Router -> video.compose on lyonix.render).
+    InternalRenderService,
+    // VE2E-37: render cuts ranged scenes into derivatives via apps/media-worker (RabbitMQ, lazy connect).
+    MediaJobsGateway,
+    ClipDerivativesService,
+    VideoFramesService,
+    ReframeService,
+    TimelineVersionsService,
+    WorkflowRunnerService,
+  ],
+})
+export class WorkflowWorkerModule {}

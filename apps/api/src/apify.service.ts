@@ -1,0 +1,791 @@
+/**
+ * VE2E-34: Apify social/web media search + import (DEC-2026-09-29-JP-ONESHOT-MEDIA #1/#5/#10-#16).
+ *
+ * Search runs a PINNED allowlisted Actor on the project's verified Apify account (`searchApify`), and
+ * returns candidates to the client WITHOUT any download URL: each importable candidate carries an opaque
+ * `importRef` (AES-GCM sealed with the server key, bound to project + account, expiring) that the import
+ * endpoint unseals. A client can therefore never make the server fetch an arbitrary URL, and the Apify
+ * token / Key-Value-Store URL never leave the server.
+ *
+ * Import downloads through `fetchBinarySafely` with the per-platform host allowlist (whole DNS labels,
+ * re-checked on every redirect), or - for Google image only - public-web mode (private/loopback/link-local
+ * blocked, DNS pinned, redirects revalidated, size + image-MIME limits), sniffs the bytes, then registers a
+ * `MediaAssetVersion` with `origin: "apify"` and full provenance. Audio is always stripped later by the
+ * derivative cut (`decideStripAudio`, VE2E-37).
+ *
+ * No FFmpeg here; results/runs are bounded (<=20 items, 120 s, 1 retry) inside the adapter. A per
+ * (project, platform) single-flight guard and a 15-minute result cache avoid paying twice for the same query.
+ */
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Inject, Injectable, Optional } from "@nestjs/common";
+import {
+  APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+  APIFY_HOST_ALLOWLIST,
+  ProviderError,
+  addApifyUsage,
+  emptyApifyUsage,
+  fetchApifyTikTokPost,
+  hostMatchesSuffix,
+  isLiveContentKind,
+  isApifyPlatform,
+  searchApify,
+  type ApifyUsage,
+  type ApifyCandidateResult,
+  type ApifyDeps,
+  type ApifyDownloadPlan,
+  type ApifyLang,
+  type ApifyPlatform,
+  type ApifySearchOutcome,
+  type VisionModerationFrame,
+  type VisionModerationSceneContext,
+} from "@lyonix/providers";
+import {
+  canAccessProject,
+  canWriteProjectResource,
+  decideMediaSelection,
+  rankMediaCandidates,
+  selectSocialCandidates,
+  socialWindowOptionsFromEnv,
+  type MediaCandidate,
+  type SceneBrief,
+} from "@lyonix/domain";
+import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality, MediaPlanReframeCheck } from "@lyonix/contracts";
+import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
+import { GrantsService } from "./grants.service.js";
+import { mediaRoot } from "./handoff-workspace.js";
+import { MediaService, sniffMediaMimeType } from "./media.service.js";
+import { PrismaService } from "./prisma.service.js";
+import { ProviderAccountsService } from "./provider-accounts.service.js";
+import { VideoFramesService, visionVideoFramesEnabled } from "./video-frames.service.js";
+import { ReframeService } from "./reframe.service.js";
+import { decryptSecret, encryptSecret } from "./secret-crypto.js";
+import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
+import { writeQuarantineFile } from "./quarantine.js";
+
+type MediaAssetVersionSummaryLike = ApifyImportResponse["asset"];
+
+export type ApifyOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
+
+const IMPORT_REF_TTL_MS = 30 * 60 * 1000;
+/** VE2E-51: TTL of the shared search cache (memory + file, so the API process (Studio) and the worker process (Auto) share it). Env `APIFY_CACHE_TTL_MS`. */
+const DEFAULT_RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
+const resultCacheTtlMs = () => {
+  const value = Number(process.env.APIFY_CACHE_TTL_MS);
+  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_RESULT_CACHE_TTL_MS;
+};
+/** VE2E-51: Actor runs allowed at once per (project, platform); segment sourcing runs at most 3 in parallel. */
+export const APIFY_MAX_CONCURRENT_RUNS = 3;
+/** VE2E-51: phase-1 result count and how many filtered candidates go on to vision moderation/ranking. */
+export const APIFY_SEARCH_LIMIT = 10;
+const MAX_FILTERED_POOL = 8;
+const flagOn = (value: string | undefined, fallback: boolean) => (value === undefined || value.trim() === "" ? fallback : !/^(0|false|off|no)$/i.test(value.trim()));
+/**
+ * `APIFY_TWO_PHASE` (default ON since the 01/10 read-only probe confirmed the `postURLs` input of
+ * `clockworks/tiktok-scraper`: search ~12 s + one targeted download ~24 s, vs 2-4 min for the download search): `0` = classic single-phase.
+ */
+export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, true);
+/** `APIFY_TWO_PHASE_FALLBACK` (default on): when phase 2 fails, fall back to the single-phase download search. */
+export const apifyTwoPhaseFallbackEnabled = () => flagOn(process.env.APIFY_TWO_PHASE_FALLBACK, true);
+
+/**
+ * VE2E-51: state of ONE sourcing job (Auto run or Studio media plan): accumulated Apify spend and the identical
+ * (platform, keyword) searches already made, so segments with the same keyword share one Actor run.
+ */
+export class ApifyJobContext {
+  readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
+  readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
+  /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
+  readonly vision = new VisionBudget();
+  /**
+   * VE2E-67: what a plan-time `overlay_unavoidable` verdict does. `swap` (Auto): the candidate fails and the existing fallback (next
+   * platform, then Pexels) supplies another source. `flag` (Studio, default): the candidate is kept and the flag is shown to the user.
+   */
+  overlayPolicy: "swap" | "flag" = "flag";
+  addRun(usage: ApifyUsage) {
+    addApifyUsage(this.usage, usage);
+  }
+  snapshot() {
+    return { ...this.usage };
+  }
+}
+
+const emptyQuality = (twoPhase: boolean): MediaPlanApifyQuality => ({ considered: 0, passed: 0, rejected: {}, rejectedExamples: [], twoPhase, phase2: "not_used", reusedLibraryAsset: false, searchReused: false });
+
+export type AutoImportedAsset = Pick<MediaAssetVersionSummaryLike, "id" | "kind" | "durationMs">;
+export type AutoImportOutcome =
+  | { ok: true; data: { asset: AutoImportedAsset; externalId: string; ledgerId: string; provenance: MediaCandidate["provenance"]["apify"] | null; platform: ApifyPlatform; quality: MediaPlanApifyQuality } }
+  | { ok: false; reason: string; quality?: MediaPlanApifyQuality };
+/** Vision moderation spend guard per segment source (same bound as Pexels, VE2E-29). */
+// VE2E-57: candidates per segment and calls per job now come from VisionBudget (VISION_MAX_CANDIDATES_PER_SEGMENT / VISION_MAX_CALLS_PER_JOB).
+const MAX_VISION_PREVIEW_BYTES = 4 * 1024 * 1024;
+const APIFY_PREVIEW_SUFFIXES = [...APIFY_HOST_ALLOWLIST.tiktok, ...APIFY_HOST_ALLOWLIST.pinterest, ...APIFY_HOST_ALLOWLIST.x, ...APIFY_HOST_ALLOWLIST.googlePreview];
+const APIFY_LICENSE = "Apify-sourced social/web media - owner_accepted_risk (not rights-cleared); audio always stripped";
+
+/** Everything the import step needs, sealed inside `importRef` (never trusted from the client). */
+type ImportRefPayload = {
+  v: 1;
+  exp: number;
+  projectId: string;
+  providerAccountId: string;
+  platform: ApifyPlatform;
+  download: ApifyDownloadPlan;
+  meta: { externalId: string; mediaType: "video" | "photo"; widthPx: number | null; heightPx: number | null; durationSeconds: number | null; title: string };
+  provenance: Record<string, unknown>;
+};
+
+const ALL_ALLOWED_SUFFIXES = new Set<string>([...APIFY_HOST_ALLOWLIST.tiktok, ...APIFY_HOST_ALLOWLIST.pinterest, ...APIFY_HOST_ALLOWLIST.x, ...APIFY_HOST_ALLOWLIST.apifyApi]);
+
+const providerFailure = (error: unknown): { code: ErrorCode; message: string; status: number; retryable: boolean } => {
+  if (error instanceof ProviderError) {
+    const status = error.code === "PROVIDER_RATE_LIMITED" ? 429 : error.code === "PROVIDER_AUTH_INVALID" ? 401 : 502;
+    // The (already token-redacted) upstream message is passed through, per the 27/09 verify fix.
+    return { code: error.code, message: error.message, status, retryable: error.retryable };
+  }
+  return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi Apify", status: 502, retryable: true };
+};
+
+const extFor = (mime: string) => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "video/mp4": "mp4", "video/webm": "webm" } as Record<string, string>)[mime] ?? "bin";
+
+@Injectable()
+export class ApifyService {
+  private readonly cache = new Map<string, { at: number; outcome: ApifySearchOutcome }>();
+  /** Identical searches already running (any job/Studio call) share one promise instead of paying twice. */
+  private readonly pending = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
+  /** Running Actor searches per `project:platform` (bounded by {@link APIFY_MAX_CONCURRENT_RUNS}). */
+  private readonly running = new Map<string, number>();
+  /** Test seam: stubbed Apify API. Production leaves this undefined (global fetch). */
+  apifyDeps: ApifyDeps | undefined;
+
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(GrantsService) private readonly grants: GrantsService,
+    @Inject(MediaService) private readonly media: MediaService,
+    /** Only needed for the Auto vision-moderation pass (VE2E-46); omitted in unit tests that do not exercise it. */
+    @Optional() @Inject(ProviderAccountsService) private readonly providerAccounts?: ProviderAccountsService,
+    /** VE2E-30: frames of imported videos for vision moderation (media worker). Omitted = frame check is always `unchecked`. */
+    @Optional() @Inject(VideoFramesService) private readonly videoFrames?: VideoFramesService,
+    /** VE2E-67: plan-time crop/overlay check. Omitted = no check (identical to the previous behaviour). */
+    @Optional() @Inject(ReframeService) private readonly reframe?: ReframeService,
+  ) {}
+
+  private async access(projectId: string, userId: string, role: "admin" | "staff", write: boolean) {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) return false;
+    const grants = await this.grants.forUser(userId, role);
+    return write ? canWriteProjectResource(role, grants, projectId) : canAccessProject(role, grants, projectId);
+  }
+
+  /** A non-deleted, verified `apify`/`visual` account (test-only fake accounts allowed under NODE_ENV=test, like Pexels). */
+  async usableAccount(providerAccountId: string): Promise<ApifyOutcome<{ id: string; encryptedSecret: string }>> {
+    const account = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null } });
+    if (!account) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Apify không tồn tại hoặc đã bị xóa", status: 503 };
+    if (account.role !== "visual" || account.provider !== "apify") return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải Apify (visual)", status: 503 };
+    const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
+    if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Apify chưa verify", status: 503 };
+    return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret } };
+  }
+
+  /** Server-internal search (also used by MediaPlanService, VE2E-46): raw candidates incl. download plans. Access is checked by the caller-facing wrappers. */
+  async searchRaw(
+    projectId: string,
+    account: { id: string; encryptedSecret: string },
+    input: { platform: ApifyPlatform; keyword: string; lang: ApifyLang; limit?: number; download?: boolean; runTimeoutSecs?: number },
+    job?: ApifyJobContext,
+  ): Promise<ApifyOutcome<ApifySearchOutcome>> {
+    return (await this.searchShared(projectId, account, input, job)).outcome;
+  }
+
+  private cacheDir() {
+    return join(mediaRoot(), "_apify_cache");
+  }
+
+  private async readFileCache(key: string, ttl: number): Promise<ApifySearchOutcome | null> {
+    try {
+      const path = join(this.cacheDir(), `${key}.json`);
+      const info = await stat(path);
+      if (Date.now() - info.mtimeMs >= ttl) return null;
+      const parsed = JSON.parse(await readFile(path, "utf8")) as ApifySearchOutcome;
+      return parsed && Array.isArray(parsed.results) && parsed.actor && typeof parsed.runId === "string" ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeFileCache(key: string, outcome: ApifySearchOutcome, ttl: number): Promise<void> {
+    try {
+      const dir = this.cacheDir();
+      await mkdir(dir, { recursive: true });
+      const tmp = join(dir, `${key}.${process.pid}.tmp`);
+      await writeFile(tmp, JSON.stringify(outcome));
+      await rename(tmp, join(dir, `${key}.json`));
+      // Best-effort prune of expired entries (working files are short-lived, never kept for days).
+      for (const name of await readdir(dir)) {
+        const info = await stat(join(dir, name)).catch(() => null);
+        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, 60_000)) await unlink(join(dir, name)).catch(() => undefined);
+      }
+    } catch {
+      // The cache is an optimisation only.
+    }
+  }
+
+  /**
+   * VE2E-51 shared search: TTL cache (memory + file, shared by Studio and Auto), identical (platform, keyword) searches of one
+   * job reused, identical in-flight searches share one run, up to {@link APIFY_MAX_CONCURRENT_RUNS} distinct runs per
+   * (project, platform). A search-only request is also answered from a cached full-download result (superset).
+   */
+  private async searchShared(
+    projectId: string,
+    account: { id: string; encryptedSecret: string },
+    input: { platform: ApifyPlatform; keyword: string; lang: ApifyLang; limit?: number; download?: boolean; runTimeoutSecs?: number },
+    job?: ApifyJobContext,
+  ): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> {
+    const limit = Math.min(Math.max(Math.floor(input.limit ?? 10), 1), 20);
+    const keyword = input.keyword.trim().replace(/\s+/g, " ");
+    const download = input.download !== false;
+    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
+    const key = keyFor(download);
+    const altKey = download ? null : keyFor(true);
+    const ttl = resultCacheTtlMs();
+
+    const memo = job?.searches.get(key);
+    if (memo) {
+      job!.usage.searchesReused += 1;
+      return { outcome: await memo, reused: true };
+    }
+    const work = (async (): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> => {
+      if (ttl > 0) {
+        const now = Date.now();
+        for (const candidate of altKey ? [key, altKey] : [key]) {
+          const hit = this.cache.get(candidate);
+          if (hit && now - hit.at < ttl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
+        }
+        for (const candidate of altKey ? [key, altKey] : [key]) {
+          const hit = await this.readFileCache(candidate, ttl);
+          if (hit) {
+            this.cache.set(candidate, { at: now, outcome: hit });
+            return { outcome: { ok: true, data: hit }, reused: true };
+          }
+        }
+      }
+      const inFlight = this.pending.get(key);
+      if (inFlight) return { outcome: await inFlight, reused: true };
+      const flightKey = `${projectId}:${input.platform}`;
+      if ((this.running.get(flightKey) ?? 0) >= APIFY_MAX_CONCURRENT_RUNS) {
+        return { outcome: { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Đang có quá nhiều lượt tìm Apify cho nền tảng này, thử lại sau.", status: 429, retryable: true }, reused: false };
+      }
+      this.running.set(flightKey, (this.running.get(flightKey) ?? 0) + 1);
+      const usage = emptyApifyUsage();
+      const run = (async (): Promise<ApifyOutcome<ApifySearchOutcome>> => {
+        try {
+          const outcome = await searchApify(
+            decryptSecret(account.encryptedSecret),
+            { platform: input.platform, keyword, lang: input.lang, limit, providerAccountId: account.id, download, usageSink: usage, ...(input.runTimeoutSecs ? { runTimeoutSecs: input.runTimeoutSecs } : {}) },
+            this.apifyDeps,
+          );
+          if (ttl > 0) {
+            const now = Date.now();
+            this.cache.set(key, { at: now, outcome });
+            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= ttl) this.cache.delete(k);
+            await this.writeFileCache(key, outcome, ttl);
+          }
+          return { ok: true, data: outcome };
+        } catch (error) {
+          return { ok: false, ...providerFailure(error) };
+        } finally {
+          job?.addRun(usage);
+          this.running.set(flightKey, Math.max(0, (this.running.get(flightKey) ?? 1) - 1));
+        }
+      })();
+      this.pending.set(key, run);
+      void run.then(() => { if (this.pending.get(key) === run) this.pending.delete(key); });
+      return { outcome: await run, reused: false };
+    })();
+    job?.searches.set(key, work.then((result) => result.outcome));
+    return work;
+  }
+
+  private seal(projectId: string, providerAccountId: string, platform: ApifyPlatform, result: ApifyCandidateResult): string | null {
+    if (!result.download) return null;
+    const { candidate } = result;
+    const payload: ImportRefPayload = {
+      v: 1,
+      exp: Date.now() + IMPORT_REF_TTL_MS,
+      projectId,
+      providerAccountId,
+      platform,
+      download: result.download,
+      meta: { externalId: candidate.externalId, mediaType: candidate.mediaType, widthPx: candidate.widthPx ?? null, heightPx: candidate.heightPx ?? null, durationSeconds: candidate.durationSeconds ?? null, title: candidate.descriptorText ?? "" },
+      provenance: { platform, rightsStatus: "owner_accepted_risk", apify: candidate.provenance.apify ?? null, attribution: candidate.attribution, query: candidate.provenance.query },
+    };
+    return encryptSecret(JSON.stringify(payload));
+  }
+
+  private unseal(importRef: string): ImportRefPayload | null {
+    try {
+      const payload = JSON.parse(decryptSecret(importRef)) as ImportRefPayload;
+      if (payload?.v !== 1 || typeof payload.exp !== "number" || payload.exp < Date.now() || !isApifyPlatform(payload.platform) || !payload.download?.url) return null;
+      return payload;
+    } catch {
+      return null;
+    }
+  }
+
+  async search(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { providerAccountId: string; platform: string; query: string; lang?: string; limit?: number },
+  ): Promise<ApifyOutcome<ApifySearchResponse>> {
+    if (!(await this.access(projectId, userId, role, false))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    if (!isApifyPlatform(input.platform)) return { ok: false, code: "VALIDATION_FAILED", message: "Nền tảng Apify không được hỗ trợ" };
+    const query = input.query.trim();
+    if (!query || query.length > 200) return { ok: false, code: "VALIDATION_FAILED", message: "Từ khóa tìm kiếm không hợp lệ" };
+    const lang: ApifyLang = input.lang === "en" ? "en" : "ja";
+    const account = await this.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    const raw = await this.searchRaw(projectId, account.data, { platform: input.platform, keyword: query, lang, ...(input.limit !== undefined ? { limit: input.limit } : {}) });
+    if (!raw.ok) return raw;
+    const outcome = raw.data;
+    const candidates: ApifyCandidateResponse[] = outcome.results.map((result) => {
+      const { candidate } = result;
+      const importRef = this.seal(projectId, account.data.id, input.platform as ApifyPlatform, result);
+      return {
+        candidateId: candidate.candidateId,
+        platform: input.platform as ApifyPlatform,
+        mediaType: candidate.mediaType,
+        importable: importRef !== null,
+        previewOnlyReason: importRef === null ? (candidate.eligibility.reason ?? "discovery_only_no_import_capability") : null,
+        previewUrl: candidate.previewUrl,
+        durationSeconds: candidate.durationSeconds ?? null,
+        widthPx: candidate.widthPx ?? null,
+        heightPx: candidate.heightPx ?? null,
+        title: candidate.descriptorText ?? "",
+        author: candidate.attribution?.name ?? null,
+        sourcePageUrl: candidate.attribution?.sourcePageUrl ?? null,
+        rightsStatus: "owner_accepted_risk",
+        importRef,
+      };
+    });
+    return { ok: true, data: { platform: input.platform as ApifyPlatform, query, lang, actor: outcome.actor, fetchedAt: new Date().toISOString(), primaryError: outcome.primaryError, candidates } };
+  }
+
+  async import(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { providerAccountId: string; importRef: string; folderId?: string | null; reusable?: boolean; sceneId?: string | null },
+  ): Promise<ApifyOutcome<ApifyImportResponse>> {
+    if (!(await this.access(projectId, userId, role, true))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    const account = await this.usableAccount(input.providerAccountId);
+    if (!account.ok) return account;
+    const payload = this.unseal(input.importRef);
+    if (!payload || payload.projectId !== projectId || payload.providerAccountId !== account.data.id) {
+      return { ok: false, code: "VALIDATION_FAILED", message: "importRef không hợp lệ hoặc đã hết hạn, hãy tìm lại.", status: 400 };
+    }
+    return this.importPlan(projectId, userId, role, account.data, { plan: payload.download, platform: payload.platform, meta: payload.meta, provenance: payload.provenance }, input);
+  }
+
+  /** Server-internal import of a search result (MediaPlanService, VE2E-46) - same download/registration path as `import`. */
+  async importResult(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    account: { id: string; encryptedSecret: string },
+    platform: ApifyPlatform,
+    result: ApifyCandidateResult,
+    options: { sceneId?: string | null; folderId?: string | null } = {},
+  ): Promise<ApifyOutcome<ApifyImportResponse>> {
+    if (!result.download) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Candidate chỉ để xem trước, không import được", status: 400 };
+    const { candidate } = result;
+    return this.importPlan(
+      projectId, userId, role, account,
+      {
+        plan: result.download,
+        platform,
+        meta: { externalId: candidate.externalId, mediaType: candidate.mediaType, widthPx: candidate.widthPx ?? null, heightPx: candidate.heightPx ?? null, durationSeconds: candidate.durationSeconds ?? null, title: candidate.descriptorText ?? "" },
+        provenance: { platform, rightsStatus: "owner_accepted_risk", apify: candidate.provenance.apify ?? null, attribution: candidate.attribution, query: candidate.provenance.query },
+      },
+      { ...options, reusable: true },
+    );
+  }
+
+
+  /**
+   * VE2E-46: the project's verified Apify account visible to this user (org-scoped, or the user's own personal one;
+   * admins see all), or `null`. Same visibility rules as `GET /provider-accounts`.
+   */
+  async findAccountForUser(userId: string, role: "admin" | "staff"): Promise<{ id: string; encryptedSecret: string } | null> {
+    const row = await this.prisma.providerAccount.findFirst({
+      where: {
+        provider: "apify",
+        role: "visual",
+        deletedAt: null,
+        ...(process.env.NODE_ENV === "test" ? {} : { status: "verified", isFake: false }),
+        ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    if (!row) return null;
+    const usable = await this.usableAccount(row.id);
+    return usable.ok ? usable.data : null;
+  }
+
+  /**
+   * VE2E-46: one vision-moderation pass per segment source over the top-ranked candidates' preview frames
+   * (cover image; never the video itself). Candidates whose preview cannot be fetched, or when no vision-capable
+   * content account exists, keep their metadata-only score - moderation only ever strengthens evidence / rejects.
+   */
+  private async moderatePool(pool: MediaCandidate[], brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string, fetchFrames?: (candidate: MediaCandidate) => Promise<VisionModerationFrame[]>): Promise<MediaCandidate[]> {
+    if (!this.providerAccounts) return pool;
+    const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
+    const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
+    if (!account) return pool;
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
+    return moderatePoolWithBudget({
+      pool,
+      brief,
+      usedExternalIds,
+      scopeKey,
+      budget,
+      account: { id: account.id, provider: account.provider, apiKey: decryptSecret(account.encryptedSecret), model: models[0] ?? account.model, models },
+      sceneContext,
+      availability: this.providerAccounts as unknown as ModelAvailability,
+      ...(fetchFrames ? { fetchFrames } : {}),
+      fetchFrame: async (candidate) => {
+        const frame = await fetchBinarySafely(candidate.previewUrl, { maxBytes: MAX_VISION_PREVIEW_BYTES, allowedHostSuffixes: APIFY_PREVIEW_SUFFIXES, allowedMimePrefixes: ["image/"] });
+        if (!frame.ok) return null;
+        const visionFrame: VisionModerationFrame = { mimeType: frame.mimeType || "image/jpeg", base64: frame.buffer.toString("base64") };
+        return visionFrame;
+      },
+    });
+  }
+
+  /**
+   * VE2E-30: vision verdict over frames sampled from the IMPORTED video (media worker `frame.extract`), reusing the same
+   * budgeted pipeline as the cover-frame pass. Opt-in (`VISION_VIDEO_FRAMES=1`). Only an explicit `rejected` decision blocks the
+   * clip; everything else (flag off, no vision account/budget/frames, worker down) is `unchecked` and never fails sourcing.
+   */
+  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<"accepted" | "rejected" | "unchecked"> {
+    if (!visionVideoFramesEnabled() || !this.videoFrames || asset.kind !== "video") return "unchecked";
+    try {
+      const moderated = await this.moderatePool([candidate], brief, userId, role, usedExternalIds, budget, `${scopeKey}:frames`, async () => {
+        const outcome = await this.videoFrames!.framesForAsset(asset.id);
+        return outcome.ok ? outcome.frames : [];
+      });
+      const decision = moderated[0]?.moderationDecision ?? null;
+      return decision === "rejected" ? "rejected" : decision === "accepted" ? "accepted" : "unchecked";
+    } catch {
+      return "unchecked";
+    }
+  }
+
+  /**
+   * VE2E-67: plan-time screen of an Apify candidate with the worker's `reframe.analyze` (subject + logo/caption overlay). The analysed
+   * window is the one the segment will use (start guard, segment duration). Records `quality.reframe` (shown to Studio users) and returns
+   * `reject` ONLY for an unavoidable overlay under the Auto `swap` policy; an analysis that cannot run never blocks sourcing here (it is
+   * flagged `analysis_unavailable` + logged by ReframeService; the render step applies REFRAME_LEGACY_FALLBACK).
+   */
+  private async reframeCheck(asset: AutoImportedAsset, input: { segmentDurationSeconds?: number }, job: ApifyJobContext, quality: MediaPlanApifyQuality): Promise<"keep" | "reject"> {
+    if (!this.reframe || !this.reframe.enabledFor("apify")) return "keep";
+    try {
+      const row = await this.prisma.mediaAssetVersion.findFirst({ where: { id: asset.id, deletedAt: null } });
+      if (!row || (row.kind !== "video" && row.kind !== "image")) return "keep";
+      let window: { startMs: number; durationMs: number } | null = null;
+      if (row.kind === "video" && row.durationMs && row.durationMs > 0) {
+        const guard = socialWindowOptionsFromEnv();
+        const startMs = Math.min(guard.startGuardMs, Math.max(0, row.durationMs - 1000));
+        const wanted = input.segmentDurationSeconds && input.segmentDurationSeconds > 0 ? Math.round(input.segmentDurationSeconds * 1000) : row.durationMs;
+        window = { startMs, durationMs: Math.max(100, Math.min(wanted, 60_000, row.durationMs - startMs)) };
+      }
+      const decision = await this.reframe.plan({ id: row.id, kind: row.kind as "video" | "image", origin: row.origin, relativePath: row.relativePath, checksumSha256: row.checksumSha256 ?? null }, window);
+      if (decision.status === "skipped") return "keep";
+      if (decision.status === "legacy_fallback" || decision.status === "failed") {
+        quality.reframe = { status: "analysis_unavailable", overlayUnavoidable: false, residualOverlayPct: 0, subjectCoveragePct: 100, zoomPermille: null, confidenceLevel: null, swapped: false, reason: decision.code };
+        return "keep";
+      }
+      const swap = decision.overlayUnavoidable && job.overlayPolicy === "swap" && this.reframe.policy().autoSwapOnOverlay;
+      const check: MediaPlanReframeCheck = {
+        status: decision.overlayUnavoidable ? "overlay_unavoidable" : "ok",
+        overlayUnavoidable: decision.overlayUnavoidable,
+        residualOverlayPct: decision.residualOverlayPct,
+        subjectCoveragePct: decision.subjectCoveragePct,
+        zoomPermille: decision.zoomPermille,
+        confidenceLevel: decision.confidenceLevel,
+        swapped: swap,
+        ...(decision.warnings.length > 0 ? { warnings: decision.warnings } : {}),
+      };
+      quality.reframe = check;
+      return swap ? "reject" : "keep";
+    } catch {
+      return "keep"; // best-effort screen: never fail sourcing because the check itself broke
+    }
+  }
+
+  /** VE2E-51: an asset of this project already imported from the same platform video (no second download). */
+  private async findLibraryAsset(projectId: string, platform: ApifyPlatform, externalId: string): Promise<AutoImportedAsset | null> {
+    const safeId = externalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40);
+    if (!safeId) return null;
+    try {
+      const row = await this.prisma.mediaAssetVersion.findFirst({
+        where: { projectId, deletedAt: null, parentMediaAssetVersionId: null, kind: "video", originalFileName: { startsWith: `apify-${platform}-${safeId}.` } },
+        orderBy: { createdAt: "desc" },
+      });
+      return row ? { id: row.id, kind: row.kind as AutoImportedAsset["kind"], durationMs: row.durationMs } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Phase 2: run the primary TikTok Actor for ONE chosen post with download on; the result is import-ready. Usage goes to the job. */
+  private async fetchChosenPost(
+    account: { id: string; encryptedSecret: string },
+    chosen: ApifyCandidateResult,
+    job: ApifyJobContext,
+  ): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    const usage = emptyApifyUsage();
+    try {
+      const outcome = await fetchApifyTikTokPost(
+        decryptSecret(account.encryptedSecret),
+        {
+          postUrl: chosen.deferredPostUrl ?? "",
+          expectedVideoId: chosen.candidate.externalId,
+          lang: "ja",
+          providerAccountId: account.id,
+          runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+          usageSink: usage,
+          ...(process.env.APIFY_TIKTOK_POST_URL_FIELD ? { postUrlField: process.env.APIFY_TIKTOK_POST_URL_FIELD } : {}),
+        },
+        this.apifyDeps,
+      );
+      const result = outcome.results[0];
+      return result ? { ok: true, result } : { ok: false, code: "PROVIDER_SCHEMA_INVALID" };
+    } catch (error) {
+      return { ok: false, code: error instanceof ProviderError ? error.code : "PROVIDER_UNAVAILABLE" };
+    } finally {
+      job.addRun(usage);
+    }
+  }
+
+  /**
+   * VE2E-46/51 Auto/Studio-auto-fill source for ONE segment. For TikTok (default two-phase flow):
+   *  1. one search WITHOUT downloading (10 results; identical (platform, keyword) searches of a job and the shared TTL cache
+   *     are reused), 2. dataset-evidence filter + ranking (`selectSocialCandidates`: ja language, JP location, no ads/sponsored,
+   *     no template/greenscreen/CapCut, vertical, duration >= the segment, keyword overlap; reject reasons -> `quality`),
+   *     3. the shared vision pass + `decideMediaSelection` over the survivors, 4. the winner is taken from the project library
+   *     when its video id was already imported, else 5. the Actor runs for ONLY the chosen post URL with download on (falling
+   *     back to the classic download search when `APIFY_TWO_PHASE_FALLBACK` is on), then the KV-store import.
+   * Other platforms, and TikTok with `APIFY_TWO_PHASE=0`, keep the single-phase flow (download during the search).
+   * The chosen video id is reserved in `usedExternalIds` (the caller's live set) synchronously at decision time, so segments
+   * sourced concurrently can never pick the same clip. Google video and preview-only candidates never enter the pool.
+   * Never throws; any failure is a `reason` so the caller can fall back to Pexels.
+   */
+  async autoImportForSegment(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    account: { id: string; encryptedSecret: string },
+    input: {
+      platform: ApifyPlatform;
+      keyword: string;
+      brief: SceneBrief;
+      sceneId: string;
+      /** Plain platform video ids already used (live set: the chosen id is added here before any await). */
+      usedExternalIds: Set<string>;
+      /** Script language: `ja` scripts only accept Japanese-language, JP-located clips (else Pexels). Omitted = no language rule. */
+      scriptLanguage?: string;
+      /** Template-aware sourcing: only candidates of this kind (`image` = photo, `video` = video) are eligible. Omitted = any importable candidate. */
+      mediaType?: "video" | "image";
+      /** The segment's duration: candidates shorter than this are rejected (they would loop). */
+      segmentDurationSeconds?: number;
+      job?: ApifyJobContext;
+    },
+  ): Promise<AutoImportOutcome> {
+    if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
+    const job = input.job ?? new ApifyJobContext();
+    const twoPhase = input.platform === "tiktok" && apifyTwoPhaseEnabled();
+    const quality = emptyQuality(twoPhase);
+    const fail = (reason: string): AutoImportOutcome => ({ ok: false, reason, quality });
+    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
+    quality.searchReused = searched.reused;
+    if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
+    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds };
+    /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
+    const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
+      const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
+      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
+      if (input.platform !== "tiktok") return eligible;
+      const selection = selectSocialCandidates(
+        eligible.filter((r) => r.social).map((r) => ({ ref: r, signals: r.social! })),
+        filterContext,
+      );
+      quality.considered = eligible.length;
+      quality.passed = selection.passed.length;
+      quality.rejected = selection.rejectCounts;
+      quality.rejectedExamples = selection.rejected.slice(0, 5).map((r) => ({ videoId: r.videoId, reasons: [...r.reasons] }));
+      return selection.passed.slice(0, MAX_FILTERED_POOL).map((p) => p.ref);
+    };
+    const usable = shortlist(searched.outcome.data.results);
+    if (usable.length === 0) return fail("apify_no_usable_candidate");
+    const byCandidateId = new Map(usable.map((r) => [r.candidate.candidateId, r] as const));
+    let pool = usable.map((r) => r.candidate);
+    try {
+      pool = await this.moderatePool(pool, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+    } catch {
+      // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
+    }
+    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: true });
+    if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
+    const chosen = byCandidateId.get(decision.chosen.candidateId);
+    if (!chosen) return fail("apify_no_usable_candidate");
+    const externalId = decision.chosen.externalId;
+    // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
+    input.usedExternalIds.add(externalId);
+    const release = () => input.usedExternalIds.delete(externalId);
+    const done = (asset: AutoImportedAsset, candidate: MediaCandidate): AutoImportOutcome => ({
+      ok: true,
+      data: { asset, externalId, ledgerId: `${decision.chosen.source}:${externalId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
+    });
+
+    const library = await this.findLibraryAsset(projectId, input.platform, externalId);
+    if (library) {
+      quality.reusedLibraryAsset = true;
+      job.usage.libraryReuses += 1;
+      quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+      if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
+      if ((await this.reframeCheck(library, input, job, quality)) === "reject") return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
+      return done(library, decision.chosen);
+    }
+
+    let toImport: ApifyCandidateResult | null = chosen.download ? chosen : null;
+    if (!toImport) {
+      const phase2 = await this.fetchChosenPost(account, chosen, job);
+      if (phase2.ok) {
+        quality.phase2 = "ok";
+        toImport = phase2.result;
+      } else if (!apifyTwoPhaseFallbackEnabled()) {
+        quality.phase2 = "failed";
+        release();
+        return fail(`apify_phase2_failed:${phase2.code}`);
+      } else {
+        // Classic single-phase flow: search WITH download (240 s), then take the same clip, else the best filtered one.
+        quality.phase2 = "fallback_single_phase";
+        const full = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: true, runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS }, job);
+        if (!full.outcome.ok) {
+          release();
+          return fail(`apify_phase2_failed:${full.outcome.code}`);
+        }
+        const withFile = full.outcome.data.results.filter((r) => r.download !== null);
+        toImport = withFile.find((r) => r.candidate.externalId === externalId) ?? null;
+        if (!toImport) {
+          input.usedExternalIds.delete(externalId);
+          const alternative = shortlist(withFile)[0] ?? null;
+          if (alternative) input.usedExternalIds.add(alternative.candidate.externalId);
+          toImport = alternative;
+        }
+        if (!toImport) {
+          release();
+          return fail("apify_phase2_failed:no_stored_file");
+        }
+      }
+    }
+    const importedId = toImport.candidate.externalId;
+    const candidate: MediaCandidate = { ...toImport.candidate, provenance: { ...toImport.candidate.provenance, query: input.keyword } };
+    const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
+    if (!imported.ok) {
+      input.usedExternalIds.delete(importedId);
+      release();
+      return fail(`apify_import_failed:${imported.code}`);
+    }
+    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+    if (quality.frameCheck === "rejected") {
+      // Unbind the rejected clip from its scene so a retry never reuses it through the library shortcut; the video id stays reserved.
+      await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
+      return fail("apify_frames_rejected");
+    }
+    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject") {
+      // Auto + overlay_unavoidable (CR-SUBJECT-REFRAME Q5): same handling as a rejected candidate - unbind it and let the existing fallback pick another source.
+      await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
+      return fail("apify_overlay_unavoidable");
+    }
+    return {
+      ok: true,
+      data: { asset: imported.data.asset, externalId: importedId, ledgerId: `${candidate.source}:${importedId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
+    };
+  }
+
+  private async download(account: { encryptedSecret: string }, plan: ApifyDownloadPlan): Promise<SafeBinaryFetchResult | "plan_invalid"> {
+    let url: URL;
+    try { url = new URL(plan.url); } catch { return "plan_invalid"; }
+    if (url.protocol !== "https:") return "plan_invalid";
+    const mimePrefixes = plan.kind === "image" ? ["image/"] : ["video/", "application/octet-stream", "binary/octet-stream"];
+    if (plan.policy === "public_web") {
+      // Google image only: any public host, images only; safe-fetch blocks private/loopback/link-local, pins DNS, revalidates redirects.
+      if (plan.kind !== "image") return "plan_invalid";
+      return fetchBinarySafely(plan.url, { maxBytes: plan.maxBytes, allowedMimePrefixes: mimePrefixes });
+    }
+    // Suffix policies: the plan's suffixes must be from the fixed allowlist AND match the URL host (defence in depth over the sealed ref).
+    const suffixes = plan.hostSuffixes;
+    if (!suffixes.length || !suffixes.every((s) => ALL_ALLOWED_SUFFIXES.has(s)) || !hostMatchesSuffix(url.hostname, suffixes)) return "plan_invalid";
+    if (plan.policy === "apify_api") {
+      if (url.hostname.toLowerCase() !== "api.apify.com" || !url.pathname.startsWith("/v2/key-value-stores/")) return "plan_invalid";
+      return fetchBinarySafely(plan.url, {
+        maxBytes: plan.maxBytes,
+        allowedHostSuffixes: suffixes,
+        allowedMimePrefixes: mimePrefixes,
+        hostScopedHeaders: { host: "api.apify.com", headers: { Authorization: `Bearer ${decryptSecret(account.encryptedSecret)}` } },
+      });
+    }
+    return fetchBinarySafely(plan.url, { maxBytes: plan.maxBytes, allowedHostSuffixes: suffixes, allowedMimePrefixes: mimePrefixes });
+  }
+
+  private async importPlan(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    account: { id: string; encryptedSecret: string },
+    source: { plan: ApifyDownloadPlan; platform: ApifyPlatform; meta: ImportRefPayload["meta"]; provenance: Record<string, unknown> },
+    options: { folderId?: string | null; reusable?: boolean; sceneId?: string | null },
+  ): Promise<ApifyOutcome<ApifyImportResponse>> {
+    const downloaded = await this.download(account, source.plan);
+    if (downloaded === "plan_invalid") return { ok: false, code: "SSRF_BLOCKED", message: "Nguồn tải Apify không nằm trong allowlist", status: 400 };
+    if (!downloaded.ok) {
+      if (downloaded.reason === "ssrf_blocked" || downloaded.reason === "domain_not_allowed") return { ok: false, code: "SSRF_BLOCKED", message: "Link tải Apify bị chặn bởi SSRF guard", status: 400 };
+      if (downloaded.reason === "too_large") return { ok: false, code: "VALIDATION_FAILED", message: "File Apify vượt giới hạn dung lượng", status: 413 };
+      if (downloaded.reason === "mime_not_allowed") return { ok: false, code: "UNSUPPORTED_MEDIA", message: "File Apify không phải loại media được phép", status: 415 };
+      return { ok: false, code: "VALIDATION_FAILED", message: "Không tải được file từ Apify", status: 502 };
+    }
+    if (downloaded.buffer.byteLength === 0) return { ok: false, code: "VALIDATION_FAILED", message: "File tải về từ Apify rỗng", status: 502 };
+    // Content-Type is only a hint: the bytes decide.
+    const sniffed = sniffMediaMimeType(downloaded.buffer);
+    const kind = source.plan.kind;
+    if (!sniffed || !sniffed.startsWith(kind === "image" ? "image/" : "video/")) return { ok: false, code: "UNSUPPORTED_MEDIA", message: "Nội dung tải về không đúng loại media", status: 415 };
+
+    const checksumSha256 = createHash("sha256").update(downloaded.buffer).digest("hex");
+    const quarantined = await writeQuarantineFile(downloaded.buffer);
+    const safeId = source.meta.externalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || checksumSha256.slice(0, 12);
+    const registered = await this.media.registerAsset(projectId, userId, role, {
+      quarantineToken: quarantined.quarantineToken,
+      kind,
+      originalFileName: `apify-${source.platform}-${safeId}.${extFor(sniffed)}`,
+      mimeType: sniffed,
+      checksumSha256,
+      bytes: downloaded.buffer.byteLength,
+      widthPx: source.meta.widthPx,
+      heightPx: source.meta.heightPx,
+      durationMs: source.meta.durationSeconds !== null ? Math.round(source.meta.durationSeconds * 1000) || null : null,
+      origin: "apify",
+      license: APIFY_LICENSE,
+      reusable: options.reusable ?? true,
+      folderId: options.folderId ?? null,
+      sceneId: options.sceneId ?? null,
+      serverProvenance: { ...source.provenance, importedAt: new Date().toISOString(), audioPolicy: "strip_audio" },
+    });
+    if (registered === "forbidden") return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+    if (registered === "unsupported_media") return { ok: false, code: "UNSUPPORTED_MEDIA", message: "MIME không khớp loại asset", status: 415 };
+    if (registered === "invalid" || registered === "quarantine_missing") return { ok: false, code: "VALIDATION_FAILED", message: "Không thể lưu asset Apify vào project", status: 500 };
+    return { ok: true, data: { asset: registered } };
+  }
+}

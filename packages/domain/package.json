@@ -1,0 +1,35 @@
+{
+  "name": "@lyonix/domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./media-ranking": "./src/media-ranking.ts",
+    "./duration-budget": "./src/duration-budget.ts",
+    "./media-candidate": "./src/media-candidate.ts",
+    "./vision-moderation-policy": "./src/vision-moderation-policy.ts",
+    "./timeline-segments": "./src/timeline-segments.ts",
+    "./timeline-edit": "./src/timeline-edit.ts",
+    "./media-lineage": "./src/media-lineage.ts",
+    "./background-segments": "./src/background-segments.ts",
+    "./render-plan": "./src/render-plan.ts",
+    "./caption-ass": "./src/caption-ass.ts",
+    "./subtitle-edit": "./src/subtitle-edit.ts",
+    "./creation-form": "./src/creation-form.ts",
+    "./render-router": "./src/render-router.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "budoux": "^0.9.3"
+  }
+}

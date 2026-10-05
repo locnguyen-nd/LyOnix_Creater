@@ -1,0 +1,49 @@
+import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { WORKING_RETENTION_DAYS } from "@lyonix/domain";
+import { MEDIA_JOBS_DIR } from "./clip-prepare.js";
+import { RENDERS_DIR } from "./compose/compose-processor.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Directories (relative to MEDIA_ROOT) holding the worker's own job outputs: clip/frame/reframe jobs and `video.compose` renders (VE2E-105). */
+export const SWEPT_JOB_DIRS = [MEDIA_JOBS_DIR, RENDERS_DIR] as const;
+
+/**
+ * 7-day TTL for the media-worker's own working outputs (`MEDIA_ROOT/working/media-jobs` and `working/renders`).
+ * Deletes a job directory when its stored `expiresAt` has passed, or — for directories
+ * without a manifest (failed/partial runs) — when untouched for WORKING_RETENTION_DAYS.
+ * Never touches anything outside that directory (project assets are not swept here).
+ */
+export async function sweepExpiredMediaJobs(mediaRoot: string, now: Date = new Date()): Promise<{ removed: number }> {
+  let removed = 0;
+  for (const jobsDir of SWEPT_JOB_DIRS) removed += await sweepDir(join(mediaRoot, jobsDir), now);
+  return { removed };
+}
+
+async function sweepDir(root: string, now: Date): Promise<number> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(root, entry.name);
+    let expiresAtMs: number | null = null;
+    try {
+      const manifest = JSON.parse(await readFile(join(dir, "result.json"), "utf8")) as { result?: { output?: { expiresAt?: string }; expiresAt?: string } };
+      const parsed = Date.parse(manifest.result?.output?.expiresAt ?? manifest.result?.expiresAt ?? "");
+      expiresAtMs = Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      expiresAtMs = null;
+    }
+    if (expiresAtMs === null) {
+      const info = await stat(dir).catch(() => null);
+      if (!info) continue;
+      expiresAtMs = info.mtimeMs + WORKING_RETENTION_DAYS * DAY_MS;
+    }
+    if (expiresAtMs <= now.getTime()) {
+      await rm(dir, { recursive: true, force: true });
+      removed += 1;
+    }
+  }
+  return removed;
+}

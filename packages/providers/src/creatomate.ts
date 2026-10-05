@@ -1,0 +1,330 @@
+/**
+ * VE2E-05: real Creatomate adapter — template catalog/detail, `POST /v2/renders`
+ * submit and status GET. Same DI-fetch pattern as `elevenlabs.ts`/`pexels.ts`: tests
+ * inject `fetch` via `vi.stubGlobal`, this module never decides on its own to skip a
+ * real HTTP call. No webhook signature verification lives here — Creatomate does not
+ * document a per-account webhook signing secret, so the caller (apps/api) embeds an
+ * unguessable per-render token in the `webhook_url` itself (same "capability URL"
+ * pattern as `media-delivery.service.ts`) and verifies that token server-side.
+ */
+import { ProviderError } from "./index.js";
+
+const API_BASE = "https://api.creatomate.com/v2";
+const timeoutMs = 30_000;
+/** Render submission itself can legitimately take longer to accept than a read call, but this is still just the HTTP round trip to *accept* the job, not the render duration. */
+const submitTimeoutMs = 60_000;
+
+const redact = (value: string) => value.replace(/[A-Za-z0-9_-]{24,}/g, "[redacted]").slice(0, 220);
+
+const fail = (status: number, retryAfter: string | null, body: unknown): never => {
+  const record = (body ?? {}) as Record<string, unknown>;
+  const message = typeof record.message === "string" ? record.message : typeof record.error === "string" ? record.error : typeof record.hint === "string" ? record.hint : "";
+  const suffix = message ? `: ${redact(message)}` : "";
+  if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Creatomate authentication failed${suffix}`, false);
+  if (status === 404) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Creatomate template or render not found${suffix}`, false);
+  if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Creatomate credits exhausted${suffix}`, false);
+  if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Creatomate rate limit reached${suffix}`, true, Number(retryAfter ?? 0) * 1000 || undefined);
+  if (status === 400 || status === 422) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Creatomate rejected the request${suffix}`, false);
+  throw new ProviderError("PROVIDER_UNAVAILABLE", `Creatomate request failed (${status})${suffix}`, status >= 500);
+};
+
+const timedFetch = (path: string, apiKey: string, init: RequestInit = {}, timeout = timeoutMs): Promise<Response> =>
+  fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { ...(init.headers ?? {}), authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    signal: AbortSignal.timeout(timeout),
+  });
+
+async function call(path: string, apiKey: string, init: RequestInit = {}, timeout = timeoutMs): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await timedFetch(path, apiKey, init, timeout);
+  } catch {
+    throw new ProviderError("PROVIDER_TIMEOUT", "Creatomate request timed out or network failed", true);
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) fail(response.status, response.headers.get("retry-after"), body);
+  return body;
+}
+
+// --- account preflight ---
+
+/** Cheapest real, non-billed call that proves the API key works: listing templates (page size 1). */
+export async function probeCreatomateAccount(apiKey: string): Promise<{ verifiedAt: string }> {
+  await call("/templates?limit=1", apiKey, { method: "GET" });
+  return { verifiedAt: new Date().toISOString() };
+}
+
+// --- templates ---
+
+export type CreatomateTemplateSummary = { externalTemplateId: string; name: string; previewUrl: string | null; tags: string[] };
+
+const toTemplateSummary = (row: Record<string, unknown>): CreatomateTemplateSummary => ({
+  externalTemplateId: String(row.id ?? ""),
+  name: typeof row.name === "string" ? row.name : "",
+  previewUrl: typeof row.preview_image_url === "string" ? row.preview_image_url : typeof row.preview_url === "string" ? row.preview_url : null,
+  tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
+});
+
+export async function listCreatomateTemplates(apiKey: string): Promise<CreatomateTemplateSummary[]> {
+  const body = await call("/templates", apiKey, { method: "GET" });
+  const rows = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [];
+  return rows.map(toTemplateSummary);
+}
+
+export type CreatomateTemplateDetail = CreatomateTemplateSummary & { source: unknown };
+
+export async function getCreatomateTemplate(apiKey: string, externalTemplateId: string): Promise<CreatomateTemplateDetail> {
+  const body = (await call(`/templates/${encodeURIComponent(externalTemplateId)}`, apiKey, { method: "GET" })) as Record<string, unknown>;
+  return { ...toTemplateSummary(body), source: body.source ?? body.elements ?? null };
+}
+
+// --- modification slot derivation ---
+
+export type ModificationKind = "text" | "video" | "image" | "audio" | "color" | "font" | "volume";
+export type TemplateModificationSlot = {
+  key: string;
+  kind: ModificationKind;
+  label: string;
+  required: boolean;
+  /** VE2E-47: TTS `provider` string of the template's audio element (audio `.source` slot only). */
+  ttsProvider?: string;
+};
+
+/**
+ * VE2E-47: Creatomate RenderScript audio elements can carry a `provider` (e.g. `"elevenlabs
+ * model_id=... voice_id=..."`); when set, Creatomate treats `source` as TEXT to speak and calls the
+ * TTS integration itself (billed on the owner's ElevenLabs account). LyOnix sends a media-delivery
+ * URL as `<name>.source`, so it must also blank `<name>.provider` in the same modifications object.
+ * This is the single place that knows the override key/value (the Test agent dry-runs exactly this).
+ */
+export const TTS_PROVIDER_DISABLED_VALUE = "";
+export const ttsProviderOverrideKey = (sourceKey: string): string => sourceKey.replace(/.source$/, ".provider");
+
+export type TemplateTtsElement = { elementName: string; provider: string; dynamic: boolean };
+
+/** Every named audio element in the template that carries a non-empty `provider` (dynamic or fixed). */
+export function findTemplateTtsElements(source: unknown): TemplateTtsElement[] {
+  const found: TemplateTtsElement[] = [];
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) { for (const item of node) walk(item); return; }
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+    if (name && type === "audio" && provider) {
+      found.push({ elementName: name, provider, dynamic: record.dynamic === true || (Array.isArray(record.dynamic) && record.dynamic.length > 0) });
+    }
+    for (const value of Object.values(record)) walk(value);
+  };
+  walk(source);
+  return found;
+}
+
+const ELEMENT_KIND: Record<string, "text" | "video" | "image" | "audio" | undefined> = { text: "text", video: "video", image: "image", audio: "audio" };
+
+/**
+ * Best-effort derivation of logical modification slots from a Creatomate template's
+ * `source` element tree. Creatomate identifies a modification target by
+ * `<element name>.<property>` (e.g. `Text-1.text`, `Video-1.source`) — this walks the
+ * template's element list and emits the conventional property key per element type,
+ * matching the shape already prototyped in `apps/web/src/studio/creatomate-placeholder.ts`.
+ * Never invents a key that is not backed by a real, named element in the template.
+ */
+export function deriveTemplateModifications(source: unknown): TemplateModificationSlot[] {
+  const slots: TemplateModificationSlot[] = [];
+  const seen = new Set<string>();
+  const push = (key: string, kind: ModificationKind, required: boolean, ttsProvider?: string) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    slots.push({ key, kind, label: key, required, ...(ttsProvider ? { ttsProvider } : {}) });
+  };
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+    const kind = ELEMENT_KIND[type];
+    // Creatomate itself only treats an element as automation-fillable when the template author
+    // marked it `dynamic` (true or a property array) — see "No-code handoffs": "Only what is
+    // marked Dynamic appears as a field". A named text/media element without that flag is a
+    // fixed, author-authored part of the design (a rank badge, a persistent logo, static copy)
+    // and must never enter the same per-scene fill queue as the real content slots — otherwise
+    // Auto's positional mapper (buildAutoRenderAssignments) shifts scene narration onto it and
+    // starves/misaligns the real slots, which is exactly the bug this guard fixes.
+    const isDynamic = record.dynamic === true || (Array.isArray(record.dynamic) && record.dynamic.length > 0);
+    if (name && kind && isDynamic) {
+      if (kind === "text") {
+        push(`${name}.text`, "text", true);
+        push(`${name}.font_family`, "font", false);
+        push(`${name}.fill_color`, "color", false);
+      } else if (kind === "video" || kind === "image") {
+        push(`${name}.source`, kind, true);
+        if (kind === "video") push(`${name}.volume`, "volume", false);
+      } else if (kind === "audio") {
+        // VE2E-06: an audio element's `source` lets the Auto orchestrator attach a
+        // generated narration clip — never required, since many audio elements are
+        // fixed background music the template author does not want overridden.
+        const ttsProvider = typeof record.provider === "string" ? record.provider.trim() : "";
+        push(`${name}.source`, "audio", false, ttsProvider || undefined);
+        push(`${name}.volume`, "volume", false);
+      }
+    }
+    for (const value of Object.values(record)) walk(value);
+  };
+  walk(source);
+  return slots;
+}
+
+// --- renders ---
+
+export type CreatomateRenderStatus = "planned" | "waiting" | "transcribing" | "rendering" | "succeeded" | "failed";
+
+export type CreatomateRenderResult = {
+  externalJobId: string;
+  status: CreatomateRenderStatus;
+  url: string | null;
+  progress: number | null;
+  errorMessage: string | null;
+  renderDurationMs: number | null;
+  /** VE2E-19: Creatomate's own render-frame preview image, when the provider includes one. */
+  snapshotUrl: string | null;
+  /** VE2E-52b: what Creatomate actually rendered (`render_scale`/`width`/`height` of the render object); null when not reported. */
+  renderScale: number | null;
+  width: number | null;
+  height: number | null;
+};
+
+const finiteNumber = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * VE2E-52b: explicit `render_scale` sent on every final render. Creatomate silently applied 0.25 (270x480)
+ * on the owner's account when none was sent, so LyOnix always states it. Env `CREATOMATE_RENDER_SCALE`
+ * (default 1, valid 0.1..1; anything else falls back to 1).
+ */
+export function resolveCreatomateRenderScale(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.CREATOMATE_RENDER_SCALE?.trim();
+  if (!raw) return 1;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0.1 && value <= 1 ? value : 1;
+}
+
+/**
+ * Capacity: Creatomate bills a video as `width x height x frame_rate x seconds / 100,000,000` credits and renders it proportionally
+ * slower, so a 60 fps template costs twice a 30 fps one. `frame_rate` is NOT a render option (only `render_scale`, `max_width`,
+ * `max_height`, `metadata`, `webhook_url`, `dry_run` are) - it lives in the `source`/template root. Env `CREATOMATE_FRAME_RATE`
+ * (valid 1..60; unset/invalid = keep the template's own value) caps the root `frame_rate` of dynamic (source) renders only: it never raises
+ * a template's rate, and template_id renders are unchanged (edit the template itself for those).
+ */
+export function resolveCreatomateFrameRateCap(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env.CREATOMATE_FRAME_RATE?.trim();
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 1 && value <= 60 ? value : null;
+}
+
+/** Returns `source` with its root `frame_rate` capped at `CREATOMATE_FRAME_RATE` (no-op when unset, or when the source is already at/below the cap). */
+export function applyCreatomateFrameRateCap<T extends Record<string, unknown>>(source: T, env: Record<string, string | undefined> = process.env): T {
+  const cap = resolveCreatomateFrameRateCap(env);
+  if (cap === null) return source;
+  const current = finiteNumber(source.frame_rate);
+  if (current !== null && current <= cap) return source;
+  return { ...source, frame_rate: cap };
+}
+
+/** Canvas (`width`/`height`) declared by a Creatomate template/source document, or null when absent. */
+export function readCreatomateCanvas(rawTemplate: unknown): { width: number; height: number } | null {
+  if (!rawTemplate || typeof rawTemplate !== "object") return null;
+  const record = rawTemplate as Record<string, unknown>;
+  const width = finiteNumber(record.width);
+  const height = finiteNumber(record.height);
+  return width && height && width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** True when the rendered output is smaller than the template canvas (e.g. render_scale 0.25 -> 270x480 of 1080x1920). */
+export function isRenderOutputBelowCanvas(output: { width: number | null; height: number | null } | null, canvas: { width: number | null; height: number | null } | null): boolean {
+  if (!output || !canvas || !output.width || !output.height || !canvas.width || !canvas.height) return false;
+  return output.width < canvas.width || output.height < canvas.height;
+}
+
+const toRenderResult = (row: Record<string, unknown>): CreatomateRenderResult => ({
+  externalJobId: String(row.id ?? ""),
+  status: (typeof row.status === "string" ? row.status : "planned") as CreatomateRenderStatus,
+  url: typeof row.url === "string" ? row.url : null,
+  progress: typeof row.progress === "number" ? row.progress : null,
+  errorMessage: typeof row.error_message === "string" ? row.error_message : null,
+  renderDurationMs: typeof row.render_duration === "number" ? Math.round(row.render_duration * 1000) : null,
+  snapshotUrl: typeof row.snapshot_url === "string" ? row.snapshot_url : null,
+  renderScale: finiteNumber(row.render_scale),
+  width: finiteNumber(row.width),
+  height: finiteNumber(row.height),
+});
+
+export type SubmitRenderInput = {
+  templateId: string;
+  modifications: Record<string, string>;
+  webhookUrl: string;
+  outputFormat?: "mp4" | "mov" | "gif";
+};
+
+/**
+ * `POST /v2/renders`. Creatomate's own API accepts an array-shaped request (it can
+ * render several sources per call) and always answers with an array of render
+ * objects — this adapter only ever submits one template per call and returns its
+ * single resulting render.
+ */
+export async function submitCreatomateRender(apiKey: string, input: SubmitRenderInput): Promise<CreatomateRenderResult> {
+  const body = await call(
+    "/renders",
+    apiKey,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        template_id: input.templateId,
+        modifications: input.modifications,
+        webhook_url: input.webhookUrl,
+        render_scale: resolveCreatomateRenderScale(),
+        ...(input.outputFormat ? { output_format: input.outputFormat } : {}),
+      }),
+    },
+    submitTimeoutMs,
+  );
+  const rows = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [body as Record<string, unknown>];
+  const first = rows[0];
+  if (!first || !first.id) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Creatomate did not return a render id", false);
+  return toRenderResult(first);
+}
+
+export type SubmitSourceRenderInput = { source: Record<string, unknown>; webhookUrl: string };
+
+/** Same `POST /v2/renders` endpoint as `submitCreatomateRender`, but with a fully dynamic `source` document instead of `template_id`+`modifications` — see `creatomate-dynamic.ts`. */
+export async function submitCreatomateSourceRender(apiKey: string, input: SubmitSourceRenderInput): Promise<CreatomateRenderResult> {
+  const body = await call(
+    "/renders",
+    apiKey,
+    { method: "POST", body: JSON.stringify({ source: input.source, webhook_url: input.webhookUrl, render_scale: resolveCreatomateRenderScale() }) },
+    submitTimeoutMs,
+  );
+  const rows = Array.isArray(body) ? (body as Array<Record<string, unknown>>) : [body as Record<string, unknown>];
+  const first = rows[0];
+  if (!first || !first.id) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Creatomate did not return a render id", false);
+  return toRenderResult(first);
+}
+
+export async function getCreatomateRender(apiKey: string, externalJobId: string): Promise<CreatomateRenderResult> {
+  const body = (await call(`/renders/${encodeURIComponent(externalJobId)}`, apiKey, { method: "GET" })) as Record<string, unknown>;
+  return toRenderResult(body);
+}
+
+/** Maps Creatomate's own status vocabulary to the normalized `RenderJobStatus` state machine (`@lyonix/domain`). */
+export function normalizeCreatomateStatus(status: CreatomateRenderStatus): "queued" | "rendering" | "completed" | "failed" {
+  if (status === "planned" || status === "waiting") return "queued";
+  if (status === "transcribing" || status === "rendering") return "rendering";
+  if (status === "succeeded") return "completed";
+  return "failed";
+}
