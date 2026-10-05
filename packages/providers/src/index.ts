@@ -1,4 +1,4 @@
-export const providerKinds = ["fake", "openai", "gemini", "xai", "elevenlabs", "pexels", "youtube", "pinterest", "apify", "creatomate", "orshot", "vrew", "capcut"] as const;
+export const providerKinds = ["fake", "openai", "gemini", "xai", "openrouter", "elevenlabs", "pexels", "youtube", "pinterest", "apify", "creatomate", "orshot", "vrew", "capcut"] as const;
 export type ProviderKind = (typeof providerKinds)[number];
 export const providerRoles = ["content", "tts", "visual", "render"] as const;
 export type ProviderRole = (typeof providerRoles)[number];
@@ -105,11 +105,15 @@ export {
   isLiveContentKind,
   liveContentKinds,
   verifyContentKey,
+  verifyOpenRouterKey,
   type LiveContentInput,
   type LiveContentKind,
+  type OpenRouterCredits,
+  type OpenRouterVerifyResult,
   type VisionInputPart,
 } from "./live-content.js";
 export { CONTENT_MODEL_RANKING_VERSION, CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, rankContentModels, suggestedModelFromError } from "./content-models.js";
+export { classifyOpenRouterModels, type OpenRouterModelCapabilities, type OpenRouterRawModel } from "./openrouter-models.js";
 export {
   probeContentModel,
   pickUsableContentModel,
