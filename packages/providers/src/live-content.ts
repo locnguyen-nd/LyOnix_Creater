@@ -100,11 +100,6 @@ const geminiConfig = (schema?: JsonSchema) => ({
   ...(schema ? { responseJsonSchema: schema } : {}),
 });
 
-const chatFormat = (schema?: JsonSchema) =>
-  schema
-    ? { type: "json_schema", json_schema: { name: "script_draft_v1", strict: true, schema } }
-    : { type: "json_object" };
-
 /** V1 editor persona; was the Chat Completions `system` message before VE2E-122, now the Responses `instructions`. */
 const SCRIPT_V1_INSTRUCTIONS = "You are LyOnix, a short-form script editor. Reply with a single JSON object only. Follow the requested creative direction; do not repeat a previous draft.";
 
@@ -188,15 +183,18 @@ const responsesText = (body: Record<string, unknown>, label: string): string => 
   throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} did not return structured text`, false);
 };
 
+/** Responses `input`: a plain prompt, or (VE2E-123 vision) one user message whose content mixes `input_text` and `input_image` parts. */
+type ResponsesInput = string | ReadonlyArray<{ role: "user"; content: ReadonlyArray<Record<string, string>> }>;
+
 /** One structured call on a Responses API endpoint (OpenAI and xAI share the wire contract). */
-async function generateResponses<T>(url: string, label: string, apiKey: string, modelId: string, prompt: string, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
+async function generateResponses<T>(url: string, label: string, apiKey: string, modelId: string, input: ResponsesInput, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
   const response = await timedFetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: modelId,
       ...(options.instructions ? { instructions: options.instructions } : {}),
-      input: prompt,
+      input,
       text: responsesFormat(schema, options),
     }),
   });
@@ -259,12 +257,16 @@ export async function generateContentOnce<T>(kind: LiveContentKind, apiKey: stri
 export type VisionInputPart = { mimeType: string; base64: string };
 
 const geminiInlinePart = (part: VisionInputPart) => ({ inlineData: { mimeType: part.mimeType, data: part.base64 } });
-const openAiImagePart = (part: VisionInputPart) => ({ type: "image_url" as const, image_url: { url: `data:${part.mimeType};base64,${part.base64}` } });
+/** VE2E-123: Responses image part; no `detail` (owner decision: keep the provider default `auto`, same as Chat Completions before). */
+const responsesImagePart = (part: VisionInputPart) => ({ type: "input_image", image_url: `data:${part.mimeType};base64,${part.base64}` });
+
+/** Vision classifier persona; was the Chat Completions `system` message before VE2E-123, now the Responses `instructions`. */
+const VISION_INSTRUCTIONS = "You are a vision content classifier. Reply with a single JSON object only, matching the requested schema exactly. No other text, no markdown.";
 
 /**
  * Single attempt, exact-endpoint vision dispatch - mirrors `generateContentOnce` but attaches
  * one or more inline image parts to the same real generate endpoint (Gemini `generateContent`
- * inline_data, OpenAI/xAI chat-completions `image_url` data URI). Used by
+ * inline_data, OpenAI/xAI Responses API `input_image` data URI since VE2E-123). Used by
  * `vision-probe.ts`/`vision-moderation.ts` so capability verification and the real moderation
  * call go through the identical request shape - never a separate "probe-only" payload that
  * could pass while the real moderation call shape silently fails.
@@ -284,25 +286,11 @@ export async function generateVisionStructuredOnce<T>(kind: LiveContentKind, api
       try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
       catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return valid JSON", false); }
     }
-    const url = kind === "openai" ? "https://api.openai.com/v1/chat/completions" : "https://api.x.ai/v1/chat/completions";
-    const response = await timedFetch(url, {
-      method: "POST",
-      headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        response_format: chatFormat(schema),
-        messages: [
-          { role: "system", content: "You are a vision content classifier. Reply with a single JSON object only, matching the requested schema exactly. No other text, no markdown." },
-          { role: "user", content: [{ type: "text", text: prompt }, ...media.map(openAiImagePart)] },
-        ],
-      }),
-    });
-    const body = await json(response);
-    const text = chatText(body);
-    if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return structured text", false);
-    try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
-    catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return valid JSON", false); }
+    // VE2E-123: openai/xai on the Responses API, no `temperature` (owner decision: reasoning models reject it, and a 400 here would
+    // mark the whole model as not vision-capable). The probe and the real moderation both come through here, so their shapes stay identical.
+    const url = kind === "openai" ? "https://api.openai.com/v1/responses" : "https://api.x.ai/v1/responses";
+    const input = [{ role: "user" as const, content: [{ type: "input_text", text: prompt }, ...media.map(responsesImagePart)] }];
+    return await generateResponses<T>(url, kind === "openai" ? "OpenAI" : "xAI", apiKey, model, input, schema, { instructions: VISION_INSTRUCTIONS, schemaName: "vision_moderation", jsonModeWithoutSchema: true });
   } catch (error) {
     if (error instanceof ProviderError) throw error;
     throw new ProviderError("PROVIDER_TIMEOUT", "Provider vision generate timed out or network failed", true);

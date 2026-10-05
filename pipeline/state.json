@@ -30,11 +30,11 @@
       "title": "Chuyển vision moderation sang Responses API",
       "group": "Nhà cung cấp nội dung",
       "assignee": null,
-      "status": "draft",
+      "status": "code_done",
       "dependsOn": [
         "VE2E-122"
       ],
-      "note": "Bỏ chỗ Chat Completions cuối cùng (generateVisionStructuredOnce: probe + moderation, openai/xai). Chờ chủ dự án trả lời 2 câu hỏi trong spec (temperature, detail) rồi đổi sang ready."
+      "note": "Bỏ chỗ Chat Completions cuối cùng (generateVisionStructuredOnce: probe + moderation, openai/xai). Chủ dự án duyệt 2026-10-05: bỏ temperature, không gửi detail. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows); không còn chat/completions trong providers/api; chạy thật chờ gate B04."
     }
   ]
 }

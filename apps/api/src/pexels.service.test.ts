@@ -283,8 +283,10 @@ describe("PexelsService", () => {
         isFake: false,
         ...overrides,
       });
-      const visionResponse = (body: Record<string, unknown>) =>
-        new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(body) } }] }), { status: 200 });
+      // VE2E-123: raw REST Responses API shape (text in output[] message parts, no top-level output_text).
+      const visionText = (text: string) =>
+        new Response(JSON.stringify({ status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }] }), { status: 200 });
+      const visionResponse = (body: Record<string, unknown>) => visionText(JSON.stringify(body));
 
       it("auto-selects a photo with no alt text once vision moderation accepts it", async () => {
         providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
@@ -293,7 +295,7 @@ describe("PexelsService", () => {
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
           if (url.includes("/v1/photos/")) return new Response(JSON.stringify(photoDetail), { status: 200 });
-          if (url.includes("api.openai.com/v1/chat/completions")) {
+          if (url.includes("api.openai.com/v1/responses")) {
             return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "matches beat" });
           }
           throw new Error(`unexpected fetch: ${url}`);
@@ -316,7 +318,7 @@ describe("PexelsService", () => {
           const url = String(input);
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
-          if (url.includes("api.openai.com/v1/chat/completions")) {
+          if (url.includes("api.openai.com/v1/responses")) {
             return visionResponse({ safety_flag: true, safety_categories: ["violence"], scene_beat_relevance: 0.8, confidence: 0.95, notes: "unsafe content" });
           }
           throw new Error(`unexpected fetch: ${url}`);
@@ -340,7 +342,7 @@ describe("PexelsService", () => {
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
           // Malformed content: fails JSON.parse inside `generateVisionStructuredOnce`, so the capability probe itself throws and `moderateSceneCandidate` fails closed to `raw: null` - the real moderation call is never even attempted.
-          if (url.includes("api.openai.com/v1/chat/completions")) return new Response(JSON.stringify({ choices: [{ message: { content: "not json" } }] }), { status: 200 });
+          if (url.includes("api.openai.com/v1/responses")) return visionText("not json");
           throw new Error(`unexpected fetch: ${url}`);
         });
         vi.stubGlobal("fetch", fetchMock);
@@ -371,7 +373,7 @@ describe("PexelsService", () => {
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos }), { status: 200 });
           if (url.includes("/v1/photos/1")) return new Response(JSON.stringify(photos[0]), { status: 200 });
-          if (url.includes("api.openai.com/v1/chat/completions")) {
+          if (url.includes("api.openai.com/v1/responses")) {
             visionCallCount += 1;
             return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "ok" });
           }

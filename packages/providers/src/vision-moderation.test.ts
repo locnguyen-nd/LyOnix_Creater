@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
 import { MAX_MODERATION_FRAMES, moderateMediaWithVision, moderateSceneCandidate } from "./vision-moderation.js";
+import { probeVisionCapability } from "./vision-probe.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -9,6 +10,26 @@ const sceneContext = { beat: "hook", entities: ["person"], action: ["walking"], 
 const okBody = (result: Record<string, unknown>) => JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(result) }] } }] });
 
 describe("moderateMediaWithVision", () => {
+  it("VE2E-123: the capability probe and the real moderation send the same Responses API request shape (OpenAI)", async () => {
+    const result = { safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "ok" };
+    // Raw REST Responses shape: text in output[] message parts, no top-level output_text.
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify({
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify(result) }] }],
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await probeVisionCapability("openai", "sk-test", "gpt-4o-mini");
+    const moderated = await moderateMediaWithVision({ kind: "openai", apiKey: "sk-test", modelId: "gpt-4o-mini", operation: "image_moderation", sceneContext, frames: [{ mimeType: "image/jpeg", base64: "AAAA" }] });
+    expect(moderated.raw).toMatchObject({ safetyFlag: false, sceneBeatRelevance: 0.9 });
+    const [probe, real] = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1]?.body)) as { instructions: string; input: Array<{ content: Array<{ type: string }> }>; text: { format: { name: string } } });
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(["https://api.openai.com/v1/responses", "https://api.openai.com/v1/responses"]);
+    expect(Object.keys(probe!).sort()).toEqual(Object.keys(real!).sort());
+    expect(probe!.instructions).toBe(real!.instructions);
+    expect(probe!.text.format.name).toBe(real!.text.format.name);
+    expect(probe!.input[0]!.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
+    expect(real!.input[0]!.content.map((part) => part.type)).toEqual(["input_text", "input_image"]);
+  });
+
   it("sends a bounded, well-formed request and returns the parsed structured result plus sampled metadata", async () => {
     const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));

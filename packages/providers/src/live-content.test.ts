@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
-import { generateContentOnce, generateLiveStructured, generateOpenAi, generateXai, isLiveContentKind, verifyContentKey } from "./live-content.js";
+import { generateContentOnce, generateLiveStructured, generateOpenAi, generateVisionStructuredOnce, generateXai, isLiveContentKind, verifyContentKey } from "./live-content.js";
 import { SCRIPT_DRAFT_V1_JSON_SCHEMA } from "./script-draft-v1.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -200,5 +200,47 @@ describe("Responses API parser (VE2E-122, shared with V2 / model probe / keyword
     expect(sentRaw(fetchMock, 0)).toBe(JSON.stringify({ model: "gpt-4o-mini", input: "prompt", text: { format: { type: "json_schema", name: "script_draft", strict: true, schema } } }));
     expect(sentRaw(fetchMock, 1)).toBe(JSON.stringify({ model: "gpt-4o-mini", input: "prompt" }));
     expect(sentRaw(fetchMock, 2)).toBe(JSON.stringify({ model: "grok-4", input: "prompt", text: { format: { type: "json_schema", name: "script_draft", strict: true, schema } } }));
+  });
+});
+
+describe("generateVisionStructuredOnce (VE2E-123, Responses API)", () => {
+  const frames = [{ mimeType: "image/jpeg", base64: "AAAA" }, { mimeType: "image/png", base64: "BBBB" }];
+  const schema = { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false };
+
+  it("OpenAI sends input_text + input_image data URLs with the classifier instructions and the vision_moderation schema, without temperature or detail", async () => {
+    const fetchMock = vi.fn(async () => ok(responsesBody("{\"ok\":true}")));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(generateVisionStructuredOnce("openai", "sk-test", "gpt-4o-mini", "prompt", frames, schema)).resolves.toMatchObject({ output: { ok: true } });
+    expect(sentUrl(fetchMock)).toBe("https://api.openai.com/v1/responses");
+    const body = sentBody(fetchMock);
+    expect(body.instructions).toContain("vision content classifier");
+    expect(body.input).toEqual([{
+      role: "user",
+      content: [
+        { type: "input_text", text: "prompt" },
+        { type: "input_image", image_url: "data:image/jpeg;base64,AAAA" },
+        { type: "input_image", image_url: "data:image/png;base64,BBBB" },
+      ],
+    }]);
+    expect(body.text).toEqual({ format: { type: "json_schema", name: "vision_moderation", strict: true, schema } });
+    for (const key of ["temperature", "messages", "response_format"]) expect(body).not.toHaveProperty(key);
+  });
+
+  it("xAI uses the xAI Responses endpoint with the same request shape", async () => {
+    const fetchMock = vi.fn(async () => ok(responsesBody("{\"ok\":true}")));
+    vi.stubGlobal("fetch", fetchMock);
+    await generateVisionStructuredOnce("xai", "xai-test", "grok-4", "prompt", frames, schema);
+    expect(sentUrl(fetchMock)).toBe("https://api.x.ai/v1/responses");
+    expect(sentBody(fetchMock).text).toMatchObject({ format: { name: "vision_moderation" } });
+  });
+
+  it("a refusal is PROVIDER_CONTENT_REFUSED (callers fail closed to manual review)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ok({ status: "completed", output: [{ type: "message", content: [{ type: "refusal", refusal: "I can't assess this image." }] }] })));
+    await expect(generateVisionStructuredOnce("openai", "sk-test", "gpt-4o-mini", "prompt", frames, schema)).rejects.toMatchObject({ code: "PROVIDER_CONTENT_REFUSED" } satisfies Partial<ProviderError>);
+  });
+
+  it("a network failure is still normalized to a retryable PROVIDER_TIMEOUT", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    await expect(generateVisionStructuredOnce("openai", "sk-test", "gpt-4o-mini", "prompt", frames, schema)).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT", retryable: true } satisfies Partial<ProviderError>);
   });
 });
