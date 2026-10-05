@@ -16,6 +16,7 @@
     "./render-plan": "./src/render-plan.ts",
     "./caption-ass": "./src/caption-ass.ts",
     "./subtitle-edit": "./src/subtitle-edit.ts",
+    "./creation-form": "./src/creation-form.ts",
     "./render-router": "./src/render-router.ts"
   },
   "scripts": {

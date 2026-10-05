@@ -55,6 +55,9 @@ import { AudioVersionsController } from "./audio-versions.controller.js";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { SubtitleVersionsController } from "./subtitle-versions.controller.js";
 import { SubtitleVersionsService } from "./subtitle-versions.service.js";
+import { MeCreationController } from "./me-creation.controller.js";
+import { UserDraftsService } from "./user-drafts.service.js";
+import { CreationPreferencesService } from "./creation-preferences.service.js";
 import { VideoProductionsController } from "./video-productions.controller.js";
 import { VideoProductionsService } from "./video-productions.service.js";
 import { QueueStatusController } from "./queue-status.controller.js";
@@ -95,6 +98,7 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptVersionsController,
     AudioVersionsController,
     SubtitleVersionsController,
+    MeCreationController,
     VideoProductionsController,
     QueueStatusController,
     StudioBridgeController,
@@ -134,6 +138,8 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ScriptVersionsService,
     AudioVersionsService,
     SubtitleVersionsService,
+    UserDraftsService,
+    CreationPreferencesService,
     VideoProductionsService,
     QueueStatusService,
     SystemSettingsService,

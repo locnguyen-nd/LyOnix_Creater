@@ -193,6 +193,8 @@ model User {
   scriptDraftVersionsCreated       ScriptDraftVersion[]       @relation("ScriptDraftVersionCreatedBy")
   audioVersionsCreated             AudioVersion[]             @relation("AudioVersionCreatedBy")
   subtitleVersionsCreated          SubtitleVersion[]          @relation("SubtitleVersionCreatedBy")
+  drafts                           UserDraft[]
+  creationPreference               UserCreationPreference?
 }
 
 model Team {
@@ -1047,4 +1049,33 @@ model ProviderModelCooldown {
 
   @@unique([providerAccountId, modelId])
   @@index([cooldownUntil])
+}
+
+// --- VE2E-124: per-user drafts + creation defaults (new tables only) ---
+
+/// One in-progress form per user and flow (e.g. the new-job page). Never a job: creating or updating it starts no workflow
+/// and calls no provider. `payload` is whitelisted by `@lyonix/domain` creation-form (identifiers only, never a secret).
+/// `version` is a compare-and-set token: a save based on an older version is refused, so a late autosave never overwrites newer state.
+model UserDraft {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  flowType  String
+  payload   Json
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, flowType])
+}
+
+/// A user's own defaults for the creation form: options only (mode, language, accounts, voice, template, targets ...),
+/// never job content. Read only when a new job form is opened; existing jobs are never touched.
+model UserCreationPreference {
+  userId    String   @id @db.Uuid
+  options   Json
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

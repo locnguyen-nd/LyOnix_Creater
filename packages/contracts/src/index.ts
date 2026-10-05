@@ -1275,3 +1275,66 @@ export type RenderEngineAdminOverviewResponse = { templates: RenderEngineAdminTe
 
 /** PATCH /admin/render-engine/templates/:snapshotId - rollout > 0 needs at least one provider fallback. */
 export type UpdateRenderEngineTemplateRequest = { rolloutPercent?: number; fallbackSnapshotIds?: string[] };
+
+// --- VE2E-124: per-user drafts + creation defaults of the new-job form ---
+// Structurally identical to `JobNewFormValues` in `@lyonix/domain/creation-form` (domain never imports contracts).
+
+export const creationFlowTypes = ["job_new"] as const;
+export type CreationFlowType = (typeof creationFlowTypes)[number];
+
+export type JobNewFormValues = {
+  entryMode: "manual" | "auto";
+  mode: "topic" | "revise";
+  autoSourceType: "topic" | "raw_script" | "article_url";
+  channelId: string;
+  language: UiLocale;
+  topic: string;
+  promptSpec: string;
+  existingScript: string;
+  autoRawScript: string;
+  autoArticleUrl: string;
+  contentAccountId: string;
+  durationTarget: "30-45s" | "45-65s" | "65-90s";
+  sceneCountTarget: "6-8" | "8-12" | "12-16";
+  backgroundSegmentsChoice: string;
+  voiceAccountId: string;
+  voiceId: string;
+  mediaAccountId: string;
+  renderAccountId: string;
+  templateId: string;
+  orshotFormat: "" | "mp4" | "webm" | "mov" | "gif";
+  orshotSize: string;
+};
+
+/** `GET|PUT /me/drafts/:flowType`: the signed-in user's own in-progress form (never another user's). */
+export type UserDraftResponse = {
+  flowType: CreationFlowType;
+  payload: Partial<JobNewFormValues>;
+  /** Compare-and-set token: send it back as `baseVersion` on the next save. */
+  version: number;
+  updatedAt: string;
+};
+
+/** `PUT /me/drafts/:flowType`. `baseVersion` null = create the draft; otherwise it must equal the stored version (else `VERSION_CONFLICT`). */
+export type SaveUserDraftRequest = {
+  payload: Partial<JobNewFormValues>;
+  baseVersion: number | null;
+};
+
+/** Options a user may save as defaults - never job content (topic, prompt, scripts, article URL). */
+export type CreationPreferenceOptions = Partial<
+  Pick<
+    JobNewFormValues,
+    | "entryMode" | "mode" | "autoSourceType" | "channelId" | "language" | "contentAccountId" | "durationTarget" | "sceneCountTarget"
+    | "backgroundSegmentsChoice" | "voiceAccountId" | "voiceId" | "mediaAccountId" | "renderAccountId" | "templateId" | "orshotFormat" | "orshotSize"
+  >
+>;
+
+/** `GET|PUT /me/creation-preferences`. `null` from GET = the user has no defaults (system defaults apply). */
+export type CreationPreferencesResponse = {
+  options: CreationPreferenceOptions;
+  version: number;
+  updatedAt: string;
+};
+
+export type SaveCreationPreferencesRequest = { options: CreationPreferenceOptions };
