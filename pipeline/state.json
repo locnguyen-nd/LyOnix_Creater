@@ -24,6 +24,17 @@
         "VE2E-01"
       ],
       "note": "Mở theo kết luận của V00-05; chủ dự án duyệt 2026-10-05: bỏ temperature, gộp sửa parser Responses API (đang đọc output_text, trường chỉ có trong SDK; ảnh hưởng cả V2). Vision moderation để task riêng. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows); chạy thật chờ gate B04. done 2026-10-05: chủ dự án xác nhận (gate B04 chưa chạy lúc xác nhận)."
+    },
+    {
+      "id": "VE2E-123",
+      "title": "Chuyển vision moderation sang Responses API",
+      "group": "Nhà cung cấp nội dung",
+      "assignee": null,
+      "status": "draft",
+      "dependsOn": [
+        "VE2E-122"
+      ],
+      "note": "Bỏ chỗ Chat Completions cuối cùng (generateVisionStructuredOnce: probe + moderation, openai/xai). Chờ chủ dự án trả lời 2 câu hỏi trong spec (temperature, detail) rồi đổi sang ready."
     }
   ]
 }
