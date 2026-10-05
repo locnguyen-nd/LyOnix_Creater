@@ -27,7 +27,11 @@ export type FullPreviewSceneInput = {
   sourceDurationMs: number | null;
   audioUrl: string | null | undefined;
   audioDurationMs: number | null | undefined;
+  /** V03-03: the voice-timed subtitle cues the render will use (ms from the voice start); when present the preview shows them instead of spreading the whole caption over the scene. */
+  captionCues?: ReadonlyArray<FullPreviewCaptionCue> | null;
 };
+
+export type FullPreviewCaptionCue = { text: string; startMs: number; endMs: number };
 
 export type FullPreviewDurationSource = "audio" | "source" | "hint" | "fallback";
 
@@ -48,6 +52,8 @@ export type FullPreviewSegment = {
   missingMedia: boolean;
   missingVoice: boolean;
   durationSource: FullPreviewDurationSource;
+  /** V03-03: voice-timed cues (relative to the scene start, which is the voice start); `null` = lay out `caption` over the scene. */
+  captionCues: ReadonlyArray<FullPreviewCaptionCue> | null;
 };
 
 export type FullPreviewSequence = {
@@ -100,6 +106,8 @@ export function buildFullPreviewSequence(inputs: FullPreviewSceneInput[]): FullP
       missingMedia: !hasMedia,
       missingVoice: !hasVoice,
       durationSource: source,
+      // Cue times are relative to the voice, so they only apply when the scene really plays that voice.
+      captionCues: hasVoice && input.captionCues?.length ? input.captionCues : null,
     });
     cursor += durationMs;
   }

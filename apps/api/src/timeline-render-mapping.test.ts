@@ -1,6 +1,35 @@
 import { describe, expect, it } from "vitest";
 import type { TemplateModificationSlotResponse } from "@lyonix/contracts";
-import { buildRenderAssignmentsFromTimeline, deriveDefaultVideoRange, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { buildRenderAssignmentsFromTimeline, captionOverrideFor, deriveDefaultVideoRange, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+
+describe("captionOverrideFor (V03-03)", () => {
+  it("an override equal to the voiced narration (whitespace ignored, what Auto writes) is not a real override", () => {
+    expect(captionOverrideFor({ screenTextOverride: "東京の 夜景。\n人が多い。", audioNarration: "東京の夜景。人が多い。" })).toBeNull();
+    expect(captionOverrideFor({ screenTextOverride: "Messi is a  football player.", audioNarration: "Messi is a football player." })).toBeNull();
+  });
+
+  it("keeps a human-typed override that differs from the narration, or when the narration is unknown", () => {
+    expect(captionOverrideFor({ screenTextOverride: "Tiêu đề khác", audioNarration: "Lời đọc thật" })).toBe("Tiêu đề khác");
+    expect(captionOverrideFor({ screenTextOverride: " Xin chào ", audioNarration: null })).toBe("Xin chào");
+  });
+
+  it("an empty or missing override is no override", () => {
+    expect(captionOverrideFor({ screenTextOverride: "   ", audioNarration: "x" })).toBeNull();
+    expect(captionOverrideFor({ screenTextOverride: null })).toBeNull();
+  });
+
+  it("resolveSceneBindingsForMapping carries the narration the bound voice was generated from", async () => {
+    const prisma = {
+      audioVersion: { findMany: async () => [{ id: "audio-1", mediaAssetVersionId: "media-audio-1", durationMs: 3000, sceneDraftVersion: { narration: "Lời đọc của cảnh" } }] },
+      mediaAssetVersion: { findMany: async () => [] },
+      sceneDraftVersion: { findMany: async () => [] },
+    } as never;
+    const [scene] = await resolveSceneBindingsForMapping(prisma, "project-1", [
+      { sceneId: "s1", orderIndex: 0, mediaAssetVersionId: null, audioVersionId: "audio-1", subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false },
+    ]);
+    expect(scene!.audioNarration).toBe("Lời đọc của cảnh");
+  });
+});
 
 const slots: TemplateModificationSlotResponse[] = [
   { key: "Video-1.source", kind: "video", label: "Video-1.source", required: true },

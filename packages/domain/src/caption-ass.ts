@@ -489,14 +489,22 @@ export const buildCaptionAssFromRenderPlan = (plan: RenderPlan, options: Caption
  * Maps caption segments onto a character-level TTS alignment (ElevenLabs shape, seconds), ignoring whitespace on
  * both sides. Returns per-code-point timings (ms, relative to the audio start) for every segment, or `null` for a
  * segment whose non-space characters do not match the alignment sequentially (the caller then keeps estimated timing).
+ *
+ * V03-03: a user-edited cue (text no longer equal to what was voiced) is such a `null` segment. When the segment carries its
+ * own `endMs`, the alignment characters voiced before that time are skipped, so the cues AFTER an edited one still get their
+ * real timing instead of all falling back to the estimate.
  */
 export function charTimingsForSegments(
   alignment: { characters: string[]; characterStartTimesSeconds: number[]; characterEndTimesSeconds: number[] },
-  segments: readonly { text: string }[],
+  segments: readonly { text: string; endMs?: number }[],
 ): Array<CaptionCharTiming[] | null> {
   const chars = alignment.characters;
   const usable = chars.length === alignment.characterStartTimesSeconds.length && chars.length === alignment.characterEndTimesSeconds.length;
   let cursor = 0;
+  const skipPast = (endMs: number | undefined) => {
+    if (typeof endMs !== "number") return;
+    while (cursor < chars.length && Math.round(alignment.characterStartTimesSeconds[cursor]! * 1000) < endMs) cursor += 1;
+  };
   return segments.map((segment) => {
     if (!usable) return null;
     const result: CaptionCharTiming[] = [];
@@ -508,7 +516,10 @@ export function charTimingsForSegments(
         continue;
       }
       while (at < chars.length && /^\s*$/.test(chars[at]!)) at += 1;
-      if (at >= chars.length || chars[at] !== ch) return null;
+      if (at >= chars.length || chars[at] !== ch) {
+        skipPast(segment.endMs);
+        return null;
+      }
       const startMs = Math.round(alignment.characterStartTimesSeconds[at]! * 1000);
       const endMs = Math.round(alignment.characterEndTimesSeconds[at]! * 1000);
       result.push({ startMs, endMs });

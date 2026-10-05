@@ -684,10 +684,27 @@ export type SubtitleVersionResponse = {
   audioVersionId: string;
   version: number;
   status: AudioSubtitleVersionStatus;
+  /** `elevenlabs_alignment` (automatic, from the voice's character timing) or `manual_edit` (V03-03). */
   source: string;
   segments: CaptionSegmentResponse[];
   staleReason: string | null;
   createdAt: string;
+};
+
+// --- V03-03: subtitle alignment + editing ---
+
+export const subtitleVersionSources = ["elevenlabs_alignment", "manual_edit"] as const;
+export type SubtitleVersionSource = (typeof subtitleVersionSources)[number];
+
+/** `POST /audio-versions/:id/subtitle-versions`: a user edit of one voice's captions. Creates a new version; `basedOnSubtitleVersionId` must be the current one (else `VERSION_CONFLICT`). */
+export type SaveSubtitleVersionRequest = {
+  basedOnSubtitleVersionId: string;
+  cues: CaptionSegmentResponse[];
+};
+
+/** `POST /audio-versions/:id/subtitle-versions/reset`: rebuild the automatic captions from the voice's stored alignment (no provider call). */
+export type ResetSubtitleVersionRequest = {
+  basedOnSubtitleVersionId: string;
 };
 
 export type AudioVersionResponse = {

@@ -58,10 +58,30 @@ export function layoutSceneCaption(caption: string, durationMs: number, recipe: 
   return cues.map((cue) => ({ startMs: cue.startMs, endMs: cue.endMs, lines: cue.lines, fontSizePx: cue.fontSizePx, split: cue.split }));
 }
 
-/** The page shown `offsetMs` into the scene (the last page stays until the scene ends). */
+/**
+ * V03-03: caption pages of ONE scene from its voice-timed cues (what the render burns in when the scene has them), laid out by the
+ * same shared `buildCaptionAss`. Cues are clamped to the scene; a cue the scene is too short for is dropped.
+ */
+export function layoutSceneCues(cues: ReadonlyArray<{ text: string; startMs: number; endMs: number }>, durationMs: number, recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1): PreviewCaptionPage[] {
+  if (durationMs <= 0) return [];
+  const usable = cues
+    .map((cue) => ({ text: cue.text, startMs: Math.max(0, cue.startMs), endMs: Math.min(durationMs, cue.endMs) }))
+    .filter((cue) => cue.text.trim() && cue.endMs > cue.startMs);
+  if (usable.length === 0) return [];
+  const { cues: laidOut } = buildCaptionAss(usable, captionStyle(recipe));
+  return laidOut.map((cue) => ({ startMs: cue.startMs, endMs: cue.endMs, lines: cue.lines, fontSizePx: cue.fontSizePx, split: cue.split }));
+}
+
+/**
+ * The page shown `offsetMs` into the scene: the page covering it, else the latest page already started (V03-03: holds a voice-timed
+ * cue through a pause instead of jumping ahead), else the first one. The last page stays until the scene ends.
+ */
 export function pageAt(pages: readonly PreviewCaptionPage[], offsetMs: number): PreviewCaptionPage | null {
   if (pages.length === 0) return null;
-  return pages.find((page) => offsetMs >= page.startMs && offsetMs < page.endMs) ?? (offsetMs < pages[0]!.startMs ? pages[0]! : pages[pages.length - 1]!);
+  const covering = pages.find((page) => offsetMs >= page.startMs && offsetMs < page.endMs);
+  if (covering) return covering;
+  const started = pages.filter((page) => page.startMs <= offsetMs);
+  return started.length > 0 ? started[started.length - 1]! : pages[0]!;
 }
 
 export function buildPreviewPlan(segments: readonly FullPreviewSegment[], recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1): PreviewPlan {
@@ -76,11 +96,15 @@ export function buildPreviewPlan(segments: readonly FullPreviewSegment[], recipe
       // the voice length is what drives a scene's length in the render
       audioDurationMs: segment.durationSource === "audio" ? segment.durationMs : null,
       fallbackScreenText: segment.caption,
+      captionSegments: segment.captionCues ?? null,
     })),
     profile: { padStartMs: recipe.timing.padStartMs, padEndMs: recipe.timing.padEndMs, defaultTransition: { kind: recipe.transition.kind, durationMs: recipe.transition.durationMs }, fps: PREVIEW_FPS },
   });
   const captionPages = new Map<string, PreviewCaptionPage[]>();
-  for (const segment of segments) captionPages.set(segment.sceneId, layoutSceneCaption(segment.caption, segment.durationMs, recipe));
+  for (const segment of segments) {
+    const cuePages = segment.captionCues ? layoutSceneCues(segment.captionCues, segment.durationMs, recipe) : [];
+    captionPages.set(segment.sceneId, cuePages.length > 0 ? cuePages : layoutSceneCaption(segment.caption, segment.durationMs, recipe));
+  }
   return built.ok
     ? { renderPlan: built.plan, expectedRenderDurationMs: built.plan.totalDurationMs, skippedSceneIds: built.skippedSceneIds, captionPages }
     : { renderPlan: null, expectedRenderDurationMs: null, skippedSceneIds: segments.map((segment) => segment.sceneId), captionPages };

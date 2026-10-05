@@ -1,7 +1,7 @@
 import { buildRenderPlan, charTimingsForSegments, type CharacterAlignment, type RenderPlan, type RenderPlanSceneInput } from "@lyonix/domain";
 import type { ComposePlan, ComposeScene } from "@lyonix/media-jobs";
 import { resolveRecipeParams, type RenderRecipe } from "@lyonix/render-recipes";
-import type { SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { captionOverrideFor, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 
 /**
  * VE2E-110: assembles the wire plan of one internal render from an approved timeline: scenes (already re-pointed at their prepared
@@ -46,8 +46,9 @@ export function buildComposePlan(input: BuildComposePlanInput): BuildComposePlan
       mediaPrepared: scene.mediaAssetVersionId ? input.preparedMediaIds.has(scene.mediaAssetVersionId) : false,
       audioAssetVersionId: scene.audioMediaAssetVersionId ?? null,
       audioDurationMs: scene.audioDurationMs ?? null,
-      screenTextOverride: scene.screenTextOverride ?? null,
-      fallbackScreenText: scene.fallbackScreenText ?? null,
+      // V03-03: an override equal to the voiced narration (Auto) is not a human edit - it keeps the timed cues and stays the static fallback text.
+      screenTextOverride: captionOverrideFor(scene),
+      fallbackScreenText: scene.screenTextOverride?.trim() || scene.fallbackScreenText || null,
       captionSegments: caption
         ? caption.segments.map((segment, index) => ({ text: segment.text, startMs: segment.startMs, endMs: segment.endMs, ...(timings?.[index] ? { charTimings: timings[index]! } : {}) }))
         : null,

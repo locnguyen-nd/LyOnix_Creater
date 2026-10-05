@@ -19,6 +19,7 @@ import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { MediaJobsGateway, type VideoComposer } from "./media-jobs.gateway.js";
 import { PrismaService } from "./prisma.service.js";
 import { resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { selectSubtitlesForScenes } from "./subtitle-selection.js";
 
 /**
  * VE2E-110: orchestration of the internal `lyonix` render engine for one RenderJob.
@@ -369,15 +370,16 @@ export class InternalRenderService {
     const audioVersionIds = [...new Set(scenes.map((scene) => scene.audioVersionId).filter((id): id is string => Boolean(id)))];
     const result = new Map<string, PlanCaptionSource>();
     if (audioVersionIds.length === 0) return result;
-    const [audioRows, subtitleRows] = await Promise.all([
+    // V03-03: the subtitle version the timeline pinned (a user-edited one included), see `selectSubtitlesForScenes`. The TTS alignment
+    // still rides along: `charTimingsForSegments` keeps real per-character timing for cues that match it and leaves edited cues to the
+    // honest proportional estimate.
+    const [audioRows, subtitles] = await Promise.all([
       this.prisma.audioVersion.findMany({ where: { id: { in: audioVersionIds } }, select: { id: true, alignment: true } }),
-      this.prisma.subtitleVersion.findMany({ where: { audioVersionId: { in: audioVersionIds } }, orderBy: { version: "desc" }, select: { audioVersionId: true, segments: true } }),
+      selectSubtitlesForScenes(this.prisma, scenes),
     ]);
     const alignmentById = new Map(audioRows.map((row) => [row.id, row.alignment as unknown as CharacterAlignment | null]));
-    for (const row of subtitleRows) {
-      if (result.has(row.audioVersionId)) continue; // newest version first
-      const segments = (Array.isArray(row.segments) ? row.segments : []) as unknown as PlanCaptionSource["segments"];
-      result.set(row.audioVersionId, { segments, alignment: alignmentById.get(row.audioVersionId) ?? null });
+    for (const [audioVersionId, subtitle] of subtitles) {
+      result.set(audioVersionId, { segments: subtitle.segments, alignment: alignmentById.get(audioVersionId) ?? null });
     }
     return result;
   }

@@ -279,3 +279,4 @@ export {
 export * from "./render-plan.js";
 export * from "./caption-ass.js";
 export * from "./render-router.js";
+export * from "./subtitle-edit.js";

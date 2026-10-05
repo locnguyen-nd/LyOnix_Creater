@@ -27,6 +27,7 @@ import type {
   RenderJobResponse,
   StudioContextResponse,
   StudioSceneContextResponse,
+  SubtitleVersionResponse,
   TemplateModificationSlotResponse,
   TemplateSnapshotResponse,
   TimelineOptionValues,
@@ -90,6 +91,8 @@ import { UndoStack } from "../studio/undo-stack";
 import { MediaPicker } from "../studio/MediaPicker";
 import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/auto-shorts";
 import { SourceBadge } from "../studio/SourceBadge";
+import { SubtitleEditor } from "../studio/SubtitleEditor";
+import { sameCaptionText } from "@lyonix/domain/subtitle-edit";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
@@ -613,10 +616,15 @@ export function StudioProPage() {
       if (!scene) return [];
       const asset = row.mediaAssetVersionId ? mediaLibrary.find((item) => item.id === row.mediaAssetVersionId) : undefined;
       const audio = audioBySceneId[row.sceneId];
+      // V03-03: same rule as the render - a typed caption that differs from the narration replaces the voice-timed cues with one static block.
+      const humanOverride = row.screenTextOverride?.trim() && !sameCaptionText(row.screenTextOverride, scene.narration) ? row.screenTextOverride.trim() : null;
+      const subtitle = audio?.subtitleVersion;
+      const pinnedSubtitle = subtitle && (!row.subtitleVersionId || row.subtitleVersionId === subtitle.id) ? subtitle : null;
       return [{
         sceneId: row.sceneId,
         excluded: row.excluded,
-        narration: scene.narration,
+        narration: humanOverride ?? scene.narration,
+        captionCues: humanOverride ? null : pinnedSubtitle?.segments ?? null,
         screenText: row.screenTextOverride || scene.screenText,
         durationHintMs: scene.durationHintMs,
         mediaKind: asset ? (asset.kind === "video" ? "video" : "image") : null,
@@ -774,6 +782,12 @@ export function StudioProPage() {
 
   const setScreenTextOverride = (sceneId: string, value: string) => {
     mutate((prev) => ({ ...prev, scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...scene, screenTextOverride: value } : scene)) }));
+  };
+
+  /** V03-03: a saved subtitle edit (or "use latest") re-binds the scene to that SubtitleVersion; the timeline becomes dirty and needs a save + re-approval. */
+  const bindSubtitle = (sceneId: string, subtitle: SubtitleVersionResponse) => {
+    setAudioBySceneId((prev) => (prev[sceneId] ? { ...prev, [sceneId]: { ...prev[sceneId]!, subtitleVersion: subtitle } } : prev));
+    mutate((prev) => ({ ...prev, scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...scene, subtitleVersionId: subtitle.id } : scene)) }));
   };
 
   const setAnnotation = (sceneId: string, value: string) => {
@@ -1788,6 +1802,23 @@ export function StudioProPage() {
                     value={selectedSceneDraft.screenTextOverride ?? selectedScene.screenText}
                     onChange={(event) => setScreenTextOverride(selectedScene.sceneId, event.target.value)}
                   />
+                  {selectedAudio && selectedSceneDraft.screenTextOverride?.trim() && selectedScene.narration.trim() && !sameCaptionText(selectedSceneDraft.screenTextOverride, selectedScene.narration) ? (
+                    <p role="note" className="mt-1 text-[10px] text-amber-400">{t("studioPro.subtitleOverrideWarning")}</p>
+                  ) : null}
+                </div>
+                <div>
+                  {selectedAudio ? (
+                    <SubtitleEditor
+                      key={selectedAudio.id}
+                      audio={selectedAudio}
+                      pinnedSubtitleVersionId={selectedSceneDraft.subtitleVersionId}
+                      audioUrl={thumbCache[selectedAudio.mediaAssetVersionId]}
+                      onSaved={(subtitle) => bindSubtitle(selectedScene.sceneId, subtitle)}
+                      onUseLatest={(subtitle) => bindSubtitle(selectedScene.sceneId, subtitle)}
+                    />
+                  ) : (
+                    <p className="text-[11px] text-lyx-fg-muted">{t("studioPro.subtitleNoVoice")}</p>
+                  )}
                 </div>
                 <div>
                   <label className="mb-1 block text-[10px] text-lyx-fg-muted">{t("studioPro.fieldAnnotation")}</label>

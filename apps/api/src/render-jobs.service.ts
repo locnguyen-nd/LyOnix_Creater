@@ -57,7 +57,8 @@ import { estimateOrshotCost, narrationDurationMs, resolveOrshotPricing, sanitize
 import { QueueStatusService } from "./queue-status.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { TTS_PROVIDER_DISABLED_VALUE, classifyCreatomateRenderError, slotsWithTtsProvider, templateTtsConflictMessage, ttsProviderOverrideKey, unfilledTtsSlotKeys } from "./template-tts.js";
-import { buildRenderAssignmentsFromTimeline, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { buildRenderAssignmentsFromTimeline, captionOverrideFor, resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
+import { selectSubtitlesForScenes } from "./subtitle-selection.js";
 
 export type RenderOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -607,14 +608,8 @@ export class RenderJobsService {
     // `caption-segmentation.ts`), so the dynamic composition can show on-screen text timed to the
     // actual narration instead of one static block for the whole scene (`dynamicScenes` loop
     // below still falls back to the static block whenever a scene has none, or a Studio override).
-    const subtitleRows = audioVersionIds.length
-      ? await this.prisma.subtitleVersion.findMany({ where: { audioVersionId: { in: audioVersionIds } }, orderBy: { version: "desc" }, select: { audioVersionId: true, segments: true } })
-      : [];
-    const captionSegmentsByAudioVersionId = new Map<string, DynamicSceneInput["captionSegments"]>();
-    for (const row of subtitleRows) {
-      if (captionSegmentsByAudioVersionId.has(row.audioVersionId)) continue;
-      captionSegmentsByAudioVersionId.set(row.audioVersionId, (Array.isArray(row.segments) ? row.segments : []) as unknown as DynamicSceneInput["captionSegments"]);
-    }
+    // V03-03: the version the timeline pinned (a user-edited one included), see `selectSubtitlesForScenes`.
+    const subtitles = await selectSubtitlesForScenes(this.prisma, resolved);
 
     let renderable = [...resolved]
       .sort((a, b) => a.orderIndex - b.orderIndex)
@@ -658,8 +653,9 @@ export class RenderJobsService {
       if (!audioIssued || audioIssued === "forbidden") continue;
       // A human-typed Studio override has no real per-word timing to draw from, so it always
       // stays a single static block for the whole scene - only the un-overridden (script-derived)
-      // caption uses the scene's real voice-timed segments.
-      const captionSegments = scene.screenTextOverride ? undefined : captionSegmentsByAudioVersionId.get(scene.audioVersionId!);
+      // caption uses the scene's real voice-timed segments. V03-03: an override equal to the voiced
+      // narration (what Auto writes) is not a human edit and keeps the timed segments.
+      const captionSegments = captionOverrideFor(scene) ? undefined : subtitles.get(scene.audioVersionId!)?.segments;
       dynamicScenes.push({
         sceneId: scene.sceneId,
         mediaUrl: mediaIssued.url,

@@ -199,6 +199,25 @@ describe("caption-ass (VE2E-103)", () => {
     expect(charTimingsForSegments(alignment, [{ text: "Hello" }])).toEqual([null]);
   });
 
+  it("V03-03: a user-edited cue gets null timing, but the cues after it keep their real alignment timing", () => {
+    const text = "Hi there you"; // H0 i1 _2 t3 h4 e5 r6 e7 _8 y9 o10 u11, 100 ms per character
+    const characters = Array.from(text);
+    const alignment = {
+      characters,
+      characterStartTimesSeconds: characters.map((_, i) => i * 0.1),
+      characterEndTimesSeconds: characters.map((_, i) => i * 0.1 + 0.1),
+    };
+    const [a, b, c] = charTimingsForSegments(alignment, [
+      { text: "Hi", endMs: 200 },
+      { text: "THERE!", endMs: 800 }, // edited: no longer what was voiced
+      { text: "you", endMs: 1200 },
+    ]);
+    expect(a).toHaveLength(2);
+    expect(b).toBeNull();
+    expect(c).toHaveLength(3);
+    expect(c![0]!.startMs).toBe(900);
+  });
+
   it("builds captions from a RenderPlan on the absolute timeline (voice-timed cues and static override text)", () => {
     const plan = buildRenderPlan({
       scenes: [

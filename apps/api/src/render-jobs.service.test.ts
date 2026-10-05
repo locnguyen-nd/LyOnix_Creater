@@ -777,6 +777,54 @@ describe("RenderJobsService", () => {
       expect(textNodes[0]).toMatchObject({ text: "Custom override", time: 0, duration: 4 });
     });
 
+    it("V03-03: an Auto override equal to the voiced narration keeps the voice-timed captions", async () => {
+      prisma.audioVersion.findMany = async ({ where }: any) =>
+        [{ id: "audio-1", mediaAssetVersionId: "asset-audio", durationMs: 4000, sceneDraftVersion: { narration: "Messi is a football player. He plays for Inter Miami now." } }].filter((r) => where.id.in.includes(r.id));
+      prisma.subtitleVersion.findMany = vi.fn(async () => [
+        { audioVersionId: "audio-1", segments: [{ text: "Messi is a football player.", startMs: 0, endMs: 1800 }, { text: "He plays for Inter Miami now.", startMs: 1800, endMs: 3600 }] },
+      ]);
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        // Auto writes the narration itself as the caption override (whitespace may differ).
+        scenes: [sceneRow({ sceneId: "s1", screenTextOverride: "Messi is a football player.  He plays for Inter Miami now." })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
+      expect(textNodes).toHaveLength(2);
+      expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+    });
+
+    it("V03-03: renders the subtitle version the timeline pinned, not a newer edit made after approval", async () => {
+      const versions = [
+        { id: "sub-1", audioVersionId: "audio-1", version: 1, status: "stale", source: "elevenlabs_alignment", segments: [{ text: "Pinned caption.", startMs: 0, endMs: 3000 }] },
+        { id: "sub-2", audioVersionId: "audio-1", version: 2, status: "current", source: "manual_edit", segments: [{ text: "Newer edit.", startMs: 0, endMs: 3000 }] },
+      ];
+      prisma.subtitleVersion.findMany = vi.fn(async ({ where }: any) => versions.filter((row) => (!where.id || where.id.in.includes(row.id)) && where.audioVersionId.in.includes(row.audioVersionId)).sort((a, b) => b.version - a.version));
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", screenTextOverride: null, subtitleVersionId: "sub-1" })],
+        optionValues: {},
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
+      const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
+      expect(textNodes.map((node: any) => node.text)).toEqual(["Pinned caption."]);
+    });
+
     it("skips a scene the user excluded from the timeline instead of blocking the render", async () => {
       timelineRows.set(timelineVersionId, {
         id: timelineVersionId,

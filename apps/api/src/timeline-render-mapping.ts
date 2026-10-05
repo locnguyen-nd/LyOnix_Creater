@@ -18,6 +18,7 @@
  */
 import type { TemplateModificationSlotResponse, TimelineOptionValues, TimelineSceneBindingResponse } from "@lyonix/contracts";
 import type { RenderAssignmentInput } from "@lyonix/contracts";
+import { sameCaptionText } from "@lyonix/domain";
 import type { PrismaService } from "./prisma.service.js";
 
 export type TimelineSceneMediaKind = "video" | "image" | null;
@@ -40,7 +41,21 @@ export type SceneBindingForMapping = StoredTimelineSceneBinding & {
   /** VE2E-44: bound video asset's own duration (null when unknown) and the scene voice's duration. */
   mediaDurationMs?: number | null;
   audioDurationMs?: number | null;
+  /** V03-03: narration the bound voice was generated from (`SceneDraftVersion.narration`); null when unknown. */
+  audioNarration?: string | null;
 };
+
+/**
+ * V03-03: the `screenTextOverride` that really replaces the voice-timed captions with one static block, or null.
+ * Auto writes the scene's own narration as the override (word-for-word caption rule) - that is not a human edit, so
+ * it must keep the timed captions; only text that differs from the voiced narration (whitespace ignored) is a real override.
+ */
+export function captionOverrideFor(scene: Pick<SceneBindingForMapping, "screenTextOverride" | "audioNarration">): string | null {
+  const override = scene.screenTextOverride?.trim();
+  if (!override) return null;
+  if (scene.audioNarration && sameCaptionText(override, scene.audioNarration)) return null;
+  return override;
+}
 
 /** VE2E-44: an asset within this much of the scene length is not worth cutting. */
 export const DEFAULT_RANGE_TOLERANCE_MS = 500;
@@ -177,10 +192,11 @@ export async function resolveSceneBindingsForMapping(
 ): Promise<SceneBindingForMapping[]> {
   const audioIds = [...new Set(scenes.map((scene) => scene.audioVersionId).filter((id): id is string => Boolean(id)))];
   const audioRows = audioIds.length
-    ? await prisma.audioVersion.findMany({ where: { id: { in: audioIds } }, select: { id: true, mediaAssetVersionId: true, durationMs: true } })
+    ? await prisma.audioVersion.findMany({ where: { id: { in: audioIds } }, select: { id: true, mediaAssetVersionId: true, durationMs: true, sceneDraftVersion: { select: { narration: true } } } })
     : [];
   const audioAssetById = new Map(audioRows.map((row) => [row.id, row.mediaAssetVersionId]));
   const audioDurationById = new Map(audioRows.map((row) => [row.id, row.durationMs]));
+  const audioNarrationById = new Map(audioRows.map((row) => [row.id, row.sceneDraftVersion?.narration ?? null]));
 
   const mediaIds = [
     ...new Set([
@@ -218,6 +234,7 @@ export async function resolveSceneBindingsForMapping(
       fallbackScreenText: screenTextBySceneId.get(scene.sceneId) ?? null,
       mediaDurationMs: scene.mediaAssetVersionId ? mediaDurationById.get(scene.mediaAssetVersionId) ?? null : null,
       audioDurationMs: scene.audioVersionId ? audioDurationById.get(scene.audioVersionId) ?? null : null,
+      audioNarration: scene.audioVersionId ? audioNarrationById.get(scene.audioVersionId) ?? null : null,
     };
   });
   return options.fillDefaultVideoRanges ? applyDefaultVideoRanges(mapped) : mapped;

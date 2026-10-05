@@ -63,6 +63,23 @@ describe("preview shares the render engine's caption layout (VE2E-114)", () => {
     expect(none).toMatchObject({ renderPlan: null, expectedRenderDurationMs: null, skippedSceneIds: ["x"] });
   });
 
+  it("V03-03: a scene with voice-timed cues shows those cues at their own times, holding a cue through a pause", () => {
+    const cues = [{ text: "東京の夜景。", startMs: 200, endMs: 1400 }, { text: "人が多い。", startMs: 2000, endMs: 3200 }];
+    const sequence = buildFullPreviewSequence([scene("a", { audioDurationMs: 3500, captionCues: cues })]);
+    expect(sequence.segments[0]!.captionCues).toEqual(cues);
+    const plan = buildPreviewPlan(sequence.segments);
+    const pages = plan.captionPages.get("a")!;
+    expect(pages.map((page) => page.lines.join(""))).toEqual(["東京の夜景。", "人が多い。"]);
+    expect(pageAt(pages, 1700)!.lines.join("")).toBe("東京の夜景。"); // pause between the two cues
+    expect(pageAt(pages, 2100)!.lines.join("")).toBe("人が多い。");
+    expect(plan.renderPlan!.scenes[0]!.captionCues.map((cue) => cue.text)).toEqual(["東京の夜景。", "人が多い。"]);
+  });
+
+  it("V03-03: cues are ignored for a scene without its voice (their times are relative to that voice)", () => {
+    const sequence = buildFullPreviewSequence([scene("a", { audioUrl: null, audioDurationMs: null, captionCues: [{ text: "x", startMs: 0, endMs: 500 }] })]);
+    expect(sequence.segments[0]!.captionCues).toBeNull();
+  });
+
   it("has the new strings in every locale", () => {
     for (const locale of ["vi", "en", "ja", "ko"] as const) {
       const strings = locales[locale].studioPro;

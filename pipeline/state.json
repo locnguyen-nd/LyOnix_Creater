@@ -35,6 +35,17 @@
         "VE2E-122"
       ],
       "note": "Bỏ chỗ Chat Completions cuối cùng (generateVisionStructuredOnce: probe + moderation, openai/xai). Chủ dự án duyệt 2026-10-05: bỏ temperature, không gửi detail. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows); không còn chat/completions trong providers/api; chạy thật chờ gate B04."
+    },
+    {
+      "id": "V03-03",
+      "title": "Căn chỉnh và chỉnh sửa phụ đề",
+      "group": "Luồng sản xuất bản đầu — phụ đề",
+      "assignee": "Lộc Nguyễn",
+      "status": "code_done",
+      "dependsOn": [
+        "V03-02"
+      ],
+      "note": "Plan đối chiếu 2026-10-05: VE2E-03/32/103/114 đã có phụ đề theo giọng đọc + render. Còn thiếu: API/UI sửa phụ đề, render dùng đúng subtitleVersionId đã ghim, và (đọc code) Auto mất phụ đề theo giọng vì screenTextOverride = narration. Chủ dự án duyệt 2026-10-05: chỉ Studio/Auto, ước lượng tỉ lệ khi sửa chữ, gộp sửa lỗi Auto. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows), build web ok; chưa thử trên trình duyệt với giọng đọc thật."
     }
   ]
 }
