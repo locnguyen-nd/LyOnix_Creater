@@ -24,6 +24,8 @@ export class ProviderAccountsController {
       { provider: "openai", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.openai },
       { provider: "gemini", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.gemini },
       { provider: "xai", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.xai },
+      // VE2E-79: one key fronting many upstream models (OpenAI chat-completions wire contract); content role only.
+      { provider: "openrouter", role: "content", implementationStatus: "available", models: CURATED_CONTENT_MODELS.openrouter },
       { provider: "elevenlabs", role: "tts", implementationStatus: "available", models: [...CURATED_ELEVENLABS_MODELS] },
       { provider: "pexels", role: "visual", implementationStatus: "available", models: [] },
       // VE2E-15b: discovery/embed-only (see packages/providers/src/youtube.ts) - never a download/import path, and never Auto-eligible today (no embed-source render slot exists yet).

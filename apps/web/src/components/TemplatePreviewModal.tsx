@@ -194,7 +194,14 @@ export function TemplatePreviewModal({ templates, index, onIndexChange, selected
 }
 
 /** Small "Xem trước" icon button for a template card. */
-export function TemplatePreviewButton({ onClick, label, className = "" }: { onClick: () => void; label: string; className?: string }) {
+export function TemplatePreviewButton({ onClick, label, className = "", iconOnly = false }: { onClick: () => void; label: string; className?: string; iconOnly?: boolean }) {
+  if (iconOnly) {
+    return (
+      <button type="button" onClick={onClick} title={label} aria-label={label} className={`inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition hover:bg-black/80 ${className}`} data-testid="template-preview-open">
+        <Eye size={13} aria-hidden="true" />
+      </button>
+    );
+  }
   return (
     <button type="button" onClick={onClick} title={label} aria-label={label} className={`inline-flex items-center gap-1 rounded-[6px] border border-lyx-border bg-lyx-bg px-2 py-1 text-[11px] font-medium text-lyx-fg-muted transition hover:border-lyx-strong hover:text-lyx-fg ${className}`} data-testid="template-preview-open">
       <Eye size={13} aria-hidden="true" /> {label}
