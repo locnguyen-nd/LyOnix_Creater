@@ -621,11 +621,11 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
                   {/* VE2E-13: real template preview images at Auto intake. V04-XX: the picture opens the 9:16 preview (it no
                       longer selects); only "Chọn" / "Chọn template này" applies a template. */}
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="flex gap-2 overflow-x-auto pb-1" data-testid="template-strip">
                     {previewTemplates.map((tpl, index) => {
                       const chosen = form.templateId === tpl.externalTemplateId;
                       return (
-                        <div key={tpl.externalTemplateId} className={`overflow-hidden rounded-[6px] border ${chosen ? "border-2 border-lyx-fg" : "border-lyx-border"}`} data-testid="template-card">
+                        <div key={tpl.externalTemplateId} className={`w-[76px] shrink-0 overflow-hidden rounded-[6px] border ${chosen ? "border-2 border-lyx-fg" : "border-lyx-border"}`} data-testid="template-card">
                           <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="block w-full">
                             <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[9px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
                               <TemplateThumb template={tpl} fallbackLabel={t("templates.preview")} />
@@ -633,13 +633,13 @@ export function JobNewPage() {
                           </button>
                           <div className="p-1">
                             <div className="truncate text-[10px]" title={tpl.name}>{tpl.name}</div>
-                            <div className="mt-1 flex gap-1">
-                              <TemplatePreviewButton onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="flex-1 justify-center px-1" />
+                            <div className="mt-1 flex flex-col gap-1">
+                              <TemplatePreviewButton onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="w-full justify-center px-1" />
                               <button
                                 type="button"
                                 onClick={() => update({ templateId: tpl.externalTemplateId })}
                                 disabled={chosen}
-                                className={`flex-1 rounded-[6px] border px-1 py-1 text-[11px] font-semibold ${chosen ? "border-lyx-fg bg-lyx-fg text-lyx-bg" : "border-lyx-border hover:border-lyx-strong"}`}
+                                className={`w-full rounded-[6px] border px-1 py-1 text-[11px] font-semibold ${chosen ? "border-lyx-fg bg-lyx-fg text-lyx-bg" : "border-lyx-border hover:border-lyx-strong"}`}
                               >
                                 {chosen ? t("templates.current") : t("templates.choose")}
                               </button>
