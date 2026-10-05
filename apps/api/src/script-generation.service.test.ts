@@ -246,6 +246,33 @@ describe("ScriptGenerationService.extractSegmentKeywords (VE2E-50)", () => {
     expect(providerAccounts.cooldownContentAccount).not.toHaveBeenCalled();
   });
 
+  it("rotates to another content account (different provider) when the first one is auth-invalid, and reports the account used", async () => {
+    providerAccounts.contentGenerationCandidates = vi.fn(async () => [
+      accountRow({ id: "account-1" }),
+      accountRow({ id: "account-2", provider: "openai", model: "gpt-5-mini", availableModels: ["gpt-5-mini"] }),
+    ]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output_text: JSON.stringify({ segments: [{ segmentId: "seg-1", ja: "新宿 夜景", en: "shinjuku night" }] }),
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await service.extractSegmentKeywords("user-1", "staff", { providerAccountId: "account-1", language: "ja", segments });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ ok: true, providerAccountId: "account-2" });
+    expect(providerAccounts.cooldownContentAccount).toHaveBeenCalledWith("account-1", expect.any(Number));
+  });
+
+  it("fails with the last error once every content account has failed", async () => {
+    providerAccounts.contentGenerationCandidates = vi.fn(async () => [accountRow({ id: "account-1" }), accountRow({ id: "account-2" })]);
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await service.extractSegmentKeywords("user-1", "staff", { providerAccountId: "account-1", language: "ja", segments });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_AUTH_INVALID" });
+  });
+
   it("fails without a call when the content account is unavailable or the request is empty", async () => {
     providerAccounts.contentGenerationCandidates = vi.fn(async () => []);
     expect(await service.extractSegmentKeywords("user-1", "staff", { providerAccountId: "account-1", language: "ja", segments })).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });

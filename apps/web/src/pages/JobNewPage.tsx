@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, Select, TextArea } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Check } from "lucide-react";
 import { TemplatePreviewButton, TemplatePreviewModal, TemplateThumb } from "../components/TemplatePreviewModal";
 import { engineOfProvider } from "../studio/render-engine";
 import { api, ApiError, csrfHeaders } from "../api";
@@ -621,30 +622,29 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
                   {/* VE2E-13: real template preview images at Auto intake. V04-XX: the picture opens the 9:16 preview (it no
                       longer selects); only "Chọn" / "Chọn template này" applies a template. */}
-                  <div className="flex gap-2 overflow-x-auto pb-1" data-testid="template-strip">
+                  <div className="-mx-1 flex snap-x gap-2.5 overflow-x-auto px-1 pb-2" data-testid="template-strip">
                     {previewTemplates.map((tpl, index) => {
                       const chosen = form.templateId === tpl.externalTemplateId;
                       return (
-                        <div key={tpl.externalTemplateId} className={`w-[76px] shrink-0 overflow-hidden rounded-[6px] border ${chosen ? "border-2 border-lyx-fg" : "border-lyx-border"}`} data-testid="template-card">
-                          <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="block w-full">
-                            <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[9px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
-                              <TemplateThumb template={tpl} fallbackLabel={t("templates.preview")} />
-                            </div>
-                          </button>
-                          <div className="p-1">
-                            <div className="truncate text-[10px]" title={tpl.name}>{tpl.name}</div>
-                            <div className="mt-1 flex flex-col gap-1">
-                              <TemplatePreviewButton onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="w-full justify-center px-1" />
-                              <button
-                                type="button"
-                                onClick={() => update({ templateId: tpl.externalTemplateId })}
-                                disabled={chosen}
-                                className={`w-full rounded-[6px] border px-1 py-1 text-[11px] font-semibold ${chosen ? "border-lyx-fg bg-lyx-fg text-lyx-bg" : "border-lyx-border hover:border-lyx-strong"}`}
-                              >
-                                {chosen ? t("templates.current") : t("templates.choose")}
-                              </button>
-                            </div>
+                        <div key={tpl.externalTemplateId} className="w-[92px] shrink-0 snap-start" data-testid="template-card">
+                          <div className={`relative overflow-hidden rounded-[8px] transition ${chosen ? "ring-2 ring-lyx-fg ring-offset-2 ring-offset-lyx-bg" : "ring-1 ring-lyx-border hover:ring-lyx-strong"}`}>
+                            <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="block w-full">
+                              <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[9px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
+                                <TemplateThumb template={tpl} fallbackLabel={t("templates.preview")} />
+                              </div>
+                            </button>
+                            <TemplatePreviewButton iconOnly onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="absolute bottom-1.5 right-1.5" />
+                            {chosen ? <span className="absolute left-1.5 top-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-lyx-fg text-lyx-bg" aria-hidden="true"><Check size={12} /></span> : null}
                           </div>
+                          <div className="mt-1.5 truncate text-[11px] font-medium" title={tpl.name}>{tpl.name}</div>
+                          <button
+                            type="button"
+                            onClick={() => update({ templateId: tpl.externalTemplateId })}
+                            disabled={chosen}
+                            className={`mt-1 w-full rounded-[6px] border py-1 text-[11px] font-semibold transition ${chosen ? "border-lyx-fg bg-lyx-fg text-lyx-bg" : "border-lyx-border hover:border-lyx-strong"}`}
+                          >
+                            {chosen ? t("templates.current") : t("templates.choose")}
+                          </button>
                         </div>
                       );
                     })}

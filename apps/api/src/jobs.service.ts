@@ -18,6 +18,7 @@ import {
   type JsonSchema,
   type LiveContentKind,
 } from "@lyonix/providers";
+import { rotatesToNextAccount } from "./content-model-failover.js";
 import { canAccessChannel, canDeleteJob, canReviewJob } from "./grant-access.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -113,6 +114,8 @@ export const noticeAfterGenerate = (provider: string, model: string, version: nu
 export const SWITCHABLE_PROVIDER_CODES = ["PROVIDER_RATE_LIMITED", "PROVIDER_QUOTA_EXHAUSTED", "PROVIDER_AUTH_INVALID"] as const;
 export const isSwitchableProviderError = (code: string) =>
   (SWITCHABLE_PROVIDER_CODES as readonly string[]).includes(code);
+
+const isSwitchable = (error: unknown) => error instanceof ProviderError && isSwitchableProviderError(error.code);
 
 export const noticeGenerateFailed = (provider: string, model: string, detail: string) =>
   `Generate thất bại — chưa gọi xong ${provider}/${model}: ${detail}`;
@@ -264,8 +267,8 @@ export class JobsService {
   async generate(id: string, userId: string, role: "admin" | "staff", direction: string) {
     const job = await this.get(id, userId, role);
     if (!job) return null;
-    const account = await this.liveAccount(job.contentProviderAccountId);
-    if (!account) return "provider" as const;
+    const primary = await this.liveAccount(job.contentProviderAccountId);
+    if (!primary) return "provider" as const;
     const language = isContentLanguage(job.locale) ? job.locale : "vi";
     const pkg = buildScriptPromptPackage({
       topic: job.topic,
@@ -276,38 +279,72 @@ export class JobsService {
     });
     const nextVersion = job.script.version + 1;
     const callInput = { topic: job.topic, language, direction: pkg.direction, promptSpec: pkg.promptSpec, version: nextVersion };
-    this.logger.log(`content_generate start job=${id} provider=${account.provider} model=${account.model} promptChars=${pkg.text.length}`);
-    try {
-      const first = await this.callContent(account, pkg.text, callInput, SCRIPT_DRAFT_V1_JSON_SCHEMA);
-      const parsed = this.acceptDraft(first.output, nextVersion, language)
-        ?? this.acceptDraft((await this.callContent(account, pkg.repairText, { ...callInput, version: nextVersion + 17 }, SCRIPT_DRAFT_V1_JSON_SCHEMA)).output, nextVersion, language);
-      if (!parsed) {
-        await this.appendEvent(id, job, {
-          kind: "generate_failed",
-          message: noticeGenerateFailed(account.provider, account.model, "JSON không khớp ScriptDraftV1"),
+    // The job's pinned account first; on a provider-side failure rotate to the other verified content accounts (any provider).
+    const accounts = [primary, ...(await this.fallbackContentAccounts(primary.id, userId, role))];
+    let lastError: unknown = null;
+    for (const account of accounts) {
+      this.logger.log(`content_generate start job=${id} provider=${account.provider} model=${account.model} promptChars=${pkg.text.length}`);
+      try {
+        const first = await this.callContent(account, pkg.text, callInput, SCRIPT_DRAFT_V1_JSON_SCHEMA);
+        const parsed = this.acceptDraft(first.output, nextVersion, language)
+          ?? this.acceptDraft((await this.callContent(account, pkg.repairText, { ...callInput, version: nextVersion + 17 }, SCRIPT_DRAFT_V1_JSON_SCHEMA)).output, nextVersion, language);
+        if (!parsed) {
+          await this.appendEvent(id, job, {
+            kind: "generate_failed",
+            message: noticeGenerateFailed(account.provider, account.model, "JSON không khớp ScriptDraftV1"),
+          });
+          this.logger.warn(`content_generate schema_fail job=${id} provider=${account.provider} model=${account.model}`);
+          lastError = "schema";
+          continue;
+        }
+        this.logger.log(`content_generate ok job=${id} provider=${account.provider} model=${account.model} scenes=${parsed.scenes.length} req=${first.usage.providerRequestId ?? "n/a"}`);
+        await this.writeScript(id, job, { ...parsed, approvedVersion: null }, "awaiting_staff_ack", {
+          kind: "script_generated",
+          message: noticeAfterGenerate(account.provider, account.model, nextVersion, first.usage.providerRequestId),
+        }, {
+          promptTemplateVersion: pkg.promptTemplateVersion,
+          providerConfigVersion: account.configVersion,
+          ...(account.id !== job.contentProviderAccountId ? { contentProviderAccountId: account.id, model: account.model } : {}),
         });
-        this.logger.warn(`content_generate schema_fail job=${id} provider=${account.provider} model=${account.model}`);
-        return "schema" as const;
+        return this.get(id, userId, role);
+      } catch (error) {
+        const detail = error instanceof ProviderError ? `${error.code}: ${error.message}` : "network/timeout";
+        this.logger.warn(`content_generate fail job=${id} provider=${account.provider} model=${account.model} ${detail}`);
+        lastError = error;
+        const rotate = error instanceof ProviderError && rotatesToNextAccount(error.code);
+        const hasNext = account !== accounts[accounts.length - 1];
+        await this.appendEvent(id, job, {
+          kind: rotate && hasNext ? "provider_rotated" : isSwitchable(error) ? "blocked_provider" : "generate_failed",
+          message: rotate && hasNext
+            ? `${noticeGenerateFailed(account.provider, account.model, detail)} Tự động chuyển sang tài khoản content khác.`
+            : isSwitchable(error)
+              ? noticeSuggestSwitch(account.provider, account.model, detail)
+              : noticeGenerateFailed(account.provider, account.model, detail),
+        }).catch(() => undefined);
+        if (!rotate) break;
       }
-      this.logger.log(`content_generate ok job=${id} provider=${account.provider} model=${account.model} scenes=${parsed.scenes.length} req=${first.usage.providerRequestId ?? "n/a"}`);
-      await this.writeScript(id, job, { ...parsed, approvedVersion: null }, "awaiting_staff_ack", {
-        kind: "script_generated",
-        message: noticeAfterGenerate(account.provider, account.model, nextVersion, first.usage.providerRequestId),
-      }, { promptTemplateVersion: pkg.promptTemplateVersion, providerConfigVersion: account.configVersion });
-      return this.get(id, userId, role);
-    } catch (error) {
-      const detail = error instanceof ProviderError ? `${error.code}: ${error.message}` : "network/timeout";
-      this.logger.warn(`content_generate fail job=${id} provider=${account.provider} model=${account.model} ${detail}`);
-      const switchable = error instanceof ProviderError && isSwitchableProviderError(error.code);
-      await this.appendEvent(id, job, {
-        kind: switchable ? "blocked_provider" : "generate_failed",
-        message: switchable
-          ? noticeSuggestSwitch(account.provider, account.model, detail)
-          : noticeGenerateFailed(account.provider, account.model, detail),
-      }).catch(() => undefined);
-      if (error instanceof ProviderError) return error.code;
-      return "provider" as const;
     }
+    if (lastError === "schema") return "schema" as const;
+    if (lastError instanceof ProviderError) return lastError.code;
+    return "provider" as const;
+  }
+
+  /** Other verified content accounts the caller may use (same visibility rule as ProviderAccountsService.contentGenerationCandidates). */
+  private async fallbackContentAccounts(excludeId: string, userId: string, role: "admin" | "staff") {
+    const rows = await this.prisma.providerAccount.findMany({
+      where: {
+        role: "content",
+        status: "verified",
+        deletedAt: null,
+        id: { not: excludeId },
+        ...(process.env.NODE_ENV === "test" ? {} : { isFake: false }),
+        ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    const ready = rows.filter(contentAccountReady);
+    const live = await Promise.all(ready.map((row) => this.liveAccount(row.id)));
+    return live.filter((row): row is NonNullable<typeof row> => row !== null);
   }
 
   async switchContentAccount(id: string, userId: string, role: "admin" | "staff", contentProviderAccountId: string) {
@@ -479,7 +516,7 @@ export class JobsService {
     script: ScriptDraft,
     status: "scripting" | "awaiting_staff_ack",
     event: { kind: string; message: string },
-    pin?: { promptTemplateVersion?: string; providerConfigVersion?: number },
+    pin?: { promptTemplateVersion?: string; providerConfigVersion?: number; contentProviderAccountId?: string; model?: string },
   ) {
     const latest = await this.prisma.scriptVersion.findFirst({ where: { productionRequestId: id }, orderBy: { version: "desc" } });
     const payload = (latest?.content ?? {}) as Partial<StoredContent>;
@@ -488,6 +525,8 @@ export class JobsService {
       currentStep: stepForStatus(status),
       ...(pin?.promptTemplateVersion ? { promptTemplateVersion: pin.promptTemplateVersion } : {}),
       ...(pin?.providerConfigVersion !== undefined ? { providerConfigVersion: pin.providerConfigVersion } : {}),
+      ...(pin?.contentProviderAccountId ? { contentProviderAccountId: pin.contentProviderAccountId } : {}),
+      ...(pin?.model ? { model: pin.model } : {}),
       events: [{ id: randomUUID(), at: new Date().toISOString(), kind: event.kind, message: event.message }],
     });
     await this.prisma.$transaction([

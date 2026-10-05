@@ -66,6 +66,17 @@
         "VE2E-124"
       ],
       "note": "Yêu cầu chủ dự án 2026-10-05. Mã task chính thức chờ chủ dự án gán (XX). Plan: TemplatePreviewModal 9:16 dùng chung; ảnh Creatomate/Orshot, LyOnix chưa có ảnh (câu hỏi 2), Preview SDK tuỳ chọn (câu hỏi 3); xem trước không chọn/không ghim/không render. Chủ dự án duyệt 2026-10-05: cả 3 màn hình, mô phỏng LyOnix trên trình duyệt, tab Xem chuyển động (Preview SDK) tuỳ chọn, tạm giữ mã V04-XX. Code xong 2026-10-05 (code_done): lint/typecheck/build pass; test toàn repo pass trừ 4 test fail sẵn trên Windows (template-lint, parity), không liên quan."
+    },
+    {
+      "id": "VE2E-125",
+      "title": "Xoay provider content khi lỗi (script/từ khóa), OpenRouter trong form thêm provider, chỉnh lại bộ chọn template",
+      "group": "Nhà cung cấp nội dung",
+      "assignee": null,
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-79"
+      ],
+      "note": "Yêu cầu chủ dự án 2026-10-05; mã task tạm, chờ chủ dự án gán/đổi. (1) Từ khóa: extractSegmentKeywords xoay qua mọi account content đã verify (khác provider cũng được) khi lỗi rate/quota/auth/capability/schema/unavailable, trả providerAccountId thực dùng; Auto script V2 dùng chung rotatesToNextAccount; Manual V1 (jobs.service.generate) xoay account và ghim lại account đã dùng. (2) Thêm openrouter vào provider-catalog và form thêm provider. (3) Bộ chọn template Auto: dải cuộn ngang, thẻ 92px, nút Xem dạng icon, 1 nút Chọn. code_done 2026-10-05: typecheck toàn repo, test api 717 + web 188 pass, build web ok. Chưa thử trên trình duyệt và chưa chạy thật với OpenRouter."
     }
   ]
 }

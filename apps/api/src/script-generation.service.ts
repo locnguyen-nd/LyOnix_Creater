@@ -14,7 +14,7 @@ import type { NarrationBudget } from "@lyonix/domain";
 import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
-import { callContentWithModelFailover, describeLimitedModels, type LimitedModel } from "./content-model-failover.js";
+import { callContentWithModelFailover, describeLimitedModels, rotatesToNextAccount, type LimitedModel } from "./content-model-failover.js";
 
 export type GenerateScriptDraftInput = {
   providerAccountId?: string;
@@ -40,6 +40,8 @@ export type SegmentKeywordsOutcome =
       modelId: string;
       provider: string;
       promptTemplateVersion: string;
+      /** The account that actually served the call (may differ from the preferred one after rotation). */
+      providerAccountId: string;
     }
   | { ok: false; code: ErrorCode; message: string };
 
@@ -115,8 +117,8 @@ export class ScriptGenerationService {
       }
       if (result.thrown !== undefined) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi provider; chưa tự gửi lại request mơ hồ", status: 502 };
       if (result.error) lastError = result.error;
-      // Rate/quota/auth (account or model level) only moves on to the next verified account; anything else stops.
-      if (result.error && !["PROVIDER_RATE_LIMITED", "PROVIDER_QUOTA_EXHAUSTED", "PROVIDER_AUTH_INVALID"].includes(result.error.code)) break;
+      // Any provider-side failure rotates to the next verified content account (any provider); only an unknown error stops.
+      if (result.error && !rotatesToNextAccount(result.error.code)) break;
     }
     const limitedMessage = describeLimitedModels(limited);
     if (limitedMessage && (!lastError || lastError.code === "PROVIDER_RATE_LIMITED" || lastError.code === "PROVIDER_QUOTA_EXHAUSTED")) {
@@ -161,32 +163,45 @@ export class ScriptGenerationService {
   ): Promise<SegmentKeywordsOutcome> {
     if (input.segments.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Không có segment nào để trích từ khóa" };
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role, input.providerAccountId);
-    const account = accounts.find((candidate) => candidate.id === input.providerAccountId && candidate.role === "content" && isLiveContentKind(candidate.provider));
-    if (!account || !isLiveContentKind(account.provider)) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản content không khả dụng cho trích từ khóa" };
-    const snapshots = Array.isArray(account.modelSnapshot) ? account.modelSnapshot as Array<{ modelId: string; status: string }> : [];
-    const unavailable = new Set(snapshots.filter((entry) => entry.status === "retired" || entry.status === "unsupported").map((entry) => entry.modelId));
-    const ranked = rankContentModels(account.provider, account.availableModels ?? []).filter((modelId) => !unavailable.has(modelId));
-    const preferred = (account.preferredModels ?? []).filter((modelId) => ranked.includes(modelId));
-    const models = [...new Set([...preferred, ...(ranked.includes(account.model) ? [account.model] : []), ...ranked])];
-    if (models.length === 0) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Không có model khả dụng" };
-    const apiKey = decryptSecret(account.encryptedSecret);
-    const provider = account.provider;
-    const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => extractSegmentKeywords(provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments }));
-    if (result.ok) {
-      const value = result.value;
-      return {
-        ok: true,
-        keywords: value.keywords,
-        rejectedSegmentIds: value.rejectedSegmentIds,
-        usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens, costAmount: value.usage.cost.amount, costCurrency: value.usage.cost.currency, providerRequestId: value.usage.providerRequestId },
-        modelId: value.modelId,
-        provider: account.provider,
-        promptTemplateVersion: value.promptTemplateVersion,
-      };
+    if (!accounts.some((candidate) => candidate.id === input.providerAccountId && candidate.role === "content" && isLiveContentKind(candidate.provider))) {
+      return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản content không khả dụng cho trích từ khóa" };
     }
-    if (result.thrown !== undefined) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi trích từ khóa" };
-    const limitedMessage = result.error?.code === "PROVIDER_AUTH_INVALID" ? null : describeLimitedModels(result.limited);
-    return { ok: false, code: result.error?.code ?? (limitedMessage ? "PROVIDER_RATE_LIMITED" : "PROVIDER_UNAVAILABLE"), message: limitedMessage ?? result.error?.message ?? "Trích từ khóa thất bại" };
+    // Preferred account first, then every other verified content account (any provider): a rate/quota/auth/capability
+    // failure on one account rotates to the next; only a non-switchable error (schema/network) stops the rotation.
+    let lastFailure: { code: ErrorCode; message: string } | null = null;
+    const limited: LimitedModel[] = [];
+    for (const account of accounts) {
+      if (account.role !== "content" || !isLiveContentKind(account.provider)) continue;
+      if (!(account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified")) continue;
+      const snapshots = Array.isArray(account.modelSnapshot) ? account.modelSnapshot as Array<{ modelId: string; status: string }> : [];
+      const unavailable = new Set(snapshots.filter((entry) => entry.status === "retired" || entry.status === "unsupported").map((entry) => entry.modelId));
+      const ranked = rankContentModels(account.provider, account.availableModels ?? []).filter((modelId) => !unavailable.has(modelId));
+      const preferred = (account.preferredModels ?? []).filter((modelId) => ranked.includes(modelId));
+      const models = [...new Set([...preferred, ...(ranked.includes(account.model) ? [account.model] : []), ...ranked])];
+      if (models.length === 0) continue;
+      const apiKey = decryptSecret(account.encryptedSecret);
+      const provider = account.provider;
+      const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => extractSegmentKeywords(provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments }));
+      limited.push(...result.limited);
+      if (result.ok) {
+        const value = result.value;
+        return {
+          ok: true,
+          keywords: value.keywords,
+          rejectedSegmentIds: value.rejectedSegmentIds,
+          usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens, costAmount: value.usage.cost.amount, costCurrency: value.usage.cost.currency, providerRequestId: value.usage.providerRequestId },
+          modelId: value.modelId,
+          provider: account.provider,
+          promptTemplateVersion: value.promptTemplateVersion,
+          providerAccountId: account.id,
+        };
+      }
+      if (result.thrown !== undefined) return { ok: false, code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi trích từ khóa" };
+      if (result.error) lastFailure = { code: result.error.code as ErrorCode, message: result.error.message };
+      if (result.error && !rotatesToNextAccount(result.error.code)) break;
+    }
+    const limitedMessage = lastFailure?.code === "PROVIDER_AUTH_INVALID" ? null : describeLimitedModels(limited);
+    return { ok: false, code: lastFailure?.code ?? (limitedMessage ? "PROVIDER_RATE_LIMITED" : "PROVIDER_UNAVAILABLE"), message: limitedMessage ?? lastFailure?.message ?? "Trích từ khóa thất bại" };
   }
 
   private buildResponse(

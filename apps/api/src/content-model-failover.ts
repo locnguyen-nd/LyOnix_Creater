@@ -38,6 +38,10 @@ export const modelCooldownMs = (error: ProviderError): number => {
   return error.retryAfterMs ?? 60_000;
 };
 
+/** Errors after which the next verified content account (any provider of the same content role) is tried instead of failing the step. */
+export const rotatesToNextAccount = (code: string) =>
+  code === "PROVIDER_RATE_LIMITED" || code === "PROVIDER_QUOTA_EXHAUSTED" || code === "PROVIDER_AUTH_INVALID" || code === "PROVIDER_CAPABILITY_UNAVAILABLE" || code === "PROVIDER_SCHEMA_INVALID" || code === "PROVIDER_UNAVAILABLE";
+
 export const isKeyLevelLimit = (error: ProviderError) => error.quotaScope === "account" || error.quotaScope === undefined;
 
 export const formatRetryAt = (date: Date) => `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
