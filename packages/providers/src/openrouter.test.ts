@@ -164,6 +164,30 @@ describe("VE2E-79 OpenRouter: error mapping", () => {
     await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED", retryable: false, quotaScope: "account" } satisfies Partial<ProviderError>);
   });
 
+  it("caps max_tokens explicitly so OpenRouter does not reserve the model's whole output window", async () => {
+    const fetchMock = vi.fn(async () => ok(chatBody('{"ok":true}')));
+    vi.stubGlobal("fetch", fetchMock);
+    await generate();
+    expect(sentBody(fetchMock).max_tokens).toBe(8192);
+  });
+
+  it("retries once with the affordable budget when a 402 says it can only afford fewer tokens", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 4000." } }), { status: 402 }))
+      .mockResolvedValueOnce(ok(chatBody('{"ok":true}')));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(generate()).resolves.toMatchObject({ output: { ok: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sentBody(fetchMock, 1).max_tokens).toBe(3936);
+  });
+
+  it("does not retry when the affordable budget is too small to hold a useful answer", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { message: "You requested up to 8192 tokens, but can only afford 900." } }), { status: 402 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" } satisfies Partial<ProviderError>);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("maps 429 to a retryable PROVIDER_RATE_LIMITED", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 })));
     await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED", retryable: true } satisfies Partial<ProviderError>);

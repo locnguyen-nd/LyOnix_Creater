@@ -146,25 +146,51 @@ const chatCompletionsText = (body: Record<string, unknown>, label: string): stri
 };
 
 /** One structured chat-completions call to OpenRouter (text prompt or vision parts). Callers normalize network/abort failures to PROVIDER_TIMEOUT. */
+/** Output-token ceiling per OpenRouter call: enough for a full script/keyword JSON, small enough not to reserve the model's whole window against the credit balance. */
+const OPENROUTER_MAX_OUTPUT_TOKENS = 8_192;
+/** Smallest affordable budget worth retrying with; below this the JSON would truncate, so the quota error stands. */
+const OPENROUTER_MIN_RETRY_TOKENS = 1_500;
+/** Parses OpenRouter's 402 text "...but can only afford 4000" into a safe retry budget (a small margin is kept), or null. */
+export const openRouterAffordableTokens = (message: string): number | null => {
+  const match = /can only afford (\d+)/i.exec(message);
+  if (!match) return null;
+  const budget = Number(match[1]) - 64;
+  return Number.isFinite(budget) && budget >= OPENROUTER_MIN_RETRY_TOKENS ? budget : null;
+};
+
 async function generateOpenRouter<T>(apiKey: string, modelId: string, content: ChatCompletionsContent, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
   const messages: Array<Record<string, unknown>> = [];
   if (options.instructions) messages.push({ role: "system", content: options.instructions });
   messages.push({ role: "user", content });
   const format = chatCompletionsFormat(schema, options);
-  const response = await timedFetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: openRouterHeaders(apiKey),
-    body: JSON.stringify({
-      model: modelId,
-      messages,
-      ...(format ? { response_format: format } : {}),
-      // require_parameters makes OpenRouter skip any upstream endpoint that would ignore the schema (OpenRouter docs, 2026-10-04).
-      ...(schema ? { provider: { require_parameters: true } } : {}),
-      // Ask OpenRouter to return the prepaid-credit cost in `usage` (source for the VE2E-28 cost ceilings).
-      usage: { include: true },
-    }),
-  });
-  const body = await json(response);
+  const post = async (maxTokens: number) => {
+    const response = await timedFetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: "POST",
+      headers: openRouterHeaders(apiKey),
+      body: JSON.stringify({
+        model: modelId,
+        messages,
+        // Without an explicit cap OpenRouter reserves the model's full output window (e.g. 65536) against the prepaid balance and 402s.
+        max_tokens: maxTokens,
+        ...(format ? { response_format: format } : {}),
+        // require_parameters makes OpenRouter skip any upstream endpoint that would ignore the schema (OpenRouter docs, 2026-10-04).
+        ...(schema ? { provider: { require_parameters: true } } : {}),
+        // Ask OpenRouter to return the prepaid-credit cost in `usage` (source for the VE2E-28 cost ceilings).
+        usage: { include: true },
+      }),
+    });
+    return { response, body: await json(response) };
+  };
+  let result: Awaited<ReturnType<typeof post>>;
+  try {
+    result = await post(OPENROUTER_MAX_OUTPUT_TOKENS);
+  } catch (error) {
+    // 402 "can only afford N": retry ONCE with what the balance covers (when still enough for a useful answer) instead of failing the step.
+    const affordable = error instanceof ProviderError && error.code === "PROVIDER_QUOTA_EXHAUSTED" ? openRouterAffordableTokens(error.message) : null;
+    if (affordable === null || affordable >= OPENROUTER_MAX_OUTPUT_TOKENS) throw error;
+    result = await post(affordable);
+  }
+  const { response, body } = result;
   const text = chatCompletionsText(body, "OpenRouter");
   try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
   catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenRouter did not return valid JSON", false); }
