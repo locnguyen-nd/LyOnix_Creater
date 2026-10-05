@@ -13,6 +13,17 @@
         "V00-04"
       ],
       "note": "Superseded bởi VE2E-01 (generateOpenAi/Responses API). Ghim V1 đã có ở jobs.service.ts. Bỏ mục registry. Chạy thật chuyển sang gate B04. Không đụng file code nào."
+    },
+    {
+      "id": "VE2E-122",
+      "title": "Chuyển Script V1 sang Responses API",
+      "group": "Nhà cung cấp nội dung",
+      "assignee": null,
+      "status": "done",
+      "dependsOn": [
+        "VE2E-01"
+      ],
+      "note": "Mở theo kết luận của V00-05; chủ dự án duyệt 2026-10-05: bỏ temperature, gộp sửa parser Responses API (đang đọc output_text, trường chỉ có trong SDK; ảnh hưởng cả V2). Vision moderation để task riêng. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows); chạy thật chờ gate B04. done 2026-10-05: chủ dự án xác nhận (gate B04 chưa chạy lúc xác nhận)."
     }
   ]
 }

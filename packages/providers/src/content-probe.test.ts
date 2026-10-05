@@ -14,6 +14,14 @@ describe("probeContentModel", () => {
     expect(result.modelId).toBe("gpt-4o-mini");
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://api.openai.com/v1/responses");
   });
+
+  it("VE2E-122: verifies a model from the real REST Responses shape (text in output[] parts, no top-level output_text)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: JSON.stringify({ ok: true }) }] }],
+    }), { status: 200 })));
+    await expect(probeContentModel("openai", "sk-test", "gpt-4o-mini")).resolves.toMatchObject({ modelId: "gpt-4o-mini" });
+  });
 });
 
 describe("pickUsableContentModel", () => {

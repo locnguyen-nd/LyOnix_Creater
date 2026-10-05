@@ -105,6 +105,9 @@ const chatFormat = (schema?: JsonSchema) =>
     ? { type: "json_schema", json_schema: { name: "script_draft_v1", strict: true, schema } }
     : { type: "json_object" };
 
+/** V1 editor persona; was the Chat Completions `system` message before VE2E-122, now the Responses `instructions`. */
+const SCRIPT_V1_INSTRUCTIONS = "You are LyOnix, a short-form script editor. Reply with a single JSON object only. Follow the requested creative direction; do not repeat a previous draft.";
+
 export async function generateLiveStructured<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
   const resolved = resolveContentModel(kind as ContentKind, modelId);
   try {
@@ -136,25 +139,71 @@ async function generateLiveStructuredOnce<T>(kind: LiveContentKind, apiKey: stri
     try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
     catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Gemini did not return valid JSON", false); }
   }
-  const url = kind === "openai" ? "https://api.openai.com/v1/chat/completions" : "https://api.x.ai/v1/chat/completions";
+  // VE2E-122: openai/xai V1 uses the same Responses API call as V2 and sends no `temperature` (owner decision: reasoning
+  // models reject it). Only the instructions, the schema name and the JSON-mode fallback without a schema are V1-specific.
+  const options: ResponsesOptions = { instructions: SCRIPT_V1_INSTRUCTIONS, schemaName: "script_draft_v1", jsonModeWithoutSchema: true };
+  return kind === "openai" ? generateOpenAi<T>(apiKey, model, prompt, schema, options) : generateXai<T>(apiKey, model, prompt, schema, options);
+}
+
+/** VE2E-122: optional request extras for the V1 script flow. Omitted (V2, model probe, keyword extraction) the request body is unchanged. */
+export type ResponsesOptions = {
+  /** System instructions (V1's editor persona). */
+  instructions?: string;
+  /** `text.format.name` of the strict json_schema; default `script_draft`. */
+  schemaName?: string;
+  /** Without a schema, request JSON mode (`json_object`) instead of free text - V1's former chat `response_format` fallback. */
+  jsonModeWithoutSchema?: boolean;
+};
+
+const responsesFormat = (schema: JsonSchema | undefined, options: ResponsesOptions) => {
+  if (schema) return { format: { type: "json_schema", name: options.schemaName ?? "script_draft", strict: true, schema } };
+  return options.jsonModeWithoutSchema ? { format: { type: "json_object" } } : undefined;
+};
+
+/**
+ * VE2E-122: text of a raw REST `/v1/responses` body. `output_text` is a convenience the official SDKs compute client-side
+ * (openai-node `addOutputText`), so the wire shape carries the text as `output_text` content parts of `message` items in
+ * `output[]`; a top-level `output_text` string is still honoured when a server sends one. A refusal or an incomplete
+ * response is reported as such instead of a generic "no structured text".
+ */
+const responsesText = (body: Record<string, unknown>, label: string): string => {
+  if (body.status === "incomplete") {
+    const details = body.incomplete_details as Record<string, unknown> | null | undefined;
+    const reason = typeof details?.reason === "string" ? details.reason : "unknown";
+    throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} returned an incomplete response (${reason})`, false);
+  }
+  const texts: string[] = [];
+  let refusal: string | null = null;
+  const items = Array.isArray(body.output) ? body.output as Array<Record<string, unknown>> : [];
+  for (const item of items) {
+    if (item?.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const part of item.content as Array<Record<string, unknown>>) {
+      if (part?.type === "output_text" && typeof part.text === "string") texts.push(part.text);
+      else if (part?.type === "refusal") refusal = typeof part.refusal === "string" ? part.refusal : "";
+    }
+  }
+  if (texts.length > 0) return texts.join("");
+  if (typeof body.output_text === "string") return body.output_text;
+  if (refusal !== null) throw new ProviderError("PROVIDER_CONTENT_REFUSED", `${label} refused the request${refusal ? `: ${redact(refusal)}` : ""}`, false);
+  throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} did not return structured text`, false);
+};
+
+/** One structured call on a Responses API endpoint (OpenAI and xAI share the wire contract). */
+async function generateResponses<T>(url: string, label: string, apiKey: string, modelId: string, prompt: string, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
   const response = await timedFetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model,
-      temperature: 0.7,
-      response_format: chatFormat(schema),
-      messages: [
-        { role: "system", content: "You are LyOnix, a short-form script editor. Reply with a single JSON object only. Follow the requested creative direction; do not repeat a previous draft." },
-        { role: "user", content: prompt },
-      ],
+      model: modelId,
+      ...(options.instructions ? { instructions: options.instructions } : {}),
+      input: prompt,
+      text: responsesFormat(schema, options),
     }),
   });
   const body = await json(response);
-  const text = chatText(body);
-  if (!text) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return structured text", false);
+  const text = responsesText(body, label);
   try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
-  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Provider did not return valid JSON", false); }
+  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", `${label} did not return valid JSON`, false); }
 }
 
 /**
@@ -163,21 +212,8 @@ async function generateLiveStructuredOnce<T>(kind: LiveContentKind, apiKey: stri
  * `apiKey`/`modelId`/`prompt` are passed directly (not wrapped in `ContentGenerationInput`)
  * so this can be reused by both the account-adapter port and the VE2E-01 ScriptDraftV2 flow.
  */
-export async function generateOpenAi<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
-  const response = await timedFetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: modelId,
-      input: prompt,
-      text: schema ? { format: { type: "json_schema", name: "script_draft", strict: true, schema } } : undefined,
-    }),
-  });
-  const body = await json(response);
-  const output = body.output_text;
-  if (typeof output !== "string") throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenAI did not return structured text", false);
-  try { return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
-  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenAI did not return valid JSON", false); }
+export async function generateOpenAi<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema, options: ResponsesOptions = {}): Promise<ContentGenerationResult<T>> {
+  return generateResponses<T>("https://api.openai.com/v1/responses", "OpenAI", apiKey, modelId, prompt, schema, options);
 }
 
 /** Gemini structured output via `generateContent` + `responseJsonSchema` (no separate Responses API). */
@@ -196,21 +232,8 @@ export async function generateGemini<T>(apiKey: string, modelId: string, prompt:
 }
 
 /** xAI/Grok Responses API, mirrors OpenAI (same wire contract for `/v1/responses`). */
-export async function generateXai<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T>> {
-  const response = await timedFetch("https://api.x.ai/v1/responses", {
-    method: "POST",
-    headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: modelId,
-      input: prompt,
-      text: schema ? { format: { type: "json_schema", name: "script_draft", strict: true, schema } } : undefined,
-    }),
-  });
-  const body = await json(response);
-  const output = body.output_text;
-  if (typeof output !== "string") throw new ProviderError("PROVIDER_SCHEMA_INVALID", "xAI did not return structured text", false);
-  try { return { output: JSON.parse(output) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
-  catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "xAI did not return valid JSON", false); }
+export async function generateXai<T>(apiKey: string, modelId: string, prompt: string, schema?: JsonSchema, options: ResponsesOptions = {}): Promise<ContentGenerationResult<T>> {
+  return generateResponses<T>("https://api.x.ai/v1/responses", "xAI", apiKey, modelId, prompt, schema, options);
 }
 
 /**
@@ -291,7 +314,7 @@ export async function generateVisionStructuredOnce<T>(kind: LiveContentKind, api
  * openai/xai, `generateContent` for gemini) — schema-invalid retries once without the
  * strict schema, and a retired/capability-unavailable model retries once with the hinted
  * replacement model (same retry shape as `generateLiveStructured`, kept as a separate
- * function so the existing ScriptDraftV1 chat-completions path is untouched).
+ * function because V1 adds its own instructions/JSON-mode options and reports no schema rejection).
  */
 export async function generateContentStructuredV2<T>(kind: LiveContentKind, apiKey: string, modelId: string, prompt: string, schema?: JsonSchema): Promise<ContentGenerationResult<T> & { schemaRejection?: string }> {
   const resolved = resolveContentModel(kind as ContentKind, modelId);
