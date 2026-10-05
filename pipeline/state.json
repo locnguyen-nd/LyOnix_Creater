@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-05",
+  "tasks": [
+    {
+      "id": "V00-05",
+      "title": "Bộ chuyển đổi nội dung OpenAI",
+      "group": "Nhà cung cấp nội dung",
+      "assignee": "DNT",
+      "status": "superseded",
+      "supersededBy": "VE2E-01",
+      "dependsOn": [
+        "V00-04"
+      ],
+      "note": "Superseded bởi VE2E-01 (generateOpenAi/Responses API). Ghim V1 đã có ở jobs.service.ts. Bỏ mục registry. Chạy thật chuyển sang gate B04. Không đụng file code nào."
+    }
+  ]
+}

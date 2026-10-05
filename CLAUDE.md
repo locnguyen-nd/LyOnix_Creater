@@ -1,5 +1,12 @@
 # LyOnix Creater — monorepo (code)
-
+# Trước khi nhận task:
+1. Đọc pipeline/state.json.
+2. Chỉ code task có status: ready.
+3. Đọc spec tương ứng trong .docs/specs/.
+4. Khi bắt đầu, chuyển status sang in_progress.
+5. Khi code + test xong, chuyển sang code_done.
+6. Không tự chuyển done; quyền xác nhận done thuộc chủ dự án.
+7. Task bị task khác thay thế dùng status superseded.
 Tài liệu nghiệp vụ/pipeline ở repo cha `D:\LyOnix` (xem `../../CLAUDE.md`, `../../.docs/`,
 `../../pipeline/`). File này chỉ nói về code trong `SourceCode/LyOnix_Creater/`.
 
