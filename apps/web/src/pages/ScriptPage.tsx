@@ -7,6 +7,7 @@ import { JobStepper } from "../components/JobStepper";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { JobStepKey } from "../studio/types";
+import { isInAppNavigation, isScriptDirty } from "../script/unsaved";
 
 const stepForStatus = (status: string, currentStep: string): JobStepKey => {
   if (currentStep === "intake" || currentStep === "check" || currentStep === "script" || currentStep === "review" || currentStep === "produce" || currentStep === "edit" || currentStep === "vrew" || currentStep === "done") {
@@ -39,7 +40,36 @@ export function ScriptPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("content");
-  const load = async () => { if (id) setJob(await api<ApiJob>(`/jobs/${id}`)); };
+  // VE2E-124: the last script the server has (existing versioning), to tell unsaved on-screen edits apart.
+  const [savedScript, setSavedScript] = useState<ApiJob["script"] | null>(null);
+  const applyServerJob = (next: ApiJob) => {
+    setJob(next);
+    setSavedScript(next.script);
+  };
+  const load = async () => { if (id) applyServerJob(await api<ApiJob>(`/jobs/${id}`)); };
+  const dirty = Boolean(job && savedScript && isScriptDirty(job.script, savedScript));
+  // Unsaved edits: warn before a reload/close and before an in-app link takes the user away (no second draft system).
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const onClick = (event: MouseEvent) => {
+      const anchor = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || !isInAppNavigation(event, anchor, window.location)) return;
+      if (!window.confirm(t("script.unsavedLeaveConfirm"))) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    document.addEventListener("click", onClick, true);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      document.removeEventListener("click", onClick, true);
+    };
+  }, [dirty, t]);
   useEffect(() => { void load().catch((err) => setError(err instanceof ApiError ? err.message : t("common.error"))); }, [id]);
   useEffect(() => {
     void api<ApiProvider[]>("/provider-accounts").then((rows) => {
@@ -58,6 +88,8 @@ export function ScriptPage() {
     const next = { ...script, ...patch };
     setJob({ ...job, script: next });
   };
+  /** Existing versioning: POST /jobs/:id/script creates a new ScriptVersion from what is on screen. */
+  const saveScriptNow = async () => applyServerJob(await api<ApiJob>(`/jobs/${job.id}/script`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ script }) }));
   const scrollToScene = (sceneId: string) => {
     setTab("content");
     requestAnimationFrame(() => document.getElementById(`scene-${sceneId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
@@ -79,8 +111,10 @@ export function ScriptPage() {
             try {
               setBusy(true);
               setError(null);
+              // VE2E-124: approve what is on screen - unsaved edits become a new version first (never approve the stale one).
+              if (dirty) await saveScriptNow();
               const next = await api<ApiJob>(`/jobs/${job.id}/script/approve`, { method: "POST", headers: await csrfHeaders() });
-              setJob(next);
+              applyServerJob(next);
               setNotice(next.lastNotice ?? t("script.approved", { version: next.script.approvedVersion ?? next.script.version }));
               if (next.status === "handoff_workspace_ready") navigate(`/jobs/${next.id}/studio`);
             } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
@@ -123,7 +157,9 @@ export function ScriptPage() {
             try {
               setBusy(true); setError(null);
               const next = await api<ApiJob>(`/jobs/${job.id}/content-account`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ contentProviderAccountId: nextAccountId }) });
-              setJob(next);
+              // Switching the account does not touch the script: keep the on-screen (possibly unsaved) edits.
+              setJob({ ...next, script });
+              setSavedScript(next.script);
               setNotice(next.lastNotice ?? t("jobs.switchAccount"));
             } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
             finally { setBusy(false); }
@@ -134,25 +170,28 @@ export function ScriptPage() {
             <TextArea value={direction} onChange={(e) => setDirection(e.target.value)} placeholder={t("jobs.directionHint")} />
           </Field>
           <div className="mt-3 flex gap-2">
+            {/* VE2E-124: these two handlers were never invoked before (`void (async () => {...})` without the call) - fixed. */}
             <Button disabled={busy} onClick={() => void (async () => {
               try {
                 setBusy(true); setError(null);
+                // Revise from what is on screen: unsaved edits become a new version first.
+                if (dirty) await saveScriptNow();
                 const next = await api<ApiJob>(`/jobs/${job.id}/script/generate`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ direction }) });
-                setJob(next);
+                applyServerJob(next);
                 setNotice(next.lastNotice ?? t("script.generated"));
               } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
               finally { setBusy(false); }
-            })}>{busy ? t("common.loading") : script.body ? t("script.revise") : t("script.generate")}</Button>
+            })()}>{busy ? t("common.loading") : script.body ? t("script.revise") : t("script.generate")}</Button>
             <Button variant="secondary" disabled={busy} onClick={() => void (async () => {
               try {
                 setBusy(true);
                 setError(null);
-                const next = await api<ApiJob>(`/jobs/${job.id}/script`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ script }) });
-                setJob(next);
-                setNotice(next.lastNotice ?? t("common.save"));
+                await saveScriptNow();
+                setNotice(t("common.save"));
               } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
               finally { setBusy(false); }
-            })}>{t("common.save")}</Button>
+            })()}>{t("common.save")}</Button>
+            {dirty ? <span role="status" className="self-center text-[11.5px] text-amber-500">{t("script.unsavedChanges")}</span> : null}
           </div>
         </div>
       </div>

@@ -12,6 +12,7 @@ import type { ApiProvider } from "../jobs-api";
 import { useMe } from "../session";
 import { Banner, StatusPill } from "../components/chrome";
 import { RenderProgress } from "../components/RenderProgress";
+import { TemplatePreviewButton, TemplatePreviewModal, TemplateThumb } from "../components/TemplatePreviewModal";
 import { Button, Select } from "../components/ui";
 import { fetchOrshotEstimate, listCreatomateTemplates, pinTemplateSnapshot, reconcileRenderJob } from "./timeline-api";
 import {
@@ -65,6 +66,9 @@ export function OrshotStudioPanel(props: OrshotStudioPanelProps) {
   const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [loadingTemplates, setLoadingTemplates] = useState(false);
   const [pinningId, setPinningId] = useState<string | null>(null);
+  // V04-XX: 9:16 preview of the Orshot templates; it never pins - only "Dùng" / "Chọn template này" does.
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const previewTemplates = useMemo(() => (templates ?? []).map((tpl) => ({ ...tpl, engine: "orshot" as const })), [templates]);
   const [embedNotice, setEmbedNotice] = useState<string | null>(null);
   const [eventsOff, setEventsOff] = useState(false);
   const [estimate, setEstimate] = useState<OrshotCostEstimateResponse | null>(null);
@@ -119,11 +123,11 @@ export function OrshotStudioPanel(props: OrshotStudioPanelProps) {
     return () => clearInterval(timer);
   }, [renderJob]);
 
-  const pin = async (externalTemplateId: string) => {
+  const pin = async (externalTemplateId: string): Promise<boolean> => {
     setPinningId(externalTemplateId);
     setError(null);
-    try { onPinned(await pinTemplateSnapshot(account.id, externalTemplateId)); }
-    catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
+    try { onPinned(await pinTemplateSnapshot(account.id, externalTemplateId)); return true; }
+    catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); return false; }
     finally { setPinningId(null); }
   };
 
@@ -191,14 +195,15 @@ export function OrshotStudioPanel(props: OrshotStudioPanelProps) {
             {templatesError ? <Banner variant="danger">{templatesError}</Banner> : null}
             {templates && templates.length === 0 ? <p className="text-[12px] text-lyx-fg-muted">{t("studioPro.orshotNoTemplates")}</p> : null}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-              {(templates ?? []).map((item) => {
+              {(templates ?? []).map((item, index) => {
                 const pinned = template?.externalTemplateId === item.externalTemplateId;
                 return (
                   <article key={item.externalTemplateId} className={`rounded-[6px] border p-1.5 text-[11px] ${pinned ? "border-lyx-fg" : "border-lyx-border"}`}>
-                    <div className="mb-1 flex h-28 items-center justify-center overflow-hidden rounded-[4px] bg-lyx-muted">
-                      {item.previewUrl ? <img src={item.previewUrl} alt="" loading="lazy" className="h-full w-full object-cover" /> : null}
-                    </div>
+                    <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="mb-1 flex h-28 w-full items-center justify-center overflow-hidden rounded-[4px] bg-lyx-muted text-[10px] text-lyx-fg-subtle">
+                      <TemplateThumb template={previewTemplates[index]!} fallbackLabel={t("templates.preview")} />
+                    </button>
                     <p className="mb-1 line-clamp-2 font-medium">{item.name}</p>
+                    <TemplatePreviewButton onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="mb-1 w-full justify-center" />
                     {pinned ? <StatusPill tone="ok">{t("studioPro.orshotPinned")}</StatusPill> : (
                       <Button variant="secondary" className="h-7 w-full" disabled={pinningId !== null} onClick={() => void pin(item.externalTemplateId)}>
                         {pinningId === item.externalTemplateId ? t("studioPro.orshotPinning") : t("studioPro.orshotUse")}
@@ -207,6 +212,17 @@ export function OrshotStudioPanel(props: OrshotStudioPanelProps) {
                   </article>
                 );
               })}
+              {previewIndex !== null && previewTemplates[previewIndex] ? (
+                <TemplatePreviewModal
+                  templates={previewTemplates}
+                  index={previewIndex}
+                  onIndexChange={setPreviewIndex}
+                  selectedId={template?.externalTemplateId ?? null}
+                  selecting={pinningId !== null}
+                  onSelect={(tpl) => void pin(tpl.externalTemplateId).then((ok) => { if (ok) setPreviewIndex(null); })}
+                  onClose={() => setPreviewIndex(null)}
+                />
+              ) : null}
             </div>
 
             <div className="rounded-[6px] border border-lyx-border p-2">

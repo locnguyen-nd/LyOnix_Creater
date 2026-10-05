@@ -105,3 +105,97 @@ textarea {
 .lyx-btn-ghost:hover:not(:disabled) {
   color: var(--lyx-fg);
 }
+
+/* VE2E-124: confirm dialog (destructive actions) - entrance animation, red accent, reduced-motion safe. */
+@keyframes lyx-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes lyx-dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.95); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes lyx-danger-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lyx-danger) 45%, transparent); }
+  70% { box-shadow: 0 0 0 12px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@keyframes lyx-wiggle {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(-12deg); }
+  40% { transform: rotate(10deg); }
+  60% { transform: rotate(-6deg); }
+  80% { transform: rotate(4deg); }
+}
+
+.lyx-anim-backdrop {
+  animation: lyx-backdrop-in 160ms ease-out both;
+}
+
+.lyx-anim-dialog {
+  animation: lyx-dialog-in 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.lyx-anim-danger-icon {
+  animation: lyx-danger-ring 1.4s ease-out 240ms 2;
+}
+
+.lyx-anim-danger-icon svg {
+  animation: lyx-wiggle 560ms ease-in-out 240ms 1;
+}
+
+.lyx-btn-danger-solid {
+  background: var(--lyx-danger);
+  color: #fff;
+  border: 1px solid var(--lyx-danger);
+}
+
+.lyx-btn-danger-solid:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyx-anim-backdrop,
+  .lyx-anim-dialog,
+  .lyx-anim-danger-icon,
+  .lyx-anim-danger-icon svg {
+    animation: none;
+  }
+}
+
+/* V04-XX: template preview - slow zoom of the simulated LyOnix background (recipe image motion). */
+@keyframes lyx-recipe-zoom {
+  from { transform: scale(1); }
+  to { transform: scale(var(--lyx-zoom, 1.06)); }
+}
+
+.lyx-recipe-zoom {
+  animation: lyx-recipe-zoom 4s ease-in-out infinite alternate;
+}
+
+@keyframes lyx-skeleton {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.lyx-skeleton {
+  background: linear-gradient(90deg, var(--lyx-bg-muted) 25%, var(--lyx-border) 50%, var(--lyx-bg-muted) 75%);
+  background-size: 200% 100%;
+  animation: lyx-skeleton 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyx-recipe-zoom,
+  .lyx-skeleton {
+    animation: none;
+  }
+}
+
+/* Dark theme: the light danger red is a tint for text; a solid button needs a deeper red so white text stays readable. */
+html.dark .lyx-btn-danger-solid {
+  background: #dc2626;
+  border-color: #dc2626;
+}

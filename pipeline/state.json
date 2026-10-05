@@ -46,6 +46,26 @@
         "V03-02"
       ],
       "note": "Plan đối chiếu 2026-10-05: VE2E-03/32/103/114 đã có phụ đề theo giọng đọc + render. Còn thiếu: API/UI sửa phụ đề, render dùng đúng subtitleVersionId đã ghim, và (đọc code) Auto mất phụ đề theo giọng vì screenTextOverride = narration. Chủ dự án duyệt 2026-10-05: chỉ Studio/Auto, ước lượng tỉ lệ khi sửa chữ, gộp sửa lỗi Auto. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows), build web ok; chưa thử trên trình duyệt với giọng đọc thật. Bổ sung 2026-10-05 (yêu cầu chủ dự án): phụ đề tối đa 2 dòng cùng lúc trên mọi đường render (Creatomate động chia trang, schema recipe maxLines 1..2)."
+    },
+    {
+      "id": "VE2E-124",
+      "title": "Bản nháp theo user + tuỳ chọn mặc định cho luồng tạo video",
+      "group": "Luồng tạo video",
+      "assignee": null,
+      "status": "code_done",
+      "dependsOn": [],
+      "note": "CR mới của chủ dự án 2026-10-05. Plan: bảng UserDraft (userId+flowType, CAS theo version) và UserCreationPreference (theo user), API /me/drafts/:flowType + /me/creation-preferences, JobNewPage khôi phục draft > defaults > system, autosave debounce 1,5 s. Chủ dự án duyệt 2026-10-05: ScriptPage cảnh báo + tự lưu trước Duyệt/Viết lại, kênh trong defaults (kiểm tra quyền), URL thắng field tương ứng, thêm ô chọn tài khoản ElevenLabs. code_done 2026-10-05: lint/typecheck/build xanh; test toàn repo xanh trừ test fail sẵn do Windows (template-lint, 3 parity fixture). Sửa kèm: nút Lưu/Viết lại của ScriptPage trước đây không chạy. Chưa thử trên trình duyệt."
+    },
+    {
+      "id": "V04-XX",
+      "title": "Xem trước template trước khi lựa chọn",
+      "group": "Template",
+      "assignee": null,
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-124"
+      ],
+      "note": "Yêu cầu chủ dự án 2026-10-05. Mã task chính thức chờ chủ dự án gán (XX). Plan: TemplatePreviewModal 9:16 dùng chung; ảnh Creatomate/Orshot, LyOnix chưa có ảnh (câu hỏi 2), Preview SDK tuỳ chọn (câu hỏi 3); xem trước không chọn/không ghim/không render. Chủ dự án duyệt 2026-10-05: cả 3 màn hình, mô phỏng LyOnix trên trình duyệt, tab Xem chuyển động (Preview SDK) tuỳ chọn, tạm giữ mã V04-XX. Code xong 2026-10-05 (code_done): lint/typecheck/build pass; test toàn repo pass trừ 4 test fail sẵn trên Windows (template-lint, parity), không liên quan."
     }
   ]
 }

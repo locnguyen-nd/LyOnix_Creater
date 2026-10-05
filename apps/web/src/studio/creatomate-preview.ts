@@ -39,6 +39,8 @@ export function isCreatomatePreviewSupported(): boolean {
 export type CreatomatePreviewHandle = {
   readonly instance: Preview;
   setSource: (source: Record<string, unknown>) => Promise<void>;
+  /** V04-XX: plays a template of the token's project as-is (template preview) - still no render job. */
+  loadTemplate: (templateId: string) => Promise<void>;
   dispose: () => void;
 };
 
@@ -59,6 +61,7 @@ export function mountCreatomatePreview(container: HTMLDivElement, publicToken: s
       resolve({
         instance: preview,
         setSource: (source) => preview.setSource(source),
+        loadTemplate: (templateId) => preview.loadTemplate(templateId),
         dispose: () => preview.dispose(),
       });
     };

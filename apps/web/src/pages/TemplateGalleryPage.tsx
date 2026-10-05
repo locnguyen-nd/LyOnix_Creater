@@ -9,6 +9,7 @@ import { api, ApiError } from "../api";
 import type { ApiProvider } from "../jobs-api";
 import { listCreatomateTemplates, pinTemplateSnapshot } from "../studio/timeline-api";
 import { engineNameKey } from "../studio/render-engine";
+import { TemplatePreviewButton, TemplatePreviewModal, TemplateThumb } from "../components/TemplatePreviewModal";
 import type { RenderEngine } from "@lyonix/contracts";
 
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
@@ -66,6 +67,9 @@ export function TemplateGalleryPage() {
   const engines = useMemo(() => [...new Set(entries.map((entry) => entry.engine))], [entries]);
   const tags = useMemo(() => [...new Set(byEngine.flatMap((entry) => entry.template.tags))], [byEngine]);
   const filtered = useMemo(() => (tag === "all" ? byEngine : byEngine.filter((entry) => entry.template.tags.includes(tag))), [byEngine, tag]);
+  // V04-XX: the preview browses the filtered list; it never pins - only "Dùng template" does.
+  const previewTemplates = useMemo(() => filtered.map((entry) => ({ ...entry.template, engine: entry.engine })), [filtered]);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const useTemplate = async (entry: TemplateEntry) => {
     if (!id) return;
@@ -90,6 +94,17 @@ export function TemplateGalleryPage() {
       />
       <p className="mb-4 text-[12px] text-lyx-fg-muted">{t("templates.subtitle")}</p>
       {error ? <Banner variant="danger">{error}</Banner> : null}
+      {previewIndex !== null && filtered[previewIndex] ? (
+        <TemplatePreviewModal
+          templates={previewTemplates}
+          index={previewIndex}
+          onIndexChange={setPreviewIndex}
+          selectedId={null}
+          selecting={pinning === filtered[previewIndex]!.key}
+          onSelect={() => void useTemplate(filtered[previewIndex]!)}
+          onClose={() => setPreviewIndex(null)}
+        />
+      ) : null}
 
       {entries.length === 0 && !loading ? <p className="mb-4 text-[12px] text-lyx-fg-muted">{t("studioPro.noAccountForRole", { role: "LyOnix / Creatomate / Orshot" })}</p> : null}
       <div className="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label={t("renderEngine.galleryEngineFilter")}>
@@ -120,25 +135,31 @@ export function TemplateGalleryPage() {
         <div>
           {loading ? <p className="text-[12px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((entry) => {
+            {filtered.map((entry, index) => {
               const tpl = entry.template;
               return (
               <div key={entry.key} className="overflow-hidden rounded-[6px] border border-lyx-border" data-engine={entry.engine}>
-                <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[11px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
-                  {tpl.previewUrl ? <img src={tpl.previewUrl} alt={tpl.name} className="h-full w-full object-cover" /> : t("templates.preview")}
-                </div>
+                {/* V04-XX: the picture opens the 9:16 preview; "Dùng template" (here or in the preview) is what pins it. */}
+                <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="block w-full">
+                  <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[11px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
+                    <TemplateThumb template={previewTemplates[index]!} fallbackLabel={t("templates.preview")} />
+                  </div>
+                </button>
                 <div className="p-2.5">
                   <span className="mb-1 inline-block rounded-[4px] border border-lyx-border bg-lyx-muted px-1.5 py-0.5 text-[10px] text-lyx-fg-muted" data-testid="engine-badge">{t(engineNameKey(entry.engine))}</span>
                   <div className="text-[12px] font-medium">{tpl.name}</div>
                   <div className="mt-0.5 text-[11px] text-lyx-fg-muted">{tpl.tags.join(", ") || tpl.externalTemplateId}</div>
-                  <Button
-                    variant="primary"
-                    className="mt-2 w-full"
-                    disabled={pinning === entry.key}
-                    onClick={() => void useTemplate(entry)}
-                  >
-                    {pinning === entry.key ? t("common.loading") : t("templates.useTemplate")}
-                  </Button>
+                  <div className="mt-2 flex gap-1.5">
+                    <TemplatePreviewButton onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="justify-center px-2.5" />
+                    <Button
+                      variant="primary"
+                      className="flex-1"
+                      disabled={pinning === entry.key}
+                      onClick={() => void useTemplate(entry)}
+                    >
+                      {pinning === entry.key ? t("common.loading") : t("templates.useTemplate")}
+                    </Button>
+                  </div>
                 </div>
               </div>
               );
