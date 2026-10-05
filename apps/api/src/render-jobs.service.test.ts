@@ -751,8 +751,10 @@ describe("RenderJobsService", () => {
       const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
       const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
       expect(textNodes).toHaveLength(2);
-      expect(textNodes[0]).toMatchObject({ text: "Messi is a football player.", time: 0, duration: 1.8 });
-      expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+      expect(textNodes[0]).toMatchObject({ time: 0, duration: 1.8 });
+      expect(textNodes[1]).toMatchObject({ time: 1.8, duration: 1.8 });
+      // V03-03: same words, explicitly broken into at most 2 lines.
+      expect(textNodes.map((node: any) => node.text.replace(/\n/g, " "))).toEqual(["Messi is a football player.", "He plays for Inter Miami now."]);
     });
 
     it("VE2E-32: a Studio screenTextOverride always stays one static block, even when real caption segments exist", async () => {
@@ -799,7 +801,8 @@ describe("RenderJobsService", () => {
       const submittedBody = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body));
       const textNodes = submittedBody.source.elements[0].elements.filter((el: any) => el.type === "text");
       expect(textNodes).toHaveLength(2);
-      expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+      expect(textNodes[1]).toMatchObject({ time: 1.8, duration: 1.8 });
+      expect(textNodes[1].text.replace(/\n/g, " ")).toBe("He plays for Inter Miami now.");
     });
 
     it("V03-03: renders the subtitle version the timeline pinned, not a newer edit made after approval", async () => {

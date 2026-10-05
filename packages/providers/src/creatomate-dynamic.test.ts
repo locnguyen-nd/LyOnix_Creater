@@ -206,8 +206,11 @@ describe("buildDynamicComposition", () => {
     const elements = source.elements as Array<{ elements: Array<{ type: string; time?: number; duration?: number; text?: string }> }>;
     const textNodes = elements[0]!.elements.filter((el) => el.type === "text");
     expect(textNodes).toHaveLength(2);
-    expect(textNodes[0]).toMatchObject({ text: "Messi is a football player.", time: 0, duration: 1.8 });
-    expect(textNodes[1]).toMatchObject({ text: "He plays for Inter Miami now.", time: 1.8, duration: 1.8 });
+    expect(textNodes[0]).toMatchObject({ time: 0, duration: 1.8 });
+    expect(textNodes[1]).toMatchObject({ time: 1.8, duration: 1.8 });
+    // V03-03: same words, broken explicitly into at most 2 lines for the text box.
+    expect(textNodes.map((node) => node.text!.replace(/\n/g, " "))).toEqual(["Messi is a football player.", "He plays for Inter Miami now."]);
+    expect(textNodes.every((node) => node.text!.split("\n").length <= 2)).toBe(true);
     // audio is still the last element, after every caption node.
     expect(elements[0]!.elements.at(-1)).toMatchObject({ type: "audio" });
   });
@@ -219,6 +222,20 @@ describe("buildDynamicComposition", () => {
     const textNodes = elements[0]!.elements.filter((el) => el.type === "text");
     expect(textNodes).toHaveLength(1);
     expect(textNodes[0]).toMatchObject({ type: "text", time: 0, duration: 2, text: "Hook" });
+  });
+
+  it("V03-03: a long whole-scene caption block becomes consecutive pages of at most 2 lines, covering the scene end to end", () => {
+    const narration = "東京の夜景はとても美しく、毎晩たくさんの観光客が展望台に集まって写真を撮っています。週末にはさらに人が増え、駅前の通りは夜遅くまでにぎやかです。";
+    const scenes = [{ sceneId: "s1", mediaUrl: "https://x/img1", mediaKind: "image" as const, text: narration, audioUrl: "https://x/a1", audioDurationMs: 12000 }];
+    const source = buildDynamicComposition(scenes, DEFAULT_DYNAMIC_SCENE_STYLE, { width: 1080, height: 1920 });
+    const elements = source.elements as Array<{ elements: Array<{ type: string; time: number; duration: number; text: string }> }>;
+    const pages = elements[0]!.elements.filter((el) => el.type === "text");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.every((page) => page.text.split("\n").length <= 2)).toBe(true);
+    expect(pages.map((page) => page.text.replace(/\n/g, "")).join("")).toBe(narration);
+    expect(pages[0]!.time).toBe(0);
+    for (let i = 1; i < pages.length; i += 1) expect(pages[i]!.time).toBeCloseTo(pages[i - 1]!.time + pages[i - 1]!.duration, 5); // back to back, never two on screen
+    expect(pages.at(-1)!.time + pages.at(-1)!.duration).toBeCloseTo(12, 5);
   });
 
   it("never fabricates a Creatomate-native voiceover/transcript element - audio and text stay plain", () => {

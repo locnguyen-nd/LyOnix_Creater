@@ -199,6 +199,18 @@ describe("caption-ass (VE2E-103)", () => {
     expect(charTimingsForSegments(alignment, [{ text: "Hello" }])).toEqual([null]);
   });
 
+  it("V03-03: never puts more than 2 lines on screen at once - long cues are split into back-to-back cues instead", () => {
+    const texts = [
+      "東京の夜景はとても美しく、毎晩たくさんの観光客が展望台に集まって写真を撮っています。週末にはさらに人が増え、駅前の通りは夜遅くまでにぎやかです。",
+      "Messi đã chính thức chuyển tới Inter Miami sau nhiều năm thi đấu tại châu Âu, mở ra một chương mới đầy hứa hẹn trong sự nghiệp của anh.",
+      "Supercalifragilisticexpialidociousandevenlongerwordswithoutanyspacesatallthatcannotbebrokenbyphrase",
+    ];
+    const { cues } = buildCaptionAss(texts.map((text, i) => ({ text, startMs: i * 10_000, endMs: i * 10_000 + 9_000 })), { maxLines: 2 });
+    expect(cues.length).toBeGreaterThan(texts.length);
+    for (const cue of cues) expect(cue.lines.length).toBeLessThanOrEqual(2);
+    for (let i = 1; i < cues.length; i += 1) expect(cues[i]!.startMs).toBeGreaterThanOrEqual(cues[i - 1]!.endMs);
+  });
+
   it("V03-03: a user-edited cue gets null timing, but the cues after it keep their real alignment timing", () => {
     const text = "Hi there you"; // H0 i1 _2 t3 h4 e5 r6 e7 _8 y9 o10 u11, 100 ms per character
     const characters = Array.from(text);

@@ -24,7 +24,11 @@
  * scene's entire duration. `text` remains the fallback static block, used whenever
  * `captionSegments` is omitted/empty (no alignment available yet, or the caller passed a
  * human-typed Studio override that has no per-word timing to draw from).
+ *
+ * V03-03: every caption block (timed segment or static block) is then split into consecutive pages of at most 2 lines
+ * (`paginateCaptionBlocks`), so a long cue or a whole-scene block never shows 3-4 lines on screen at once.
  */
+import { paginateCaptionBlocks } from "./caption-pages.js";
 
 export type DynamicCaptionSegment = { text: string; startMs: number; endMs: number };
 
@@ -425,6 +429,7 @@ function buildTemplateScaledComposition(
 ): DynamicCompositionResult {
   const warnings = new Set<TemplateScaleWarning>();
   const overrides = style.layoutOverrides ?? {};
+  const canvas = { width: layout.width ?? options.width, height: layout.height ?? options.height };
   const total = scenes.length;
   const sceneTrack = toSeconds(layout.scenes[0]!.track) ?? 1;
   let cursor = 0;
@@ -468,7 +473,8 @@ function buildTemplateScaledComposition(
         }
         children.push(kid);
       } else if (kidIndex === caption) {
-        captionBlocks(scene, durationSeconds).forEach((block, blockIndex) => {
+        // V03-03: at most 2 lines on screen - pages sized to THIS element's own font size and box width.
+        paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: asString(kid.font_size) ?? style.text.fontSize, width: asString(kid.width) ?? style.text.width }, canvas).forEach((block, blockIndex) => {
           if (!block.text.trim()) return;
           const node = clone(kid);
           const base = renameForScene(nameOf(rawKid), n, "Subtitles");
@@ -523,7 +529,7 @@ function buildTemplateScaledComposition(
     }
     if (caption < 0) {
       warnings.add("no_caption_element");
-      captionBlocks(scene, durationSeconds).forEach((block, blockIndex) => {
+      paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: style.text.fontSize, width: style.text.width }, canvas).forEach((block, blockIndex) => {
         if (!block.text.trim()) return;
         children.push({
           name: blockIndex === 0 ? `Subtitles-${n}` : `Subtitles-${n}-${blockIndex + 1}`, type: "text", track: usedTrackMax + 1, time: block.time, duration: block.duration, text: block.text,
@@ -666,14 +672,9 @@ function buildStyleOnlyComposition(
     // this scene's own real audio duration (defends only against float/drift edge cases - both
     // come from the same underlying narration synthesis, so they should already agree); a scene
     // with no usable segments keeps the prior single-static-block behavior unchanged.
-    const usableSegments = (scene.captionSegments ?? []).filter((s) => s.text.trim() && s.endMs > s.startMs);
-    const captions: RawNode[] = usableSegments.length
-      ? usableSegments.map((segment) => {
-          const segStart = Math.min(durationSeconds, Math.max(0, segment.startMs / 1000));
-          const segEnd = Math.min(durationSeconds, Math.max(segStart + 0.05, segment.endMs / 1000));
-          return captionNode(segment.text, segStart, segEnd - segStart);
-        })
-      : [captionNode(scene.text, 0, durationSeconds)];
+    // V03-03: every block is then split into pages of at most 2 lines (never 3-4 lines on screen at once).
+    const captions: RawNode[] = paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: style.text.fontSize, width: style.text.width }, { width: options.width, height: options.height })
+      .map((block) => captionNode(block.text, block.time, block.duration));
 
     const audio: RawNode = {
       type: "audio",

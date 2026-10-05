@@ -20,6 +20,13 @@ describe("released recipes", () => {
     expect(() => new RecipeRegistry([{ ...clone(), fps: 30 } as unknown as RenderRecipe])).toThrow(/invalid/);
   });
 
+  it("V03-03: a caption never shows more than 2 lines - every released recipe uses 1..2 and 3 is rejected", () => {
+    for (const recipe of RELEASED_RECIPES) expect(recipe.captions.maxLines, recipe.id).toBeLessThanOrEqual(2);
+    const threeLines = clone();
+    threeLines.captions.maxLines = 3;
+    expect(errorsOf(threeLines)).toContain("captions.maxLines must be 1..2");
+  });
+
   it("news-recap-broadcast-telop-jp@1 is immutable: its digest is pinned (a change must ship as a new version)", () => {
     const digest = createHash("sha256").update(JSON.stringify(NEWS_RECAP_BROADCAST_TELOP_JP_V1)).digest("hex");
     expect(digest).toBe(PINNED_DIGEST_V1);

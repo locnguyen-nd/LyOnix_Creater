@@ -82,6 +82,7 @@ export type RecipeCaptions = {
   fontFamily: string;
   fontSizePx: number;
   minFontSizePx: number;
+  /** V03-03 (owner rule): a caption shows at most 2 lines at a time, so 1..2. A longer cue is split into consecutive cues, never a 3rd line. */
   maxLines: number;
   bold: boolean;
   /** Not-yet-spoken colour. */
@@ -230,7 +231,7 @@ export function validateRecipe(input: unknown): RecipeValidation {
     if (typeof captions.enabled !== "boolean" || typeof captions.bold !== "boolean") errors.push("captions.enabled/bold must be booleans");
     if (typeof captions.fontFamily !== "string" || !captions.fontFamily.trim()) errors.push("captions.fontFamily is required");
     if (!isInt(captions.fontSizePx, 16, 200) || !isInt(captions.minFontSizePx, 16, 200) || (captions.minFontSizePx as number) > (captions.fontSizePx as number)) errors.push("captions font sizes must satisfy 16 <= min <= size <= 200");
-    if (!isInt(captions.maxLines, 1, 3)) errors.push("captions.maxLines must be 1..3");
+    if (!isInt(captions.maxLines, 1, 2)) errors.push("captions.maxLines must be 1..2");
     for (const key of ["textColor", "highlightColor", "outlineColor"] as const) if (typeof captions[key] !== "string" || !HEX_RE.test(captions[key] as string)) errors.push(`captions.${key} must be #RRGGBB`);
     if (!isNum(captions.outlinePx, 0, 20)) errors.push("captions.outlinePx must be 0..20");
     if (captions.highlight !== "word" && captions.highlight !== "none") errors.push("captions.highlight must be word|none");

@@ -45,7 +45,7 @@
       "dependsOn": [
         "V03-02"
       ],
-      "note": "Plan đối chiếu 2026-10-05: VE2E-03/32/103/114 đã có phụ đề theo giọng đọc + render. Còn thiếu: API/UI sửa phụ đề, render dùng đúng subtitleVersionId đã ghim, và (đọc code) Auto mất phụ đề theo giọng vì screenTextOverride = narration. Chủ dự án duyệt 2026-10-05: chỉ Studio/Auto, ước lượng tỉ lệ khi sửa chữ, gộp sửa lỗi Auto. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows), build web ok; chưa thử trên trình duyệt với giọng đọc thật."
+      "note": "Plan đối chiếu 2026-10-05: VE2E-03/32/103/114 đã có phụ đề theo giọng đọc + render. Còn thiếu: API/UI sửa phụ đề, render dùng đúng subtitleVersionId đã ghim, và (đọc code) Auto mất phụ đề theo giọng vì screenTextOverride = narration. Chủ dự án duyệt 2026-10-05: chỉ Studio/Auto, ước lượng tỉ lệ khi sửa chữ, gộp sửa lỗi Auto. code_done 2026-10-05: lint/typecheck/test toàn repo xanh (trừ template-lint.test.ts fail sẵn trên Windows), build web ok; chưa thử trên trình duyệt với giọng đọc thật. Bổ sung 2026-10-05 (yêu cầu chủ dự án): phụ đề tối đa 2 dòng cùng lúc trên mọi đường render (Creatomate động chia trang, schema recipe maxLines 1..2)."
     }
   ]
 }
