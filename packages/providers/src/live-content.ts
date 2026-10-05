@@ -44,8 +44,10 @@ const fail = (status: number, retryAfter: string | null, detail = "") => {
   const retryAfterMs = parseRetryAfterMs(retryAfter) ?? parseRetryDelayMs(detail);
   if (quota) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, scope);
   if (retired) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Model is no longer available${suffix}`, false);
-  // VE2E-79: OpenRouter returns 402 when the prepaid credit balance can no longer cover the request - an account-level stop, like a no-credits 429.
-  if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, "account");
+  // VE2E-79: OpenRouter 402 = the prepaid balance cannot cover THIS request. Cost depends on the model (a reasoning model such as
+  // gpt-5 can be unaffordable while gpt-4o-mini is fine), so it is model-scoped: only that model is benched (2 min) and the next
+  // model/account is tried. It must not cool the whole key or the cheaper models are never reached.
+  if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs ?? 120_000, "minute");
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Provider authentication failed${suffix}`, false);
   if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Provider rate limit reached${suffix}`, true, retryAfterMs, scope);
   if (status === 400) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Provider rejected the generate payload${suffix}`, false);
@@ -148,16 +150,6 @@ const chatCompletionsText = (body: Record<string, unknown>, label: string): stri
 /** One structured chat-completions call to OpenRouter (text prompt or vision parts). Callers normalize network/abort failures to PROVIDER_TIMEOUT. */
 /** Output-token ceiling per OpenRouter call: enough for a full script/keyword JSON, small enough not to reserve the model's whole window against the credit balance. */
 const OPENROUTER_MAX_OUTPUT_TOKENS = 8_192;
-/** Smallest affordable budget worth retrying with; below this the JSON would truncate, so the quota error stands. */
-const OPENROUTER_MIN_RETRY_TOKENS = 1_500;
-/** Parses OpenRouter's 402 text "...but can only afford 4000" into a safe retry budget (a small margin is kept), or null. */
-export const openRouterAffordableTokens = (message: string): number | null => {
-  const match = /can only afford (\d+)/i.exec(message);
-  if (!match) return null;
-  const budget = Number(match[1]) - 64;
-  return Number.isFinite(budget) && budget >= OPENROUTER_MIN_RETRY_TOKENS ? budget : null;
-};
-
 async function generateOpenRouter<T>(apiKey: string, modelId: string, content: ChatCompletionsContent, schema: JsonSchema | undefined, options: ResponsesOptions): Promise<ContentGenerationResult<T>> {
   const messages: Array<Record<string, unknown>> = [];
   if (options.instructions) messages.push({ role: "system", content: options.instructions });
@@ -181,16 +173,7 @@ async function generateOpenRouter<T>(apiKey: string, modelId: string, content: C
     });
     return { response, body: await json(response) };
   };
-  let result: Awaited<ReturnType<typeof post>>;
-  try {
-    result = await post(OPENROUTER_MAX_OUTPUT_TOKENS);
-  } catch (error) {
-    // 402 "can only afford N": retry ONCE with what the balance covers (when still enough for a useful answer) instead of failing the step.
-    const affordable = error instanceof ProviderError && error.code === "PROVIDER_QUOTA_EXHAUSTED" ? openRouterAffordableTokens(error.message) : null;
-    if (affordable === null || affordable >= OPENROUTER_MAX_OUTPUT_TOKENS) throw error;
-    result = await post(affordable);
-  }
-  const { response, body } = result;
+  const { response, body } = await post(OPENROUTER_MAX_OUTPUT_TOKENS);
   const text = chatCompletionsText(body, "OpenRouter");
   try { return { output: JSON.parse(text) as T, usage: usage(body, response.headers.get("x-request-id")) }; }
   catch { throw new ProviderError("PROVIDER_SCHEMA_INVALID", "OpenRouter did not return valid JSON", false); }

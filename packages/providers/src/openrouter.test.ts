@@ -159,9 +159,9 @@ describe("VE2E-79 OpenRouter: error mapping", () => {
     await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_AUTH_INVALID", retryable: false } satisfies Partial<ProviderError>);
   });
 
-  it("maps 402 (out of prepaid credits) to an account-scoped PROVIDER_QUOTA_EXHAUSTED", async () => {
+  it("maps 402 (out of prepaid credits) to a model-scoped PROVIDER_QUOTA_EXHAUSTED", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { message: "Insufficient credits" } }), { status: 402 })));
-    await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED", retryable: false, quotaScope: "account" } satisfies Partial<ProviderError>);
+    await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED", retryable: false, quotaScope: "minute" } satisfies Partial<ProviderError>);
   });
 
   it("caps max_tokens explicitly so OpenRouter does not reserve the model's whole output window", async () => {
@@ -171,20 +171,10 @@ describe("VE2E-79 OpenRouter: error mapping", () => {
     expect(sentBody(fetchMock).max_tokens).toBe(8192);
   });
 
-  it("retries once with the affordable budget when a 402 says it can only afford fewer tokens", async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "This request requires more credits, or fewer max_tokens. You requested up to 8192 tokens, but can only afford 4000." } }), { status: 402 }))
-      .mockResolvedValueOnce(ok(chatBody('{"ok":true}')));
+  it("treats a 402 'can only afford' as model-scoped so cheaper models on the same key are still tried", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { message: "You requested up to 8192 tokens, but can only afford 4000." } }), { status: 402 }));
     vi.stubGlobal("fetch", fetchMock);
-    await expect(generate()).resolves.toMatchObject({ output: { ok: true } });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(sentBody(fetchMock, 1).max_tokens).toBe(3936);
-  });
-
-  it("does not retry when the affordable budget is too small to hold a useful answer", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { message: "You requested up to 8192 tokens, but can only afford 900." } }), { status: 402 }));
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" } satisfies Partial<ProviderError>);
+    await expect(generate()).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED", quotaScope: "minute" } satisfies Partial<ProviderError>);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

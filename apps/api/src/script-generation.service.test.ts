@@ -138,6 +138,19 @@ describe("ScriptGenerationService.generate", () => {
     expect(providerAccounts.markModelLimited).toHaveBeenCalledTimes(2);
   });
 
+  it("treats a 402 (balance cannot afford this model) as model-level: benches that model and tries a cheaper one without cooling the key", async () => {
+    providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: "You requested up to 8192 tokens, but can only afford 4000." } }), { status: 402 }))
+      .mockResolvedValueOnce(new Response(draftBody(), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await service.generate("source-1", "user-1", "staff", { providerAccountId: "account-1" });
+    expect(outcome).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(providerAccounts.markModelLimited).toHaveBeenCalledWith("account-1", "gpt-4o-mini", expect.any(Number), "PROVIDER_QUOTA_EXHAUSTED");
+    expect(providerAccounts.cooldownContentAccount).not.toHaveBeenCalled();
+  });
+
   it("tries the next model on the same key after a model-level 429", async () => {
     providerAccounts.contentGenerationCandidates.mockResolvedValue([accountRow({ availableModels: ["gpt-4o-mini", "gpt-4o"] })]);
     const fetchMock = vi.fn()
