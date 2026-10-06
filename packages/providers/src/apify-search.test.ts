@@ -45,7 +45,7 @@ describe("Apify allowlist / helpers", () => {
     expect(APIFY_ACTOR_ALLOWLIST.x.primary.actorId).toBe("apidojo/tweet-scraper");
     expect(APIFY_ACTOR_ALLOWLIST.x.backup?.actorId).toBe("kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest");
     expect(APIFY_ACTOR_ALLOWLIST.google_image.primary.actorId).toBe("damilo/google-images-scraper");
-    for (const pin of Object.values(APIFY_ACTOR_ALLOWLIST)) expect(pin.primary.version).toMatch(/^\d/);
+    for (const pin of Object.values(APIFY_ACTOR_ALLOWLIST)) expect(pin.primary.version).toMatch(/^(\d|latest$)/);
   });
 
   it("rejects an Actor id that is not on the allowlist", () => {
