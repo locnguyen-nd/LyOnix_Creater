@@ -1,24 +1,27 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, Eye } from "lucide-react";
-import { EngineBadge, TemplateThumb } from "./TemplatePreviewModal";
+import { TemplateThumb } from "./TemplatePreviewModal";
+import { ProviderBadge, ProviderMark } from "./ProviderBadge";
 import { templateCategory, templateReadiness } from "../studio/template-catalog";
 import type { PreviewableTemplate } from "../studio/template-preview";
 
 /**
- * V04-01: one template of the library. The whole card opens the 9:16 preview - it never selects (only "Chọn template này" in the
- * preview does). Picture (a LyOnix template moves while hovered), name, group · 9:16, engine badge; "Chưa sẵn sàng render" when it
- * cannot be applied; a clear border + check mark when it is the template in use. "Xem trước" shows on hover / focus with a pointer,
- * always on touch screens.
+ * V04-01 / V04-02: one template of the library. The whole card is ONE button that opens the 9:16 preview - it never selects (only
+ * "Chọn template này" in the preview does). Picture (provider image, LyOnix simulation moving while hovered / focused, or a styled
+ * fallback) with the provider mark in its corner; name, group · 9:16, provider badge and "Chưa sẵn sàng render" below the picture so
+ * nothing covers it; a clear ring + check mark when it is the template in use. "Xem trước" shows on hover / focus with a pointer,
+ * always on touch screens. Keyboard: Tab to the card, Enter / Space opens the preview.
  */
 export function TemplateCard({ template, selected, onPreview }: { template: PreviewableTemplate; selected: boolean; onPreview: () => void }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const category = templateCategory(template);
   const readiness = templateReadiness(template);
+  const providerName = t(`templates.library.engineBadge.${template.engine}`);
   return (
     <div
-      className={`group relative overflow-hidden rounded-[8px] border bg-lyx-bg transition ${selected ? "border-lyx-fg ring-2 ring-lyx-fg" : "border-lyx-border hover:border-lyx-strong"}`}
+      className={`group relative flex flex-col overflow-hidden rounded-[10px] border bg-lyx-bg transition duration-150 ${selected ? "border-lyx-fg ring-2 ring-lyx-fg" : "border-lyx-border hover:-translate-y-0.5 hover:border-lyx-strong hover:shadow-md"}`}
       data-testid="template-card"
       data-engine={template.engine}
       data-selected={selected ? "true" : "false"}
@@ -30,17 +33,18 @@ export function TemplateCard({ template, selected, onPreview }: { template: Prev
         onMouseLeave={() => setHovered(false)}
         onFocus={() => setHovered(true)}
         onBlur={() => setHovered(false)}
-        aria-label={`${t("templates.previewOpen")}: ${template.name}`}
-        className="relative block w-full text-left"
+        aria-label={`${t("templates.previewOpen")}: ${template.name} · ${providerName}`}
+        className="relative block w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-lyx-fg"
       >
-        <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[11px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
-          <TemplateThumb template={template} fallbackLabel={t("templates.previewNoImage")} playing={hovered} />
+        <div className="relative overflow-hidden bg-lyx-muted" style={{ aspectRatio: "9 / 16" }}>
+          <div className="h-full w-full transition-transform duration-300 group-hover:scale-[1.03]">
+            <TemplateThumb template={template} playing={hovered} />
+          </div>
+          <span className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-black/35 to-transparent" aria-hidden="true" />
         </div>
-        {!readiness.ready ? (
-          <span className="absolute left-1.5 top-1.5 max-w-[calc(100%-2.5rem)] rounded-[4px] bg-lyx-warn-bg px-1.5 py-0.5 text-[10px] font-semibold leading-tight text-lyx-warn shadow-sm" data-testid="template-not-ready">
-            {t("templates.library.notReadyBadge")}
-          </span>
-        ) : null}
+        <span className="absolute left-1.5 top-1.5 rounded-[5px] shadow-sm" title={providerName} data-testid="template-card-provider-mark">
+          <ProviderMark engine={template.engine} size={20} />
+        </span>
         {selected ? (
           <span className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-lyx-fg text-lyx-bg shadow" data-testid="template-card-check" aria-label={t("templates.previewSelected")}>
             <Check size={14} strokeWidth={3} aria-hidden="true" />
@@ -52,10 +56,17 @@ export function TemplateCard({ template, selected, onPreview }: { template: Prev
           </span>
         </span>
       </button>
-      <div className="flex flex-col gap-1 p-2">
-        <div className="truncate text-[12px] font-medium" title={template.name}>{template.name}</div>
+      <div className="flex flex-1 flex-col gap-1 p-2.5">
+        <div className="line-clamp-2 text-[12.5px] font-semibold leading-snug [overflow-wrap:anywhere]" title={template.name}>{template.name}</div>
         <div className="text-[11px] text-lyx-fg-muted">{category ? t(`templates.library.category.${category}`) : t("templates.library.categoryNone")} · 9:16</div>
-        <EngineBadge engine={template.engine} />
+        <div className="mt-auto flex flex-wrap items-center gap-1 pt-1">
+          <ProviderBadge engine={template.engine} />
+          {!readiness.ready ? (
+            <span className="inline-flex items-center rounded-[4px] bg-lyx-warn-bg px-1.5 py-0.5 text-[10px] font-semibold leading-tight text-lyx-warn" data-testid="template-not-ready">
+              {t("templates.library.notReadyBadge")}
+            </span>
+          ) : null}
+        </div>
       </div>
     </div>
   );

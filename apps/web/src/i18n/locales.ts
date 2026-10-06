@@ -635,6 +635,18 @@ const vi = {
     useTemplate: "Dùng template",
     current: "Đang dùng",
     pinNote: "Chọn template sẽ ghim templateSnapshotId; slot và option ở Inspector lấy đúng theo modification schema của snapshot đó, không nhập JSON tự do.",
+    search: {
+      label: "Tìm template",
+      placeholder: "Tìm template theo tên, loại hoặc nhà cung cấp...",
+      clear: "Xoá nội dung tìm kiếm",
+      count: "{{count}} template",
+      countOf: "{{shown}}/{{total}} template",
+      resultsFor: "Kết quả cho “{{query}}” · {{count}} template",
+      emptyTitle: "Không tìm thấy template",
+      emptyHint: "Thử tên khác hoặc xoá bộ lọc tìm kiếm.",
+      clearSearch: "Xóa tìm kiếm",
+      clearAll: "Xóa bộ lọc",
+    },
     library: {
       categoryFilter: "Nhóm template",
       category: {
@@ -1662,6 +1674,18 @@ const en: typeof vi = {
     useTemplate: "Use template",
     current: "In use",
     pinNote: "Choosing a template pins its templateSnapshotId; the Inspector's slots and options come straight from that snapshot's modification schema — no free-form JSON entry.",
+    search: {
+      label: "Search templates",
+      placeholder: "Search templates by name, type or provider...",
+      clear: "Clear search",
+      count: "{{count}} templates",
+      countOf: "{{shown}}/{{total}} templates",
+      resultsFor: "Results for “{{query}}” · {{count}} templates",
+      emptyTitle: "No template found",
+      emptyHint: "Try another name or clear the search filter.",
+      clearSearch: "Clear search",
+      clearAll: "Clear filters",
+    },
     library: {
       categoryFilter: "Template group",
       category: {
@@ -2279,6 +2303,18 @@ const ja: typeof vi = {
     useTemplate: "テンプレートを使用",
     current: "使用中",
     pinNote: "テンプレートを選択するとtemplateSnapshotIdが固定されます。Inspectorのスロットとオプションはそのスナップショットのmodificationスキーマから直接取得されます — 自由入力のJSONはありません。",
+    search: {
+      label: "テンプレートを検索",
+      placeholder: "名前・種類・プロバイダーでテンプレートを検索...",
+      clear: "検索をクリア",
+      count: "{{count}} 件のテンプレート",
+      countOf: "{{shown}}/{{total}} 件のテンプレート",
+      resultsFor: "「{{query}}」の結果 · {{count}} 件",
+      emptyTitle: "テンプレートが見つかりません",
+      emptyHint: "別の名前を試すか、検索条件をクリアしてください。",
+      clearSearch: "検索をクリア",
+      clearAll: "条件をすべてクリア",
+    },
     library: {
       categoryFilter: "テンプレートの分類",
       category: {
@@ -2896,6 +2932,18 @@ const ko: typeof vi = {
     useTemplate: "템플릿 사용",
     current: "사용 중",
     pinNote: "템플릿을 선택하면 templateSnapshotId가 고정됩니다. Inspector의 슬롯과 옵션은 해당 스냅샷의 modification 스키마에서 직접 가져옵니다 — 자유 형식 JSON 입력은 없습니다.",
+    search: {
+      label: "템플릿 검색",
+      placeholder: "이름, 유형 또는 제공자로 템플릿 검색...",
+      clear: "검색어 지우기",
+      count: "템플릿 {{count}}개",
+      countOf: "템플릿 {{shown}}/{{total}}개",
+      resultsFor: "“{{query}}” 검색 결과 · {{count}}개",
+      emptyTitle: "템플릿을 찾을 수 없습니다",
+      emptyHint: "다른 이름을 입력하거나 검색 필터를 지워 보세요.",
+      clearSearch: "검색 지우기",
+      clearAll: "필터 모두 지우기",
+    },
     library: {
       categoryFilter: "템플릿 그룹",
       category: {

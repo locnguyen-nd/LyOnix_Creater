@@ -89,6 +89,17 @@
         "VE2E-124"
       ],
       "note": "Yêu cầu chủ dự án 2026-10-06. Chốt 1a 2b 3a 4b + A–F: 3 recipe cũ + 5 recipe LyOnix mới (Tin tức/Thể thao/Faceless/Breaking News, mỗi nhóm ≥ 2), catalog metadata riêng, admin bật rollout 100 % không cần dự phòng, rollout 0 % = chưa sẵn sàng và bị chặn trước workflow (preflight web + API), mô phỏng chuyển động chỉ dùng hiệu ứng engine có, trang Tạo video gộp template mọi tài khoản render. Không migration, không sửa media-worker/FFmpeg. Spec .docs/specs/V04-01.md. Chủ dự án duyệt 2026-10-06: giữ mã V04-01; Studio dùng chung rule sẵn sàng/tương thích với Auto (xem trước được, không áp dụng/render được); bỏ nút Chọn trên thẻ. code_done 2026-10-06: lint/typecheck/build xanh; test toàn repo xanh trừ 4 test fail sẵn trên Windows (template-lint, 3 parity); 5 recipe mới render thật qua QC trên máy local. Không migration, không đổi mã chạy media-worker. Chưa thử trên trình duyệt với dữ liệu thật. Sửa 2026-10-06 sau khi chạy với tài khoản Creatomate thật: xếp nhóm template provider xét tên trước rồi mới đến tag (3 template News Recap gắn tag faceless từng bị xếp nhầm vào Faceless). Gộp lên dev 57ae38a (2026-10-06): giữ lưới thẻ của V04-01 thay cho dải cuộn ngang của 63f9d66 (chủ dự án chốt lưới trong task search template)."
+    },
+    {
+      "id": "V04-02",
+      "title": "Tìm kiếm template và nâng cấp giao diện thẻ template (Creatomate/Orshot/LyOnix)",
+      "group": "Template",
+      "assignee": null,
+      "status": "code_done",
+      "dependsOn": [
+        "V04-01"
+      ],
+      "note": "Yêu cầu chủ dự án 2026-10-06 (task Template Search + UI). Search phía client trên danh sách đã tải (tên, provider, nhóm, tag, id; không phân biệt hoa/thường; bỏ dấu tiếng Việt), kết hợp bộ lọc nhóm, empty state; thẻ có dấu nhận diện provider (không hotlink logo), ảnh fallback có kiểu khi thiếu/lỗi ảnh. Chỉ UI web: không đổi render pipeline, rollout, readiness, draft/defaults backend. Nhánh feature/template-search-ui tách từ feature/v04-01-template-library. Spec .docs/specs/V04-02.md. code_done 2026-10-06: typecheck/build xanh, test web 217 pass; smoke trên app thật (search/lọc/empty state/bàn phím/ảnh lỗi → fallback/tối/390 px, draft và defaults không đổi). Phát hiện ngoài phạm vi: API Creatomate thật trả previewUrl rỗng cho cả 4 template (thẻ hiện fallback); trang cuộn ngang ở 390 px là lỗi layout có sẵn của AppShell/Tạo video (cả chế độ Thủ công, không do thư viện template)."
     }
   ]
 }

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, Check, ChevronLeft, ChevronRight, ImageOff, Info, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronLeft, ChevronRight, Film, ImageOff, Info, LayoutTemplate, Newspaper, Siren, Trophy, X, type LucideIcon } from "lucide-react";
 import type { CreatomatePreviewConfigResponse, RenderEngine } from "@lyonix/contracts";
 import { RecipePreview } from "./RecipePreview";
+import { ProviderBadge } from "./ProviderBadge";
 import { fetchCreatomatePreviewConfig } from "../studio/timeline-api";
 import { isCreatomatePreviewSupported, mountCreatomatePreview, type CreatomatePreviewHandle } from "../studio/creatomate-preview";
 import { canShowMotionPreview, stepIndex, templatePreviewSource, type PreviewableTemplate } from "../studio/template-preview";
-import { previewSourceKind, templateCategory, templateLanguages, templateReadiness, templateRecipeId, templateStyleTags } from "../studio/template-catalog";
+import { previewSourceKind, templateCategory, templateLanguages, templateReadiness, templateRecipeId, templateStyleTags, type TemplateCategory } from "../studio/template-catalog";
 
 export type TemplatePreviewModalProps = {
   templates: readonly PreviewableTemplate[];
@@ -36,13 +37,8 @@ const defaultTab = (engine: RenderEngine | undefined): Tab => (engine === "lyoni
 
 /** Small engine badge used by the cards and the preview (LyOnix Render / Creatomate / Orshot). */
 export function EngineBadge({ engine, viaFallback = false }: { engine: RenderEngine; viaFallback?: boolean }) {
-  const { t } = useTranslation();
-  return (
-    <span className="inline-flex w-fit items-center gap-1 rounded-[4px] border border-lyx-border bg-lyx-muted px-1.5 py-0.5 text-[10.5px] font-medium text-lyx-fg-muted" data-testid="engine-badge">
-      {t(`templates.library.engineBadge.${engine}`)}
-      {viaFallback ? <span className="text-lyx-fg-subtle">· {t("templates.library.viaFallback")}</span> : null}
-    </span>
-  );
+  // V04-02: the shared provider identity (mark + name).
+  return <ProviderBadge engine={engine} viaFallback={viaFallback} />;
 }
 
 /**
@@ -260,11 +256,41 @@ export function TemplatePreviewModal({ templates, index, onIndexChange, selected
   );
 }
 
-/** Card thumbnail: the provider image, or the recipe simulation (moving while `playing`) for a LyOnix template, or a plain label. */
-export function TemplateThumb({ template, fallbackLabel, playing = false }: { template: PreviewableTemplate; fallbackLabel: string; playing?: boolean }) {
+/**
+ * Card thumbnail, in this order: the provider picture, the recipe simulation of a LyOnix template (moving while `playing`), else a
+ * styled fallback (V04-02) - also when the provider picture fails to load, so a broken-image icon never shows.
+ */
+export function TemplateThumb({ template, playing = false }: { template: PreviewableTemplate; playing?: boolean }) {
   const source = templatePreviewSource(template);
+  const imageUrl = source.kind === "image" ? source.url : null;
   const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [imageUrl]);
   if (source.kind === "recipe") return <RecipePreview recipe={source.recipe} playing={playing} />;
-  if (source.kind === "image" && !broken) return <img src={source.url} alt={template.name} loading="lazy" className="h-full w-full object-cover" onError={() => setBroken(true)} />;
-  return <span>{fallbackLabel}</span>;
+  if (imageUrl && !broken) return <img src={imageUrl} alt={template.name} loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken(true)} data-testid="template-thumb-image" />;
+  return <TemplateFallbackThumb template={template} />;
+}
+
+const FALLBACK_STYLE: Record<TemplateCategory | "none", { gradient: string; Icon: LucideIcon }> = {
+  news: { gradient: "from-sky-600 via-blue-800 to-slate-950", Icon: Newspaper },
+  sports: { gradient: "from-emerald-500 via-green-700 to-emerald-950", Icon: Trophy },
+  faceless: { gradient: "from-indigo-500 via-violet-700 to-slate-950", Icon: Film },
+  breaking_news: { gradient: "from-red-500 via-rose-700 to-neutral-950", Icon: Siren },
+  none: { gradient: "from-slate-500 via-slate-700 to-slate-950", Icon: LayoutTemplate },
+};
+
+/** V04-02: picture of a template without a usable image - gradient and icon of its group, its name, 9:16. Drawn locally, no request. */
+export function TemplateFallbackThumb({ template }: { template: Pick<PreviewableTemplate, "engine" | "externalTemplateId" | "name" | "tags"> }) {
+  const { t } = useTranslation();
+  const category = templateCategory(template);
+  const { gradient, Icon } = FALLBACK_STYLE[category ?? "none"];
+  return (
+    <div className={`flex h-full w-full flex-col justify-between bg-gradient-to-b ${gradient} p-3 text-left text-white`} data-testid="template-fallback-thumb" data-category={category ?? "none"}>
+      <span className="flex items-center gap-1.5 pl-6 text-[10px] font-semibold uppercase tracking-wide opacity-90">
+        <Icon size={13} aria-hidden="true" className="shrink-0" />
+        <span className="truncate">{category ? t(`templates.library.category.${category}`) : t("templates.library.categoryNone")}</span>
+      </span>
+      <span className="line-clamp-5 text-[14px] font-extrabold uppercase leading-tight [overflow-wrap:anywhere]">{template.name}</span>
+      <span className="w-fit rounded-[4px] bg-white/20 px-1.5 py-0.5 text-[10px] font-bold">9:16</span>
+    </div>
+  );
 }

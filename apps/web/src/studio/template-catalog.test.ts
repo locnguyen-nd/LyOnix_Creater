@@ -4,7 +4,10 @@ import {
   accountForTemplate,
   categoryCounts,
   filterByCategory,
+  normalizeSearch,
   previewSourceKind,
+  searchTemplates,
+  templateSearchText,
   templateCategory,
   templateReadiness,
   templateSelectionState,
@@ -57,6 +60,49 @@ describe("template library catalog - web (V04-01)", () => {
     // tags only: the subject wins over the production style
     expect(creatomate("Recap A", ["news-recap", "faceless"])).toBe("news");
     expect(creatomate("Story B", ["faceless"])).toBe("faceless");
+  });
+
+  describe("search (V04-02)", () => {
+    const cards = uniqueTemplates(library);
+    const labels = { lyonix: "LyOnix Render", creatomate: "Creatomate", orshot: "Orshot" } as const;
+    const groupLabels = { news: "Tin tức", sports: "Thể thao", faceless: "Faceless", breaking_news: "Breaking News" } as const;
+    const textOf = (item: (typeof cards)[number]) => templateSearchText(item, { provider: labels[item.engine], category: item.category ? groupLabels[item.category] : null });
+    const names = (query: string, items = cards) => searchTemplates(items, query, textOf).map((item) => item.name);
+
+    it("normalises case and Vietnamese diacritics, leaves Japanese / Korean untouched", () => {
+      expect(normalizeSearch("  Tin TỨC Đặc biệt ")).toBe("tin tuc dac biet");
+      expect(normalizeSearch("Thể thao")).toBe("the thao");
+      expect(normalizeSearch("ニュース・ガイド")).toBe("ニュース・ガイド");
+      expect(normalizeSearch("뉴스 템플릿")).toBe("뉴스 템플릿");
+    });
+
+    it("finds by name, provider, group (id or label, with or without accents), tag and id - case-insensitive", () => {
+      expect(names("news")).toEqual(["Alert", "News Recap - White Top Caption (JP)", "Breaking News card"]); // group "breaking news" + names
+      expect(names("RECAP")).toEqual(["Player", "News Recap - White Top Caption (JP)"]); // Player: id recipe:sports-recap-player-focus-jp@1
+      expect(names("creatomate")).toEqual(["News Recap - White Top Caption (JP)", "Top 5 countdown"]);
+      expect(names("orshot")).toEqual(["Breaking News card"]);
+      expect(names("lyonix render")).toEqual(["Player", "Alert"]);
+      expect(names("sport")).toEqual(["Player"]);
+      expect(names("the thao")).toEqual(["Player"]);
+      expect(names("Thể Thao")).toEqual(["Player"]);
+      expect(names("lower third")).toEqual(["Player"]); // catalog style tag
+      expect(names("cm-misc")).toEqual(["Top 5 countdown"]); // external id
+      expect(names("zzz")).toEqual([]);
+    });
+
+    it("an empty query keeps everything; several words must all match", () => {
+      expect(names("")).toHaveLength(cards.length);
+      expect(names("   ")).toHaveLength(cards.length);
+      expect(names("creatomate news")).toEqual(["News Recap - White Top Caption (JP)"]);
+    });
+
+    it("combines with the group filter in either order without changing the source list", () => {
+      const sportsThenCreatomate = searchTemplates(filterByCategory(cards, "sports"), "creatomate", textOf);
+      expect(sportsThenCreatomate).toEqual([]);
+      const breaking = filterByCategory(searchTemplates(cards, "news", textOf), "breaking_news").map((item) => item.name);
+      expect(breaking).toEqual(["Alert", "Breaking News card"]);
+      expect(cards).toHaveLength(5);
+    });
   });
 
   it("filters by group without touching the list, and counts one card per template", () => {

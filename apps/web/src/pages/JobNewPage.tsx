@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
@@ -6,6 +6,7 @@ import { Button, Field, Select, TextArea } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
 import { CategoryChips, TemplateCard } from "../components/TemplateCard";
+import { TemplateSearch, TemplateSearchEmpty } from "../components/TemplateSearch";
 import { Modal } from "../components/Modal";
 import { mergeTemplateEntries, type TemplateEntry } from "../studio/template-gallery";
 import {
@@ -13,6 +14,8 @@ import {
   accountForTemplate,
   categoryCounts,
   filterByCategory,
+  searchTemplates,
+  templateSearchText,
   templateSelectionState,
   toLibraryTemplates,
   uniqueTemplates,
@@ -81,6 +84,8 @@ export function JobNewPage() {
   const [libraryFailed, setLibraryFailed] = useState<string[]>([]);
   /** Group filter of the library - display only, never saved, never changes the selection. */
   const [category, setCategory] = useState<CategoryFilter>("all");
+  /** V04-02: template search - display only (client-side on the loaded list), never saved, never changes the selection. */
+  const [templateQuery, setTemplateQuery] = useState("");
   /** "Chọn template này" on a template several accounts list, without a current / default one among them: the user picks the account. */
   const [accountChoice, setAccountChoice] = useState<{ template: PreviewableTemplate; accountIds: string[] } | null>(null);
 
@@ -117,9 +122,21 @@ export function JobNewPage() {
   const renderProvider = renderAccounts.find((account) => account.id === form.renderAccountId)?.provider;
   const isOrshotRender = isTemplateOnlyRenderProvider(renderProvider);
   const library = useMemo(() => toLibraryTemplates(libraryEntries), [libraryEntries]);
-  const counts = useMemo(() => categoryCounts(uniqueTemplates(library)), [library]);
+  const cards = useMemo(() => uniqueTemplates(library), [library]);
+  const searchTextOf = useCallback(
+    (tpl: (typeof cards)[number]) => templateSearchText(tpl, { provider: t(`templates.library.engineBadge.${tpl.engine}`), category: tpl.category ? t(`templates.library.category.${tpl.category}`) : null }),
+    [t],
+  );
+  // V04-02: search and group filter combine (neither resets the other); the group counts follow the current search.
+  const searched = useMemo(() => searchTemplates(cards, templateQuery, searchTextOf), [cards, templateQuery, searchTextOf]);
+  const counts = useMemo(() => categoryCounts(searched), [searched]);
   // V04-XX / V04-01: the cards (one per template) and the preview browse the filtered list; previewing never selects.
-  const previewTemplates = useMemo(() => uniqueTemplates(filterByCategory(library, category)), [library, category]);
+  const previewTemplates = useMemo(() => filterByCategory(searched, category), [searched, category]);
+  const templateSummary = templateQuery.trim()
+    ? t("templates.search.resultsFor", { query: templateQuery.trim(), count: previewTemplates.length })
+    : category === "all"
+      ? t("templates.search.count", { count: cards.length })
+      : t("templates.search.countOf", { shown: previewTemplates.length, total: cards.length });
   // V04-01: the chosen template against the chosen render account - Auto is blocked unless it is compatible AND ready to render.
   const templateState = templateSelectionState(library, form.templateId, form.renderAccountId);
   const renderAccountKey = renderAccounts.map((account) => account.id).join(",");
@@ -685,6 +702,7 @@ export function JobNewPage() {
                   {/* VE2E-13 / V04-XX / V04-01: the library of every render account, filtered by group. A card only opens the 9:16
                       preview; only "Chọn template này" in the preview applies a template (and its render account). */}
                   <div className="flex flex-col gap-2.5">
+                    {cards.length > 0 ? <TemplateSearch value={templateQuery} onChange={setTemplateQuery} summary={templateSummary} /> : null}
                     <CategoryChips filters={CATEGORY_FILTERS} value={category} counts={counts} onChange={setCategory} label={t("templates.library.categoryFilter")} />
                     {templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? (
                       <p className="text-[12px] text-lyx-fg-muted" data-testid="template-selected-line">{t("templates.library.selectedLine", { name: templateState.template.name })}</p>
@@ -696,8 +714,14 @@ export function JobNewPage() {
                       <Banner variant="warn"><span data-testid="template-not-ready-warning">{t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${templateState.reason}`) })}</span></Banner>
                     ) : null}
                     {libraryFailed.length > 0 ? <p className="text-[11.5px] text-lyx-danger">{t("templates.library.loadPartial", { names: libraryFailed.join(", ") })}</p> : null}
-                    {previewTemplates.length === 0 && library.length > 0 ? <p className="text-[12px] text-lyx-fg-muted">{t("templates.library.emptyCategory")}</p> : null}
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {previewTemplates.length === 0 && cards.length > 0 ? (
+                      templateQuery.trim() ? (
+                        <TemplateSearchEmpty onClearSearch={() => setTemplateQuery("")} onClearAll={category !== "all" ? () => { setTemplateQuery(""); setCategory("all"); } : undefined} />
+                      ) : (
+                        <p className="text-[12px] text-lyx-fg-muted">{t("templates.library.emptyCategory")}</p>
+                      )
+                    ) : null}
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4">
                       {previewTemplates.map((tpl, index) => (
                         <TemplateCard key={tpl.key} template={tpl} selected={form.templateId === tpl.externalTemplateId} onPreview={() => setPreviewIndex(index)} />
                       ))}

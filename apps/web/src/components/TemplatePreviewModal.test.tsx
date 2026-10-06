@@ -9,6 +9,8 @@ vi.mock("../studio/timeline-api", () => api);
 
 const { TemplatePreviewModal, TemplateThumb } = await import("./TemplatePreviewModal");
 const { TemplateCard, CategoryChips } = await import("./TemplateCard");
+const { TemplateSearch, TemplateSearchEmpty } = await import("./TemplateSearch");
+const { ProviderBadge } = await import("./ProviderBadge");
 const { RecipePreview } = await import("./RecipePreview");
 const { locales } = await import("../i18n/locales");
 
@@ -61,10 +63,11 @@ describe("TemplatePreviewModal (V04-XX, V04-01)", () => {
 
   it("keeps the render engine and the preview source apart: a Creatomate picture is the provider's image, a LyOnix one never claims a provider render", () => {
     const creatomate = html(0);
-    expect(creatomate).toMatch(/data-testid="engine-badge"[^>]*>Creatomate/);
+    expect(creatomate).toMatch(/data-testid="engine-badge" data-provider="creatomate"/);
+    expect(creatomate).toContain(">Creatomate</span>");
     expect(creatomate).toMatch(/data-testid="template-preview-source"[^>]*>Ảnh preview của Creatomate</);
     const lyonix = html(1);
-    expect(lyonix).toMatch(/data-testid="engine-badge"[^>]*>LyOnix Render/);
+    expect(lyonix).toMatch(/data-testid="engine-badge" data-provider="lyonix"/);
     expect(lyonix).not.toContain("Ảnh preview của Creatomate");
   });
 
@@ -102,10 +105,14 @@ describe("TemplatePreviewModal (V04-XX, V04-01)", () => {
     expect(html(0, { selectLabel: "Dùng template" })).toContain("Dùng template");
   });
 
-  it("card thumbnails use the same source: image, recipe simulation, or a label", () => {
-    expect(renderToStaticMarkup(<TemplateThumb template={templates[0]!} fallbackLabel="Xem trước" />)).toContain("<img");
-    expect(renderToStaticMarkup(<TemplateThumb template={templates[1]!} fallbackLabel="Xem trước" />)).toContain('data-testid="recipe-preview"');
-    expect(renderToStaticMarkup(<TemplateThumb template={templates[2]!} fallbackLabel="Xem trước" />)).toBe("<span>Xem trước</span>");
+  it("card thumbnails: provider image, recipe simulation, else a styled fallback (never a broken image)", () => {
+    expect(wrap(<TemplateThumb template={templates[0]!} />)).toContain('data-testid="template-thumb-image"');
+    expect(wrap(<TemplateThumb template={templates[1]!} />)).toContain('data-testid="recipe-preview"');
+    const fallback = wrap(<TemplateThumb template={templates[2]!} />);
+    expect(fallback).toContain('data-testid="template-fallback-thumb"');
+    expect(fallback).not.toContain("<img");
+    expect(fallback).toContain("Orshot không ảnh");
+    expect(fallback).toContain("9:16");
   });
 });
 
@@ -124,7 +131,8 @@ describe("TemplateCard (V04-01)", () => {
     const out = card(1);
     expect(out).toContain(recipe.name);
     expect(out).toContain("Tin tức · 9:16");
-    expect(out).toMatch(/data-testid="engine-badge"[^>]*>LyOnix Render/);
+    expect(out).toMatch(/data-testid="engine-badge" data-provider="lyonix"/);
+    expect(out).toContain(">LyOnix Render</span>");
     expect(card(3)).toContain("Thể thao · 9:16");
     expect(card(2)).toContain("Chưa phân nhóm · 9:16");
   });
@@ -187,13 +195,58 @@ describe("RecipePreview (V04-XX, V04-01)", () => {
   });
 });
 
+describe("template search and provider identity (V04-02)", () => {
+  it("search box: accessible label, placeholder, magnifier; the clear button only appears with text and has an aria-label", () => {
+    const empty = wrap(<TemplateSearch value="" onChange={() => undefined} />);
+    expect(empty).toMatch(/<label for="[^"]+" class="sr-only">Tìm template<\/label>/);
+    expect(empty).toContain('placeholder="Tìm template theo tên, loại hoặc nhà cung cấp..."');
+    expect(empty).toContain('type="search"');
+    expect(empty).not.toContain('data-testid="template-search-clear"');
+    const typed = wrap(<TemplateSearch value="news" onChange={() => undefined} summary="Kết quả cho “news” · 3 template" />);
+    expect(typed).toMatch(/aria-label="Xoá nội dung tìm kiếm"[^>]*data-testid="template-search-clear"/);
+    expect(typed).toMatch(/role="status"[^>]*>Kết quả cho “news” · 3 template</);
+  });
+
+  it("empty state: title, hint and 'Xóa tìm kiếm'; 'Xóa bộ lọc' only when a group filter is also on", () => {
+    const searchOnly = wrap(<TemplateSearchEmpty onClearSearch={() => undefined} />);
+    for (const text of ["Không tìm thấy template", "Thử tên khác hoặc xoá bộ lọc tìm kiếm.", "Xóa tìm kiếm"]) expect(searchOnly).toContain(text);
+    expect(searchOnly).not.toContain("Xóa bộ lọc");
+    expect(wrap(<TemplateSearchEmpty onClearSearch={() => undefined} onClearAll={() => undefined} />)).toContain("Xóa bộ lọc");
+  });
+
+  it("provider badge: mark + name for LyOnix Render / Creatomate / Orshot, no external logo URL", () => {
+    for (const [engine, name] of [["lyonix", "LyOnix Render"], ["creatomate", "Creatomate"], ["orshot", "Orshot"]] as const) {
+      for (const variant of ["inline", "overlay"] as const) {
+        const out = wrap(<ProviderBadge engine={engine} variant={variant} />);
+        expect(out, `${engine}/${variant}`).toContain(`data-provider="${engine}"`);
+        expect(out).toContain(`data-provider-mark="${engine}"`);
+        expect(out).toContain(`>${name}</span>`);
+        expect(out).not.toMatch(/<img|(src|href)="https?:/); // inline marks only (the SVG xmlns is not a request)
+      }
+    }
+  });
+
+  it("card: provider mark on the picture, provider badge in the details, readiness below the picture, fallback picture without image", () => {
+    const creatomate = wrap(<TemplateCard template={templates[0]!} selected={false} onPreview={() => undefined} />);
+    expect(creatomate).toMatch(/data-testid="template-card-provider-mark"[^>]*><span aria-hidden="true"[^>]*data-provider-mark="creatomate"/);
+    expect(creatomate).toContain('data-testid="template-thumb-image"');
+    expect(creatomate).toMatch(/aria-label="Xem trước: Tin tức A · Creatomate"/);
+    const orshot = wrap(<TemplateCard template={templates[2]!} selected={false} onPreview={() => undefined} />);
+    expect(orshot).toContain('data-testid="template-fallback-thumb"');
+    expect(orshot).toContain('data-provider-mark="orshot"');
+    expect(orshot).not.toContain("<img");
+    const notReady = wrap(<TemplateCard template={templates[3]!} selected={false} onPreview={() => undefined} />);
+    expect(notReady.indexOf('data-testid="template-not-ready"')).toBeGreaterThan(notReady.indexOf("</button>")); // not over the picture
+  });
+});
+
 describe("template preview translations (V04-XX, V04-01)", () => {
   const flatten = (value: unknown, prefix = ""): Record<string, string> =>
     typeof value === "string" ? { [prefix]: value } : Object.assign({}, ...Object.entries(value as Record<string, unknown>).map(([key, child]) => flatten(child, prefix ? `${prefix}.${key}` : key)));
 
   it("has every preview / library key in vi/en/ja/ko with the same placeholders", () => {
     const vi = flatten(locales.vi.templates);
-    const keys = Object.keys(vi).filter((key) => key.startsWith("preview") || key === "choose" || key.startsWith("library."));
+    const keys = Object.keys(vi).filter((key) => key.startsWith("preview") || key === "choose" || key.startsWith("library.") || key.startsWith("search."));
     expect(keys.length).toBeGreaterThanOrEqual(60);
     for (const locale of ["vi", "en", "ja", "ko"] as const) {
       const strings = flatten(locales[locale].templates);

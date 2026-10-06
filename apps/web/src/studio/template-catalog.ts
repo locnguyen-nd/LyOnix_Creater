@@ -84,6 +84,34 @@ export const categoryCounts = <T extends { category: TemplateCategory | null }>(
 export const filterByCategory = <T extends { category: TemplateCategory | null }>(items: readonly T[], filter: CategoryFilter): T[] =>
   filter === "all" ? [...items] : items.filter((item) => item.category === filter);
 
+/**
+ * V04-02: text normalisation of the template search - lower case, Vietnamese diacritics folded ("Tin tức" ~ "tin tuc", "đ" ~ "d").
+ * Only combining marks of the Latin range (U+0300-U+036F) are dropped, then the text is recomposed (NFC), so kana voicing marks and
+ * Hangul syllables come back unchanged.
+ */
+export const normalizeSearch = (value: string): string =>
+  value.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").normalize("NFC").toLowerCase().trim();
+
+/** Everything a template can be found by: name, provider (id + shown name), group (id + label), tags, style tags, id, account. */
+export function templateSearchText(
+  template: Pick<LibraryTemplate, "name" | "engine" | "category" | "tags" | "externalTemplateId"> & { accountName?: string },
+  labels: { provider: string; category: string | null },
+): string {
+  return normalizeSearch(
+    [template.name, template.engine, labels.provider, template.category?.replace(/_/g, " ") ?? "", labels.category ?? "", ...template.tags, ...templateStyleTags(template), template.externalTemplateId, template.accountName ?? ""].join(" \u0001 "),
+  );
+}
+
+/** Client-side search of the loaded list (no request per keystroke): every term of the query must appear; an empty query keeps all. */
+export function searchTemplates<T>(items: readonly T[], query: string, textOf: (item: T) => string): T[] {
+  const terms = normalizeSearch(query).split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [...items];
+  return items.filter((item) => {
+    const text = textOf(item);
+    return terms.every((term) => text.includes(term));
+  });
+}
+
 /** A library entry for the preview modal / cards: the template, its engine, account and group. */
 export type LibraryTemplate = PreviewableTemplate & { key: string; accountId: string; category: TemplateCategory | null };
 
