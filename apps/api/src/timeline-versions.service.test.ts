@@ -148,6 +148,38 @@ describe("TimelineVersionsService", () => {
       expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
     });
 
+    it("VE2E-93 (17): saves the whole-video caption style keys and a scene override, and reloads them unchanged", async () => {
+      const optionValues = { "dynamicStyle.captionFontId": "noto-sans-jp", "dynamicStyle.captionFontSizePx": "80", "dynamicStyle.captionPosition": "middle", "dynamicStyle.captionMaxLines": "1" };
+      const saved = await service.save(projectId, "user-1", "staff", {
+        supersedesId: null,
+        templateSnapshotId: "template-1",
+        scenes: [{ sceneId: "s1", captionStyleOverride: { fillColor: "#FF0000", strokeEnabled: false } }, { sceneId: "s2" }],
+        optionValues,
+      });
+      expect(saved).toMatchObject({ ok: true, data: { optionValues } });
+      if (!saved.ok) return;
+      // only a scene that has an override stores one (other scenes keep their exact JSON)
+      expect(timelineRows[0].scenes[0].captionStyleOverride).toEqual({ fillColor: "#FF0000", strokeEnabled: false });
+      expect(timelineRows[0].scenes[1]).not.toHaveProperty("captionStyleOverride");
+      const reloaded = await service.get(saved.data.id, "user-1", "staff");
+      expect(reloaded).toMatchObject({ ok: true, data: { optionValues, scenes: [{ sceneId: "s1", captionStyleOverride: { fillColor: "#FF0000", strokeEnabled: false } }, { sceneId: "s2", captionStyleOverride: null }] } });
+    });
+
+    it("VE2E-93: rejects an override with unknown fields or out-of-range values, and new caption keys with invalid values", async () => {
+      for (const captionStyleOverride of [{ background: "#000000" }, { maxLines: 3 }, { fontSizePx: 400 }] as unknown[]) {
+        const outcome = await service.save(projectId, "user-1", "staff", { supersedesId: null, templateSnapshotId: "template-1", scenes: [{ sceneId: "s1", captionStyleOverride } as never] });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      }
+      const badKey = await service.save(projectId, "user-1", "staff", { supersedesId: null, templateSnapshotId: "template-1", scenes: [{ sceneId: "s1" }], optionValues: { "dynamicStyle.captionMaxLines": "3" } });
+      expect(badKey).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    });
+
+    it("VE2E-93 (16): an old timeline (VE2E-26 font/colour, unknown legacy font, no scene override) re-saves without losing anything", async () => {
+      const optionValues = { [DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily]: "Inter Bold", [DYNAMIC_STYLE_OPTION_KEYS.captionFillColor]: "#facc15", [DYNAMIC_STYLE_OPTION_KEYS.imageAnimation]: "none" };
+      const outcome = await service.save(projectId, "user-1", "staff", { supersedesId: null, templateSnapshotId: "template-1", scenes: [{ sceneId: "s1" }], optionValues });
+      expect(outcome).toMatchObject({ ok: true, data: { optionValues, scenes: [{ sceneId: "s1", captionStyleOverride: null }] } });
+    });
+
     it("returns NOT_FOUND for a project outside the caller's grants", async () => {
       grants.forUser = async () => ({ projectIds: [] });
       const outcome = await service.save(projectId, "user-1", "staff", { supersedesId: null, scenes: [{ sceneId: "s1" }] });
@@ -220,6 +252,18 @@ describe("TimelineVersionsService", () => {
       expect(legacy.segments).toEqual([]);
       expect(legacy.workflowRunId).toBeNull();
       expect(legacy.scenes[0]).toMatchObject({ excluded: false, segmentId: null, sourceStartMs: null, sourceDurationMs: null });
+    });
+
+    it("VE2E-93 (20): reads a stored scene override defensively - invalid fields are dropped, nothing throws", () => {
+      const row = toTimelineVersionResponse({
+        id: "t-bad", projectId, version: 1, status: "draft", templateSnapshotId: "template-1",
+        scenes: [
+          { sceneId: "s1", orderIndex: 0, captionStyleOverride: { fillColor: "#ABC", maxLines: 7, evil: "<script>" } },
+          { sceneId: "s2", orderIndex: 1, captionStyleOverride: "garbage" },
+        ],
+        optionValues: {}, supersedesId: null, createdAt: new Date(), approvedAt: null,
+      });
+      expect(row.scenes.map((scene) => scene.captionStyleOverride)).toEqual([{ fillColor: "#AABBCC" }, null]);
     });
 
     it("saves a timeline without segments exactly as before (segments [] and null ranges)", async () => {

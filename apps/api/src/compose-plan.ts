@@ -1,4 +1,4 @@
-import { buildRenderPlan, charTimingsForSegments, type CharacterAlignment, type RenderPlan, type RenderPlanSceneInput } from "@lyonix/domain";
+import { buildRenderPlan, captionStylePatchToOptionValues, charTimingsForSegments, normalizeCaptionTextStylePatch, type CharacterAlignment, type RenderPlan, type RenderPlanSceneInput } from "@lyonix/domain";
 import type { ComposePlan, ComposeScene } from "@lyonix/media-jobs";
 import { resolveRecipeParams, type RenderRecipe } from "@lyonix/render-recipes";
 import { captionOverrideFor, type SceneBindingForMapping } from "./timeline-render-mapping.js";
@@ -64,11 +64,14 @@ export function buildComposePlan(input: BuildComposePlanInput): BuildComposePlan
   if (!built.ok) return { ok: false, code: "NO_RENDERABLE_SCENES", message: built.message };
 
   const rendered = built.plan;
+  const bindingById = new Map(input.scenes.map((scene) => [scene.sceneId, scene]));
   const scenes: ComposeScene[] = [];
   for (const scene of rendered.scenes) {
     const media = input.assets.get(scene.media.mediaAssetVersionId);
     const voice = input.assets.get(scene.voice.audioAssetVersionId);
     if (!media || !voice) return { ok: false, code: "ASSET_MISSING", message: `Cảnh ${scene.sceneId}: không tìm thấy file media/giọng đọc trong kho` };
+    // VE2E-93: a scene's own caption style travels as flat per-scene params (omitted without one, so the plan/job key stay unchanged).
+    const captionStyle = normalizeCaptionTextStylePatch(bindingById.get(scene.sceneId)?.captionStyleOverride);
     scenes.push({
       sceneId: scene.sceneId,
       startFrame: scene.startFrame,
@@ -84,6 +87,7 @@ export function buildComposePlan(input: BuildComposePlanInput): BuildComposePlan
       voice: { relativePath: voice.relativePath, mediaAssetVersionId: scene.voice.audioAssetVersionId, sha256: voice.checksumSha256, durationMs: scene.voice.durationMs },
       text: scene.text,
       captionCues: scene.captionCues.map((cue) => ({ text: cue.text, startMs: cue.startMs, endMs: cue.endMs, ...(cue.charTimings ? { charTimings: cue.charTimings } : {}) })),
+      ...(captionStyle ? { captionParams: captionStylePatchToOptionValues(captionStyle) } : {}),
       effectIn: scene.effectIn,
       effectOut: scene.effectOut,
       transitionIn: scene.transitionIn,

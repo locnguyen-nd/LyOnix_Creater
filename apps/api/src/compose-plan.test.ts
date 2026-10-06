@@ -49,3 +49,21 @@ describe("buildComposePlan captions (V03-03, internal engine)", () => {
     expect(built.renderPlan.scenes[0]!.text).toBe("別のタイトル");
   });
 });
+
+describe("buildComposePlan caption style (VE2E-93)", () => {
+  it("carries a scene's own caption style as flat per-scene params; a scene without one has none (unchanged plan)", () => {
+    const plain = build({});
+    expect(plain.ok && plain.plan.scenes[0]).not.toHaveProperty("captionParams");
+    const styled = build({ captionStyleOverride: { fillColor: "#FF0000", maxLines: 1, position: "top" } });
+    expect(styled.ok && styled.plan.scenes[0]!.captionParams).toEqual({
+      "dynamicStyle.captionFillColor": "#FF0000",
+      "dynamicStyle.captionPosition": "top",
+      "dynamicStyle.captionMaxLines": "1",
+    });
+  });
+
+  it("drops an invalid stored override instead of sending it to the worker", () => {
+    const built = build({ captionStyleOverride: { maxLines: 9 } as never });
+    expect(built.ok && built.plan.scenes[0]).not.toHaveProperty("captionParams");
+  });
+});

@@ -112,5 +112,24 @@ describe("CreatomateTemplatesService", () => {
       const outcome = await service.getSnapshot("missing");
       expect(outcome).toMatchObject({ ok: false, code: "NOT_FOUND" });
     });
+
+    it("VE2E-93: sends the template's caption style defaults - LyOnix from its recipe, Creatomate from its caption element, none for Orshot", async () => {
+      const row = (engine: string, rawTemplate: unknown) => ({ id: "snap-1", externalTemplateId: "x", name: "T", previewUrl: null, modifications: [], capturedAt: new Date(), engine, rolloutPercent: 0, fallbackSnapshotIds: [], rawTemplate });
+      prisma.templateSnapshot.findUnique = async () => row("lyonix", { id: "faceless-story-caption-center-jp", version: 1 });
+      const lyonix = await service.getSnapshot("snap-1");
+      expect(lyonix).toMatchObject({ ok: true, data: { captionStyleDefaults: { fontFamily: "Noto Sans CJK JP", fontSizePx: 76, minFontSizePx: 50, animation: "word_highlight", position: { anchor: "top", percent: 38 }, maxLines: 2 } } });
+
+      prisma.templateSnapshot.findUnique = async () => row("creatomate", { width: 1080, height: 1920, elements: [{ type: "text", name: "Subtitles-1", font_family: "Montserrat", font_size: "5 vmin", fill_color: "#ffee00" }] });
+      const creatomate = await service.getSnapshot("snap-1");
+      expect(creatomate).toMatchObject({ ok: true, data: { captionStyleDefaults: { fontFamily: "Montserrat", fontSizePx: 54, fillColor: "#ffee00", animation: "none" } } });
+
+      prisma.templateSnapshot.findUnique = async () => row("orshot", { modifications: [] });
+      const orshot = await service.getSnapshot("snap-1");
+      expect(orshot.ok && orshot.data).not.toHaveProperty("captionStyleDefaults");
+
+      prisma.templateSnapshot.findUnique = async () => row("lyonix", { id: "no-such-recipe", version: 9 });
+      const unknown = await service.getSnapshot("snap-1");
+      expect(unknown.ok && unknown.data).not.toHaveProperty("captionStyleDefaults");
+    });
   });
 });

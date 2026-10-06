@@ -39,7 +39,17 @@ export type CaptionCueInput = {
   charTimings?: readonly CaptionCharTiming[] | undefined;
   /** `#RRGGBB` colour of this cue's text (overrides the style colour; only meaningful with `highlight: "none"`). */
   color?: string | undefined;
+  /**
+   * VE2E-93: per-cue style (a scene's caption style override) on top of the document options. Each distinct style becomes its own ASS
+   * `Style:` line (`Sub2`, `Sub3`, ...); cues without one use `Sub`, so a document without per-cue styles is unchanged.
+   */
+  style?: CaptionCueStyle | undefined;
 };
+
+/** The style fields a single cue may override (layout-wide settings - canvas, fps, placement, locale - stay document-wide). */
+export type CaptionCueStyle = Partial<
+  Pick<CaptionStyleOptions, "fontName" | "fontSizePx" | "minFontSizePx" | "maxLines" | "bold" | "textColor" | "highlightColor" | "outlineColor" | "outlinePx" | "highlight" | "verticalAnchor" | "marginVPercent">
+>;
 
 export type CaptionStyleOptions = {
   canvas?: { width: number; height: number };
@@ -63,8 +73,11 @@ export type CaptionStyleOptions = {
    * and wrapped inside `widthPx` instead of the safe-zone width. Margins are not used.
    */
   placement?: { x: number; y: number; widthPx: number } | undefined;
-  /** Caption position: bottom edge (default) or top edge `marginVPercent` of the canvas height away from that side. Ignored with `placement`. */
-  verticalAnchor?: "bottom" | "top";
+  /**
+   * Caption position: bottom edge (default) or top edge `marginVPercent` of the canvas height away from that side, or (VE2E-93) centred
+   * vertically on the canvas (`middle`, margin unused). Ignored with `placement`.
+   */
+  verticalAnchor?: "bottom" | "top" | "middle";
   marginVPercent?: number;
 };
 
@@ -389,21 +402,51 @@ function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSi
   return out;
 }
 
+const CUE_STYLE_KEYS = ["fontName", "fontSizePx", "minFontSizePx", "maxLines", "bold", "textColor", "highlightColor", "outlineColor", "outlinePx", "highlight", "verticalAnchor", "marginVPercent"] as const;
+
+const styleKey = (o: ResolvedOptions): string => JSON.stringify(CUE_STYLE_KEYS.map((key) => o[key]));
+
+function styleLine(name: string, o: ResolvedOptions): string {
+  const marginLR = Math.round(o.canvas.width * CAPTION_SAFE_ZONE.side);
+  const marginV = Math.round((o.canvas.height * o.marginVPercent) / 100);
+  // ASS numpad alignment: 2 = bottom centre, 8 = top centre, 5 = middle centre (vertical margin unused)
+  const alignment = o.verticalAnchor === "top" ? 8 : o.verticalAnchor === "middle" ? 5 : 2;
+  const primary = o.highlight === "word" ? o.highlightColor : o.textColor;
+  return `Style: ${name},${o.fontName},${o.fontSizePx},${assColor(primary)},${assColor(o.textColor)},${assColor(o.outlineColor)},&H64000000,${o.bold ? -1 : 0},0,0,0,100,100,0,0,1,${o.outlinePx},0,${alignment},${marginLR},${marginLR},${marginV},1`;
+}
+
 export function buildCaptionAss(cues: readonly CaptionCueInput[], options: CaptionStyleOptions = {}): CaptionAssResult {
-  const o = { ...DEFAULTS, ...options, canvas: options.canvas ?? DEFAULTS.canvas, placement: options.placement } as ResolvedOptions;
+  const base = { ...DEFAULTS, ...options, canvas: options.canvas ?? DEFAULTS.canvas, placement: options.placement } as ResolvedOptions;
   const warnings: string[] = [];
-  const frameMs = 1000 / o.fps;
+  const frameMs = 1000 / base.fps;
   const laidOut: CaptionLaidOutCue[] = [];
   const bodies: string[] = [];
-  const highlight = o.highlight === "word";
+  const cueStyleNames: string[] = [];
+
+  // VE2E-93: one ASS style per distinct cue style; `Sub` (the document options) always comes first.
+  const styles: Array<{ name: string; key: string; o: ResolvedOptions }> = [{ name: "Sub", key: styleKey(base), o: base }];
+  const styleFor = (cue: CaptionCueInput) => {
+    if (!cue.style) return styles[0]!;
+    const defined = Object.fromEntries(Object.entries(cue.style).filter(([, value]) => value !== undefined));
+    const o = { ...base, ...defined } as ResolvedOptions;
+    const key = styleKey(o);
+    let found = styles.find((style) => style.key === key);
+    if (!found) {
+      found = { name: `Sub${styles.length + 1}`, key, o };
+      styles.push(found);
+    }
+    return found;
+  };
 
   const ordered = [...cues].sort((a, b) => a.startMs - b.startMs);
-  const sizes = sizeLadder(o.fontSizePx, Math.min(o.minFontSizePx, o.fontSizePx));
-  const minSize = sizes[sizes.length - 1]!;
 
   ordered.forEach((cue) => {
-    const prepared = prepare(cue, o.locale);
+    const prepared = prepare(cue, base.locale);
     if (!prepared) return;
+    const { name: styleName, o } = styleFor(cue);
+    const highlight = o.highlight === "word";
+    const sizes = sizeLadder(o.fontSizePx, Math.min(o.minFontSizePx, o.fontSizePx));
+    const minSize = sizes[sizes.length - 1]!;
     const { glyphs } = prepared;
     const whole = fit(glyphs, 0, glyphs.length, o, sizes);
     const pages: Array<{ range: Range; size: number; lines: Range[] }> = [];
@@ -420,31 +463,28 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
     pages.forEach((page, index) => {
       const first = glyphs[page.range.s]!;
       const nextFirst = pages[index + 1] ? glyphs[pages[index + 1]!.range.s]! : null;
-      let startMs = snapToFrameMs(index === 0 ? cue.startMs : first.startMs, o.fps);
-      let endMs = snapToFrameMs(nextFirst ? nextFirst.startMs : cue.endMs, o.fps);
+      let startMs = snapToFrameMs(index === 0 ? cue.startMs : first.startMs, base.fps);
+      let endMs = snapToFrameMs(nextFirst ? nextFirst.startMs : cue.endMs, base.fps);
       if (endMs < startMs + frameMs - 0.001) endMs = startMs + frameMs;
       const prev = laidOut[laidOut.length - 1];
       if (prev && prev.endMs > startMs) prev.endMs = Math.max(prev.startMs + frameMs, startMs); // never overlap the previous event
       if (prev && prev.endMs > startMs) startMs = prev.endMs;
       if (endMs < startMs + frameMs - 0.001) endMs = startMs + frameMs;
-      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, o.placement, cue.color);
+      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, base.placement, cue.color);
       const lines = page.lines.map((l) => glyphs.slice(l.s, l.e).map((g) => g.ch).join("").trim());
       laidOut.push({ startMs, endMs, fontSizePx: page.size, lines, timing: prepared.timing, split: pages.length > 1 });
       bodies.push(body);
+      cueStyleNames.push(styleName);
     });
   });
   // end times are written from the final layout: a later cue may have shortened an earlier one
-  const dialogue = laidOut.map((cue, index) => `Dialogue: 0,${formatAssTime(cue.startMs)},${formatAssTime(cue.endMs)},Sub,,0,0,0,,${bodies[index]!}`);
+  const dialogue = laidOut.map((cue, index) => `Dialogue: 0,${formatAssTime(cue.startMs)},${formatAssTime(cue.endMs)},${cueStyleNames[index]!},,0,0,0,,${bodies[index]!}`);
 
-  const marginLR = Math.round(o.canvas.width * CAPTION_SAFE_ZONE.side);
-  const marginV = Math.round((o.canvas.height * o.marginVPercent) / 100);
-  const alignment = o.verticalAnchor === "top" ? 8 : 2;
-  const primary = highlight ? o.highlightColor : o.textColor;
   const ass = [
     "[Script Info]",
     "ScriptType: v4.00+",
-    `PlayResX: ${o.canvas.width}`,
-    `PlayResY: ${o.canvas.height}`,
+    `PlayResX: ${base.canvas.width}`,
+    `PlayResY: ${base.canvas.height}`,
     "WrapStyle: 2",
     "ScaledBorderAndShadow: yes",
     // the render is BT.709 limited range: without this libass would map the colours with BT.601
@@ -452,7 +492,7 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
     "",
     "[V4+ Styles]",
     "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
-    `Style: Sub,${o.fontName},${o.fontSizePx},${assColor(primary)},${assColor(o.textColor)},${assColor(o.outlineColor)},&H64000000,${o.bold ? -1 : 0},0,0,0,100,100,0,0,1,${o.outlinePx},0,${alignment},${marginLR},${marginLR},${marginV},1`,
+    ...styles.map((style) => styleLine(style.name, style.o)),
     "",
     "[Events]",
     "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",

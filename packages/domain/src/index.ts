@@ -281,3 +281,6 @@ export * from "./caption-ass.js";
 export * from "./render-router.js";
 export * from "./subtitle-edit.js";
 export * from "./creation-form.js";
+export * from "./caption-fonts.js";
+export * from "./caption-style-capabilities.js";
+export * from "./caption-style.js";

@@ -28,7 +28,18 @@
  * V03-03: every caption block (timed segment or static block) is then split into consecutive pages of at most 2 lines
  * (`paginateCaptionBlocks`), so a long cue or a whole-scene block never shows 3-4 lines on screen at once.
  */
-import { paginateCaptionBlocks } from "./caption-pages.js";
+import {
+  CAPTION_POSITION_LAYOUT,
+  captionFontById,
+  captionStyleFromOptionValues,
+  DEFAULT_CAPTION_STROKE_WIDTH_PX,
+  isCaptionStyleOptionKey,
+  isValidCaptionStyleOptionValue,
+  normalizeHexColor,
+  type CaptionTemplateDefaults,
+  type CaptionTextStylePatch,
+} from "@lyonix/domain";
+import { creatomateLengthPx, MAX_CAPTION_LINES, paginateCaptionBlocks } from "./caption-pages.js";
 
 export type DynamicCaptionSegment = { text: string; startMs: number; endMs: number };
 
@@ -44,6 +55,8 @@ export type DynamicSceneInput = {
   /** Preview-only source range. Final renders use a prepared derivative instead. */
   sourceStartMs?: number | null;
   sourceDurationMs?: number | null;
+  /** VE2E-93: this scene's caption style override (on top of the whole-video `DynamicSceneStyle.captionStyle`). */
+  captionStyle?: CaptionTextStylePatch | null | undefined;
 };
 
 export type DynamicImageAnimation = { type: string; startScale: string; endScale: string; startX: string; endX: string; easing: string };
@@ -80,6 +93,11 @@ export type DynamicSceneStyle = {
   layoutFallbackReason?: "no_scene_composition" | undefined;
   /** VE2E-52: Studio overrides that must be applied on top of the cloned template layout. */
   layoutOverrides?: { captionFontFamily?: string; captionFillColor?: string; disablePan?: boolean } | undefined;
+  /**
+   * VE2E-93: whole-video caption style fields beyond the VE2E-26 font/fill overrides above (font from the catalog, size, stroke,
+   * position, lines, animation). The fill colour stays on the VE2E-26 path; a scene's own `captionStyle` is applied on top.
+   */
+  captionStyle?: CaptionTextStylePatch | undefined;
 };
 
 export const DEFAULT_DYNAMIC_SCENE_STYLE: DynamicSceneStyle = {
@@ -141,9 +159,7 @@ const IMAGE_NAME_HINT = /image|video|photo|scene|background/i;
  * `DEFAULT_DYNAMIC_SCENE_STYLE` for whichever half is missing (or when no template was
  * pinned at all).
  */
-export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSceneStyle {
-  let text = { ...DEFAULT_DYNAMIC_SCENE_STYLE.text };
-  let image = { ...DEFAULT_DYNAMIC_SCENE_STYLE.image };
+function findStyleSources(rawTemplate: unknown): { textSource: RawNode | undefined; imageSource: RawNode | undefined } {
   let textSource: RawNode | undefined;
   let textNamedMatch = false;
   let imageSource: RawNode | undefined;
@@ -172,6 +188,16 @@ export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSc
     for (const value of Object.values(el)) walk(value);
   };
   walk(rawTemplate);
+  return { textSource, imageSource };
+}
+
+/** VE2E-93: the template element its caption style is lifted from (same choice as `extractDynamicStyleFromTemplate`), if any. */
+export const findTemplateCaptionNode = (rawTemplate: unknown): RawNode | undefined => findStyleSources(rawTemplate).textSource;
+
+export function extractDynamicStyleFromTemplate(rawTemplate: unknown): DynamicSceneStyle {
+  let text = { ...DEFAULT_DYNAMIC_SCENE_STYLE.text };
+  let image = { ...DEFAULT_DYNAMIC_SCENE_STYLE.image };
+  const { textSource, imageSource } = findStyleSources(rawTemplate);
 
   if (textSource) {
     const el = textSource;
@@ -243,7 +269,53 @@ export type TemplateSceneLayout = {
   staticTextSeries: Record<string, "desc" | "asc" | "varying">;
 };
 
-export type TemplateScaleWarning = "template_layout_fallback" | "rank_badges_renumbered" | "static_text_not_scalable" | "no_caption_element";
+/** `caption_highlight_unsupported` (VE2E-93): the caption style asks for the word highlight, which this pipeline never draws on Creatomate. */
+export type TemplateScaleWarning = "template_layout_fallback" | "rank_badges_renumbered" | "static_text_not_scalable" | "no_caption_element" | "caption_highlight_unsupported";
+
+// --- VE2E-93: caption style -> Creatomate text element properties -------------------------------------------------------
+
+/** Canonical pixels are on the 1080-wide reference canvas; `vmin` keeps the same proportion on any 9:16 template resolution. */
+const pxToVmin = (px: number): string => `${Math.round((px * 100_000) / 1080) / 1000} vmin`;
+
+/** Where each position preset puts the caption box (`y` = anchor point, `y_anchor` = which edge, `y_alignment` = text inside the box). */
+const CREATOMATE_POSITION: Record<NonNullable<CaptionTextStylePatch["position"]>, { y: string; y_anchor: string; y_alignment: string }> = {
+  top: { y: `${CAPTION_POSITION_LAYOUT.top.percent}%`, y_anchor: "0%", y_alignment: "0%" },
+  middle: { y: `${CAPTION_POSITION_LAYOUT.middle.percent}%`, y_anchor: "50%", y_alignment: "50%" },
+  bottom: { y: `${100 - CAPTION_POSITION_LAYOUT.bottom.percent}%`, y_anchor: "100%", y_alignment: "100%" },
+};
+
+/** Effective caption patch of one scene: whole video, then the scene's own fields. */
+const scenePatch = (style: DynamicSceneStyle, scene: DynamicSceneInput): CaptionTextStylePatch => ({ ...(style.captionStyle ?? {}), ...(scene.captionStyle ?? {}) });
+
+/** Font size the page layout must use: the style's (if set) else the element's own. */
+const captionFontSize = (patch: CaptionTextStylePatch, fallback: string): string => (patch.fontSizePx !== undefined ? pxToVmin(patch.fontSizePx) : fallback);
+const captionMaxLines = (patch: CaptionTextStylePatch): 1 | 2 => (patch.maxLines === 1 ? 1 : MAX_CAPTION_LINES);
+
+/**
+ * Writes a caption style patch onto one caption text node (after the VE2E-26 font/fill overrides). Fields the patch does not set keep the
+ * template's own values. Stroke widths are doubled: a Creatomate stroke is centred on the glyph outline, the canonical width (ASS outline)
+ * is what shows outside the glyph.
+ */
+function applyCaptionPatch(node: RawNode, patch: CaptionTextStylePatch): void {
+  const font = captionFontById(patch.fontId);
+  if (font) node.font_family = font.families.creatomate;
+  if (patch.fontSizePx !== undefined) node.font_size = pxToVmin(patch.fontSizePx);
+  if (patch.fillColor !== undefined) node.fill_color = patch.fillColor;
+  if (patch.strokeEnabled === false) {
+    delete node.stroke_color;
+    delete node.stroke_width;
+  } else {
+    if (patch.strokeColor !== undefined) node.stroke_color = patch.strokeColor;
+    if (patch.strokeWidthPx !== undefined) node.stroke_width = pxToVmin(patch.strokeWidthPx * 2);
+    if (patch.strokeEnabled === true) {
+      if (node.stroke_color === undefined) node.stroke_color = "#000000";
+      if (node.stroke_width === undefined) node.stroke_width = pxToVmin(DEFAULT_CAPTION_STROKE_WIDTH_PX * 2);
+    }
+  }
+  if (patch.position !== undefined) Object.assign(node, CREATOMATE_POSITION[patch.position]);
+}
+
+const asksForHighlight = (patch: CaptionTextStylePatch): boolean => patch.animation === "word_highlight";
 
 const isNode = (value: unknown): value is RawNode => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const typeOf = (el: RawNode): string => (typeof el.type === "string" ? el.type.toLowerCase() : "");
@@ -473,8 +545,11 @@ function buildTemplateScaledComposition(
         }
         children.push(kid);
       } else if (kidIndex === caption) {
-        // V03-03: at most 2 lines on screen - pages sized to THIS element's own font size and box width.
-        paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: asString(kid.font_size) ?? style.text.fontSize, width: asString(kid.width) ?? style.text.width }, canvas).forEach((block, blockIndex) => {
+        // V03-03: at most 2 lines on screen - pages sized to THIS element's own font size and box width (VE2E-93: or the style's).
+        const patch = scenePatch(style, scene);
+        if (asksForHighlight(patch)) warnings.add("caption_highlight_unsupported");
+        const box = { fontSize: captionFontSize(patch, asString(kid.font_size) ?? style.text.fontSize), width: asString(kid.width) ?? style.text.width, maxLines: captionMaxLines(patch) };
+        paginateCaptionBlocks(captionBlocks(scene, durationSeconds), box, canvas).forEach((block, blockIndex) => {
           if (!block.text.trim()) return;
           const node = clone(kid);
           const base = renameForScene(nameOf(rawKid), n, "Subtitles");
@@ -484,6 +559,7 @@ function buildTemplateScaledComposition(
           node.duration = block.duration;
           if (overrides.captionFontFamily) node.font_family = overrides.captionFontFamily;
           if (overrides.captionFillColor) node.fill_color = overrides.captionFillColor;
+          applyCaptionPatch(node, patch);
           children.push(node);
         });
       } else if (kidIndex === voice) {
@@ -529,14 +605,19 @@ function buildTemplateScaledComposition(
     }
     if (caption < 0) {
       warnings.add("no_caption_element");
-      paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: style.text.fontSize, width: style.text.width }, canvas).forEach((block, blockIndex) => {
+      const patch = scenePatch(style, scene);
+      if (asksForHighlight(patch)) warnings.add("caption_highlight_unsupported");
+      const box = { fontSize: captionFontSize(patch, style.text.fontSize), width: style.text.width, maxLines: captionMaxLines(patch) };
+      paginateCaptionBlocks(captionBlocks(scene, durationSeconds), box, canvas).forEach((block, blockIndex) => {
         if (!block.text.trim()) return;
-        children.push({
+        const node: RawNode = {
           name: blockIndex === 0 ? `Subtitles-${n}` : `Subtitles-${n}-${blockIndex + 1}`, type: "text", track: usedTrackMax + 1, time: block.time, duration: block.duration, text: block.text,
           font_family: overrides.captionFontFamily ?? style.text.fontFamily, font_size: style.text.fontSize, font_weight: style.text.fontWeight,
           fill_color: overrides.captionFillColor ?? style.text.fillColor, stroke_color: style.text.strokeColor, stroke_width: style.text.strokeWidth,
           x_alignment: style.text.xAlignment, y_alignment: style.text.yAlignment, width: style.text.width, height: style.text.height,
-        });
+        };
+        applyCaptionPatch(node, patch);
+        children.push(node);
       });
     }
 
@@ -587,7 +668,9 @@ export function buildDynamicCompositionWithWarnings(
   options: { width: number; height: number; outputFormat?: "mp4" | "mov" | "gif" | undefined },
 ): DynamicCompositionResult {
   if (style.layout) return buildTemplateScaledComposition(scenes, style, style.layout, options);
-  return { source: buildStyleOnlyComposition(scenes, style, options), warnings: style.layoutFallbackReason ? ["template_layout_fallback"] : [] };
+  const warnings: TemplateScaleWarning[] = style.layoutFallbackReason ? ["template_layout_fallback"] : [];
+  if (scenes.some((scene) => asksForHighlight(scenePatch(style, scene)))) warnings.push("caption_highlight_unsupported");
+  return { source: buildStyleOnlyComposition(scenes, style, options), warnings };
 }
 
 export function buildDynamicComposition(
@@ -646,7 +729,9 @@ function buildStyleOnlyComposition(
         : {}),
     };
 
-    const captionNode = (text: string, nodeTime: number, nodeDuration: number): RawNode => ({
+    const patch = scenePatch(style, scene);
+    const captionNode = (text: string, nodeTime: number, nodeDuration: number): RawNode => {
+      const node: RawNode = {
       type: "text",
       track: 2,
       time: nodeTime,
@@ -666,14 +751,18 @@ function buildStyleOnlyComposition(
       ...(style.text.backgroundXPadding ? { background_x_padding: style.text.backgroundXPadding } : {}),
       ...(style.text.backgroundYPadding ? { background_y_padding: style.text.backgroundYPadding } : {}),
       ...(style.text.backgroundBorderRadius ? { background_border_radius: style.text.backgroundBorderRadius } : {}),
-    });
+      };
+      applyCaptionPatch(node, patch);
+      return node;
+    };
 
     // VE2E-32: real voice-timed segments (when given) become one text node each, clamped inside
     // this scene's own real audio duration (defends only against float/drift edge cases - both
     // come from the same underlying narration synthesis, so they should already agree); a scene
     // with no usable segments keeps the prior single-static-block behavior unchanged.
     // V03-03: every block is then split into pages of at most 2 lines (never 3-4 lines on screen at once).
-    const captions: RawNode[] = paginateCaptionBlocks(captionBlocks(scene, durationSeconds), { fontSize: style.text.fontSize, width: style.text.width }, { width: options.width, height: options.height })
+    const box = { fontSize: captionFontSize(patch, style.text.fontSize), width: style.text.width, maxLines: captionMaxLines(patch) };
+    const captions: RawNode[] = paginateCaptionBlocks(captionBlocks(scene, durationSeconds), box, { width: options.width, height: options.height })
       .map((block) => captionNode(block.text, block.time, block.duration));
 
     const audio: RawNode = {
@@ -704,9 +793,6 @@ function buildStyleOnlyComposition(
 
 // --- VE2E-26: schema-backed, server-validated Studio overrides on top of the template-derived style ---
 
-const OVERRIDE_FONT_RE = /^[A-Za-z0-9 _-]+$/;
-const OVERRIDE_MAX_FONT_LENGTH = 60;
-const OVERRIDE_HEX_COLOR_RE = /^#[0-9a-fA-F]{3}$|^#[0-9a-fA-F]{4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
 const IMAGE_ANIMATION_OPTION_VALUES = new Set(["pan", "none"]);
 
 /**
@@ -719,6 +805,9 @@ const IMAGE_ANIMATION_OPTION_VALUES = new Set(["pan", "none"]);
  * with a real Creatomate modification key (those always look like `<ElementName>.<property>`,
  * never literally start with `dynamicStyle`) — so the override inherits that same
  * version/`supersedesId` audit trail for free, no new persistence needed.
+ *
+ * VE2E-93: the caption keys (`dynamicStyle.caption*`, incl. the two below) are owned by `@lyonix/domain/caption-style`; this map keeps
+ * the original three names for existing callers.
  */
 export const DYNAMIC_STYLE_OPTION_KEYS = {
   captionFontFamily: "dynamicStyle.captionFontFamily",
@@ -726,10 +815,8 @@ export const DYNAMIC_STYLE_OPTION_KEYS = {
   imageAnimation: "dynamicStyle.imageAnimation",
 } as const;
 
-const DYNAMIC_STYLE_OPTION_KEY_SET: ReadonlySet<string> = new Set(Object.values(DYNAMIC_STYLE_OPTION_KEYS));
-
 export function isDynamicStyleOptionKey(key: string): boolean {
-  return DYNAMIC_STYLE_OPTION_KEY_SET.has(key);
+  return key === DYNAMIC_STYLE_OPTION_KEYS.imageAnimation || isCaptionStyleOptionKey(key);
 }
 
 /**
@@ -738,14 +825,11 @@ export function isDynamicStyleOptionKey(key: string): boolean {
  * invalid value can never be persisted in the first place. An empty string is always valid
  * for any of these keys — it is Studio's explicit "use the template's own default" choice
  * (see the Inspector's "use template default" option), not a malformed value; `applyDynamicStyleOverrides`
- * already treats it as absent.
+ * already treats it as absent. The VE2E-26 font/fill rules are unchanged (domain `isValidCaptionStyleOptionValue`).
  */
 export function isValidDynamicStyleOptionValue(key: string, value: string): boolean {
-  if (value === "") return isDynamicStyleOptionKey(key);
-  if (key === DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily) return value.trim().length > 0 && value.length <= OVERRIDE_MAX_FONT_LENGTH && OVERRIDE_FONT_RE.test(value);
-  if (key === DYNAMIC_STYLE_OPTION_KEYS.captionFillColor) return OVERRIDE_HEX_COLOR_RE.test(value);
-  if (key === DYNAMIC_STYLE_OPTION_KEYS.imageAnimation) return IMAGE_ANIMATION_OPTION_VALUES.has(value);
-  return false;
+  if (key === DYNAMIC_STYLE_OPTION_KEYS.imageAnimation) return value === "" || IMAGE_ANIMATION_OPTION_VALUES.has(value);
+  return isCaptionStyleOptionKey(key) && isValidCaptionStyleOptionValue(key, value);
 }
 
 /**
@@ -754,28 +838,79 @@ export function isValidDynamicStyleOptionValue(key: string, value: string): bool
  * "Preserve template defaults for any field the user doesn't explicitly override". An
  * already-invalid stored value (should not happen given save-time validation, but defense in
  * depth) is treated the same as absent rather than applied.
+ *
+ * VE2E-93: the other caption style keys become `captionStyle`, written onto every caption element (a scene's own `captionStyle` on
+ * top); the fill colour keeps the VE2E-26 path so a stored colour behaves exactly as before.
  */
 export function applyDynamicStyleOverrides(base: DynamicSceneStyle, optionValues: Record<string, string>): DynamicSceneStyle {
   const fontFamily = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily];
   const fillColor = optionValues[DYNAMIC_STYLE_OPTION_KEYS.captionFillColor];
   const imageAnimation = optionValues[DYNAMIC_STYLE_OPTION_KEYS.imageAnimation];
+  const validFont = Boolean(fontFamily) && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily!);
+  const validFill = Boolean(fillColor) && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFillColor, fillColor!);
   const layoutOverrides: NonNullable<DynamicSceneStyle["layoutOverrides"]> = {
-    ...(fontFamily && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily) ? { captionFontFamily: fontFamily } : {}),
-    ...(fillColor && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFillColor, fillColor) ? { captionFillColor: fillColor } : {}),
+    ...(validFont ? { captionFontFamily: fontFamily! } : {}),
+    ...(validFill ? { captionFillColor: fillColor! } : {}),
     ...(imageAnimation === "none" ? { disablePan: true } : {}),
   };
+  const { fillColor: _fill, ...captionStyle } = captionStyleFromOptionValues(optionValues).patch;
   return {
     ...(base.layout ? { layout: base.layout } : {}),
     ...(base.layoutFallbackReason ? { layoutFallbackReason: base.layoutFallbackReason } : {}),
     ...(Object.keys(layoutOverrides).length ? { layoutOverrides } : {}),
+    ...(Object.keys(captionStyle).length ? { captionStyle } : {}),
     text: {
       ...base.text,
-      ...(fontFamily && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFontFamily, fontFamily) ? { fontFamily } : {}),
-      ...(fillColor && isValidDynamicStyleOptionValue(DYNAMIC_STYLE_OPTION_KEYS.captionFillColor, fillColor) ? { fillColor } : {}),
+      ...(validFont ? { fontFamily: fontFamily! } : {}),
+      ...(validFill ? { fillColor: fillColor! } : {}),
     },
     image: {
       ...base.image,
       ...(imageAnimation === "none" ? { animation: undefined } : {}),
     },
+  };
+}
+
+// --- VE2E-93: the template's own caption style, in canonical units (Studio panel + preview) ----------------------------
+
+const parsePercent = (value: string | undefined): number | null => {
+  const match = value?.trim().match(/^(-?\d+(?:\.\d+)?)\s*%$/);
+  return match ? Number(match[1]) : null;
+};
+
+/**
+ * Caption defaults of a Creatomate template for Studio: the same caption element `extractDynamicStyleFromTemplate` lifts its style from,
+ * converted to pixels on the 1080-wide reference canvas. Approximate where Creatomate has no equivalent (colours that are not plain hex
+ * fall back to white/black; the vertical position is the element's centre line) - the Creatomate Preview SDK stays the exact view.
+ */
+export function captionDefaultsFromCreatomateTemplate(rawTemplate: unknown): CaptionTemplateDefaults {
+  const style = extractDynamicStyleFromTemplate(rawTemplate);
+  const canvas = templateResolution(rawTemplate) ?? { width: 1080, height: 1920 };
+  const scale = 1080 / Math.min(canvas.width, canvas.height);
+  const px = (value: string | undefined): number | null => {
+    const measured = creatomateLengthPx(value, canvas, null);
+    return measured === null ? null : measured * scale;
+  };
+  const fontSizePx = Math.round(px(style.text.fontSize) ?? 86);
+  // A template-scaled render clones the caption element as it is (an absent property = Creatomate's default, e.g. no stroke, no y);
+  // the style-only render draws a new element from the lifted style (no y = the composition's centre).
+  const node = style.layout ? findTemplateCaptionNode(rawTemplate) : undefined;
+  const strokeOutside = Math.round((px(style.layout ? asString(node?.stroke_width) : style.text.strokeWidth) ?? 0) / 2);
+  const centre = parsePercent(asString(node?.y)) ?? 50;
+  const alignment = parsePercent(style.layout ? asString(node?.y_alignment) : style.text.yAlignment);
+  const height = parsePercent(style.layout ? asString(node?.height) : style.text.height);
+  const centreLine = alignment !== null && height !== null ? centre + ((alignment - 50) / 100) * height : centre;
+  return {
+    fontFamily: style.text.fontFamily,
+    fontSizePx,
+    minFontSizePx: fontSizePx,
+    bold: Number(style.text.fontWeight) >= 600,
+    fillColor: normalizeHexColor(style.text.fillColor) ?? "#FFFFFF",
+    highlightColor: null,
+    stroke: { enabled: strokeOutside > 0, color: normalizeHexColor(style.text.strokeColor) ?? "#000000", widthPx: strokeOutside > 0 ? strokeOutside : DEFAULT_CAPTION_STROKE_WIDTH_PX },
+    position: { anchor: "center", percent: Math.min(100, Math.max(0, Math.round(centreLine * 10) / 10)) },
+    maxLines: MAX_CAPTION_LINES,
+    animation: "none",
+    colorCycle: null,
   };
 }

@@ -898,6 +898,23 @@ describe("RenderJobsService", () => {
       expect(submittedBody.source.elements[0].elements[1].font_family).toBe("Noto Sans");
     });
 
+    it("VE2E-93 (21): the whole-video caption style and a scene's own override both reach the submitted composition", async () => {
+      timelineRows.set(timelineVersionId, {
+        id: timelineVersionId,
+        projectId,
+        status: "approved",
+        templateSnapshotId,
+        scenes: [sceneRow({ sceneId: "s1", captionStyleOverride: { fillColor: "#FF0000", position: "top" } })],
+        optionValues: { "dynamicStyle.captionFontId": "noto-sans-jp", "dynamicStyle.captionFontSizePx": "54" },
+      });
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify([{ id: "rnd_1", status: "planned" }]), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submitDynamicFromTimeline(projectId, timelineVersionId, "user-1", "staff", { providerAccountId });
+      expect(outcome.ok).toBe(true);
+      const caption = JSON.parse(String((fetchMock.mock.calls[0] as any)[1].body)).source.elements[0].elements[1];
+      expect(caption).toMatchObject({ font_family: "Noto Sans JP", font_size: "5 vmin", fill_color: "#FF0000", y: "10%", y_anchor: "0%" });
+    });
+
     it("VE2E-26: an identical resubmit after only changing the style override is not deduped as the same fingerprint (style-only change is a real new render)", async () => {
       timelineRows.set(timelineVersionId, {
         id: timelineVersionId,

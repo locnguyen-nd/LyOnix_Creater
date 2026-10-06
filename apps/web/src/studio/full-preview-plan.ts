@@ -52,9 +52,9 @@ const captionStyle = (recipe: RenderRecipe): CaptionStyleOptions => ({
 });
 
 /** Caption pages of ONE scene exactly as the render lays them out (shared `buildCaptionAss`); a scene without caption has none. */
-export function layoutSceneCaption(caption: string, durationMs: number, recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1): PreviewCaptionPage[] {
+export function layoutSceneCaption(caption: string, durationMs: number, recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1, options?: CaptionStyleOptions): PreviewCaptionPage[] {
   if (!caption.trim() || durationMs <= 0) return [];
-  const { cues } = buildCaptionAss([{ text: caption, startMs: 0, endMs: durationMs }], captionStyle(recipe));
+  const { cues } = buildCaptionAss([{ text: caption, startMs: 0, endMs: durationMs }], options ? { ...options, fps: PREVIEW_FPS } : captionStyle(recipe));
   return cues.map((cue) => ({ startMs: cue.startMs, endMs: cue.endMs, lines: cue.lines, fontSizePx: cue.fontSizePx, split: cue.split }));
 }
 
@@ -62,13 +62,13 @@ export function layoutSceneCaption(caption: string, durationMs: number, recipe: 
  * V03-03: caption pages of ONE scene from its voice-timed cues (what the render burns in when the scene has them), laid out by the
  * same shared `buildCaptionAss`. Cues are clamped to the scene; a cue the scene is too short for is dropped.
  */
-export function layoutSceneCues(cues: ReadonlyArray<{ text: string; startMs: number; endMs: number }>, durationMs: number, recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1): PreviewCaptionPage[] {
+export function layoutSceneCues(cues: ReadonlyArray<{ text: string; startMs: number; endMs: number }>, durationMs: number, recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1, options?: CaptionStyleOptions): PreviewCaptionPage[] {
   if (durationMs <= 0) return [];
   const usable = cues
     .map((cue) => ({ text: cue.text, startMs: Math.max(0, cue.startMs), endMs: Math.min(durationMs, cue.endMs) }))
     .filter((cue) => cue.text.trim() && cue.endMs > cue.startMs);
   if (usable.length === 0) return [];
-  const { cues: laidOut } = buildCaptionAss(usable, captionStyle(recipe));
+  const { cues: laidOut } = buildCaptionAss(usable, options ? { ...options, fps: PREVIEW_FPS } : captionStyle(recipe));
   return laidOut.map((cue) => ({ startMs: cue.startMs, endMs: cue.endMs, lines: cue.lines, fontSizePx: cue.fontSizePx, split: cue.split }));
 }
 
@@ -84,7 +84,11 @@ export function pageAt(pages: readonly PreviewCaptionPage[], offsetMs: number): 
   return started.length > 0 ? started[started.length - 1]! : pages[0]!;
 }
 
-export function buildPreviewPlan(segments: readonly FullPreviewSegment[], recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1): PreviewPlan {
+/**
+ * VE2E-93: `captionOptions` gives the layout options of each scene's EFFECTIVE caption style (`captionLayoutOptions`); a scene without
+ * one is laid out with the recipe's caption style as before.
+ */
+export function buildPreviewPlan(segments: readonly FullPreviewSegment[], recipe: RenderRecipe = NEWS_RECAP_BROADCAST_TELOP_JP_V1, captionOptions?: (sceneId: string) => CaptionStyleOptions | undefined): PreviewPlan {
   const built = buildRenderPlan({
     scenes: segments.map((segment) => ({
       sceneId: segment.sceneId,
@@ -102,8 +106,9 @@ export function buildPreviewPlan(segments: readonly FullPreviewSegment[], recipe
   });
   const captionPages = new Map<string, PreviewCaptionPage[]>();
   for (const segment of segments) {
-    const cuePages = segment.captionCues ? layoutSceneCues(segment.captionCues, segment.durationMs, recipe) : [];
-    captionPages.set(segment.sceneId, cuePages.length > 0 ? cuePages : layoutSceneCaption(segment.caption, segment.durationMs, recipe));
+    const options = captionOptions?.(segment.sceneId);
+    const cuePages = segment.captionCues ? layoutSceneCues(segment.captionCues, segment.durationMs, recipe, options) : [];
+    captionPages.set(segment.sceneId, cuePages.length > 0 ? cuePages : layoutSceneCaption(segment.caption, segment.durationMs, recipe, options));
   }
   return built.ok
     ? { renderPlan: built.plan, expectedRenderDurationMs: built.plan.totalDurationMs, skippedSceneIds: built.skippedSceneIds, captionPages }

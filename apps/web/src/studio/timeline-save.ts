@@ -8,7 +8,7 @@
  */
 // Browser-safe subpath, not the bare `@lyonix/domain` barrel.
 import { normalizeTimelineSegments } from "@lyonix/domain/timeline-segments";
-import type { TimelineSceneBindingInput, TimelineSegmentInput, TimelineSegmentResponse } from "@lyonix/contracts";
+import type { CaptionTextStylePatch, TimelineSceneBindingInput, TimelineSegmentInput, TimelineSegmentResponse } from "@lyonix/contracts";
 
 export type TimelineSceneDraftForSave = {
   sceneId: string;
@@ -21,6 +21,8 @@ export type TimelineSceneDraftForSave = {
   segmentId: string | null;
   sourceStartMs: number | null;
   sourceDurationMs: number | null;
+  /** VE2E-93: the scene's caption style override; absent/null = inherits the whole-video style. */
+  captionStyleOverride?: CaptionTextStylePatch | null;
 };
 
 export function buildTimelineSaveScenes(
@@ -40,6 +42,7 @@ export function buildTimelineSaveScenes(
       segmentId: scene.segmentId ?? null,
       sourceStartMs: scene.sourceStartMs ?? null,
       sourceDurationMs: scene.sourceDurationMs ?? null,
+      ...(scene.captionStyleOverride ? { captionStyleOverride: scene.captionStyleOverride } : {}),
     })),
     segments: normalized.segments.map((segment) => ({
       segmentId: segment.segmentId,

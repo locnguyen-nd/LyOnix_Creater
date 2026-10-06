@@ -11,17 +11,18 @@
  * characters than would really fit, never more. Page timing comes from the block's own span (proportional to its characters), the
  * same honest estimate the internal engine uses for a cue without per-character timing.
  */
-import { buildCaptionAss } from "@lyonix/domain";
+import { buildCaptionAss, CREATOMATE_CAPTION_WIDTH_SAFETY, CREATOMATE_DEFAULT_CAPTION_WIDTH_FRACTION } from "@lyonix/domain";
 
 export const MAX_CAPTION_LINES = 2;
 
 /** Estimated glyph widths vs. the real Creatomate fonts (bold display fonts run wide): keep a clear margin. */
-const CREATOMATE_WIDTH_SAFETY = 0.82;
+const CREATOMATE_WIDTH_SAFETY = CREATOMATE_CAPTION_WIDTH_SAFETY;
 const DEFAULT_FONT_VMIN = 8;
-const DEFAULT_WIDTH_FRACTION = 0.86;
+const DEFAULT_WIDTH_FRACTION = CREATOMATE_DEFAULT_CAPTION_WIDTH_FRACTION;
 
 export type CaptionBlock = { text: string; time: number; duration: number };
-export type CaptionBox = { fontSize?: string | undefined; width?: string | undefined };
+/** VE2E-93: `maxLines` comes from the caption style (1 or 2, never more than `MAX_CAPTION_LINES`). */
+export type CaptionBox = { fontSize?: string | undefined; width?: string | undefined; maxLines?: 1 | 2 | undefined };
 export type Canvas = { width: number; height: number };
 
 /**
@@ -57,7 +58,7 @@ export function paginateCaptionBlocks(blocks: readonly CaptionBlock[], box: Capt
       canvas,
       fontSizePx: Math.round(fontPx),
       minFontSizePx: Math.round(fontPx),
-      maxLines: MAX_CAPTION_LINES,
+      maxLines: Math.min(MAX_CAPTION_LINES, box.maxLines ?? MAX_CAPTION_LINES),
       highlight: "none",
       widthSafety: CREATOMATE_WIDTH_SAFETY,
       placement: { x: canvas.width / 2, y: canvas.height / 2, widthPx },

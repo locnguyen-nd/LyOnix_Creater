@@ -40,7 +40,7 @@
       "id": "V03-03",
       "title": "Căn chỉnh và chỉnh sửa phụ đề",
       "group": "Luồng sản xuất bản đầu — phụ đề",
-      "assignee": "Lộc Nguyễn",
+      "assignee": "DNT",
       "status": "code_done",
       "dependsOn": [
         "V03-02"
@@ -89,6 +89,18 @@
         "VE2E-124"
       ],
       "note": "Yêu cầu chủ dự án 2026-10-06. Chốt 1a 2b 3a 4b + A–F: 3 recipe cũ + 5 recipe LyOnix mới (Tin tức/Thể thao/Faceless/Breaking News, mỗi nhóm ≥ 2), catalog metadata riêng, admin bật rollout 100 % không cần dự phòng, rollout 0 % = chưa sẵn sàng và bị chặn trước workflow (preflight web + API), mô phỏng chuyển động chỉ dùng hiệu ứng engine có, trang Tạo video gộp template mọi tài khoản render. Không migration, không sửa media-worker/FFmpeg. Spec .docs/specs/V04-01.md. Chủ dự án duyệt 2026-10-06: giữ mã V04-01; Studio dùng chung rule sẵn sàng/tương thích với Auto (xem trước được, không áp dụng/render được); bỏ nút Chọn trên thẻ. code_done 2026-10-06: lint/typecheck/build xanh; test toàn repo xanh trừ 4 test fail sẵn trên Windows (template-lint, 3 parity); 5 recipe mới render thật qua QC trên máy local. Không migration, không đổi mã chạy media-worker. Chưa thử trên trình duyệt với dữ liệu thật. Sửa 2026-10-06 sau khi chạy với tài khoản Creatomate thật: xếp nhóm template provider xét tên trước rồi mới đến tag (3 template News Recap gắn tag faceless từng bị xếp nhầm vào Faceless). Gộp lên dev 57ae38a (2026-10-06): giữ lưới thẻ của V04-01 thay cho dải cuộn ngang của 63f9d66 (chủ dự án chốt lưới trong task search template)."
+    },
+    {
+      "id": "VE2E-93",
+      "title": "Studio — bảng tùy chỉnh chữ/phụ đề (v1)",
+      "group": "Làm mịn — phụ đề (wave 3)",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "V03-03",
+        "V04-01"
+      ],
+      "note": "Chủ dự án duyệt 2026-10-06 sau phân tích (hướng C): v1 chỉ làm capability final renderer có hoặc nối được bằng thay đổi nhỏ (font trong catalog, cỡ chữ, màu chữ, viền, vị trí trên/giữa/dưới, 1–2 dòng, highlight chỉ LyOnix), toàn video + override từng cảnh, Orshot hiển thị khoá. Không làm: nền, bo góc, căn trái/phải, kéo x/y, animation mới, font ngoài catalog. Không migration DB. Phụ thuộc kỹ thuật: V03-03 (rule 2 dòng), V04-01 (recipe/RecipePreview), cùng các phần đã có trong code VE2E-26 (dynamicStyle.*), VE2E-103/114 (buildCaptionAss dùng chung). VE2E-92 và VE2E-68 được nêu trong brief nhưng không có trong state.json/spec/git nên không xác minh được trạng thái và không tạo giả; không có nhánh remote chưa merge nào sửa StudioProPage.tsx (kiểm tra 2026-10-06). Nhánh feature/ve2e-93-studio-text-controls từ dev 98d552f. Spec .docs/specs/VE2E-93.md. code_done 2026-10-06: typecheck/build toàn repo xanh; test toàn repo xanh trừ 4 test fail sẵn trên Windows (template-lint, 3 parity); regression baseline chụp trước khi sửa: 66/72 ASS + 16/16 Creatomate giống từng byte, 6 ASS đổi đúng quy tắc D3 (màu người dùng thắng colorCycle); render FFmpeg thật qua QC và đã xem khung hình. Không migration DB, không đổi recipe. Chưa thử trên trình duyệt (sáng/tối, 390 px, kéo); Creatomate chưa render thật (độ dày viền/vị trí cần xem bằng Preview SDK). Chưa commit."
     }
   ]
 }

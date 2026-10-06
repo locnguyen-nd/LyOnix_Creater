@@ -1,0 +1,4018 @@
+[
+ {
+  "name": "newsRecap/none",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Badge-BreakingNews",
+     "type": "text",
+     "track": 4,
+     "x": "8%",
+     "y": "3%",
+     "x_alignment": "0%",
+     "y_alignment": "0%",
+     "text": "BREAKING NEWS",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff",
+     "background_color": "#d00000"
+    },
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "time": 0,
+       "duration": 1.6833333333333333
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333
+      },
+      {
+       "name": "Subtitles-1-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "まとめました。",
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffe600",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "Messi is a football\nplayer",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffe600",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "who plays for Inter\nMiami now.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "newsRecap/legacyFontColor",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Badge-BreakingNews",
+     "type": "text",
+     "track": 4,
+     "x": "8%",
+     "y": "3%",
+     "x_alignment": "0%",
+     "y_alignment": "0%",
+     "text": "BREAKING NEWS",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff",
+     "background_color": "#d00000"
+    },
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "time": 0,
+       "duration": 1.6833333333333333
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333
+      },
+      {
+       "name": "Subtitles-1-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "まとめました。",
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "Messi is a football\nplayer",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "who plays for Inter\nMiami now.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "newsRecap/legacyShortColorNoPan",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Badge-BreakingNews",
+     "type": "text",
+     "track": 4,
+     "x": "8%",
+     "y": "3%",
+     "x_alignment": "0%",
+     "y_alignment": "0%",
+     "text": "BREAKING NEWS",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff",
+     "background_color": "#d00000"
+    },
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "time": 0,
+       "duration": 1.6833333333333333
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333
+      },
+      {
+       "name": "Subtitles-1-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "まとめました。",
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "Messi is a football\nplayer",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "who plays for Inter\nMiami now.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "newsRecap/emptyValues",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Badge-BreakingNews",
+     "type": "text",
+     "track": 4,
+     "x": "8%",
+     "y": "3%",
+     "x_alignment": "0%",
+     "y_alignment": "0%",
+     "text": "BREAKING NEWS",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff",
+     "background_color": "#d00000"
+    },
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "time": 0,
+       "duration": 1.6833333333333333
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333
+      },
+      {
+       "name": "Subtitles-1-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "まとめました。",
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffe600",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "Messi is a football\nplayer",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffe600",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "who plays for Inter\nMiami now.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "fill_color": "#0b0b0b",
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "x": "50%",
+       "y": "50%",
+       "width": "100%",
+       "height": "44%",
+       "fit": "cover",
+       "volume": "0%",
+       "color_overlay": "rgba(0,0,0,0.1)",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 2,
+       "x": "50%",
+       "y": "6%",
+       "x_alignment": "50%",
+       "y_alignment": "0%",
+       "width": "88%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "6.2 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1.2 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 3,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "top5/none",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Shade-1",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-1",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第3位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく紹介します。",
+       "time": 0,
+       "duration": 2.3166666666666664
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "背景と今後の動きを短く\nまとめました。",
+       "time": 2.3166666666666664,
+       "duration": 1.8833333333333337
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "animations": [
+      {
+       "type": "wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Shade-2",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-2",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第2位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "Messi is a football player",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "who plays for Inter Miami\nnow.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "animations": [
+      {
+       "type": "circular-wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Shade-3",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-3",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第1位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    },
+    {
+     "name": "Logo-Top5",
+     "type": "text",
+     "track": 6,
+     "x": "88%",
+     "y": "4%",
+     "text": "TOP 5",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff"
+    }
+   ]
+  },
+  "warnings": [
+   "rank_badges_renumbered"
+  ]
+ },
+ {
+  "name": "top5/legacyFontColor",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Shade-1",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-1",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第3位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく紹介します。",
+       "time": 0,
+       "duration": 2.3166666666666664
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "背景と今後の動きを短く\nまとめました。",
+       "time": 2.3166666666666664,
+       "duration": 1.8833333333333337
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "animations": [
+      {
+       "type": "wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Shade-2",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-2",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第2位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "Messi is a football player",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "who plays for Inter Miami\nnow.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "animations": [
+      {
+       "type": "circular-wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Shade-3",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-3",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第1位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    },
+    {
+     "name": "Logo-Top5",
+     "type": "text",
+     "track": 6,
+     "x": "88%",
+     "y": "4%",
+     "text": "TOP 5",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff"
+    }
+   ]
+  },
+  "warnings": [
+   "rank_badges_renumbered"
+  ]
+ },
+ {
+  "name": "top5/legacyShortColorNoPan",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Shade-1",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-1",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第3位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく紹介します。",
+       "time": 0,
+       "duration": 2.3166666666666664
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "背景と今後の動きを短く\nまとめました。",
+       "time": 2.3166666666666664,
+       "duration": 1.8833333333333337
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "animations": [
+      {
+       "type": "wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Shade-2",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-2",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第2位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "Messi is a football player",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "who plays for Inter Miami\nnow.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "animations": [
+      {
+       "type": "circular-wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Shade-3",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-3",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第1位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    },
+    {
+     "name": "Logo-Top5",
+     "type": "text",
+     "track": 6,
+     "x": "88%",
+     "y": "4%",
+     "text": "TOP 5",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff"
+    }
+   ]
+  },
+  "warnings": [
+   "rank_badges_renumbered"
+  ]
+ },
+ {
+  "name": "top5/emptyValues",
+  "source": {
+   "frame_rate": 30,
+   "fill_color": "#000000",
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "duration": 4.2,
+     "elements": [
+      {
+       "name": "Video-1",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/1",
+       "time": 0,
+       "duration": 4.2
+      },
+      {
+       "name": "Shade-1",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-1",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第3位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-1",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "今日の注目ニュースを\nわかりやすく紹介します。",
+       "time": 0,
+       "duration": 2.3166666666666664
+      },
+      {
+       "name": "Subtitles-1-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "背景と今後の動きを短く\nまとめました。",
+       "time": 2.3166666666666664,
+       "duration": 1.8833333333333337
+      },
+      {
+       "name": "Voiceover-1",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/1",
+       "time": 0,
+       "duration": 4.2
+      }
+     ],
+     "time": 0
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "duration": 3.6,
+     "animations": [
+      {
+       "type": "wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-2",
+       "type": "image",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "source": "https://lyonix.test/media/2",
+       "time": 0,
+       "duration": 3.6
+      },
+      {
+       "name": "Shade-2",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-2",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第2位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "Messi is a football player",
+       "time": 0,
+       "duration": 1.5
+      },
+      {
+       "name": "Subtitles-2-2",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "who plays for Inter Miami\nnow.",
+       "time": 1.5,
+       "duration": 1.9
+      },
+      {
+       "name": "Voiceover-2",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/2",
+       "time": 0,
+       "duration": 3.6
+      }
+     ],
+     "time": 4.2
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "duration": 2.5,
+     "animations": [
+      {
+       "type": "circular-wipe",
+       "transition": true,
+       "duration": 0.6,
+       "easing": "quadratic-out"
+      }
+     ],
+     "elements": [
+      {
+       "name": "Video-3",
+       "type": "video",
+       "track": 1,
+       "width": "100%",
+       "height": "100%",
+       "fit": "cover",
+       "volume": "0%",
+       "source": "https://lyonix.test/media/3",
+       "time": 0,
+       "duration": 2.5,
+       "trim_start": 1,
+       "trim_duration": 2.5
+      },
+      {
+       "name": "Shade-3",
+       "type": "shape",
+       "track": 2,
+       "path": "M 0 0 L 100 0 L 100 100 L 0 100 Z",
+       "width": "100%",
+       "height": "35%",
+       "y": "85%",
+       "fill_color": "rgba(0,0,0,0.55)"
+      },
+      {
+       "name": "RankBadge-3",
+       "type": "text",
+       "track": 3,
+       "x": "10%",
+       "y": "8%",
+       "text": "第1位",
+       "font_family": "Noto Sans JP",
+       "font_weight": "900",
+       "font_size": "12 vmin",
+       "fill_color": "#ffd400"
+      },
+      {
+       "name": "Subtitles-3",
+       "type": "text",
+       "track": 4,
+       "x": "50%",
+       "y": "88%",
+       "width": "90%",
+       "font_family": "Noto Sans JP",
+       "font_weight": "800",
+       "font_size": "5.5 vmin",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "text": "続きは動画の最後まで\nご覧ください",
+       "time": 0,
+       "duration": 2.5
+      },
+      {
+       "name": "Voiceover-3",
+       "type": "audio",
+       "track": 5,
+       "source": "https://lyonix.test/audio/3",
+       "time": 0,
+       "duration": 2.5
+      }
+     ],
+     "time": 7.800000000000001
+    },
+    {
+     "name": "Logo-Top5",
+     "type": "text",
+     "track": 6,
+     "x": "88%",
+     "y": "4%",
+     "text": "TOP 5",
+     "font_family": "Noto Sans JP",
+     "font_weight": "900",
+     "fill_color": "#ffffff"
+    }
+   ]
+  },
+  "warnings": [
+   "rank_badges_renumbered"
+  ]
+ },
+ {
+  "name": "flat/none",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.6833333333333333,
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333,
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a football\nplayer",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for Inter\nMiami now.",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 2.5,
+       "text": "続きは動画の最後まで\nご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": [
+   "template_layout_fallback"
+  ]
+ },
+ {
+  "name": "flat/legacyFontColor",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.6833333333333333,
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333,
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a football\nplayer",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for Inter\nMiami now.",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 2.5,
+       "text": "続きは動画の最後まで\nご覧ください",
+       "font_family": "Noto Sans",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": [
+   "template_layout_fallback"
+  ]
+ },
+ {
+  "name": "flat/legacyShortColorNoPan",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.6833333333333333,
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333,
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a football\nplayer",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for Inter\nMiami now.",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 2.5,
+       "text": "続きは動画の最後まで\nご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": [
+   "template_layout_fallback"
+  ]
+ },
+ {
+  "name": "flat/emptyValues",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.6833333333333333,
+       "text": "今日の注目ニュースを\nわかりやすく",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.6833333333333333,
+       "duration": 1.783333333333333,
+       "text": "紹介します。背景と\n今後の動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a football\nplayer",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for Inter\nMiami now.",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 2.5,
+       "text": "続きは動画の最後まで\nご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "6 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffee00",
+       "stroke_color": "#111111",
+       "stroke_width": "0.8 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "90%",
+       "width": "86%",
+       "height": "22%",
+       "background_color": "rgba(0,0,0,0.5)",
+       "background_x_padding": "20%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": [
+   "template_layout_fallback"
+  ]
+ },
+ {
+  "name": "none/none",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.05,
+       "text": "今日の\n注目ニュースを",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.05,
+       "duration": 1.2666666666666664,
+       "text": "わかりやすく\n紹介します。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 2.3166666666666664,
+       "duration": 1.15,
+       "text": "背景と今後の\n動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a\nfootball player",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for\nInter Miami now.",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5666666666666667,
+       "text": "続きは動画の\n最後まで",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5666666666666667,
+       "duration": 0.9333333333333333,
+       "text": "ご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "none/legacyFontColor",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.05,
+       "text": "今日の\n注目ニュースを",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.05,
+       "duration": 1.2666666666666664,
+       "text": "わかりやすく\n紹介します。",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 2.3166666666666664,
+       "duration": 1.15,
+       "text": "背景と今後の\n動きを短く",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a\nfootball player",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for\nInter Miami now.",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5666666666666667,
+       "text": "続きは動画の\n最後まで",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5666666666666667,
+       "duration": 0.9333333333333333,
+       "text": "ご覧ください",
+       "font_family": "Noto Sans",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#facc15",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "none/legacyShortColorNoPan",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.05,
+       "text": "今日の\n注目ニュースを",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.05,
+       "duration": 1.2666666666666664,
+       "text": "わかりやすく\n紹介します。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 2.3166666666666664,
+       "duration": 1.15,
+       "text": "背景と今後の\n動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a\nfootball player",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for\nInter Miami now.",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5666666666666667,
+       "text": "続きは動画の\n最後まで",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5666666666666667,
+       "duration": 0.9333333333333333,
+       "text": "ご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ff000080",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": []
+ },
+ {
+  "name": "none/emptyValues",
+  "source": {
+   "output_format": "mp4",
+   "width": 1080,
+   "height": 1920,
+   "elements": [
+    {
+     "name": "Scene-1",
+     "type": "composition",
+     "track": 1,
+     "time": 0,
+     "duration": 4.2,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/media/1",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.05,
+       "text": "今日の\n注目ニュースを",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.05,
+       "duration": 1.2666666666666664,
+       "text": "わかりやすく\n紹介します。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 2.3166666666666664,
+       "duration": 1.15,
+       "text": "背景と今後の\n動きを短く",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 3.4666666666666663,
+       "duration": 0.7333333333333338,
+       "text": "まとめました。",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 4.2,
+       "source": "https://lyonix.test/audio/1"
+      }
+     ]
+    },
+    {
+     "name": "Scene-2",
+     "type": "composition",
+     "track": 1,
+     "time": 4.2,
+     "duration": 3.6,
+     "elements": [
+      {
+       "type": "image",
+       "track": 1,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/media/2",
+       "fit": "cover",
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5,
+       "text": "Messi is a\nfootball player",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5,
+       "duration": 1.9,
+       "text": "who plays for\nInter Miami now.",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 3.6,
+       "source": "https://lyonix.test/audio/2"
+      }
+     ]
+    },
+    {
+     "name": "Scene-3",
+     "type": "composition",
+     "track": 1,
+     "time": 7.800000000000001,
+     "duration": 2.5,
+     "elements": [
+      {
+       "type": "video",
+       "track": 1,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/media/3",
+       "fit": "cover",
+       "trim_start": 1,
+       "trim_duration": 2.5,
+       "color_overlay": "rgba(0,0,0,0.15)",
+       "animations": [
+        {
+         "type": "pan",
+         "scope": "element",
+         "track": 0,
+         "easing": "linear",
+         "start_x": "50%",
+         "end_x": "50%",
+         "start_scale": "120%",
+         "end_scale": "100%"
+        }
+       ]
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 0,
+       "duration": 1.5666666666666667,
+       "text": "続きは動画の\n最後まで",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "text",
+       "track": 2,
+       "time": 1.5666666666666667,
+       "duration": 0.9333333333333333,
+       "text": "ご覧ください",
+       "font_family": "Montserrat",
+       "font_size": "8 vmin",
+       "font_weight": "700",
+       "fill_color": "#ffffff",
+       "stroke_color": "#000000",
+       "stroke_width": "1 vmin",
+       "x_alignment": "50%",
+       "y_alignment": "82%",
+       "width": "86%",
+       "height": "22%"
+      },
+      {
+       "type": "audio",
+       "track": 3,
+       "time": 0,
+       "duration": 2.5,
+       "source": "https://lyonix.test/audio/3"
+      }
+     ]
+    }
+   ]
+  },
+  "warnings": []
+ }
+]

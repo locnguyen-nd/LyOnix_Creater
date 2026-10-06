@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { mediaRoot } from "./handoff-workspace.js";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
-import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
+import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, normalizeCaptionTextStylePatch, type RenderJobStatus } from "@lyonix/domain";
 import {
   ProviderError,
   applyDynamicStyleOverrides,
@@ -656,6 +656,8 @@ export class RenderJobsService {
       // caption uses the scene's real voice-timed segments. V03-03: an override equal to the voiced
       // narration (what Auto writes) is not a human edit and keeps the timed segments.
       const captionSegments = captionOverrideFor(scene) ? undefined : subtitles.get(scene.audioVersionId!)?.segments;
+      // VE2E-93: the scene's own caption style, on top of the whole-video style from optionValues.
+      const captionStyle = normalizeCaptionTextStylePatch(scene.captionStyleOverride);
       dynamicScenes.push({
         sceneId: scene.sceneId,
         mediaUrl: mediaIssued.url,
@@ -667,6 +669,7 @@ export class RenderJobsService {
         ...(captionSegments?.length ? { captionSegments } : {}),
         audioUrl: audioIssued.url,
         audioDurationMs: audioDurationById.get(scene.audioVersionId!) ?? 0,
+        ...(captionStyle ? { captionStyle } : {}),
       });
     }
     if (dynamicScenes.length === 0) {
