@@ -97,7 +97,10 @@ export class ApifyJobContext {
   readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
   /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
-  readonly vision = new VisionBudget();
+  readonly vision: VisionBudget;
+  constructor(opts: { visionMaxCalls?: number } = {}) {
+    this.vision = new VisionBudget(opts.visionMaxCalls ? { maxCalls: opts.visionMaxCalls } : {});
+  }
   /**
    * VE2E-67: what a plan-time `overlay_unavoidable` verdict does. `swap` (Auto): the candidate fails and the existing fallback (next
    * platform, then Pexels) supplies another source. `flag` (Studio, default): the candidate is kept and the flag is shown to the user.
@@ -603,6 +606,8 @@ export class ApifyService {
       /** The segment's duration: candidates shorter than this are rejected (they would loop). */
       segmentDurationSeconds?: number;
       job?: ApifyJobContext;
+      /** No other source can replace this one (Pexels off): accept the best metadata-ranked candidate when vision moderation could not run, instead of abstaining. */
+      allowUnverified?: boolean;
     },
   ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
@@ -638,7 +643,7 @@ export class ApifyService {
     } catch {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }
-    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: true });
+    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: !input.allowUnverified });
     if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
     const chosen = byCandidateId.get(decision.chosen.candidateId);
     if (!chosen) return fail("apify_no_usable_candidate");

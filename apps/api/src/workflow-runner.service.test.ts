@@ -124,7 +124,7 @@ describe("WorkflowRunnerService", () => {
       // scene id by default, so the normal generate-a-fresh-voice path below is still exercised.
       audioVersion: { findFirst: vi.fn(async () => null) },
       // Media on/off preflight (MediaPlanService.checkMediaSourcesEnabled): the chosen media account is an enabled Pexels one by default.
-      providerAccount: { findFirst: vi.fn(async () => ({ provider: "pexels", enabled: true })) },
+      providerAccount: { findFirst: vi.fn(async () => ({ provider: "pexels", enabled: true, status: "verified", isFake: false })) },
       renderJob: { findFirst: vi.fn(async () => null) },
       workflowRun: {
         findFirst: vi.fn(async ({ where }: any) => {

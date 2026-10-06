@@ -326,7 +326,11 @@ export class WorkflowRunnerService {
     ctx: { userId: string; role: "admin" | "staff"; contentAccountId: string; script: MediaPlanScript; title: string; segments: PlannedSegment[] },
   ): Promise<void> {
     const needing = segmentsNeedingKeywords(ctx.segments);
-    if (needing.length === 0) return;
+    if (needing.length === 0) {
+      // The script's own visualPlan already carries valid Japanese keywords: record that as the keyword stage (no extra LLM call).
+      await this.recordStep(run, "keywords_from_script", null, async () => ({ source: "visualPlan", segments: ctx.segments.map((segment) => ({ segmentId: segment.segmentId, ja: segment.keywords?.ja ?? null, en: segment.keywords?.en ?? null })) })).catch(() => undefined);
+      return;
+    }
     if (!(await this.mediaPlans.apifyAvailable(ctx.userId, ctx.role))) return;
     const requested = needing.map((segment) => segment.segmentId);
     try {
