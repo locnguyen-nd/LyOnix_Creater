@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "../components/feedback";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, Select, TextArea } from "../components/ui";
@@ -69,6 +70,7 @@ const TARGET_HINT_BY_LOCALE: Record<UiLocale, (durationSeconds: string, sceneCou
 
 export function JobNewPage() {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [channels, setChannels] = useState<PublicChannel[]>([]);
@@ -362,7 +364,7 @@ export function JobNewPage() {
   };
 
   const resetDefaults = async () => {
-    if (!window.confirm(t("jobs.defaultsResetConfirm"))) return;
+    if (!(await confirm({ title: t("jobs.defaultsResetConfirm"), message: t("jobs.defaultsResetConfirm"), tone: "warn" }))) return;
     setDefaultsBusy(true);
     setDefaultsMessage(null);
     try {
