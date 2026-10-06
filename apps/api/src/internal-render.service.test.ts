@@ -241,9 +241,36 @@ describe("InternalRenderService (VE2E-110)", () => {
     expect(String(wall.costAmount)).toBe("0.05");
   });
 
-  it("canary holdout (rollout 0, the default): converts the job to the linked Creatomate snapshot without touching the media worker", async () => {
+  it("V04-01: rollout 0 % (the default) is refused at enqueue - before any RenderJob - with the reason; an admin forcing an engine overrides it", async () => {
     build({ rolloutPercent: 0 });
+    const refused = await service.enqueue({ projectId, timelineVersionId: "tl-1", userId: "user-1", role: "staff", input: { providerAccountId: LYONIX_ACCOUNT } as never });
+    expect(refused).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("rollout 0 %") });
+    expect(db.jobs.size).toBe(0);
+    expect(composer.composeVideo).not.toHaveBeenCalled();
+    expect(await enqueue({ forceEngine: "lyonix" }, "admin")).toMatchObject({ status: "preparing_clips", engine: "lyonix" });
+  });
+
+  it("V04-01: rollout 100 % without a fallback renders internally; a stopped engine is refused at enqueue; an engine failure fails the job and never reaches a provider", async () => {
+    build({ rolloutPercent: 100, fallback: false });
+    expect(await run((await enqueue()).id)).toMatchObject({ engine: "lyonix", status: "completed" });
+
+    build({ rolloutPercent: 100, fallback: false });
+    composer.renderQueueStatus.mockResolvedValue({ consumers: 0, queued: 0 });
+    const stopped = await service.enqueue({ projectId, timelineVersionId: "tl-1", userId: "user-1", role: "staff", input: { providerAccountId: LYONIX_ACCOUNT } as never });
+    expect(stopped).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("không hoạt động") });
+    expect(db.jobs.size).toBe(0);
+
+    build({ rolloutPercent: 100, fallback: false });
+    composer.composeVideo.mockImplementation(async (job: VideoComposeJobInput) => failResult(job, "FFMPEG_FAILED"));
+    const failed = await run((await enqueue()).id);
+    expect(failed).toMatchObject({ status: "failed", engine: "lyonix" });
+    expect([...db.jobs.values()].filter((j) => j.fallbackOfJobId)).toHaveLength(0);
+    expect(db.jobs.size).toBe(1);
+  });
+
+  it("canary holdout: a job queued while the template was enabled, after an admin set it back to 0 %, goes to the linked Creatomate snapshot without touching the media worker", async () => {
     const queued = await enqueue();
+    db.stored.templateSnapshot[0]!.rolloutPercent = 0;
     const converted = await run(queued.id);
     expect(composer.composeVideo).not.toHaveBeenCalled();
     expect(converted).toMatchObject({ engine: "creatomate", templateSnapshotId: "snap-cm", providerAccountId: CM_ACCOUNT, routeReason: "canary_holdout", status: "preparing_clips", preparationLeaseUntil: null });
@@ -273,8 +300,10 @@ describe("InternalRenderService (VE2E-110)", () => {
   it("an admin can force the provider engine (reason forced); with nothing to fall back to the job fails clearly", async () => {
     const forced = await run((await enqueue({ forceEngine: "creatomate" }, "admin")).id);
     expect(forced).toMatchObject({ engine: "creatomate", routeReason: "forced", templateSnapshotId: "snap-cm" });
-    build({ rolloutPercent: 0, fallback: false });
-    const failed = await run((await enqueue()).id);
+    build({ fallback: false });
+    const queued = await enqueue();
+    db.stored.templateSnapshot[0]!.rolloutPercent = 0; // set back to 0 % after it was queued: nowhere to go
+    const failed = await run(queued.id);
     expect(failed).toMatchObject({ status: "failed", lastError: { code: "PROVIDER_NOT_CONFIGURED" } });
   });
 
@@ -322,10 +351,12 @@ describe("InternalRenderService (VE2E-110)", () => {
     expect(afterError).toMatchObject({ status: "failed", routeReason: "budget_exhausted", lastError: { code: "RENDER_BUDGET_EXHAUSTED", cause: "FFMPEG_FAILED" } });
     expect([...db.jobs.values()].filter((j) => j.fallbackOfJobId)).toHaveLength(0);
 
-    build({ rolloutPercent: 0 });
+    build();
     service.routerConfig = { ...service.routerConfig, fallbackDailyUsd: 0.05 };
     db.jobs.set("spent", { id: "spent", engine: "creatomate", routeReason: "canary_holdout", costAmount: 0.05, status: "completed", createdAt: new Date() });
-    const canary = await run((await enqueue()).id);
+    const queuedCanary = await enqueue();
+    db.stored.templateSnapshot[0]!.rolloutPercent = 0;
+    const canary = await run(queuedCanary.id);
     expect(canary).toMatchObject({ status: "failed", routeReason: "budget_exhausted", lastError: { code: "RENDER_BUDGET_EXHAUSTED" } });
     expect(canary.engine).toBe("lyonix"); // never converted to a provider
   });

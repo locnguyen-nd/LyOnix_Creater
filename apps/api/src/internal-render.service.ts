@@ -20,6 +20,7 @@ import { MediaJobsGateway, type VideoComposer } from "./media-jobs.gateway.js";
 import { PrismaService } from "./prisma.service.js";
 import { resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 import { selectSubtitlesForScenes } from "./subtitle-selection.js";
+import { checkTemplateRenderable, usableFallbackSnapshotIds, type ReadinessDeps } from "./template-readiness.js";
 
 /**
  * VE2E-110: orchestration of the internal `lyonix` render engine for one RenderJob.
@@ -128,6 +129,13 @@ export class InternalRenderService {
       return { ok: false, code: "VALIDATION_FAILED", message: "Template không thuộc engine nội bộ đã chọn" };
     }
     if (args.input.forceEngine && args.role !== "admin") return { ok: false, code: "FORBIDDEN", message: "Chỉ admin được ép engine render", status: 403 };
+    // V04-01: same readiness rule as applying the template (Studio) and the Auto preflight, before any RenderJob exists - a template at
+    // rollout 0 % or without a way to render is refused here instead of failing later. An admin forcing an engine is the explicit
+    // override of the rollout (A/B); the Router then still never calls a provider without a configured fallback.
+    if (!args.input.forceEngine) {
+      const renderable = await checkTemplateRenderable(this.readinessDeps(), { snapshot, providerAccountId: args.input.providerAccountId, checkEngine: true });
+      if (!renderable.ok) return { ok: false, code: renderable.code, message: renderable.message, status: renderable.status };
+    }
 
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, args.projectId, scenes, { fillDefaultVideoRanges: true });
@@ -241,20 +249,14 @@ export class InternalRenderService {
     return { healthy: true, estimatedWaitMs: Math.round(((status.queued + running) * median) / Math.max(status.consumers, 1)) };
   }
 
-  /** Provider (Creatomate) snapshots usable as fallback for this template, in the admin's/auto-linked order. */
+  private readinessDeps(): ReadinessDeps {
+    return { prisma: this.prisma, usableAccount: (id) => this.templates.usableAccount(id), ...(this.composer ? { renderQueueStatus: () => this.composer!.renderQueueStatus() } : {}) };
+  }
+
+  /** Provider (Creatomate) snapshots usable as fallback for this template, in the admin's/auto-linked order (same list the readiness check counts). */
   private async fallbackSnapshots(snapshot: Context["snapshot"]): Promise<RouterTemplate["fallbackSnapshots"]> {
-    const ids = Array.isArray(snapshot.fallbackSnapshotIds) ? (snapshot.fallbackSnapshotIds as unknown[]).filter((id): id is string => typeof id === "string") : [];
-    if (ids.length === 0) return [];
-    const rows = await this.prisma.templateSnapshot.findMany({ where: { id: { in: ids } }, select: { id: true, engine: true, providerAccountId: true } });
-    const usable: RouterTemplate["fallbackSnapshots"] = [];
-    for (const id of ids) {
-      const row = rows.find((candidate) => candidate.id === id);
-      // v1 falls back through the dynamic Creatomate composition only (Orshot has no dynamic composition).
-      if (!row || row.engine !== "creatomate") continue;
-      const account = await this.templates.usableAccount(row.providerAccountId);
-      if (account.ok) usable.push({ snapshotId: row.id, engine: "creatomate" });
-    }
-    return usable;
+    // v1 falls back through the dynamic Creatomate composition only (Orshot has no dynamic composition).
+    return (await usableFallbackSnapshotIds(this.readinessDeps(), snapshot)).map((snapshotId) => ({ snapshotId, engine: "creatomate" as const }));
   }
 
   private async decide(job: JobRow, payload: JobPayload, context: Context, afterError: { code: string } | null): Promise<RouteDecision> {

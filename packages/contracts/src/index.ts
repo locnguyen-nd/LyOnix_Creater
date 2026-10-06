@@ -471,11 +471,21 @@ export type TemplateSnapshotWarning = {
   provider: string;
 };
 
+/**
+ * V04-01: why a template cannot be applied / rendered right now (one rule for Auto and Studio). `incompatible_account` = the template
+ * belongs to another render account; `account_unusable` = its provider account is missing / unverified; the others come from the
+ * internal engine's rollout (`rollout_off` = 0 %, `no_fallback` = partial rollout without a usable provider fallback,
+ * `engine_unavailable` = no fallback and the internal engine is not running).
+ */
+export type TemplateRenderBlockReason = "incompatible_account" | "account_unusable" | "rollout_off" | "no_fallback" | "engine_unavailable";
+
 export type CreatomateTemplateSummaryResponse = {
   externalTemplateId: string;
   name: string;
   previewUrl: string | null;
   tags: string[];
+  /** V04-01: internal (`lyonix`) templates only - can it be applied / rendered now (rollout + fallback, engine not checked here)? */
+  internalRender?: { ready: boolean; reason: Extract<TemplateRenderBlockReason, "rollout_off" | "no_fallback"> | null; rolloutPercent: number; hasFallback: boolean };
 };
 
 /** VE2E-108: render engines. `lyonix` = internal FFmpeg engine in apps/media-worker; the others are paid providers. */

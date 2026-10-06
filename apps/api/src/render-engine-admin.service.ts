@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
+import { rolloutNeedsFallback } from "@lyonix/domain";
 import type { RenderEngineAdminOverviewResponse, RenderEngineAdminTemplateResponse, RenderEngineMetricsResponse } from "@lyonix/contracts";
 import { PrismaService } from "./prisma.service.js";
 import { FALLBACK_REASONS, loadRouterConfig } from "./internal-render.service.js";
@@ -7,8 +8,9 @@ import { FALLBACK_REASONS, loadRouterConfig } from "./internal-render.service.js
  * VE2E-118: admin view of the self-render engine. Two things, both from real data (no placeholders):
  *  - `overview`: per-template rollout controls + metrics aggregated from `RenderJob` rows (QC failures, fallbacks, render p50/p95, cost per day);
  *  - `updateTemplate`: set an internal template's `rolloutPercent` and `fallbackSnapshotIds`.
- * A template only goes above 0 % when it has at least one provider fallback, otherwise a technical failure of the internal engine would have
- * nowhere to go (the Router would fail the job with NO_FALLBACK_TEMPLATE).
+ * A PARTIAL rollout (1..99 %) needs at least one provider fallback: the jobs outside it go to the provider. V04-01 (owner decision 2b):
+ * 100 % may be set without a fallback - the template then renders on the internal engine only, and an engine failure fails the job
+ * clearly (the Router returns NO_FALLBACK_TEMPLATE) instead of silently sending it to a paid provider.
  */
 
 export type MetricRow = {
@@ -175,7 +177,9 @@ export class RenderEngineAdminService {
       const bad = fallbackSnapshotIds.find((id) => !found.some((row) => row.id === id && row.engine !== "lyonix"));
       if (bad) return invalid(`Mẫu dự phòng ${bad} không tồn tại hoặc không phải mẫu provider (creatomate/orshot)`);
     }
-    if (rolloutPercent > 0 && fallbackSnapshotIds.length === 0) return invalid("Bật rollout (>0%) cần ít nhất một mẫu provider dự phòng, nếu không lỗi kỹ thuật của engine nội bộ không có đường lùi");
+    if (rolloutNeedsFallback(rolloutPercent) && fallbackSnapshotIds.length === 0) {
+      return invalid("Rollout một phần (1–99 %) cần ít nhất một mẫu provider dự phòng cho các job ngoài rollout. 0 % và 100 % không bắt buộc (100 % không có dự phòng: engine lỗi thì job lỗi, không chuyển sang provider).");
+    }
 
     const updated = await this.prisma.templateSnapshot.update({ where: { id: snapshotId }, data: { rolloutPercent, fallbackSnapshotIds } });
     this.logger.log(`template ${snapshotId}: rolloutPercent ${snapshot.rolloutPercent} -> ${rolloutPercent}, fallbacks ${currentFallbacks.length} -> ${fallbackSnapshotIds.length} (by user ${actorUserId})`);

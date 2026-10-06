@@ -90,13 +90,23 @@ describe("RenderEngineAdminService.updateTemplate (VE2E-118)", () => {
     expect(snapshots[0]).toMatchObject({ rolloutPercent: 25, fallbackSnapshotIds: ["cm"] });
   });
 
-  it("refuses rollout > 0 without a fallback, lowering to 0 without one is fine, and an existing fallback is kept", async () => {
+  it("refuses a partial rollout (1..99 %) without a fallback, lowering to 0 without one is fine, and an existing fallback is kept", async () => {
     const { service, snapshots } = make();
-    expect(await service.updateTemplate("lx", { rolloutPercent: 10 }, "a")).toMatchObject({ ok: false, code: "VALIDATION_FAILED", status: 400 });
+    for (const partial of [1, 10, 99]) expect(await service.updateTemplate("lx", { rolloutPercent: partial }, "a")).toMatchObject({ ok: false, code: "VALIDATION_FAILED", status: 400 });
     expect(snapshots[0]!.rolloutPercent).toBe(0);
     await service.updateTemplate("lx", { fallbackSnapshotIds: ["cm"] }, "a");
     expect(await service.updateTemplate("lx", { rolloutPercent: 100 }, "a")).toMatchObject({ ok: true, data: { rolloutPercent: 100, fallbackSnapshotIds: ["cm"] } });
     expect(await service.updateTemplate("lx", { rolloutPercent: 0, fallbackSnapshotIds: [] }, "a")).toMatchObject({ ok: true });
+  });
+
+  it("V04-01: 100 % may be set without any fallback (internal engine only; an engine failure fails the job, no provider)", async () => {
+    const { service, snapshots } = make();
+    expect(await service.updateTemplate("lx", { rolloutPercent: 100 }, "a")).toMatchObject({ ok: true, data: { rolloutPercent: 100, fallbackSnapshotIds: [] } });
+    expect(snapshots[0]).toMatchObject({ rolloutPercent: 100, fallbackSnapshotIds: [] });
+    // dropping the fallbacks of a 100 % template is fine too; of a partial one it is not
+    await service.updateTemplate("lx", { rolloutPercent: 50, fallbackSnapshotIds: ["cm"] }, "a");
+    expect(await service.updateTemplate("lx", { fallbackSnapshotIds: [] }, "a")).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    expect(await service.updateTemplate("lx", { rolloutPercent: 100, fallbackSnapshotIds: [] }, "a")).toMatchObject({ ok: true });
   });
 
   it("validates ranges, ids and engine of the target and of the fallbacks", async () => {

@@ -8,7 +8,12 @@
 import { recipeRegistry, type RenderRecipe } from "@lyonix/render-recipes";
 import type { CreatomateTemplateSummaryResponse, RenderEngine } from "@lyonix/contracts";
 
-export type PreviewableTemplate = Pick<CreatomateTemplateSummaryResponse, "externalTemplateId" | "name" | "previewUrl" | "tags"> & { engine: RenderEngine };
+export type PreviewableTemplate = Pick<CreatomateTemplateSummaryResponse, "externalTemplateId" | "name" | "previewUrl" | "tags"> &
+  Partial<Pick<CreatomateTemplateSummaryResponse, "internalRender">> & {
+    engine: RenderEngine;
+    /** V04-01: render account the template belongs to (shown when several accounts are listed together). */
+    accountName?: string;
+  };
 
 export type TemplatePreviewSource =
   | { kind: "recipe"; recipe: RenderRecipe }

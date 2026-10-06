@@ -1,6 +1,11 @@
 import { NEWS_RECAP_BROADCAST_TELOP_JP_V1 } from "./recipes/news-recap-broadcast-telop-jp.v1.js";
 import { NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1 } from "./recipes/news-recap-photo-video-mix-jp.v1.js";
 import { NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1 } from "./recipes/news-recap-white-top-caption-jp.v1.js";
+import { SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1 } from "./recipes/sports-highlight-score-headline-jp.v1.js";
+import { SPORTS_RECAP_PLAYER_FOCUS_JP_V1 } from "./recipes/sports-recap-player-focus-jp.v1.js";
+import { FACELESS_STORY_CAPTION_CENTER_JP_V1 } from "./recipes/faceless-story-caption-center-jp.v1.js";
+import { BREAKING_NEWS_RED_ALERT_JP_V1 } from "./recipes/breaking-news-red-alert-jp.v1.js";
+import { BREAKING_NEWS_URGENT_HEADLINE_JP_V1 } from "./recipes/breaking-news-urgent-headline-jp.v1.js";
 import { validateRecipe, type RenderRecipe } from "./schema.js";
 
 /**
@@ -37,5 +42,15 @@ export class RecipeRegistry {
   }
 }
 
-export const RELEASED_RECIPES: RenderRecipe[] = [NEWS_RECAP_BROADCAST_TELOP_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1, NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1];
+export const RELEASED_RECIPES: RenderRecipe[] = [
+  NEWS_RECAP_BROADCAST_TELOP_JP_V1,
+  NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1,
+  NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1,
+  // V04-01: the default template library (sports / faceless / breaking news); same engine features as above, no engine change.
+  SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1,
+  SPORTS_RECAP_PLAYER_FOCUS_JP_V1,
+  FACELESS_STORY_CAPTION_CENTER_JP_V1,
+  BREAKING_NEWS_RED_ALERT_JP_V1,
+  BREAKING_NEWS_URGENT_HEADLINE_JP_V1,
+];
 export const recipeRegistry = new RecipeRegistry(RELEASED_RECIPES);
