@@ -418,16 +418,19 @@ export class MediaPlanService {
     if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
     const fallbackReason = apifyAttempt.reason;
     // Last resort (Auto): rather than leaving the timeline with a hole, take the best-fitting candidate vision does not reject.
+    let lenientReason: string | null = null;
     const lenientApify = async (): Promise<SegmentSource | null> => {
       if (!input.bestEffort) return null;
       const attempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: true, lenient: true });
-      return "source" in attempt ? { ...attempt.source, fallbackReason: "best_effort_fill" } : null;
+      if ("source" in attempt) return { ...attempt.source, fallbackReason: "best_effort_fill" };
+      lenientReason = attempt.reason ?? "không rõ lý do";
+      return null;
     };
     if (!pexelsUsable) {
       const filled = await lenientApify();
       if (filled) return { ok: true, data: filled };
       // Pexels is off / not the chosen account: say WHY Apify found nothing instead of a misleading "Pexels unavailable".
-      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: `Apify không có nguồn phù hợp cho đoạn ${input.segment.segmentId} (${fallbackReason ?? "không rõ lý do"}). Pexels không dùng được làm dự phòng; chọn nguồn thủ công trong Studio hoặc thử lại.`, status: 422 };
+      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: `Apify không có nguồn phù hợp cho đoạn ${input.segment.segmentId} (${fallbackReason ?? "không rõ lý do"}${lenientReason ? `; lấp đầy tối đa: ${lenientReason}` : ""}). Pexels không dùng được làm dự phòng; chọn nguồn thủ công trong Studio hoặc thử lại.`, status: 422 };
     }
     const apifyQuality = apifyAttempt.quality ?? null;
     const brief = this.segmentBrief(input.script, input.segment);

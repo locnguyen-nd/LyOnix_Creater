@@ -108,6 +108,10 @@ describe("WorkflowRunnerService", () => {
   let mediaAssets: any[];
   let stepRuns: any[];
 
+  // Fixtures use tiny drafts; the narration-length correction (regenerating out-of-band scripts) has its own domain tests.
+  beforeEach(() => { process.env.SCRIPT_LENGTH_CORRECTION = "0"; });
+  afterEach(() => { delete process.env.SCRIPT_LENGTH_CORRECTION; });
+
   beforeEach(() => {
     runs = [draftRun()];
     mediaAssets = [];

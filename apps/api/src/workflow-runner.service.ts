@@ -469,6 +469,8 @@ export class WorkflowRunnerService {
     const durationBudget = pageCap === null ? resolvedBudget.budget : { ...resolvedBudget.budget, sceneCount: { min: Math.min(resolvedBudget.budget.sceneCount.min, pageCap), max: Math.min(resolvedBudget.budget.sceneCount.max, pageCap) } };
     // A previously approved script with more scenes than the fixed-page template has pages cannot be rendered: generate a new one (capped).
     if (approved && pageCap !== null && approved.scenes.length > pageCap) approved = null;
+    // A retried run reuses its approved script; one whose narration is far outside the duration budget (e.g. 40 s of voice for 78 s) is replaced too.
+    if (approved && process.env.SCRIPT_LENGTH_CORRECTION !== "0" && narrationLengthCorrection(durationBudget, approved.scenes.map((scene: { narration?: string }) => scene.narration ?? "")) !== null) approved = null;
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       // The scene count asked for never exceeds the template's page count (the profile default of 14 contradicted a 10-page template).
