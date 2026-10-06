@@ -12,7 +12,7 @@
  * pause/edit/approve submit contract is VE2E-07/08 scope, not redefined in this task.
  */
 import { createHash } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun } from "@lyonix/db";
 import {
@@ -26,6 +26,7 @@ import {
 } from "@lyonix/domain";
 import type { DurationBudgetDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
+import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { QueueStatusService } from "./queue-status.service.js";
@@ -78,7 +79,20 @@ export class VideoProductionsService {
     @Inject(GrantsService) private readonly grants: GrantsService,
     @Inject(SourcesService) private readonly sources: SourcesService,
     @Inject(AutomationProfilesService) private readonly automationProfiles: AutomationProfilesService,
+    // V04-01: the shared template readiness / compatibility check (always provided by the app module; optional for narrow unit tests).
+    @Optional() @Inject(CreatomateTemplatesService) private readonly templates?: CreatomateTemplatesService,
   ) {}
+
+  /**
+   * V04-01: Auto preflight - the pinned template must belong to the chosen render account and be renderable (internal engine: rollout /
+   * fallback, plus a running engine at submit) BEFORE any project / source / run is created, so script, TTS and media never run for a
+   * render that cannot happen. Same rule as Studio (CreatomateTemplatesService.checkRenderable).
+   */
+  private async renderPreflight(renderAccountId: string, templateSnapshotId: string, checkEngine: boolean): Promise<VideoProductionOutcome<null>> {
+    if (!this.templates) return { ok: true, data: null };
+    const check = await this.templates.checkRenderable(templateSnapshotId, renderAccountId, { checkEngine });
+    return check.ok ? { ok: true, data: null } : { ok: false, code: check.code, message: check.message, status: check.status };
+  }
 
   /**
    * VE2E-08: "one-click Auto" needs a `Project` + a fully-configured `AutomationProfileVersion`
@@ -99,6 +113,8 @@ export class VideoProductionsService {
     }
     const orshotOptions = sanitizeOrshotOptions(input.renderOptions);
     if (!orshotOptions.ok) return { ok: false, code: "VALIDATION_FAILED", message: orshotOptions.message };
+    const preflight = await this.renderPreflight(input.renderAccountId, input.templateSnapshotId, false);
+    if (!preflight.ok) return preflight;
     const project = await this.prisma.project.create({ data: { name: input.name.trim(), createdByUserId: userId } });
     await this.grants.replaceProjectGrants(project.id, [], [userId]);
     const profile = await this.automationProfiles.create(userId, role, {
@@ -178,6 +194,8 @@ export class VideoProductionsService {
         status: 503,
       };
     }
+    const preflight = await this.renderPreflight(renderConfig.providerAccountId, renderConfig.templateSnapshotId, true);
+    if (!preflight.ok) return preflight;
 
     let sourceVersionId: string;
     if (input.sourceId) {

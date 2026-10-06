@@ -166,16 +166,7 @@ textarea {
   }
 }
 
-/* V04-XX: template preview - slow zoom of the simulated LyOnix background (recipe image motion). */
-@keyframes lyx-recipe-zoom {
-  from { transform: scale(1); }
-  to { transform: scale(var(--lyx-zoom, 1.06)); }
-}
-
-.lyx-recipe-zoom {
-  animation: lyx-recipe-zoom 4s ease-in-out infinite alternate;
-}
-
+/* V04-XX: template preview loading skeleton. (V04-01: the LyOnix simulation is animated by RecipePreview itself, frame by frame.) */
 @keyframes lyx-skeleton {
   0% { background-position: 100% 0; }
   100% { background-position: -100% 0; }
@@ -188,7 +179,6 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lyx-recipe-zoom,
   .lyx-skeleton {
     animation: none;
   }

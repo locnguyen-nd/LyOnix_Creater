@@ -104,6 +104,32 @@ export const isInRollout = (template: Pick<RouterTemplate, "snapshotId" | "rollo
   template.rolloutPercent >= 100 || (template.rolloutPercent > 0 && canaryBucket(template.snapshotId, jobKey) < template.rolloutPercent);
 
 /**
+ * V04-01: a partial rollout (1..99 %) sends the jobs outside it to a provider, so it needs a provider fallback; 0 % and 100 % do not
+ * (at 100 % without a fallback an engine failure fails the job, `routeRender` returns NO_FALLBACK_TEMPLATE and no provider is called).
+ */
+export const rolloutNeedsFallback = (rolloutPercent: number): boolean => rolloutPercent > 0 && rolloutPercent < 100;
+
+export type InternalTemplateBlock = "rollout_off" | "no_fallback" | "engine_unavailable";
+export type InternalTemplateReadiness = { ready: true; hasFallback: boolean } | { ready: false; reason: InternalTemplateBlock };
+
+/**
+ * V04-01: can an internal (`lyonix`) template be used now? ONE rule for Auto and Studio (template list, apply/pin, Auto setup/submit,
+ * render enqueue), checked before any workflow or render work starts, so a template that cannot render is never discovered at the
+ * render step:
+ *  - rollout 0 %                                        -> `rollout_off` (not enabled by an admin yet)
+ *  - rollout 1..99 % and no usable provider fallback   -> `no_fallback` (out-of-rollout jobs would have nowhere to go)
+ *  - no usable fallback and the engine is not running   -> `engine_unavailable` (only when the caller checked the engine)
+ * `hasFallback`: an engine outage / failure (or an out-of-rollout job) may render on the configured provider fallback.
+ */
+export function internalTemplateReadiness(input: { rolloutPercent: number; usableFallbackCount: number; engineAvailable?: boolean }): InternalTemplateReadiness {
+  const hasFallback = input.usableFallbackCount > 0;
+  if (!(input.rolloutPercent > 0)) return { ready: false, reason: "rollout_off" };
+  if (rolloutNeedsFallback(input.rolloutPercent) && !hasFallback) return { ready: false, reason: "no_fallback" };
+  if (input.engineAvailable === false && !hasFallback) return { ready: false, reason: "engine_unavailable" };
+  return { ready: true, hasFallback };
+}
+
+/**
  * Rough provider price of a render (USD), used only to gate fallbacks against the budget ceiling. Creatomate bills `w x h x fps x seconds / 1e8`
  * credits (87 credits for 70 s of 1080p60 = ~$0.52 => ~$0.006/credit); Orshot bills 1 credit per second (~$0.33 per 70 s => ~$0.0047/credit).
  * The real cost is recorded from the provider's own report after the render (VE2E-110).

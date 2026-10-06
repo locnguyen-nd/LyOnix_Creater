@@ -2,12 +2,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { I18nextProvider } from "react-i18next";
 import i18n from "i18next";
 import { describe, expect, it, vi } from "vitest";
-import { RELEASED_RECIPES } from "@lyonix/render-recipes";
+import { CATEGORY_SAMPLES, RELEASED_RECIPES, recipeCatalogEntry } from "@lyonix/render-recipes";
 
 const api = vi.hoisted(() => ({ pinTemplateSnapshot: vi.fn(), fetchCreatomatePreviewConfig: vi.fn(async () => ({ configured: false, publicToken: null })) }));
 vi.mock("../studio/timeline-api", () => api);
 
 const { TemplatePreviewModal, TemplateThumb } = await import("./TemplatePreviewModal");
+const { TemplateCard, CategoryChips } = await import("./TemplateCard");
 const { RecipePreview } = await import("./RecipePreview");
 const { locales } = await import("../i18n/locales");
 
@@ -15,45 +16,74 @@ const instance = i18n.createInstance();
 await instance.init({ lng: "vi", resources: { vi: { translation: locales.vi } }, interpolation: { escapeValue: false } });
 
 const recipe = RELEASED_RECIPES[0]!;
+const sports = RELEASED_RECIPES.find((item) => item.id === "sports-highlight-score-headline-jp")!;
+const ready = { ready: true, reason: null, rolloutPercent: 100, hasFallback: false } as const;
 const templates = [
   { externalTemplateId: "tpl-a", name: "Tin tức A", previewUrl: "https://cdn.example/a.jpg", tags: ["news"], engine: "creatomate" as const },
-  { externalTemplateId: `recipe:${recipe.id}@${recipe.version}`, name: recipe.name, previewUrl: null, tags: ["lyonix"], engine: "lyonix" as const },
+  { externalTemplateId: `recipe:${recipe.id}@${recipe.version}`, name: recipe.name, previewUrl: null, tags: ["lyonix"], engine: "lyonix" as const, internalRender: ready },
   { externalTemplateId: "orshot-1", name: "Orshot không ảnh", previewUrl: null, tags: [], engine: "orshot" as const },
+  { externalTemplateId: `recipe:${sports.id}@${sports.version}`, name: sports.name, previewUrl: null, tags: ["lyonix"], engine: "lyonix" as const, internalRender: { ready: false, reason: "rollout_off", rolloutPercent: 0, hasFallback: false } as const },
 ];
 
-const html = (index: number, extra: { selectedId?: string | null; onSelect?: () => void } = {}) =>
-  renderToStaticMarkup(
-    <I18nextProvider i18n={instance}>
-      <TemplatePreviewModal templates={templates} index={index} onIndexChange={() => undefined} selectedId={extra.selectedId ?? null} onSelect={extra.onSelect ?? (() => undefined)} onClose={() => undefined} motionConfig={null} />
-    </I18nextProvider>,
-  );
+const wrap = (node: React.ReactNode) => renderToStaticMarkup(<I18nextProvider i18n={instance}>{node}</I18nextProvider>);
+const html = (index: number, extra: { selectedId?: string | null; onSelect?: () => void; selectLabel?: string } = {}) =>
+  wrap(<TemplatePreviewModal templates={templates} index={index} onIndexChange={() => undefined} selectedId={extra.selectedId ?? null} onSelect={extra.onSelect ?? (() => undefined)} onClose={() => undefined} motionConfig={null} {...(extra.selectLabel ? { selectLabel: extra.selectLabel } : {})} />);
 
-describe("TemplatePreviewModal (V04-XX)", () => {
+describe("TemplatePreviewModal (V04-XX, V04-01)", () => {
   it("shows a provider template's picture in a 9:16 frame, with loading state, navigation and the explicit choose button", () => {
     const out = html(0);
     expect(out).toContain('data-testid="template-preview"');
-    expect(out).toContain('aspect-ratio:9 / 16');
+    expect(out).toContain("aspect-ratio:9 / 16");
     expect(out).toContain('src="https://cdn.example/a.jpg"');
     expect(out).toContain("lyx-skeleton");
     expect(out).toContain("Chọn template này");
+    expect(out).toContain("Đóng");
     expect(out).toContain("Template sau");
-    expect(out).toContain("1 / 3");
+    expect(out).toContain("1 / 4");
     expect(out).toContain("không render và không tốn credit");
   });
 
   it("previewing never selects, pins or renders: rendering it calls nothing", () => {
     const onSelect = vi.fn();
-    html(0, { onSelect });
-    html(1, { onSelect });
+    for (const index of [0, 1, 2, 3]) html(index, { onSelect });
     expect(onSelect).not.toHaveBeenCalled();
     expect(api.pinTemplateSnapshot).not.toHaveBeenCalled();
   });
 
-  it("a LyOnix template is drawn from its recipe and labelled as a simulation", () => {
+  it("a LyOnix template opens on its motion simulation, labelled as a simulation, with the LyOnix preview source", () => {
     const out = html(1);
     expect(out).toContain('data-testid="recipe-preview"');
     expect(out).toContain("Mô phỏng");
-    expect(out).toContain("không phải video render thật");
+    expect(out).toMatch(/aria-selected="true"[^>]*>Chuyển động</);
+    expect(out).toContain("chỉ dùng hiệu ứng mà engine LyOnix render được");
+    expect(out).toMatch(/data-testid="template-preview-source"[^>]*>Mô phỏng LyOnix \(trên trình duyệt\)</);
+  });
+
+  it("keeps the render engine and the preview source apart: a Creatomate picture is the provider's image, a LyOnix one never claims a provider render", () => {
+    const creatomate = html(0);
+    expect(creatomate).toMatch(/data-testid="engine-badge"[^>]*>Creatomate/);
+    expect(creatomate).toMatch(/data-testid="template-preview-source"[^>]*>Ảnh preview của Creatomate</);
+    const lyonix = html(1);
+    expect(lyonix).toMatch(/data-testid="engine-badge"[^>]*>LyOnix Render/);
+    expect(lyonix).not.toContain("Ảnh preview của Creatomate");
+  });
+
+  it("shows the library details of a built-in template: group, tags, 9:16, language, description, suited for, status", () => {
+    const out = html(1);
+    const info = out.slice(out.indexOf('data-testid="template-preview-info"'));
+    for (const text of ["Engine render", "Nhóm", "Tin tức", "Tỉ lệ", "9:16", "Ngôn ngữ", "Tiếng Nhật", "Mô tả", "Phù hợp với", "Nguồn xem trước", "Trạng thái", "Sẵn sàng render"]) expect(info, text).toContain(text);
+    expect(info).toContain("telop");
+  });
+
+  it("a template that is not ready to render can be previewed but not chosen, with the reason", () => {
+    const onSelect = vi.fn();
+    const out = html(3, { onSelect });
+    expect(out).toContain('data-testid="recipe-preview"');
+    expect(out).toContain('data-testid="template-preview-blocked"');
+    expect(out).toContain("rollout 0 %");
+    expect(out).toMatch(/<button[^>]*disabled=""[^>]*data-testid="template-preview-select"/);
+    expect(out).toMatch(/data-testid="template-preview-status"[^>]*>Chưa sẵn sàng render</);
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("a template without any picture shows a clear fallback, never a broken image", () => {
@@ -61,13 +91,15 @@ describe("TemplatePreviewModal (V04-XX)", () => {
     expect(out).toContain('data-testid="template-preview-fallback"');
     expect(out).toContain("Template này chưa có ảnh xem trước.");
     expect(out).not.toContain("<img");
+    expect(out).toContain("Không có ảnh xem trước");
   });
 
-  it("the template already in use is marked instead of offering to choose it again", () => {
+  it("the template already in use is marked instead of offering to choose it again; the Studio gallery can rename the button", () => {
     const out = html(0, { selectedId: "tpl-a" });
     expect(out).toContain('data-testid="template-preview-selected"');
-    expect(out).toContain("Đang dùng template này");
+    expect(out).toContain("Đang sử dụng");
     expect(out).not.toContain('data-testid="template-preview-select"');
+    expect(html(0, { selectLabel: "Dùng template" })).toContain("Dùng template");
   });
 
   it("card thumbnails use the same source: image, recipe simulation, or a label", () => {
@@ -77,18 +109,70 @@ describe("TemplatePreviewModal (V04-XX)", () => {
   });
 });
 
-describe("RecipePreview (V04-XX)", () => {
-  it("every released recipe renders with the sample headline and a caption of at most 2 lines", () => {
+describe("TemplateCard (V04-01)", () => {
+  const card = (index: number, selected = false) => wrap(<TemplateCard template={templates[index]!} selected={selected} onPreview={() => undefined} />);
+
+  it("only offers 'Xem trước' - there is no choose button on a card", () => {
+    const out = card(1);
+    expect(out).toContain("Xem trước");
+    expect(out).not.toContain(">Chọn<");
+    expect(out).not.toContain("Chọn template này");
+    expect((out.match(/<button/g) ?? []).length).toBe(1);
+  });
+
+  it("shows name, group · 9:16 and the engine badge", () => {
+    const out = card(1);
+    expect(out).toContain(recipe.name);
+    expect(out).toContain("Tin tức · 9:16");
+    expect(out).toMatch(/data-testid="engine-badge"[^>]*>LyOnix Render/);
+    expect(card(3)).toContain("Thể thao · 9:16");
+    expect(card(2)).toContain("Chưa phân nhóm · 9:16");
+  });
+
+  it("marks the template in use (border + check) and a template that is not ready", () => {
+    expect(card(1, true)).toContain('data-testid="template-card-check"');
+    expect(card(1, true)).toContain('data-selected="true"');
+    expect(card(1, false)).not.toContain('data-testid="template-card-check"');
+    expect(card(3)).toContain('data-testid="template-not-ready"');
+    expect(card(3)).toContain("Chưa sẵn sàng render");
+    expect(card(1)).not.toContain('data-testid="template-not-ready"');
+  });
+
+  it("category chips list the five filters with counts", () => {
+    const out = wrap(<CategoryChips filters={["all", "news", "sports", "faceless", "breaking_news"] as const} value="all" counts={{ all: 8, news: 2, sports: 2, faceless: 2, breaking_news: 2 }} onChange={() => undefined} label="Nhóm" />);
+    for (const label of ["Tất cả", "Tin tức", "Thể thao", "Faceless", "Breaking News"]) expect(out).toContain(label);
+    expect(out).toContain('aria-pressed="true"');
+  });
+});
+
+describe("RecipePreview (V04-XX, V04-01)", () => {
+  it("every released recipe renders a still frame with a caption of at most 2 lines, playing or not (no clock on the server)", () => {
     for (const item of RELEASED_RECIPES) {
-      const out = renderToStaticMarkup(<RecipePreview recipe={item} />);
-      expect(out, item.id).toContain(`viewBox="0 0 ${item.canvas.width} ${item.canvas.height}"`);
-      const captionLines = out.match(/data-testid="recipe-preview-caption"/g) ?? [];
-      expect(captionLines.length, item.id).toBeGreaterThan(0);
-      expect(captionLines.length, item.id).toBeLessThanOrEqual(2);
+      for (const playing of [false, true]) {
+        const out = renderToStaticMarkup(<RecipePreview recipe={item} playing={playing} />);
+        expect(out, item.id).toContain(`viewBox="0 0 ${item.canvas.width} ${item.canvas.height}"`);
+        const captionLines = out.match(/data-testid="recipe-preview-caption"/g) ?? [];
+        expect(captionLines.length, item.id).toBeGreaterThan(0);
+        expect(captionLines.length, item.id).toBeLessThanOrEqual(2);
+        expect(out).not.toContain("<audio");
+        expect(out).not.toContain("<video");
+        expect(out).not.toMatch(/href="https?:/);
+      }
     }
   });
 
-  it("text layers use the engine's line breaker: the headline fits its layer's maxLines instead of being clipped", () => {
+  it("a frame inside a scene change draws both pictures with the recipe's own transition (and only that one)", () => {
+    for (const item of RELEASED_RECIPES) {
+      const sceneMs = { "news-clean": 2400, "sports-energy": 2000, "faceless-zoom": 3500, "breaking-alert": 2000 }[recipeCatalogEntry(item.id)!.previewPreset];
+      const out = renderToStaticMarkup(<RecipePreview recipe={item} atMs={sceneMs + 100} />);
+      expect(out, item.id).toContain(`data-transition="${item.transition.kind}"`);
+      expect(out, item.id).toContain('data-scene="1"');
+      if (item.transition.kind === "wipe" || item.transition.kind === "circle") expect(out, item.id).toContain("reveal-");
+      expect(renderToStaticMarkup(<RecipePreview recipe={item} atMs={sceneMs + 1500} />), item.id).toContain('data-transition="none"');
+    }
+  });
+
+  it("text layers use the engine's line breaker: the group's sample headline fits its layer instead of being clipped", () => {
     for (const item of RELEASED_RECIPES) {
       const out = renderToStaticMarkup(<RecipePreview recipe={item} />);
       const headline = item.layers.find((layer) => layer.type === "text" && layer.slot === "headline");
@@ -96,23 +180,36 @@ describe("RecipePreview (V04-XX)", () => {
       const lines = out.match(/data-testid="recipe-preview-layer-text"/g) ?? [];
       expect(lines.length, item.id).toBeGreaterThan(0);
       expect(out, item.id).not.toContain("<foreignObject");
-      // Every headline character survives the layout (nothing cut off at the layer edge).
       const drawn = [...out.matchAll(/data-testid="recipe-preview-layer-text"[^>]*>([^<]*)</g)].map((match) => match[1]).join("");
-      for (const char of "東京の夜景過去最多の観光客") expect(drawn, item.id).toContain(char);
+      const sample = CATEGORY_SAMPLES[recipeCatalogEntry(item.id)!.category].headline;
+      for (const char of sample) expect(drawn, item.id).toContain(char);
     }
   });
 });
 
-describe("template preview translations (V04-XX)", () => {
-  it("has every preview key in vi/en/ja/ko with the same placeholders", () => {
-    const keys = Object.keys(locales.vi.templates).filter((key) => key.startsWith("preview") || key === "choose");
-    expect(keys.length).toBeGreaterThanOrEqual(20);
+describe("template preview translations (V04-XX, V04-01)", () => {
+  const flatten = (value: unknown, prefix = ""): Record<string, string> =>
+    typeof value === "string" ? { [prefix]: value } : Object.assign({}, ...Object.entries(value as Record<string, unknown>).map(([key, child]) => flatten(child, prefix ? `${prefix}.${key}` : key)));
+
+  it("has every preview / library key in vi/en/ja/ko with the same placeholders", () => {
+    const vi = flatten(locales.vi.templates);
+    const keys = Object.keys(vi).filter((key) => key.startsWith("preview") || key === "choose" || key.startsWith("library."));
+    expect(keys.length).toBeGreaterThanOrEqual(60);
     for (const locale of ["vi", "en", "ja", "ko"] as const) {
-      const strings = locales[locale].templates as Record<string, string>;
+      const strings = flatten(locales[locale].templates);
       for (const key of keys) {
         expect(strings[key], `${locale}.templates.${key}`).toBeTruthy();
-        const vi = (locales.vi.templates as Record<string, string>)[key]!;
-        expect([...(strings[key]!.match(/{{\w+}}/g) ?? [])].sort(), `${locale}.templates.${key}`).toEqual([...(vi.match(/{{\w+}}/g) ?? [])].sort());
+        expect([...(strings[key]!.match(/{{\w+}}/g) ?? [])].sort(), `${locale}.templates.${key}`).toEqual([...(vi[key]!.match(/{{\w+}}/g) ?? [])].sort());
+      }
+    }
+  });
+
+  it("describes every released recipe in every language", () => {
+    for (const locale of ["vi", "en", "ja", "ko"] as const) {
+      const strings = flatten(locales[locale].templates);
+      for (const item of RELEASED_RECIPES) {
+        expect(strings[`library.catalog.${item.id}.description`], `${locale} ${item.id}`).toBeTruthy();
+        expect(strings[`library.catalog.${item.id}.suited`], `${locale} ${item.id}`).toBeTruthy();
       }
     }
   });

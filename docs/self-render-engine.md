@@ -36,6 +36,13 @@ Mọi dự phòng sang provider bị chặn bởi trần chi phí (mặc định
 
 `rolloutPercent` mặc định **0** (không job nào dùng engine nội bộ cho đến khi admin bật). Job được gán vào bucket cố định theo FNV-1a của `snapshotId:jobKey`, nên cùng job luôn cùng kết quả.
 
+**V04-01 — trạng thái sẵn sàng render (một quy tắc cho Auto và Studio)**, hàm thuần `internalTemplateReadiness` (`packages/domain/src/render-router.ts`), API dùng qua `apps/api/src/template-readiness.ts`:
+
+- `0 %` ⇒ template **chưa sẵn sàng render**: vẫn hiện và xem trước được, nhưng không áp dụng (ghim snapshot) hay render được, và Auto bị chặn trước khi tạo project/run.
+- `1–99 %` ⇒ bắt buộc có ≥ 1 mẫu provider dự phòng dùng được (job ngoài rollout chạy trên provider).
+- `100 %` ⇒ **không bắt buộc** mẫu dự phòng. Không có dự phòng thì engine lỗi (hoặc không có consumer) ⇒ job lỗi rõ ràng `NO_FALLBACK_TEMPLATE`, **không** gọi provider trả phí.
+- Kiểm tra ở: danh sách template (`internalRender`), ghim snapshot, `setupAutoProfile`, `submit` Auto (kèm kiểm tra engine đang chạy khi không có dự phòng), và lúc tạo render job nội bộ. Admin ép engine (`forceEngine`) bỏ qua quy tắc rollout (dùng cho A/B).
+
 ## 3. Biến môi trường
 
 | Biến | Nơi đọc | Mặc định | Ý nghĩa |
@@ -88,7 +95,7 @@ An toàn TikTok: chữ nằm ngoài 10 % trên, 20 % dưới và 12 % hai bên; 
 2. Tạo `packages/render-recipes/src/recipes/<id>.v1.ts` xuất một `RenderRecipe`; đăng ký trong `registry.ts` (`RELEASED_RECIPES`) và `index.ts`.
 3. Thêm digest của recipe vào test `render-recipes.test.ts` (ghim bất biến: đổi nội dung = bản `version` mới, không sửa bản đã phát hành).
 4. Chạy `corepack pnpm --filter @lyonix/render-recipes test` và test tích hợp `compose.integration.test.ts` (cần FFmpeg; phông được thay bằng phông máy).
-5. API tự đồng bộ recipe thành `TemplateSnapshot` `engine=lyonix` khi khởi động (idempotent, `rolloutPercent` bắt đầu = 0, không ghi đè lựa chọn của admin). Gắn mẫu provider tương đương làm dự phòng trong Settings → *Render nội bộ*, rồi mới tăng `rolloutPercent`.
+5. API tự đồng bộ recipe thành `TemplateSnapshot` `engine=lyonix` khi khởi động (idempotent, `rolloutPercent` bắt đầu = 0, không ghi đè lựa chọn của admin). Gắn mẫu provider tương đương làm dự phòng trong Settings → *Render nội bộ*, rồi mới tăng `rolloutPercent` (hoặc bật thẳng 100 % không dự phòng, V04-01). Thêm mục cho recipe mới vào `packages/render-recipes/src/catalog.ts` (nhóm, tag, preset xem trước) và chữ mô tả vào `templates.library.catalog` của `apps/web/src/i18n/locales.ts`; test bắt buộc mọi recipe phát hành đều có mục catalog.
 6. So sánh với bản Creatomate bằng `corepack pnpm render:parity` ở máy local (cần key Creatomate; SSIM/PSNR/VMAF, độ lệch phụ đề, loudness).
 
 ### Thêm một hiệu ứng mới
@@ -103,7 +110,7 @@ Một hiệu ứng chỉ được dùng trong recipe khi engine dựng được 
 
 ## 6. Vận hành
 
-- Admin: *Settings → Render nội bộ* (`GET /admin/render-engine`, `PATCH /admin/render-engine/templates/:id`). `rolloutPercent > 0` bắt buộc có ≥ 1 mẫu provider dự phòng. Số liệu (job theo engine, QC lỗi theo mã, p50/p95, dự phòng theo lý do, chi phí theo ngày, ngân sách dự phòng) tính từ các dòng `RenderJob` thật; chi phí là **ước tính** ghi lúc render, không phải hoá đơn của provider.
+- Admin: *Settings → Render nội bộ* (`GET /admin/render-engine`, `PATCH /admin/render-engine/templates/:id`). Rollout một phần (1–99 %) bắt buộc có ≥ 1 mẫu provider dự phòng; 0 % và 100 % thì không (V04-01). Số liệu (job theo engine, QC lỗi theo mã, p50/p95, dự phòng theo lý do, chi phí theo ngày, ngân sách dự phòng) tính từ các dòng `RenderJob` thật; chi phí là **ước tính** ghi lúc render, không phải hoá đơn của provider.
 - Ép engine khi thử: chỉ admin, ở màn Render (không gửi `forceEngine` = Router tự chọn).
 - Công cụ dev: `corepack pnpm --filter @lyonix/media-worker compose:cli` chạy một job `video.compose` không cần RabbitMQ; `corepack pnpm render:parity`; `corepack pnpm template:lint`.
 - Test tích hợp cần FFmpeg (libx264, libass, xfade, loudnorm) và **bị bỏ qua trên CI**; chạy local. Test số liệu admin trên PostgreSQL thật bật bằng `LYONIX_TEST_DATABASE_URL`.
