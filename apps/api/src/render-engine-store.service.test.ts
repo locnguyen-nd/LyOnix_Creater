@@ -162,9 +162,27 @@ describe("internal templates behind the existing template endpoints", () => {
     const { service, snapshots, prisma } = setup();
     snapshots.push({ id: "snap-int", providerAccountId: "lyonix-acct", externalTemplateId: recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), name: "n", previewUrl: null, modifications: [{ key: "headline", kind: "text", label: "h", required: false }], rawTemplate: {}, capturedAt: new Date("2026-10-01"), engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: ["cm-1"] });
     prisma.templateSnapshot.findFirst = async ({ where }: any) => snapshots.find((s) => s.providerAccountId === where.providerAccountId && s.externalTemplateId === where.externalTemplateId) ?? null;
+    // V04-01: at rollout 0 % the template cannot be applied (Studio and Auto alike) - the reason is given, nothing is pinned
+    const refused = await service.snapshot("lyonix-acct", recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), "user-1");
+    expect(refused).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("rollout 0 %") });
+    snapshots[snapshots.length - 1].rolloutPercent = 100;
     const ok = await service.snapshot("lyonix-acct", recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), "user-1");
-    expect(ok).toMatchObject({ ok: true, data: { id: "snap-int", providerAccountId: "lyonix-acct", engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: ["cm-1"] } });
+    expect(ok).toMatchObject({ ok: true, data: { id: "snap-int", providerAccountId: "lyonix-acct", engine: "lyonix", rolloutPercent: 100, fallbackSnapshotIds: ["cm-1"] } });
     expect(await service.snapshot("lyonix-acct", "recipe:nope@1", "user-1")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+  });
+
+  it("V04-01: lists each internal template with its readiness (0 % / not pinned = not ready, 100 % = ready without a fallback)", async () => {
+    const { service, snapshots } = setup();
+    snapshots.push({ id: "snap-on", providerAccountId: "lyonix-acct", externalTemplateId: recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1), engine: "lyonix", rolloutPercent: 100, fallbackSnapshotIds: [], capturedAt: new Date() });
+    snapshots.push({ id: "snap-off", providerAccountId: "lyonix-acct", externalTemplateId: recipeExternalId(RELEASED_RECIPES[1]!), engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: [], capturedAt: new Date() });
+    snapshots.push({ id: "snap-part", providerAccountId: "lyonix-acct", externalTemplateId: recipeExternalId(RELEASED_RECIPES[2]!), engine: "lyonix", rolloutPercent: 50, fallbackSnapshotIds: [], capturedAt: new Date() });
+    const outcome = await service.listTemplates("lyonix-acct");
+    if (!outcome.ok) throw new Error(outcome.message);
+    const byId = new Map(outcome.data.map((row) => [row.externalTemplateId, row.internalRender]));
+    expect(byId.get(recipeExternalId(NEWS_RECAP_BROADCAST_TELOP_JP_V1))).toEqual({ ready: true, reason: null, rolloutPercent: 100, hasFallback: false });
+    expect(byId.get(recipeExternalId(RELEASED_RECIPES[1]!))).toEqual({ ready: false, reason: "rollout_off", rolloutPercent: 0, hasFallback: false });
+    expect(byId.get(recipeExternalId(RELEASED_RECIPES[2]!))).toEqual({ ready: false, reason: "no_fallback", rolloutPercent: 50, hasFallback: false });
+    expect(byId.get(recipeExternalId(RELEASED_RECIPES[3]!))).toEqual({ ready: false, reason: "rollout_off", rolloutPercent: 0, hasFallback: false }); // not pinned yet
   });
 });
 

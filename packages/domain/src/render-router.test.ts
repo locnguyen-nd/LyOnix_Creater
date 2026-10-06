@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canaryBucket, checkBudget, DEFAULT_ROUTER_CONFIG, estimateProviderCostUsd, isInRollout, routeRender, type RouterConfig, type RouterInput, type RouterTemplate } from "./render-router.js";
+import { canaryBucket, checkBudget, DEFAULT_ROUTER_CONFIG, estimateProviderCostUsd, internalTemplateReadiness, isInRollout, rolloutNeedsFallback, routeRender, type RouterConfig, type RouterInput, type RouterTemplate } from "./render-router.js";
 
 const internal = (over: Partial<RouterTemplate> = {}): RouterTemplate => ({
   snapshotId: "snap-lyonix",
@@ -149,5 +149,29 @@ describe("estimateProviderCostUsd", () => {
   it("reproduces the plan's figures for a 70 s 1080p60 video (Creatomate ~0.52, Orshot ~0.33 USD)", () => {
     expect(estimateProviderCostUsd("creatomate", { durationSec: 70, width: 1080, height: 1920, fps: 60 })).toBeCloseTo(0.52, 1);
     expect(estimateProviderCostUsd("orshot", { durationSec: 70, width: 1080, height: 1920, fps: 60 })).toBeCloseTo(0.33, 1);
+  });
+});
+
+describe("V04-01: internal template readiness (one rule for Auto and Studio)", () => {
+  it("rollout 0 % is never ready, whatever the fallback", () => {
+    expect(internalTemplateReadiness({ rolloutPercent: 0, usableFallbackCount: 0 })).toEqual({ ready: false, reason: "rollout_off" });
+    expect(internalTemplateReadiness({ rolloutPercent: 0, usableFallbackCount: 2, engineAvailable: true })).toEqual({ ready: false, reason: "rollout_off" });
+  });
+  it("a partial rollout needs a usable fallback; 100 % does not", () => {
+    expect(internalTemplateReadiness({ rolloutPercent: 50, usableFallbackCount: 0 })).toEqual({ ready: false, reason: "no_fallback" });
+    expect(internalTemplateReadiness({ rolloutPercent: 50, usableFallbackCount: 1 })).toEqual({ ready: true, hasFallback: true });
+    expect(internalTemplateReadiness({ rolloutPercent: 100, usableFallbackCount: 0 })).toEqual({ ready: true, hasFallback: false });
+    expect([0, 1, 50, 99, 100].map(rolloutNeedsFallback)).toEqual([false, true, true, true, false]);
+  });
+  it("a stopped engine blocks only when nothing could take over", () => {
+    expect(internalTemplateReadiness({ rolloutPercent: 100, usableFallbackCount: 0, engineAvailable: false })).toEqual({ ready: false, reason: "engine_unavailable" });
+    expect(internalTemplateReadiness({ rolloutPercent: 100, usableFallbackCount: 1, engineAvailable: false })).toEqual({ ready: true, hasFallback: true });
+    expect(internalTemplateReadiness({ rolloutPercent: 100, usableFallbackCount: 0, engineAvailable: true })).toEqual({ ready: true, hasFallback: false });
+  });
+  it("rollout 100 % without a fallback renders internally, and an engine failure fails the job without calling any provider", () => {
+    const solo = internal({ fallbackSnapshots: [] });
+    expect(routeRender(input({ template: solo }))).toMatchObject({ kind: "route", engine: "lyonix", reason: "default" });
+    expect(routeRender(input({ template: solo, local: { healthy: false, estimatedWaitMs: 0 } }))).toMatchObject({ kind: "fail", code: "NO_FALLBACK_TEMPLATE" });
+    expect(routeRender(input({ template: solo, afterError: { code: "FFMPEG_FAILED", isInputError: false, alreadyFellBack: false } }))).toMatchObject({ kind: "fail", code: "NO_FALLBACK_TEMPLATE" });
   });
 });

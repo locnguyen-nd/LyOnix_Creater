@@ -4,13 +4,25 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, Select, TextArea } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { Check } from "lucide-react";
-import { TemplatePreviewButton, TemplatePreviewModal, TemplateThumb } from "../components/TemplatePreviewModal";
-import { engineOfProvider } from "../studio/render-engine";
+import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
+import { CategoryChips, TemplateCard } from "../components/TemplateCard";
+import { Modal } from "../components/Modal";
+import { mergeTemplateEntries, type TemplateEntry } from "../studio/template-gallery";
+import {
+  CATEGORY_FILTERS,
+  accountForTemplate,
+  categoryCounts,
+  filterByCategory,
+  templateSelectionState,
+  toLibraryTemplates,
+  uniqueTemplates,
+  type CategoryFilter,
+} from "../studio/template-catalog";
+import type { PreviewableTemplate } from "../studio/template-preview";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { BackgroundSegmentsSetting, CreatomateTemplateSummaryResponse, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
 // Browser-safe subpaths (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import {
@@ -64,7 +76,13 @@ export function JobNewPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [voices, setVoices] = useState<ElevenLabsVoiceSummaryResponse[]>([]);
-  const [renderTemplates, setRenderTemplates] = useState<CreatomateTemplateSummaryResponse[]>([]);
+  // V04-01: the template library = the templates of EVERY usable render account (LyOnix built-ins + Creatomate + Orshot).
+  const [libraryEntries, setLibraryEntries] = useState<TemplateEntry[]>([]);
+  const [libraryFailed, setLibraryFailed] = useState<string[]>([]);
+  /** Group filter of the library - display only, never saved, never changes the selection. */
+  const [category, setCategory] = useState<CategoryFilter>("all");
+  /** "Chọn template này" on a template several accounts list, without a current / default one among them: the user picks the account. */
+  const [accountChoice, setAccountChoice] = useState<{ template: PreviewableTemplate; accountIds: string[] } | null>(null);
 
   // VE2E-124: the whole form is one value - what the draft stores and the defaults are picked from.
   const [form, setForm] = useState<JobNewFormValues>(SYSTEM_CREATION_DEFAULTS);
@@ -98,8 +116,13 @@ export function JobNewPage() {
   const lists: CreationLists = creationLists(channels, providers);
   const renderProvider = renderAccounts.find((account) => account.id === form.renderAccountId)?.provider;
   const isOrshotRender = isTemplateOnlyRenderProvider(renderProvider);
-  // V04-XX: templates of the chosen render account, labelled with its engine for the preview.
-  const previewTemplates = renderTemplates.map((tpl) => ({ ...tpl, engine: engineOfProvider(renderProvider ?? "creatomate") }));
+  const library = useMemo(() => toLibraryTemplates(libraryEntries), [libraryEntries]);
+  const counts = useMemo(() => categoryCounts(uniqueTemplates(library)), [library]);
+  // V04-XX / V04-01: the cards (one per template) and the preview browse the filtered list; previewing never selects.
+  const previewTemplates = useMemo(() => uniqueTemplates(filterByCategory(library, category)), [library, category]);
+  // V04-01: the chosen template against the chosen render account - Auto is blocked unless it is compatible AND ready to render.
+  const templateState = templateSelectionState(library, form.templateId, form.renderAccountId);
+  const renderAccountKey = renderAccounts.map((account) => account.id).join(",");
   // Auto resolves against the same target duration the Auto profile is created with (midpoint of the range).
   const autoSegmentRange = resolveBackgroundSegmentRange({ mode: "auto" }, midpoint(form.durationTarget));
   const preflight = [
@@ -107,7 +130,7 @@ export function JobNewPage() {
     { key: "voice", ok: Boolean(form.voiceAccountId) && Boolean(form.voiceId) },
     { key: "media", ok: Boolean(form.mediaAccountId) },
     { key: "render", ok: Boolean(form.renderAccountId) },
-    { key: "template", ok: Boolean(form.templateId) },
+    { key: "template", ok: templateState.kind === "ok" },
   ] as const;
   const preflightReady = preflight.every((row) => row.ok);
   const selected = contentAccounts.find((item) => item.id === form.contentAccountId);
@@ -235,29 +258,51 @@ export function JobNewPage() {
    * template pinned so far requires at least one "image" modification slot that Auto's
    * scene media (Pexels, almost always video) can never fill, so every Auto run failed
    * the same way at the last step. Owner decision (chat, 26/09): let the operator pick
-   * the template explicitly instead of guessing. Resetting `templateId` whenever the
-   * account changes (or the previous pick isn't in the new list) keeps this an explicit
-   * choice rather than silently falling back to a default. VE2E-124: a restored template that
-   * is gone is reported as such.
+   * the template explicitly instead of guessing. V04-01: the library lists the templates of
+   * every usable render account (listing costs nothing); choosing one also picks its account.
+   * Changing the render account afterwards KEEPS the template: an incompatible pair is shown
+   * as such and blocks Auto (see `templateState`) instead of being silently cleared.
+   * VE2E-124: a restored template that exists nowhere any more is cleared and reported - only
+   * once every list loaded, a failed list never clears a choice.
    */
   useEffect(() => {
-    const accountId = form.renderAccountId;
-    if (!accountId) { setRenderTemplates([]); return; }
+    if (!hydrated) return;
+    const accounts = renderAccounts;
+    if (accounts.length === 0) { setLibraryEntries([]); setLibraryFailed([]); return; }
     let cancelled = false;
-    void listCreatomateTemplates(accountId).then((rows) => {
+    void Promise.allSettled(accounts.map((account) => listCreatomateTemplates(account.id))).then((results) => {
       if (cancelled) return;
-      setRenderTemplates(rows);
+      const entries = mergeTemplateEntries(accounts, results.map((result) => (result.status === "fulfilled" ? result.value : [])));
+      setLibraryEntries(entries);
+      setLibraryFailed(accounts.filter((_, index) => results[index]!.status === "rejected").map((account) => account.name));
       const current = formRef.current.templateId;
-      if (!current || rows.some((row) => row.externalTemplateId === current)) return;
+      if (!current || entries.some((entry) => entry.template.externalTemplateId === current) || results.some((result) => result.status === "rejected")) return;
       if (restoredRef.current.has("templateId")) {
         restoredRef.current.delete("templateId");
         markCleared(["templateId"]);
       }
       fill({ templateId: "" });
-    }).catch(() => { if (!cancelled) setRenderTemplates([]); });
+    });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.renderAccountId]);
+  }, [hydrated, renderAccountKey]);
+
+  /**
+   * V04-01: "Chọn template này" - the only way the library applies a template. It also picks the template's render account: the
+   * only one listing it, else the one already selected, else the user's default render account, else the user is asked. Never a
+   * silent switch to another (possibly paid) account: the card the user chose names its provider.
+   */
+  const chooseTemplate = (template: PreviewableTemplate, accountId?: string) => {
+    const choice = accountId ? { kind: "one" as const, accountId } : accountForTemplate(library, template.externalTemplateId, { currentAccountId: form.renderAccountId, defaultAccountId: preferencesRef.current?.renderAccountId ?? null });
+    setPreviewIndex(null);
+    if (choice.kind === "ask") {
+      setAccountChoice({ template, accountIds: choice.accountIds });
+      return;
+    }
+    setAccountChoice(null);
+    if (choice.kind === "none") return;
+    update(choice.accountId === form.renderAccountId ? { templateId: template.externalTemplateId } : { templateId: template.externalTemplateId, renderAccountId: choice.accountId });
+  };
 
   /** After a successful submit: the draft is done - stop autosave and delete it, so the next new job starts from the defaults. */
   const closeDraft = async () => {
@@ -361,13 +406,26 @@ export function JobNewPage() {
           templates={previewTemplates}
           index={previewIndex}
           onIndexChange={setPreviewIndex}
-          selectedId={form.templateId || null}
-          onSelect={(tpl) => {
-            update({ templateId: tpl.externalTemplateId });
-            setPreviewIndex(null);
-          }}
+          selectedId={templateState.kind === "ok" || templateState.kind === "not_ready" ? form.templateId : null}
+          onSelect={(tpl) => chooseTemplate(tpl)}
           onClose={() => setPreviewIndex(null)}
         />
+      ) : null}
+      {accountChoice ? (
+        <Modal title={t("templates.library.chooseAccountTitle")} onClose={() => setAccountChoice(null)}>
+          <p className="mb-3 text-[12.5px] text-lyx-fg-muted">{t("templates.library.chooseAccountHint")}</p>
+          <div className="flex flex-col gap-2" data-testid="template-account-choice">
+            {accountChoice.accountIds.map((accountId) => {
+              const account = renderAccounts.find((item) => item.id === accountId);
+              return (
+                <Button key={accountId} type="button" variant="secondary" onClick={() => chooseTemplate(accountChoice.template, accountId)}>
+                  {account ? renderAccountOptionLabel(account) : accountId}
+                </Button>
+              );
+            })}
+            <Button type="button" variant="ghost" onClick={() => setAccountChoice(null)}>{t("common.cancel")}</Button>
+          </div>
+        </Modal>
       ) : null}
       <ConfirmDialog
         open={discardOpen}
@@ -399,6 +457,10 @@ export function JobNewPage() {
                     : values.autoSourceType === "article_url" ? { type: "article_url", url: values.autoArticleUrl }
                     : { type: "topic", topic: values.topic };
                   if (!values.templateId) throw new ApiError("VALIDATION_FAILED", t("jobs.autoTemplateRequired"));
+                  // V04-01: never start a run whose template cannot render with this account (the API re-checks with the same rule).
+                  const state = templateSelectionState(library, values.templateId, values.renderAccountId);
+                  if (state.kind === "incompatible") throw new ApiError("VALIDATION_FAILED", t("templates.library.blockReason.incompatible_account"));
+                  if (state.kind === "not_ready") throw new ApiError("VALIDATION_FAILED", t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${state.reason}`) }));
                   const snapshot = await pinTemplateSnapshot(values.renderAccountId, values.templateId);
                   const setup = await setupAutoProfile({
                     name: (values.topic || values.autoArticleUrl || "Auto video").slice(0, 60),
@@ -619,35 +681,27 @@ export function JobNewPage() {
                 </div>
               ) : null}
               {renderAccounts.length > 0 ? (
-                <Field label={t("jobs.autoTemplate")} {...(renderTemplates.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
-                  {/* VE2E-13: real template preview images at Auto intake. V04-XX: the picture opens the 9:16 preview (it no
-                      longer selects); only "Chọn" / "Chọn template này" applies a template. */}
-                  <div className="-mx-1 flex snap-x gap-2.5 overflow-x-auto px-1 pb-2" data-testid="template-strip">
-                    {previewTemplates.map((tpl, index) => {
-                      const chosen = form.templateId === tpl.externalTemplateId;
-                      return (
-                        <div key={tpl.externalTemplateId} className="w-[92px] shrink-0 snap-start" data-testid="template-card">
-                          <div className={`relative overflow-hidden rounded-[8px] transition ${chosen ? "ring-2 ring-lyx-fg ring-offset-2 ring-offset-lyx-bg" : "ring-1 ring-lyx-border hover:ring-lyx-strong"}`}>
-                            <button type="button" onClick={() => setPreviewIndex(index)} title={t("templates.previewOpen")} className="block w-full">
-                              <div className="flex items-center justify-center overflow-hidden bg-lyx-muted text-[9px] text-lyx-fg-subtle" style={{ aspectRatio: "9 / 16" }}>
-                                <TemplateThumb template={tpl} fallbackLabel={t("templates.preview")} />
-                              </div>
-                            </button>
-                            <TemplatePreviewButton iconOnly onClick={() => setPreviewIndex(index)} label={t("templates.previewOpen")} className="absolute bottom-1.5 right-1.5" />
-                            {chosen ? <span className="absolute left-1.5 top-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-lyx-fg text-lyx-bg" aria-hidden="true"><Check size={12} /></span> : null}
-                          </div>
-                          <div className="mt-1.5 truncate text-[11px] font-medium" title={tpl.name}>{tpl.name}</div>
-                          <button
-                            type="button"
-                            onClick={() => update({ templateId: tpl.externalTemplateId })}
-                            disabled={chosen}
-                            className={`mt-1 w-full rounded-[6px] border py-1 text-[11px] font-semibold transition ${chosen ? "border-lyx-fg bg-lyx-fg text-lyx-bg" : "border-lyx-border hover:border-lyx-strong"}`}
-                          >
-                            {chosen ? t("templates.current") : t("templates.choose")}
-                          </button>
-                        </div>
-                      );
-                    })}
+                <Field label={t("jobs.autoTemplate")} {...(library.length === 0 ? { hint: t("jobs.autoNoTemplate") } : {})}>
+                  {/* VE2E-13 / V04-XX / V04-01: the library of every render account, filtered by group. A card only opens the 9:16
+                      preview; only "Chọn template này" in the preview applies a template (and its render account). */}
+                  <div className="flex flex-col gap-2.5">
+                    <CategoryChips filters={CATEGORY_FILTERS} value={category} counts={counts} onChange={setCategory} label={t("templates.library.categoryFilter")} />
+                    {templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? (
+                      <p className="text-[12px] text-lyx-fg-muted" data-testid="template-selected-line">{t("templates.library.selectedLine", { name: templateState.template.name })}</p>
+                    ) : null}
+                    {templateState.kind === "incompatible" ? (
+                      <Banner variant="warn"><span data-testid="template-incompatible">{t("templates.library.blockReason.incompatible_account")}</span></Banner>
+                    ) : null}
+                    {templateState.kind === "not_ready" ? (
+                      <Banner variant="warn"><span data-testid="template-not-ready-warning">{t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${templateState.reason}`) })}</span></Banner>
+                    ) : null}
+                    {libraryFailed.length > 0 ? <p className="text-[11.5px] text-lyx-danger">{t("templates.library.loadPartial", { names: libraryFailed.join(", ") })}</p> : null}
+                    {previewTemplates.length === 0 && library.length > 0 ? <p className="text-[12px] text-lyx-fg-muted">{t("templates.library.emptyCategory")}</p> : null}
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      {previewTemplates.map((tpl, index) => (
+                        <TemplateCard key={tpl.key} template={tpl} selected={form.templateId === tpl.externalTemplateId} onPreview={() => setPreviewIndex(index)} />
+                      ))}
+                    </div>
                   </div>
                 </Field>
               ) : null}

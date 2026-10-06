@@ -1,4 +1,5 @@
 import type { RenderEngineAdminTemplateResponse, RenderEngineMetricsResponse } from "@lyonix/contracts";
+import { rolloutNeedsFallback } from "@lyonix/domain/render-router";
 
 /** VE2E-118: pure helpers of the admin "Render engine" panel (no React, so they are unit-tested). */
 
@@ -28,9 +29,12 @@ export type RolloutDraft = { rolloutPercent: number; fallbackSnapshotIds: string
 /** Why a draft cannot be saved (mirrors the API rule), or `null` when it can. */
 export function rolloutDraftProblem(draft: RolloutDraft): "needsFallback" | "range" | null {
   if (!Number.isInteger(draft.rolloutPercent) || draft.rolloutPercent < 0 || draft.rolloutPercent > 100) return "range";
-  if (draft.rolloutPercent > 0 && draft.fallbackSnapshotIds.length === 0) return "needsFallback";
+  if (rolloutNeedsFallback(draft.rolloutPercent) && draft.fallbackSnapshotIds.length === 0) return "needsFallback";
   return null;
 }
+
+/** V04-01: 100 % with no fallback - internal engine only; an engine failure fails the job and nothing goes to a provider. */
+export const isInternalOnlyRollout = (draft: RolloutDraft): boolean => draft.rolloutPercent === 100 && draft.fallbackSnapshotIds.length === 0;
 
 export const isDraftDirty = (template: RenderEngineAdminTemplateResponse, draft: RolloutDraft): boolean =>
   template.rolloutPercent !== draft.rolloutPercent || template.fallbackSnapshotIds.join(",") !== draft.fallbackSnapshotIds.join(",");

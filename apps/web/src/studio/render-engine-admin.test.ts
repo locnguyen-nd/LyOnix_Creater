@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RenderEngineMetricsResponse } from "@lyonix/contracts";
-import { budgetUsage, formatSeconds, formatShare, formatUsd, isDraftDirty, qcFailureList, qcFailureRate, rolloutDraftProblem } from "./render-engine-admin.js";
+import { budgetUsage, formatSeconds, formatShare, formatUsd, isDraftDirty, qcFailureList, qcFailureRate, isInternalOnlyRollout, rolloutDraftProblem } from "./render-engine-admin.js";
 
 const metrics = (over: Partial<RenderEngineMetricsResponse["internal"]> = {}, budget: Partial<RenderEngineMetricsResponse["budget"]> = {}): RenderEngineMetricsResponse => ({
   windowDays: 7,
@@ -41,6 +41,11 @@ describe("render-engine-admin helpers (VE2E-118)", () => {
     expect(rolloutDraftProblem({ rolloutPercent: 0, fallbackSnapshotIds: [] })).toBeNull();
     expect(rolloutDraftProblem({ rolloutPercent: 25, fallbackSnapshotIds: [] })).toBe("needsFallback");
     expect(rolloutDraftProblem({ rolloutPercent: 25, fallbackSnapshotIds: ["s"] })).toBeNull();
+    // V04-01: 100 % needs no fallback (internal engine only), a partial rollout still does
+    expect(rolloutDraftProblem({ rolloutPercent: 100, fallbackSnapshotIds: [] })).toBeNull();
+    expect(rolloutDraftProblem({ rolloutPercent: 99, fallbackSnapshotIds: [] })).toBe("needsFallback");
+    expect(isInternalOnlyRollout({ rolloutPercent: 100, fallbackSnapshotIds: [] })).toBe(true);
+    expect(isInternalOnlyRollout({ rolloutPercent: 100, fallbackSnapshotIds: ["s"] })).toBe(false);
     expect(rolloutDraftProblem({ rolloutPercent: 101, fallbackSnapshotIds: ["s"] })).toBe("range");
     expect(rolloutDraftProblem({ rolloutPercent: 2.5, fallbackSnapshotIds: ["s"] })).toBe("range");
   });

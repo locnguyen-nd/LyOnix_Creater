@@ -2,7 +2,7 @@ import type { RenderEngineAdminOverviewResponse, RenderEngineAdminTemplateRespon
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, ApiError, csrfHeaders } from "../api";
-import { budgetUsage, formatSeconds, formatShare, formatUsd, isDraftDirty, qcFailureList, qcFailureRate, ROLLOUT_STEPS, rolloutDraftProblem, type RolloutDraft } from "../studio/render-engine-admin";
+import { budgetUsage, formatSeconds, formatShare, formatUsd, isDraftDirty, qcFailureList, qcFailureRate, isInternalOnlyRollout, ROLLOUT_STEPS, rolloutDraftProblem, type RolloutDraft } from "../studio/render-engine-admin";
 import { routeReasonKey } from "../studio/render-engine";
 import { Banner, StatusPill } from "./chrome";
 import { Button, Select } from "./ui";
@@ -75,6 +75,7 @@ function TemplateRow({ template, onSaved }: { template: RenderEngineAdminTemplat
         </div>
       )}
       {problem === "needsFallback" ? <Banner variant="warn">{t("renderEngineAdmin.needsFallback")}</Banner> : null}
+      {isInternalOnlyRollout(draft) ? <Banner variant="info">{t("renderEngineAdmin.internalOnly")}</Banner> : null}
       {message ? <Banner variant={message.kind === "ok" ? "info" : "danger"}>{message.text}</Banner> : null}
       <Button disabled={busy || !dirty || problem !== null} onClick={() => void save()}>{busy ? t("common.loading") : t("common.save")}</Button>
     </div>

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { NEWS_RECAP_BROADCAST_TELOP_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1, NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1, RecipeRegistry, RELEASED_RECIPES, recipeRegistry, recipeToModificationSlots, resolveRecipeParams, validateRecipe, type RenderRecipe } from "./index.js";
+import { BREAKING_NEWS_RED_ALERT_JP_V1, BREAKING_NEWS_URGENT_HEADLINE_JP_V1, FACELESS_STORY_CAPTION_CENTER_JP_V1, NEWS_RECAP_BROADCAST_TELOP_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1, NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1, RecipeRegistry, SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1, SPORTS_RECAP_PLAYER_FOCUS_JP_V1, RELEASED_RECIPES, recipeRegistry, recipeToModificationSlots, resolveRecipeParams, validateRecipe, type RenderRecipe } from "./index.js";
 
 const clone = (): RenderRecipe => structuredClone(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
 const errorsOf = (recipe: unknown): string[] => {
@@ -48,11 +48,25 @@ describe("released recipes", () => {
     }
   });
 
-  it("ships the three news recaps, each immutable (digest pinned) and with the shared 60 fps / -14 LUFS standard", () => {
-    expect(RELEASED_RECIPES.map((r) => r.id)).toEqual(["news-recap-broadcast-telop-jp", "news-recap-photo-video-mix-jp", "news-recap-white-top-caption-jp"]);
+  it("ships the three news recaps and the five V04-01 library recipes, each immutable (digest pinned) and with the shared 60 fps / -14 LUFS standard", () => {
+    expect(RELEASED_RECIPES.map((r) => r.id)).toEqual([
+      "news-recap-broadcast-telop-jp",
+      "news-recap-photo-video-mix-jp",
+      "news-recap-white-top-caption-jp",
+      "sports-highlight-score-headline-jp",
+      "sports-recap-player-focus-jp",
+      "faceless-story-caption-center-jp",
+      "breaking-news-red-alert-jp",
+      "breaking-news-urgent-headline-jp",
+    ]);
     const digest = (recipe: unknown) => createHash("sha256").update(JSON.stringify(recipe)).digest("hex");
     expect(digest(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1)).toBe(PINNED_DIGEST_PHOTO_VIDEO_MIX_V1);
     expect(digest(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1)).toBe(PINNED_DIGEST_WHITE_TOP_V1);
+    expect(digest(SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1)).toBe("21673326e764287a1540aa00a2bda09277598d7f1d40ad91e352b3b25dfc93eb");
+    expect(digest(SPORTS_RECAP_PLAYER_FOCUS_JP_V1)).toBe("86f08d1e185615e727f5f217db7c4a25e3226d17bd59a9c8a3cc789bdf0df989");
+    expect(digest(FACELESS_STORY_CAPTION_CENTER_JP_V1)).toBe("2acd933b0305f279e6f0fce4cd0473e3d4a3f7549a9c165016cf187cdc7221e1");
+    expect(digest(BREAKING_NEWS_RED_ALERT_JP_V1)).toBe("b87fb920216819799cecab3ca3e8c02e7768cf72502e3cc4f975cbac415e7e3d");
+    expect(digest(BREAKING_NEWS_URGENT_HEADLINE_JP_V1)).toBe("958fa2dbf817c7e2fb06bb7155781f5628f4b43347732f61226b168c4d160b64");
     for (const recipe of RELEASED_RECIPES) {
       expect(recipe.fps).toBe(60);
       expect(recipe.audio.loudnessLufs).toBe(-14);

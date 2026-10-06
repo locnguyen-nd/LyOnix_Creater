@@ -3,6 +3,7 @@ import { Prisma } from "@lyonix/db";
 import { VideoProductionsService } from "./video-productions.service.js";
 import type { AutomationProfilesService } from "./automation-profiles.service.js";
 import type { SourcesService } from "./sources.service.js";
+import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 
 const projectId = "project-1";
 const automationProfileId = "profile-1";
@@ -454,6 +455,76 @@ describe("VideoProductionsService", () => {
       automationProfiles.create = vi.fn(async () => "forbidden" as const);
       const outcome = await service.setupAutoProfile(userId, "staff", validInput);
       expect(outcome).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    });
+  });
+
+  // V04-01: the template must be renderable BEFORE anything is created (project at setup; source / run at submit) - script, TTS and
+  // media must never run for a render that cannot happen. Uses the real shared rule (CreatomateTemplatesService.checkRenderable).
+  describe("render preflight (V04-01)", () => {
+    let snaps: any[];
+    let consumers: number;
+    const validInput = { name: "Auto", contentAccountId: "content-acc", voiceAccountId: "voice-acc", voiceId: "voice-1", mediaAccountId: "media-acc", renderAccountId: "render-acc", templateSnapshotId: "snap-1" };
+    const withTemplates = () => {
+      const templatesPrisma = {
+        templateSnapshot: {
+          findUnique: async ({ where }: any) => snaps.find((row) => row.id === where.id) ?? null,
+          findMany: async ({ where }: any) => snaps.filter((row) => where.id.in.includes(row.id)),
+        },
+        providerAccount: { findFirst: async ({ where }: any) => (where.id === "cm-acc" ? { id: "cm-acc", provider: "creatomate", role: "render", status: "verified", isFake: false, encryptedSecret: "x" } : null) },
+      };
+      const composer = { renderQueueStatus: vi.fn(async () => ({ consumers, queued: 0 })), composeVideo: vi.fn() };
+      const templates = new CreatomateTemplatesService(templatesPrisma as any, undefined, composer as any);
+      service = new VideoProductionsService(prisma, grants, sources as SourcesService, automationProfiles as AutomationProfilesService, templates);
+    };
+    beforeEach(() => {
+      snaps = [{ id: "snap-1", providerAccountId: "render-acc", engine: "lyonix", rolloutPercent: 0, fallbackSnapshotIds: [] }];
+      consumers = 1;
+      withTemplates();
+    });
+
+    it("setup: a LyOnix template at rollout 0 % is refused with the reason and no project is created", async () => {
+      expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("rollout 0 %") });
+      expect(createdProjects).toHaveLength(0);
+      expect(automationProfiles.create).not.toHaveBeenCalled();
+    });
+
+    it("setup: a template of another render account is refused as incompatible", async () => {
+      snaps[0].rolloutPercent = 100;
+      snaps[0].providerAccountId = "other-acc";
+      expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("không tương thích") });
+      expect(createdProjects).toHaveLength(0);
+    });
+
+    it("setup: an unknown snapshot is NOT_FOUND; a 100 % template (no fallback needed) provisions normally", async () => {
+      snaps = [];
+      expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      snaps = [{ id: "snap-1", providerAccountId: "render-acc", engine: "lyonix", rolloutPercent: 100, fallbackSnapshotIds: [] }];
+      expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: true });
+      expect(createdProjects).toHaveLength(1);
+    });
+
+    it("submit: re-checks (the admin may have changed the rollout since setup) before any source or run exists", async () => {
+      const outcome = await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, source: { type: "topic", topic: "x" } });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("rollout 0 %") });
+      expect(sources.create).not.toHaveBeenCalled();
+      expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+    });
+
+    it("submit: at 100 % without a fallback a stopped LyOnix engine blocks the run up front; running, the run is created", async () => {
+      snaps[0].rolloutPercent = 100;
+      consumers = 0;
+      expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId })).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("không hoạt động") });
+      expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+      consumers = 1;
+      expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId })).toMatchObject({ ok: true });
+      expect(prisma.workflowRun.create).toHaveBeenCalledTimes(1);
+    });
+
+    it("a provider template only needs its own, usable account", async () => {
+      snaps = [{ id: "snap-1", providerAccountId: "render-acc", engine: "creatomate", rolloutPercent: 0, fallbackSnapshotIds: [] }];
+      expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("chưa sẵn sàng") });
+      snaps[0].providerAccountId = "cm-acc";
+      expect(await service.setupAutoProfile(userId, "staff", { ...validInput, renderAccountId: "cm-acc" })).toMatchObject({ ok: true });
     });
   });
 });

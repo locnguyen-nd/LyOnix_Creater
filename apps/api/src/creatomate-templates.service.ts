@@ -25,6 +25,8 @@ import { RELEASED_RECIPES } from "@lyonix/render-recipes";
 import { PrismaService } from "./prisma.service.js";
 import { LYONIX_PROVIDER, RenderEngineStoreService, recipeExternalId } from "./render-engine-store.service.js";
 import { decryptSecret } from "./secret-crypto.js";
+import { MediaJobsGateway, type VideoComposer } from "./media-jobs.gateway.js";
+import { checkTemplateRenderable, internalReadiness, type ReadinessDeps, type TemplateRenderCheck } from "./template-readiness.js";
 
 export type RenderProviderName = "creatomate" | "orshot";
 export const isRenderProvider = (provider: string): provider is RenderProviderName => provider === "creatomate" || provider === "orshot";
@@ -77,7 +79,24 @@ export class CreatomateTemplatesService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     // VE2E-111: optional so provider-only unit tests keep constructing the service with one argument.
     @Optional() @Inject(RenderEngineStoreService) private readonly engineStore?: RenderEngineStoreService,
+    // V04-01: optional - only used to tell whether the internal engine is running (Auto submit preflight).
+    @Optional() @Inject(MediaJobsGateway) private readonly composer?: VideoComposer,
   ) {}
+
+  /** V04-01: dependencies of the shared readiness check (template-readiness.ts). */
+  readinessDeps(): ReadinessDeps {
+    return { prisma: this.prisma, usableAccount: (id) => this.usableAccount(id), ...(this.composer ? { renderQueueStatus: () => this.composer!.renderQueueStatus() } : {}) };
+  }
+
+  /**
+   * V04-01: THE check before a pinned template is used with a render account - same rule for Auto (setup / submit) and Studio (apply,
+   * render). Unknown snapshot = NOT_FOUND; otherwise see `checkTemplateRenderable`.
+   */
+  async checkRenderable(templateSnapshotId: string, providerAccountId: string, options: { checkEngine: boolean }): Promise<TemplateRenderCheck | { ok: false; code: "NOT_FOUND"; message: string; status: 404 }> {
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: templateSnapshotId } });
+    if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
+    return checkTemplateRenderable(this.readinessDeps(), { snapshot, providerAccountId, checkEngine: options.checkEngine });
+  }
 
   /** VE2E-111: is this the internal engine's system account? (No secret, no network: its templates are the repo's released recipes.) */
   private async isInternalAccount(providerAccountId: string): Promise<boolean> {
@@ -99,7 +118,25 @@ export class CreatomateTemplatesService {
 
   async listTemplates(providerAccountId: string): Promise<CreatomateOutcome<CreatomateTemplateSummaryResponse[]>> {
     if (await this.isInternalAccount(providerAccountId)) {
-      return { ok: true, data: RELEASED_RECIPES.map((recipe) => ({ externalTemplateId: recipeExternalId(recipe), name: recipe.name, previewUrl: null, tags: ["lyonix", `v${recipe.version}`] })) };
+      // V04-01: each internal template says whether it can be applied / rendered now (rollout + fallback of its pinned snapshot).
+      const pinned = await this.prisma.templateSnapshot.findMany({ where: { providerAccountId, engine: LYONIX_PROVIDER }, select: { externalTemplateId: true, rolloutPercent: true, fallbackSnapshotIds: true } });
+      const deps = this.readinessDeps();
+      const data: CreatomateTemplateSummaryResponse[] = [];
+      for (const recipe of RELEASED_RECIPES) {
+        const externalTemplateId = recipeExternalId(recipe);
+        const row = pinned.find((candidate) => candidate.externalTemplateId === externalTemplateId);
+        const readiness = row ? await internalReadiness(deps, row, { checkEngine: false }) : ({ ready: false, reason: "rollout_off" } as const);
+        data.push({
+          externalTemplateId,
+          name: recipe.name,
+          previewUrl: null,
+          tags: ["lyonix", `v${recipe.version}`],
+          internalRender: readiness.ready
+            ? { ready: true, reason: null, rolloutPercent: row?.rolloutPercent ?? 0, hasFallback: readiness.hasFallback }
+            : { ready: false, reason: readiness.reason === "no_fallback" ? "no_fallback" : "rollout_off", rolloutPercent: row?.rolloutPercent ?? 0, hasFallback: false },
+        });
+      }
+      return { ok: true, data };
     }
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
@@ -129,6 +166,9 @@ export class CreatomateTemplatesService {
         row = await this.prisma.templateSnapshot.findFirst({ where: { providerAccountId, externalTemplateId } });
       }
       if (!row) return { ok: false, code: "NOT_FOUND", message: "Mẫu nội bộ chưa được nạp vào kho mẫu", status: 404 };
+      // V04-01: applying a template that cannot render is refused here, for Studio and Auto alike (preview stays possible).
+      const renderable = await checkTemplateRenderable(this.readinessDeps(), { snapshot: row, providerAccountId, checkEngine: false });
+      if (!renderable.ok) return { ok: false, code: renderable.code, message: renderable.message, status: renderable.status };
       return { ok: true, data: toSnapshotResponse(row) };
     }
     const account = await this.usableAccount(providerAccountId);

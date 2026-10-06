@@ -4,7 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildVideoComposeJob, composeFingerprint, type VideoComposeProgress, type VideoComposeSuccess } from "@lyonix/media-jobs";
-import { NEWS_RECAP_BROADCAST_TELOP_JP_V1, NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1, NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1, RecipeRegistry, type RenderRecipe } from "@lyonix/render-recipes";
+import {
+  BREAKING_NEWS_RED_ALERT_JP_V1,
+  BREAKING_NEWS_URGENT_HEADLINE_JP_V1,
+  FACELESS_STORY_CAPTION_CENTER_JP_V1,
+  NEWS_RECAP_BROADCAST_TELOP_JP_V1,
+  NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1,
+  NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1,
+  RecipeRegistry,
+  SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1,
+  SPORTS_RECAP_PLAYER_FOCUS_JP_V1,
+  type RenderRecipe,
+} from "@lyonix/render-recipes";
 import { runProcess } from "../process.js";
 import { ComposeProcessor } from "./compose-processor.js";
 import { detectFfmpeg, ffmpegPath, ffprobePath, findJapaneseFont, generate, makeFixtures, makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
@@ -28,6 +39,8 @@ const withHostFont = (source: RenderRecipe): RenderRecipe => {
   return recipe;
 };
 const releasedWithHostFont = (): RenderRecipe => withHostFont(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
+/** V04-01: the default template library recipes (sports / faceless / breaking news) - same engine features, rendered for real below. */
+const LIBRARY_RECIPES = [SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1, SPORTS_RECAP_PLAYER_FOCUS_JP_V1, FACELESS_STORY_CAPTION_CENTER_JP_V1, BREAKING_NEWS_RED_ALERT_JP_V1, BREAKING_NEWS_URGENT_HEADLINE_JP_V1];
 
 describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
   let root: string;
@@ -43,7 +56,7 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       compose: { queue: "lyonix.render.test", prefetch: 1, timeoutMs: 180_000, x264Preset: "ultrafast", x264Threads: 0, fontsDir: null },
       runner: runProcess,
       ffmpegVersion: version,
-      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont(), withHostFont(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1), withHostFont(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1)]),
+      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont(), withHostFont(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1), withHostFont(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1), ...LIBRARY_RECIPES.map(withHostFont)]),
     });
   }, 120_000);
 
@@ -129,6 +142,19 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       expect(frame.stdout[0]!).toBeLessThan(40); // limited-range dark, not picture content
     }
   }, 400_000);
+
+  it("V04-01: renders the five library recipes (sports, faceless, breaking news) with a headline through the full QC gate, 1080x1920 60 fps", async () => {
+    const texts = japaneseFont ? ["注目プレーを振り返ります。", "後半の逆転劇をチェックしましょう。", "次の試合の見どころも紹介します。"] : ["First scene text", "Second scene text", "Third scene text"];
+    const plan = makePlan(files, { texts, withMusic: true, params: { headline: japaneseFont ? "試合のハイライト 2-1" : "MATCH HIGHLIGHTS 2-1" }, padStartMs: 300, padEndMs: 800 });
+    for (const recipe of LIBRARY_RECIPES) {
+      const result = await processor.handle(buildVideoComposeJob({ jobKey: `compose:it-${recipe.id}`, recipe: { id: recipe.id, version: 1 }, plan }));
+      if (!result.ok) throw new Error(`${recipe.id} failed: ${result.error.code}: ${result.error.message}`);
+      expect(result.qc.passed, `${recipe.id}: ${JSON.stringify(result.qc.checks.filter((c) => !c.ok))}`).toBe(true);
+      expect(result.output).toMatchObject({ width: 1080, height: 1920, fps: 60 });
+      expect(result.tool.recipe).toEqual({ id: recipe.id, version: 1 });
+      if (process.env.LYONIX_KEEP_RENDER) console.info(`${recipe.id} render kept at ${join(root, result.output.relativePath)}`);
+    }
+  }, 900_000);
 
   it("fails fast with FONT_MISSING (a technical failure: the Router falls back) when the recipe font is not installed", async () => {
     const ghost = { ...testRecipe("Definitely Not Installed Font"), id: "ghost-font" };
