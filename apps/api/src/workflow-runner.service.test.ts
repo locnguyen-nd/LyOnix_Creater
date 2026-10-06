@@ -513,6 +513,18 @@ describe("WorkflowRunnerService", () => {
     expect(calls.map((call) => [call[3].sceneId, call[3].mediaType])).toEqual([["scene-1", "image"], ["scene-2", "video"]]);
   });
 
+  it("only sends a headline option to internal recipes that declare the headline slot", async () => {
+    prisma.templateSnapshot.findUnique = vi.fn(async () => ({
+      id: templateSnapshotId, providerAccountId: "render-acc", engine: "lyonix",
+      modifications: [{ key: "badge", kind: "text", label: "Badge", required: false }],
+    }));
+    await service.processNext();
+    expect(timelines.persistApprovedForWorkflowRun).toHaveBeenCalledWith(
+      "run-1", projectId, userId, "staff", expect.objectContaining({ optionValues: {} }),
+    );
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
   it("bounded-retries a transient provider failure (re-queues to draft, increments attempts) then fails after maxAttempts", async () => {
     audioVersions.generateForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "rate limited" }));
     await service.processNext();

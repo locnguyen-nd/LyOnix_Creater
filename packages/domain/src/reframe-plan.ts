@@ -201,12 +201,13 @@ export function planReframe(input: PlanReframeInput, options: PlanReframeOptions
   const durationMs = Math.max(0, Math.round(input.durationMs ?? (samples.length ? samples[samples.length - 1]!.tMs : 0)));
 
   // Timeline: subject sample times plus every overlay on/off boundary, within [0, duration].
-  const times = new Set<number>(samples.map((s) => Math.min(s.tMs, durationMs)));
+  // Detectors sample video frames inside the window (often first at ~300ms), but clip.prepare
+  // requires the crop trajectory to cover the cut from its first frame at t=0.
+  const times = new Set<number>([0, ...samples.map((s) => Math.min(s.tMs, durationMs))]);
   for (const e of exclusions) {
     if (e.startMs !== undefined) times.add(clamp(Math.round(e.startMs), 0, durationMs));
     if (e.endMs !== undefined) times.add(clamp(Math.round(e.endMs) - 1, 0, durationMs));
   }
-  if (times.size === 0) times.add(0);
   const timeline = [...times].sort((a, b) => a - b);
   const frames: Frame[] = timeline.map((tMs) => ({
     tMs,

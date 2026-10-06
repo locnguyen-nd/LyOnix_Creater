@@ -56,9 +56,12 @@ export type SlotCompatibilityRow = { kind: OrshotSlotKind; templateSlots: number
  * fewer items than slots → "missing" (required slots stay empty, the submit is rejected); more → "unused" (extra scenes are dropped).
  * Audio slots are optional, so a shortfall there is only "ok".
  */
-export function slotCompatibility(slots: Pick<TemplateModificationSlotResponse, "kind">[], supply: TimelineSlotSupply): SlotCompatibilityRow[] {
+export function slotCompatibility(slots: Array<Pick<TemplateModificationSlotResponse, "kind"> & { key?: string }>, supply: TimelineSlotSupply): SlotCompatibilityRow[] {
   const count = (kind: string) => slots.filter((slot) => slot.kind === kind).length;
-  const supplyOf: Record<OrshotSlotKind, number> = { video: supply.videos, image: supply.images, text: supply.scenes, audio: supply.voices };
+  const pageMedia = slots.filter((slot) => /^page[1-9]\d*@media$/.test(slot.key ?? ""));
+  const pageTexts = slots.filter((slot) => slot.kind === "text" && /^page[1-9]\d*@/.test(slot.key ?? ""));
+  const textPerPage = pageMedia.length > 0 && pageTexts.length % pageMedia.length === 0 ? pageTexts.length / pageMedia.length : 1;
+  const supplyOf: Record<OrshotSlotKind, number> = { video: supply.videos, image: supply.images, text: supply.scenes * textPerPage, audio: supply.voices };
   return ORSHOT_SLOT_KINDS.map((kind) => {
     const templateSlots = count(kind);
     const timelineItems = supplyOf[kind];
@@ -68,6 +71,8 @@ export function slotCompatibility(slots: Pick<TemplateModificationSlotResponse, 
 }
 
 export const hasBlockingSlotMismatch = (rows: SlotCompatibilityRow[]) => rows.some((row) => row.status === "missing");
+
+export const orshotPageCountFromSlots = (slots: Array<{ key: string }>): number => slots.filter((slot) => /^page[1-9]\d*@media$/.test(slot.key)).length;
 
 export const ORSHOT_FORMATS: NonNullable<OrshotRenderOptions["format"]>[] = ["mp4", "webm", "mov", "gif"];
 export const ORSHOT_FPS: NonNullable<OrshotRenderOptions["fps"]>[] = [24, 30, 60];

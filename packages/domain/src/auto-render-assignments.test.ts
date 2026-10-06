@@ -12,6 +12,26 @@ const scene = (overrides: Partial<AutoSceneMedia>): AutoSceneMedia => ({
 });
 
 describe("buildAutoRenderAssignments", () => {
+  it("fills both Orshot text fields from the same page scene", () => {
+    const slots: AutoTemplateSlot[] = [
+      { key: "page1@media", kind: "image", required: true },
+      { key: "page1@subtitle", kind: "text", required: true },
+      { key: "page1@tag", kind: "text", required: true },
+      { key: "page2@media", kind: "video", required: true },
+      { key: "page2@subtitle", kind: "text", required: true },
+      { key: "page2@tag", kind: "text", required: true },
+    ];
+    const scenes = [scene({ sceneId: "2", orderIndex: 1, visualKind: "video", visualMediaAssetVersionId: "vid", displayText: "Lời 2", tagText: "Nhãn 2" }), scene({ sceneId: "1", orderIndex: 0, visualKind: "image", visualMediaAssetVersionId: "img", displayText: "Lời 1", tagText: "Nhãn 1" })];
+    expect(buildAutoRenderAssignments(slots, scenes)).toEqual({ ok: true, assignments: [
+      { modificationKey: "page1@media", kind: "image", mediaAssetVersionId: "img" },
+      { modificationKey: "page1@subtitle", kind: "text", text: "Lời 1" },
+      { modificationKey: "page1@tag", kind: "text", text: "Nhãn 1" },
+      { modificationKey: "page2@media", kind: "video", mediaAssetVersionId: "vid" },
+      { modificationKey: "page2@subtitle", kind: "text", text: "Lời 2" },
+      { modificationKey: "page2@tag", kind: "text", text: "Nhãn 2" },
+    ] });
+    expect(buildAutoTimelineOptionValues(slots, scenes, { title: "Title", caption: "Caption" })).toEqual({});
+  });
   it("fails fast on zero scenes", () => {
     expect(buildAutoRenderAssignments([], [])).toEqual({ ok: false, reason: "no_scenes" });
   });

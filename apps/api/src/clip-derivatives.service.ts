@@ -281,6 +281,9 @@ export class ClipDerivativesService {
       if (error instanceof MediaJobClientError && error.code === "MEDIA_WORKER_NOT_CONFIGURED") {
         throw new PrepareFailure({ ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Media worker chưa cấu hình (RABBITMQ_URL) — không cắt được clip để render", status: 503, retryable: false });
       }
+      if (error instanceof MediaJobClientError && error.code === "INVALID_JOB") {
+        throw new PrepareFailure({ ok: false, code: "VALIDATION_FAILED", message: `Yêu cầu cắt clip không hợp lệ: ${error.message} — không gửi file gốc`, retryable: false });
+      }
       const detail = error instanceof MediaJobClientError ? error.code : "UNKNOWN";
       throw new PrepareFailure({
         ok: false,

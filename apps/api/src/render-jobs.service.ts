@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { mediaRoot } from "./handoff-workspace.js";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
-import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, type RenderJobStatus } from "@lyonix/domain";
+import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, orshotPageCount, type RenderJobStatus } from "@lyonix/domain";
 import {
   ProviderError,
   applyDynamicStyleOverrides,
@@ -823,6 +823,8 @@ export class RenderJobsService {
     // VE2E-52: the fixed-slot (modification) path only when the scene count equals the template's Scene slots;
     // any other count (fewer or more) is composed by the template-scaled generator so no scene/narration is dropped.
     const includedScenes = resolved.filter((scene) => !scene.excluded);
+    const orshotPages = account.data.provider === "orshot" ? orshotPageCount(RenderJobsService.snapshotSlots(snapshot)) : null;
+    if (orshotPages !== null && includedScenes.length !== orshotPages) return { ok: false, code: "VALIDATION_FAILED", message: `Template Orshot có ${orshotPages} page nhưng timeline có ${includedScenes.length} cảnh. Chọn đúng ${orshotPages} cảnh hoặc template khác.` };
     const slotCount = countTemplateSceneSlots(snapshot.rawTemplate);
     const fixedSlotsOk = fixedSlotPathApplies({
       slotCount,

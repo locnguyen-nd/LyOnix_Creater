@@ -188,6 +188,25 @@ describe("ReframeAnalyzeProcessor", () => {
     expect(counts.faces).toBe(detectsBefore);
   });
 
+  it("recomputes a cached crop plan whose first keyframe starts after t=0", async () => {
+    await seedSource();
+    const { runner } = fakeRunner();
+    const { detector, counts } = fakeDetector({ faces: () => [person(80, 100, 70, 90)] });
+    const processor = processorWith(runner, detector);
+    const input = job({ startMs: 2000, durationMs: 9000 });
+    const first = await processor.handle(input);
+    expect(first.ok).toBe(true);
+    const manifestPath = join(mediaRoot, MEDIA_JOBS_DIR, jobDirName(input.jobKey), "result.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.result.cropPlan.keyframes[0].tMs = 296;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const before = counts.faces;
+    const recomputed = await processor.handle(input);
+    expect(recomputed).toMatchObject({ ok: true, reused: false });
+    if (recomputed.ok) expect(recomputed.cropPlan.keyframes[0]!.tMs).toBe(0);
+    expect(counts.faces).toBeGreaterThan(before);
+  });
+
   it("de-duplicates concurrent identical jobs, conflicts on a different input, recomputes when worker config changes", async () => {
     await seedSource();
     const { runner } = fakeRunner();

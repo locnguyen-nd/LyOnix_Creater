@@ -288,6 +288,7 @@ const vi = {
     autoSubmit: "Tạo video tự động",
     autoNoTemplate: "Tài khoản render này chưa có template nào để chọn.",
     autoRenderAccount: "Tài khoản render",
+    autoAddOrshot: "Thêm hoặc xác minh tài khoản Orshot trong Cài đặt Provider",
     autoOrshotHint: "Orshot render theo template: số cảnh phải khớp số slot của template (không tự co giãn như Creatomate).",
     autoOrshotFormat: "Định dạng (Orshot)",
     autoOrshotSize: "Kích thước (Orshot)",
@@ -521,6 +522,7 @@ const vi = {
     modelUsable: "khả dụng (đã xác thực gần đây)",
     modelStale: "khả dụng (đã lâu, sẽ tự kiểm tra lại khi chọn)",
     modelUnverified: "chưa xác thực - sẽ kiểm tra khi chọn",
+    readyModelCount: "Có {{count}} model sẵn sàng",
     modelStatus: {
       retired: "đã ngừng hỗ trợ",
       unsupported: "không hỗ trợ endpoint này",
@@ -1189,6 +1191,7 @@ const en: typeof vi = {
     autoSubmit: "Create video automatically",
     autoNoTemplate: "This render account has no template to choose from.",
     autoRenderAccount: "Render account",
+    autoAddOrshot: "Add or verify an Orshot account in Provider settings",
     autoOrshotHint: "Orshot renders the template's fixed slots: the scene count must match the template slots (no automatic scaling like Creatomate).",
     autoOrshotFormat: "Format (Orshot)",
     autoOrshotSize: "Size (Orshot)",
@@ -1446,6 +1449,7 @@ const en: typeof vi = {
     modelUsable: "usable (recently verified)",
     modelStale: "usable (verified a while ago, will re-check when selected)",
     modelUnverified: "unverified - will be checked when selected",
+    readyModelCount: "{{count}} models ready",
     groups: {
       content: "Content (script)",
       tts: "Voice",

@@ -37,6 +37,14 @@ describe("parseOrshotEmbedMessage", () => {
 describe("slotCompatibility", () => {
   const slots = [{ kind: "video" }, { kind: "video" }, { kind: "text" }, { kind: "text" }, { kind: "audio" }] as const;
   const row = (rows: ReturnType<typeof slotCompatibility>, kind: string) => rows.find((r) => r.kind === kind)!;
+  it("counts subtitle and tag for each Orshot page", () => {
+    const pages = [1, 2].flatMap((page) => [
+      { key: `page${page}@media`, kind: "video" as const },
+      { key: `page${page}@subtitle`, kind: "text" as const },
+      { key: `page${page}@tag`, kind: "text" as const },
+    ]);
+    expect(row(slotCompatibility(pages, { scenes: 2, videos: 2, images: 0, voices: 0 }), "text")).toMatchObject({ templateSlots: 4, timelineItems: 4, status: "ok" });
+  });
   it("flags missing required slots (blocking) and unused surplus scenes", () => {
     const rows = slotCompatibility([...slots], { scenes: 3, videos: 1, images: 0, voices: 0 });
     expect(row(rows, "video")).toMatchObject({ templateSlots: 2, timelineItems: 1, status: "missing" });

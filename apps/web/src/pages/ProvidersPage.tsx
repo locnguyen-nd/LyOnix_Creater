@@ -7,6 +7,7 @@ import { useMe } from "../session";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
 import { isInternalRenderProvider } from "../studio/render-provider";
+import { readyModelCount } from "./provider-model-summary";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
 type AddableKind = "openai" | "gemini" | "xai" | "openrouter" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate" | "orshot";
@@ -203,7 +204,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                           {modelOptionsFor(row).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(row, item)}</option>)}
                         </Select>
                       </Field>
-                      {row.role === "content" ? <div className="mt-2 space-y-1 text-[11px] text-lyx-fg-muted">{modelOptionsFor(row).map((item) => <p key={item}>{item}: {modelStatusLabel(row, item)}</p>)}</div> : null}
+                      {row.role === "content" ? <p className="mt-2 text-[12px] text-lyx-fg-muted">{t("providers.readyModelCount", { count: readyModelCount(row) })}</p> : null}
                     </div>
                   ) : null}
                   {isInternalRenderProvider(row.provider) ? (
@@ -272,7 +273,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                 {modelOptionsFor(editing).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(editing, item)}</option>)}
               </Select>
             </Field> : null}
-            {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })} hint={modelOptionsFor(editing).join(", ")}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
+            {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
             <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>

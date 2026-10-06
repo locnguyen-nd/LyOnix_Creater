@@ -94,6 +94,7 @@ export function JobNewPage() {
   const contentAccounts = usableAccounts(providers, "content");
   const voiceAccounts = usableAccounts(providers, "tts");
   const mediaAccounts = usableAccounts(providers, "visual").filter((item) => item.provider === "pexels");
+  const renderAccountChoices = providers.filter((item) => item.role === "render");
   const renderAccounts = usableAccounts(providers, "render");
   const lists: CreationLists = creationLists(channels, providers);
   const renderProvider = renderAccounts.find((account) => account.id === form.renderAccountId)?.provider;
@@ -590,14 +591,21 @@ export function JobNewPage() {
                   </Select>
                 </Field>
               ) : null}
-              {renderAccounts.length > 1 || (renderAccounts.length > 0 && !form.renderAccountId) ? (
+              <>
                 <Field label={t("jobs.autoRenderAccount")}>
                   <Select value={form.renderAccountId} onChange={(e) => update({ renderAccountId: e.target.value }, ["templateId"])}>
                     {placeholder(form.renderAccountId)}
-                    {renderAccounts.map((account) => <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>)}
+                    {renderAccountChoices.map((account) => (
+                      <option key={account.id} value={account.id} disabled={!renderAccounts.some((usable) => usable.id === account.id)}>
+                        {renderAccountOptionLabel(account)}{account.status !== "verified" && !account.isFake ? ` · ${t(`providers.${account.status}`)}` : ""}
+                      </option>
+                    ))}
                   </Select>
                 </Field>
-              ) : null}
+                {!renderAccounts.some((account) => account.provider === "orshot") ? (
+                  <Link className="text-[12px] underline" to="/settings?tab=providers">{t("jobs.autoAddOrshot")}</Link>
+                ) : null}
+              </>
               {isOrshotRender ? (
                 <div className="flex flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border p-3">
                   <p className="text-[12px] text-lyx-fg-muted">{t("jobs.autoOrshotHint")}</p>

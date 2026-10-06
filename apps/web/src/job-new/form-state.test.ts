@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { SYSTEM_CREATION_DEFAULTS, pickCreationPreferences } from "@lyonix/domain/creation-form";
 import { locales } from "../i18n/locales";
-import { FIELD_LABEL_KEYS, buildInitialFormState, type CreationLists } from "./form-state";
+import type { ApiProvider } from "../jobs-api";
+import { FIELD_LABEL_KEYS, buildInitialFormState, creationLists, type CreationLists } from "./form-state";
 
 const lists: CreationLists = { channelIds: ["ch-1", "ch-2"], contentIds: ["c-1", "c-2"], voiceIds: ["va-1", "va-2"], mediaIds: ["px-1"], renderIds: ["r-1", "r-2"] };
 
 describe("new-job form start state (VE2E-124)", () => {
+  it("includes a verified Orshot render account in selectable render IDs", () => {
+    const orshot = { id: "orshot-1", provider: "orshot", role: "render", status: "verified", isFake: false } as ApiProvider;
+    const pending = { ...orshot, id: "orshot-pending", status: "unverified" } as ApiProvider;
+    expect(creationLists([], [orshot, pending]).renderIds).toEqual(["orshot-1"]);
+  });
+
   it("no draft, no defaults: system defaults + the first available channel/content account (unchanged behaviour)", () => {
     const { values, cleared } = buildInitialFormState({ lists });
     expect(values).toMatchObject({ ...SYSTEM_CREATION_DEFAULTS, channelId: "ch-1", contentAccountId: "c-1" });

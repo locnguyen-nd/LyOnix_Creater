@@ -40,6 +40,7 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
   deriveSceneVisualKinds,
+  orshotPageCount,
   splitSegmentsByVisualKind,
 } from "@lyonix/domain";
 import { ProviderError, type ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
@@ -504,6 +505,15 @@ export class WorkflowRunnerService {
       });
     }
     if (approved.scenes.length === 0) throw new WorkflowStepFailure("VALIDATION_FAILED", "Script được duyệt không có scene nào");
+    // Orshot cannot expand a fixed page template. Check before paid voice/media work.
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
+    if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
+    if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
+    const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
+    const orshotPages = orshotPageCount(slots);
+    if (orshotPages !== null && approved.scenes.length !== orshotPages) {
+      throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Chọn đúng ${orshotPages} cảnh hoặc template có số page tương ứng.`);
+    }
 
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
@@ -641,16 +651,13 @@ export class WorkflowRunnerService {
 
     // --- 6. timeline: preflight the positional slot mapping, then persist it as an auto-approved TimelineVersion (VE2E-42) ---
     await this.setStatus(run.id, "editing");
-    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
-    if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
-    if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
-    const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
     const sceneMedia: AutoSceneMedia[] = approved.scenes.map((scene) => ({
       sceneId: scene.sceneId,
       orderIndex: scene.orderIndex,
       // narration (not the separately LLM-authored screenText) - see AutoSceneMedia.displayText's
       // own doc comment: the on-screen caption must be exactly what the voice says, word for word.
       displayText: scene.narration,
+      tagText: scene.screenText,
       visualMediaAssetVersionId: mediaByScene.get(scene.sceneId)?.id ?? null,
       visualKind: mediaByScene.get(scene.sceneId)?.kind ?? null,
       audioMediaAssetVersionId: audioByScene.get(scene.sceneId)?.mediaAssetVersionId ?? null,
@@ -667,7 +674,7 @@ export class WorkflowRunnerService {
       imageSceneCount: sceneMedia.filter((scene) => scene.visualKind === "image").length,
       templateImageSlots: slots.filter((slot) => slot.kind === "image").length,
     });
-    const built = fixedSlots ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
+    const built = fixedSlots || orshotPages !== null ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
     if (!built.ok) {
       const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
       throw new WorkflowStepFailure("VALIDATION_FAILED", detail);
@@ -693,8 +700,8 @@ export class WorkflowRunnerService {
           sourceDurationMs: planByScene.get(scene.sceneId)?.sourceDurationMs ?? null,
         })),
         segments: mediaPlan.segments,
-        // Internal (`lyonix`) recipes have no positional text slots: the script title is the telop headline.
-        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
+        // Only the telop recipe has a headline slot; other internal recipes must not receive an unknown option key.
+        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() && slots.some((slot) => slot.key === "headline") ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
       });
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
       return outcome.data;
