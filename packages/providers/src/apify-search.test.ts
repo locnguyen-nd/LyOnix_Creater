@@ -42,7 +42,8 @@ describe("Apify allowlist / helpers", () => {
   it("pins the four approved primary Actors with versions and a backup for each", () => {
     expect(APIFY_ACTOR_ALLOWLIST.tiktok.primary).toEqual({ actorId: "clockworks/tiktok-scraper", version: "0.0.611" });
     expect(APIFY_ACTOR_ALLOWLIST.pinterest.primary.actorId).toBe("fatihtahta/pinterest-scraper-search");
-    expect(APIFY_ACTOR_ALLOWLIST.x.primary.actorId).toBe("kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest");
+    expect(APIFY_ACTOR_ALLOWLIST.x.primary.actorId).toBe("apidojo/tweet-scraper");
+    expect(APIFY_ACTOR_ALLOWLIST.x.backup?.actorId).toBe("kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest");
     expect(APIFY_ACTOR_ALLOWLIST.google_image.primary.actorId).toBe("damilo/google-images-scraper");
     for (const pin of Object.values(APIFY_ACTOR_ALLOWLIST)) expect(pin.primary.version).toMatch(/^\d/);
   });
@@ -63,6 +64,7 @@ describe("Apify allowlist / helpers", () => {
     expect(buildActorInput("clockworks/tiktok-scraper", "k", "ja", 7)).toMatchObject({ resultsPerPage: 7, proxyCountryCode: "JP", shouldDownloadVideos: true });
     expect(buildActorInput("fatihtahta/pinterest-scraper-search", "k", "ja", 7)).toMatchObject({ limit: 7 });
     expect(buildActorInput("kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest", "k", "ja", 7)).toMatchObject({ maxItems: 7, lang: "ja", queryType: "Videos" });
+    expect(buildActorInput("apidojo/tweet-scraper", "阪神", "ja", 7)).toEqual({ searchTerms: ["阪神"], sort: "Top", onlyVideo: true, tweetLanguage: "ja", maxItems: 50 });
     expect(buildActorInput("johnvc/google-short-videos-api", "k", "ja", 7)).toMatchObject({ max_pages: 1 });
   });
 });

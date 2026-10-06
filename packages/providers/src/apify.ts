@@ -118,7 +118,8 @@ export type ApifyActorPin = { actorId: string; version: string };
 export const APIFY_ACTOR_ALLOWLIST: Record<ApifyPlatform, { primary: ApifyActorPin; backup: ApifyActorPin | null }> = {
   tiktok: { primary: { actorId: "clockworks/tiktok-scraper", version: "0.0.611" }, backup: { actorId: "apidojo/tiktok-scraper", version: "0.0.1111" } },
   pinterest: { primary: { actorId: "fatihtahta/pinterest-scraper-search", version: "1.1.8" }, backup: { actorId: "silentflow/pinterest-scraper-ppr", version: "1.0.27" } },
-  x: { primary: { actorId: "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest", version: "0.0.68" }, backup: { actorId: "apidojo/twitter-scraper-lite", version: "0.0.1014" } },
+  // Owner 2026-10-07: Tweet Scraper V2 (apidojo) first - the kaito Actor returned 0 items for Japanese queries; kaito stays as the backup.
+  x: { primary: { actorId: "apidojo/tweet-scraper", version: "latest" }, backup: { actorId: "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest", version: "0.0.68" } },
   google_image: { primary: { actorId: "damilo/google-images-scraper", version: "0.0.4" }, backup: { actorId: "hooli/google-images-scraper", version: "0.0.46" } },
   google_video: { primary: { actorId: "johnvc/google-short-videos-api", version: "0.0.107" }, backup: { actorId: "searchapi/google-videos-scraper", version: "3.0.5" } },
 };
@@ -167,6 +168,9 @@ export function buildActorInput(actorId: string, keyword: string, lang: ApifyLan
       return { queries: [keyword], type: "all-pins", limit };
     case "silentflow/pinterest-scraper-ppr":
       return { search: keyword, maxItems: limit };
+    case "apidojo/tweet-scraper":
+      // V2 bills at least 50 tweets per query, so ask for 50 (the dataset read is still bounded by `limit`).
+      return { searchTerms: [keyword], sort: "Top", onlyVideo: true, tweetLanguage: lang, maxItems: Math.max(limit, 50) };
     case "kaitoeasyapi/twitter-x-data-tweet-scraper-pay-per-result-cheapest":
       return { searchTerms: [keyword], queryType: "Videos", lang, maxItems: limit };
     case "apidojo/twitter-scraper-lite":

@@ -358,26 +358,36 @@ export class MediaPlanService {
       // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
       const visualKind = segmentVisualKind(input.segment);
       const platformList = visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv();
-      for (const [platformIndex, platform] of platformList.entries()) {
-        // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
-        const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
-          platform,
-          mediaType: visualKind,
-          keyword,
-          brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
-          sceneId: input.segment.sceneIds[0]!,
-          usedExternalIds,
-          scriptLanguage: input.script.language,
-          segmentDurationSeconds: input.segment.durationMs / 1000,
-          ...(input.allowUnverified ? { allowUnverified: true } : {}),
-          // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
-          ...((input.allowUnverified && platformIndex === platformList.length - 1) || input.lenient ? { keepOverlayFlagged: true } : {}),
-          // Best-effort fill: the best candidate not rejected by vision is taken even below the relevance threshold / without the strict social filter.
-          ...(input.lenient ? { lenient: true } : {}),
-          ...(input.job ? { job: input.job } : {}),
-        }));
-        if (attempt.ok) { outcome = attempt; break; }
-        firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
+      // Strict pass: the segment's Japanese keyword. Best-effort pass: also its English keyword and its subject (Pinterest/X index them better,
+      // and segments split from one plan segment would otherwise exhaust the same 10 results).
+      const keywords = input.lenient ? [...new Set([keyword, input.segment.keywords?.en.trim() ?? "", input.segment.subject?.trim() ?? ""].filter(Boolean))] : [keyword];
+      // A failed download / frame check / unavoidable overlay only rejects THAT clip: the next ranked candidate gets up to 3 tries per platform.
+      const retryable = (reason: string) => reason.startsWith("apify_import_failed") || reason.startsWith("apify_frames_rejected") || reason.startsWith("apify_overlay_unavoidable");
+      search: for (const searchKeyword of keywords) {
+        for (const [platformIndex, platform] of platformList.entries()) {
+          for (let tries = 0; tries < 3; tries += 1) {
+            // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
+            const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
+              platform,
+              mediaType: visualKind,
+              keyword: searchKeyword,
+              brief: { ...brief, phrases: [searchKeyword, ...brief.phrases.filter((phrase) => phrase !== searchKeyword)].slice(0, MAX_QUERY_VARIANTS) },
+              sceneId: input.segment.sceneIds[0]!,
+              usedExternalIds,
+              scriptLanguage: input.script.language,
+              segmentDurationSeconds: input.segment.durationMs / 1000,
+              ...(input.allowUnverified ? { allowUnverified: true } : {}),
+              // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
+              ...((input.allowUnverified && platformIndex === platformList.length - 1) || input.lenient ? { keepOverlayFlagged: true } : {}),
+              // Best-effort fill: the best candidate not rejected by vision is taken even below the relevance threshold / without the strict social filter.
+              ...(input.lenient ? { lenient: true } : {}),
+              ...(input.job ? { job: input.job } : {}),
+            }));
+            if (attempt.ok) { outcome = attempt; break search; }
+            firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
+            if (!retryable(attempt.reason)) break;
+          }
+        }
       }
       if (!outcome) return { reason: firstFailure?.reason ?? "apify_no_platform", quality: firstFailure?.quality ?? null };
       const asset = outcome.data.asset;

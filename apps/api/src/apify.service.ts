@@ -98,6 +98,8 @@ export class ApifyJobContext {
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
   /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
   readonly vision: VisionBudget;
+  /** Clip ids whose download/import failed in this job: never picked again (a retry then moves on to the next ranked candidate). */
+  readonly failedIds = new Set<string>();
   constructor(opts: { visionMaxCalls?: number } = {}) {
     this.vision = new VisionBudget(opts.visionMaxCalls ? { maxCalls: opts.visionMaxCalls } : {});
   }
@@ -626,7 +628,7 @@ export class ApifyService {
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
-      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
+      const eligible = results.filter((r) => !job.failedIds.has(r.candidate.externalId) && (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
       if (input.platform !== "tiktok") return eligible;
       if (input.lenient) {
         // Best effort: keep every importable candidate that was not already used (language/orientation/length rules are only preferences now).
@@ -712,6 +714,7 @@ export class ApifyService {
     const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
     if (!imported.ok) {
       input.usedExternalIds.delete(importedId);
+      job.failedIds.add(importedId);
       release();
       return fail(`apify_import_failed:${imported.code}:${String((imported as { message?: string }).message ?? "").slice(0, 120)}`);
     }
