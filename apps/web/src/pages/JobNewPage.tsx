@@ -5,7 +5,7 @@ import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, Select, TextArea } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
-import { CategoryChips, TemplateCard } from "../components/TemplateCard";
+import { TemplatePicker } from "../components/TemplatePicker";
 import { Modal } from "../components/Modal";
 import { mergeTemplateEntries, type TemplateEntry } from "../studio/template-gallery";
 import {
@@ -120,7 +120,7 @@ export function JobNewPage() {
   const library = useMemo(() => toLibraryTemplates(libraryEntries), [libraryEntries]);
   const counts = useMemo(() => categoryCounts(uniqueTemplates(library)), [library]);
   // V04-XX / V04-01: the cards (one per template) and the preview browse the filtered list; previewing never selects.
-  const previewTemplates = useMemo(() => uniqueTemplates(filterByCategory(library, category)), [library, category]);
+  const previewTemplates = useMemo(() => uniqueTemplates(library), [library]);
   // V04-01: the chosen template against the chosen render account - Auto is blocked unless it is compatible AND ready to render.
   const templateState = templateSelectionState(library, form.templateId, form.renderAccountId);
   const renderAccountKey = renderAccounts.map((account) => account.id).join(",");
@@ -693,7 +693,12 @@ export function JobNewPage() {
                   {/* VE2E-13 / V04-XX / V04-01: the library of every render account, filtered by group. A card only opens the 9:16
                       preview; only "Chọn template này" in the preview applies a template (and its render account). */}
                   <div className="flex flex-col gap-2.5">
-                    <CategoryChips filters={CATEGORY_FILTERS} value={category} counts={counts} onChange={setCategory} label={t("templates.library.categoryFilter")} />
+                    <TemplatePicker
+                      templates={library}
+                      selectedId={templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? form.templateId : null}
+                      onChoose={(tpl) => chooseTemplate(tpl)}
+                      onPreviewSelected={(tpl) => { const at = previewTemplates.findIndex((item) => item.externalTemplateId === tpl.externalTemplateId); if (at >= 0) setPreviewIndex(at); }}
+                    />
                     {templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? (
                       <p className="text-[12px] text-lyx-fg-muted" data-testid="template-selected-line">{t("templates.library.selectedLine", { name: templateState.template.name })}</p>
                     ) : null}
@@ -704,12 +709,6 @@ export function JobNewPage() {
                       <Banner variant="warn"><span data-testid="template-not-ready-warning">{t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${templateState.reason}`) })}</span></Banner>
                     ) : null}
                     {libraryFailed.length > 0 ? <p className="text-[11.5px] text-lyx-danger">{t("templates.library.loadPartial", { names: libraryFailed.join(", ") })}</p> : null}
-                    {previewTemplates.length === 0 && library.length > 0 ? <p className="text-[12px] text-lyx-fg-muted">{t("templates.library.emptyCategory")}</p> : null}
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {previewTemplates.map((tpl, index) => (
-                        <TemplateCard key={tpl.key} template={tpl} selected={form.templateId === tpl.externalTemplateId} onPreview={() => setPreviewIndex(index)} />
-                      ))}
-                    </div>
                   </div>
                 </Field>
               ) : null}
