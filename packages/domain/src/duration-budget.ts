@@ -87,3 +87,19 @@ export function checkDurationBand(input: { targetSec: number; totalMs: number; t
 export function buildDurationBudgetPromptLines(budget: NarrationBudget): string {
   return `Duration budget (strict): total spoken narration must last ${budget.targetSec - 10}-${budget.targetSec + 10} seconds. At about ${budget.charsPerSecond} characters/second for this language, write about ${budget.targetChars} characters of narration in total (between ${budget.minChars} and ${budget.maxChars}). Use ${budget.sceneCount.min}-${budget.sceneCount.max} scenes; scene count is flexible, total length is not.`;
 }
+
+/**
+ * One-shot length correction (VE2E-54): total narration characters of a draft against the budget. Returns `null` when the draft is
+ * close enough (within 15% outside the band), else the direction text to append for ONE regeneration. Pure.
+ */
+export function narrationLengthCorrection(budget: NarrationBudget, narrations: readonly string[]): { totalChars: number; direction: string } | null {
+  const totalChars = narrations.reduce((total, text) => total + text.trim().length, 0);
+  const tooShort = totalChars < budget.minChars * 0.85;
+  const tooLong = totalChars > budget.maxChars * 1.15;
+  if (!tooShort && !tooLong) return null;
+  const perScene = Math.round(budget.targetChars / Math.max(1, narrations.length));
+  return {
+    totalChars,
+    direction: `LENGTH CORRECTION: the previous draft had only ${totalChars} characters of narration (about ${Math.round(totalChars / budget.charsPerSecond)} seconds); it must be ${tooShort ? "longer" : "shorter"}: between ${budget.minChars} and ${budget.maxChars} characters in total (target ${budget.targetChars}). Keep ${narrations.length} scenes and write about ${perScene} characters of narration per scene, with concrete detail from the source, no filler.`,
+  };
+}

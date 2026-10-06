@@ -252,7 +252,7 @@ export {
   DEFAULT_CHARS_PER_SECOND,
   defaultCharsPerSecond,
   calibrateCharsPerSecond,
-  buildNarrationBudget,
+  buildNarrationBudget, narrationLengthCorrection,
   checkDurationBand,
   buildDurationBudgetPromptLines,
   type DurationSample,

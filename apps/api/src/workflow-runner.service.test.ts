@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkflowRunnerService, asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
 import type { AudioVersionsService } from "./audio-versions.service.js";
 import type { PexelsService } from "./pexels.service.js";
@@ -576,6 +576,9 @@ describe("WorkflowRunnerService", () => {
   });
 
   describe("VE2E-61 concurrency", () => {
+    // These fixtures use tiny drafts: the one-shot length correction would double the (counted) script calls.
+    beforeEach(() => { process.env.SCRIPT_LENGTH_CORRECTION = "0"; });
+    afterEach(() => { delete process.env.SCRIPT_LENGTH_CORRECTION; });
     const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     const persistedTimelineScenes = () => persistedTimeline().scenes.map((scene: any) => scene.audioVersionId);
     const gatedVoice = () => {

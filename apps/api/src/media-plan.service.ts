@@ -161,11 +161,11 @@ const parsePlatformList = (raw: string, allowed: ReadonlySet<ApifyPlatform>, fal
   return unique.length > 0 ? unique : fallback;
 };
 
-/** Platforms for VIDEO slots, in order: env `APIFY_VIDEO_PLATFORMS` (alias `APIFY_AUTO_PLATFORMS`; legacy single `APIFY_AUTO_PLATFORM`), default TikTok. Image-only platforms are never used for a video slot. */
+/** Platforms for VIDEO slots, in order: env `APIFY_VIDEO_PLATFORMS` (alias `APIFY_AUTO_PLATFORMS`; legacy single `APIFY_AUTO_PLATFORM`), default TikTok then X (the next platform is searched only when the previous one yields no usable clip). Image-only platforms are never used for a video slot. */
 export const apifyAutoPlatformsFromEnv = (): ApifyPlatform[] => {
   const raw = process.env.APIFY_VIDEO_PLATFORMS ?? process.env.APIFY_AUTO_PLATFORMS;
-  if (raw !== undefined) return parsePlatformList(raw, VIDEO_PLATFORMS, ["tiktok"]);
-  return process.env.APIFY_AUTO_PLATFORM ? [apifyAutoPlatformFromEnv()] : ["tiktok"];
+  if (raw !== undefined) return parsePlatformList(raw, VIDEO_PLATFORMS, ["tiktok", "x"]);
+  return process.env.APIFY_AUTO_PLATFORM ? [apifyAutoPlatformFromEnv()] : ["tiktok", "x"];
 };
 
 /** Platforms for IMAGE slots, in order: env `APIFY_IMAGE_PLATFORMS`, default Pinterest. */
@@ -351,7 +351,8 @@ export class MediaPlanService {
       let firstFailure: { reason: string; quality: MediaPlanApifyQuality | null } | null = null;
       // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
       const visualKind = segmentVisualKind(input.segment);
-      for (const platform of visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv()) {
+      const platformList = visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv();
+      for (const [platformIndex, platform] of platformList.entries()) {
         // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
         const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
           platform,
@@ -363,6 +364,8 @@ export class MediaPlanService {
           scriptLanguage: input.script.language,
           segmentDurationSeconds: input.segment.durationMs / 1000,
           ...(input.allowUnverified ? { allowUnverified: true } : {}),
+          // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
+          ...(input.allowUnverified && platformIndex === platformList.length - 1 ? { keepOverlayFlagged: true } : {}),
           ...(input.job ? { job: input.job } : {}),
         }));
         if (attempt.ok) { outcome = attempt; break; }

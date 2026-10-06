@@ -608,6 +608,8 @@ export class ApifyService {
       job?: ApifyJobContext;
       /** No other source can replace this one (Pexels off): accept the best metadata-ranked candidate when vision moderation could not run, instead of abstaining. */
       allowUnverified?: boolean;
+      /** Last resort: an `overlay_unavoidable` clip is kept (and flagged) rather than rejected. */
+      keepOverlayFlagged?: boolean;
     },
   ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
@@ -662,7 +664,7 @@ export class ApifyService {
       job.usage.libraryReuses += 1;
       quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
       if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
-      if ((await this.reframeCheck(library, input, job, quality)) === "reject") return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
+      if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
       return done(library, decision.chosen);
     }
 
@@ -704,7 +706,7 @@ export class ApifyService {
     if (!imported.ok) {
       input.usedExternalIds.delete(importedId);
       release();
-      return fail(`apify_import_failed:${imported.code}`);
+      return fail(`apify_import_failed:${imported.code}:${String((imported as { message?: string }).message ?? "").slice(0, 120)}`);
     }
     quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
     if (quality.frameCheck === "rejected") {
@@ -712,7 +714,7 @@ export class ApifyService {
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
       return fail("apify_frames_rejected");
     }
-    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject") {
+    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject" && !input.keepOverlayFlagged) {
       // Auto + overlay_unavoidable (CR-SUBJECT-REFRAME Q5): same handling as a rejected candidate - unbind it and let the existing fallback pick another source.
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
       return fail("apify_overlay_unavoidable");

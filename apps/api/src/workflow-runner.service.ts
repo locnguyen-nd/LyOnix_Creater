@@ -40,6 +40,7 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
   deriveSceneVisualKinds,
+  narrationLengthCorrection,
   orshotMaxScenes,
   orshotPageCount,
   splitSegmentsByVisualKind,
@@ -483,6 +484,28 @@ export class WorkflowRunnerService {
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+          // VE2E-54: a draft far outside the narration budget (e.g. 28 s of voice for a 78 s target) is regenerated ONCE with an explicit
+          // length correction; the closer of the two drafts is kept. A failed second call keeps the first draft (never fails the run).
+          const narrations = (outcome.response.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? "");
+          const correction = narrationLengthCorrection(durationBudget, narrations);
+          if (!correction || process.env.SCRIPT_LENGTH_CORRECTION === "0") return outcome.response;
+          try {
+            const second = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
+              providerAccountId: contentConfig.providerAccountId,
+              language: profile.locale,
+              direction: `${direction}
+
+${correction.direction}`,
+              ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+              durationBudget,
+            });
+            if (second && second !== "forbidden" && second.ok) {
+              const total = (second.response.draft.scenes ?? []).reduce((sum: number, scene: { narration?: string }) => sum + (scene.narration ?? "").trim().length, 0);
+              if (Math.abs(total - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) return second.response;
+            }
+          } catch {
+            // keep the first draft
+          }
           return outcome.response;
         }),
       );

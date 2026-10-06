@@ -246,7 +246,7 @@ describe("ApifyService.autoImportForSegment - VE2E-46 pool rules", () => {
     expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_error:PROVIDER_UNAVAILABLE" });
     service.apifyDeps = apifyStub([{ ...tiktokItem, id: "7002" }]);
     vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: false, reason: "fetch_failed" });
-    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: "apify_import_failed:VALIDATION_FAILED" });
+    expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), input())).toMatchObject({ ok: false, reason: expect.stringContaining("apify_import_failed:VALIDATION_FAILED") });
   });
 
   it("excludes sources an earlier segment already used", async () => {
