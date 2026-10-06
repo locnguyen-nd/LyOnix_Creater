@@ -40,6 +40,7 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
   deriveSceneVisualKinds,
+  mergeScenesToCap,
   narrationLengthCorrection,
   orshotMaxScenes,
   orshotPageCount,
@@ -466,9 +467,12 @@ export class WorkflowRunnerService {
     const pinnedSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
     const pageCap = orshotMaxScenes((Array.isArray(pinnedSnapshot?.modifications) ? pinnedSnapshot.modifications : []) as unknown as AutoTemplateSlot[]);
     const durationBudget = pageCap === null ? resolvedBudget.budget : { ...resolvedBudget.budget, sceneCount: { min: Math.min(resolvedBudget.budget.sceneCount.min, pageCap), max: Math.min(resolvedBudget.budget.sceneCount.max, pageCap) } };
+    // A previously approved script with more scenes than the fixed-page template has pages cannot be rendered: generate a new one (capped).
+    if (approved && pageCap !== null && approved.scenes.length > pageCap) approved = null;
     if (!approved) {
       await this.setStatus(run.id, "scripting");
-      const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
+      // The scene count asked for never exceeds the template's page count (the profile default of 14 contradicted a 10-page template).
+      const direction = buildAutoDirection(profile.locale, profile.durationSec, pageCap === null ? profile.sceneCount : Math.min(profile.sceneCount, pageCap));
       const generation = await this.recordStep(
         run,
         "generate_script",
@@ -488,7 +492,8 @@ export class WorkflowRunnerService {
           // length correction; the closer of the two drafts is kept. A failed second call keeps the first draft (never fails the run).
           const narrations = (outcome.response.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? "");
           const correction = narrationLengthCorrection(durationBudget, narrations);
-          if (!correction || process.env.SCRIPT_LENGTH_CORRECTION === "0") return outcome.response;
+          const capped = (response: typeof outcome.response): typeof outcome.response => (pageCap === null ? response : { ...response, draft: mergeScenesToCap(response.draft, pageCap) });
+          if (!correction || process.env.SCRIPT_LENGTH_CORRECTION === "0") return capped(outcome.response);
           try {
             const second = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
               providerAccountId: contentConfig.providerAccountId,
@@ -501,12 +506,12 @@ ${correction.direction}`,
             });
             if (second && second !== "forbidden" && second.ok) {
               const total = (second.response.draft.scenes ?? []).reduce((sum: number, scene: { narration?: string }) => sum + (scene.narration ?? "").trim().length, 0);
-              if (Math.abs(total - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) return second.response;
+              if (Math.abs(total - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) return capped(second.response);
             }
           } catch {
             // keep the first draft
           }
-          return outcome.response;
+          return capped(outcome.response);
         }),
       );
 

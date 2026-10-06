@@ -282,3 +282,4 @@ export * from "./caption-ass.js";
 export * from "./render-router.js";
 export * from "./subtitle-edit.js";
 export * from "./creation-form.js";
+export { mergeScenesToCap } from "./script-scene-cap.js";
