@@ -48,6 +48,7 @@ import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
+import { pexelsDisabledOutcome, pexelsSourcingEnabled } from "./pexels-config.js";
 
 export type PexelsOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -146,6 +147,7 @@ export class PexelsService {
   }
 
   async search(projectId: string, userId: string, role: "admin" | "staff", input: SearchInput): Promise<PexelsOutcome<PexelsSearchResponse>> {
+    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
@@ -193,6 +195,7 @@ export class PexelsService {
   }
 
   async import(projectId: string, userId: string, role: "admin" | "staff", input: ImportInput): Promise<PexelsOutcome<PexelsImportResponse>> {
+    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
     if (!input.externalId.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu externalId để import" };
@@ -354,6 +357,7 @@ export class PexelsService {
    * needing manual pick-from-results control should keep using `search()` + `import()`).
    */
   async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string }>> {
+    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
