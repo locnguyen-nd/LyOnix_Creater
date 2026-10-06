@@ -41,7 +41,7 @@ import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/or
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
-import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, usableAccounts, type CreationLists } from "../job-new/form-state";
+import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, mediaAccountsOf, usableAccounts, type CreationLists } from "../job-new/form-state";
 
 const toBackgroundSegmentsSetting = (choice: string): BackgroundSegmentsSetting => (choice === "auto" ? { mode: "auto" } : { mode: "fixed", count: Number(choice) });
 
@@ -111,7 +111,7 @@ export function JobNewPage() {
 
   const contentAccounts = usableAccounts(providers, "content");
   const voiceAccounts = usableAccounts(providers, "tts");
-  const mediaAccounts = usableAccounts(providers, "visual").filter((item) => item.provider === "pexels");
+  const mediaAccounts = mediaAccountsOf(providers);
   const renderAccountChoices = providers.filter((item) => item.role === "render");
   const renderAccounts = usableAccounts(providers, "render");
   const lists: CreationLists = creationLists(channels, providers);
@@ -649,7 +649,7 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoMediaAccount")}>
                   <Select value={form.mediaAccountId} onChange={(e) => update({ mediaAccountId: e.target.value })}>
                     {placeholder(form.mediaAccountId)}
-                    {mediaAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                    {mediaAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.provider}</option>)}
                   </Select>
                 </Field>
               ) : null}

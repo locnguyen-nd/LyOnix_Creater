@@ -613,6 +613,8 @@ export class WorkflowRunnerService {
       const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
       plannedSegments = splitSegmentsByVisualKind(plannedSegments, kindByScene, durationByScene);
     }
+    const mediaCheck = await this.mediaPlans.checkMediaSourcesEnabled(userId, role, mediaConfig.providerAccountId);
+    if (!mediaCheck.ok) throw new WorkflowStepFailure(mediaCheck.code, mediaCheck.message);
     const ledger = new SegmentSourceLedger();
     // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
     const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {

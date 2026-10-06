@@ -48,7 +48,6 @@ import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
-import { pexelsDisabledOutcome, pexelsSourcingEnabled } from "./pexels-config.js";
 
 export type PexelsOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -139,15 +138,15 @@ export class PexelsService {
     const account = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null } });
     if (!account) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản provider không tồn tại hoặc đã bị xóa", status: 503 };
     if (account.role !== "visual" || account.provider !== "pexels") {
-      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải Pexels (visual)", status: 503 };
+      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: account.provider === "apify" ? "Tài khoản media đang chọn là Apify; không dùng Pexels dự phòng" : "Tài khoản không phải Pexels (visual)", status: 503 };
     }
+    if (account.enabled === false) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Nguồn Pexels đang tắt trong cấu hình provider", status: 403 };
     const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
     if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Pexels chưa verify", status: 503 };
     return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret } };
   }
 
   async search(projectId: string, userId: string, role: "admin" | "staff", input: SearchInput): Promise<PexelsOutcome<PexelsSearchResponse>> {
-    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
@@ -195,7 +194,6 @@ export class PexelsService {
   }
 
   async import(projectId: string, userId: string, role: "admin" | "staff", input: ImportInput): Promise<PexelsOutcome<PexelsImportResponse>> {
-    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
     if (!input.externalId.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu externalId để import" };
@@ -357,7 +355,6 @@ export class PexelsService {
    * needing manual pick-from-results control should keep using `search()` + `import()`).
    */
   async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string }>> {
-    if (!pexelsSourcingEnabled()) return pexelsDisabledOutcome();
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;

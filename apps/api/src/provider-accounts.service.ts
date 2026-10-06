@@ -57,6 +57,8 @@ export type PublicProviderAccount = {
   modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   quota: { status: "unknown"; remaining: null; unit: null };
   isFake: boolean;
+  /** On/off switch (meaningful for media sources pexels/apify; always true elsewhere). Off accounts are skipped by jobs and refused by Studio. */
+  enabled: boolean;
   version: number;
 };
 
@@ -67,7 +69,10 @@ const toPublicSnapshot = (raw: unknown): PublicModelSnapshotEntry[] => {
     .map((entry) => ({ modelId: entry.modelId, status: entry.status, checkedAt: entry.checkedAt, source: entry.source, fresh: isFreshCheckedAt(entry.checkedAt), ...(entry.reason ? { reason: entry.reason } : {}) }));
 };
 
-const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; visionModel?: string | null; availableModels?: string[]; preferredModels?: string[]; modelSnapshot?: unknown; isFake: boolean; version: number }): PublicProviderAccount => ({
+/** Providers that can be switched on/off (media sources). */
+export const SWITCHABLE_PROVIDERS: ReadonlySet<string> = new Set(["pexels", "apify"]);
+
+const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; visionModel?: string | null; availableModels?: string[]; preferredModels?: string[]; modelSnapshot?: unknown; isFake: boolean; enabled?: boolean; version: number }): PublicProviderAccount => ({
   id: row.id,
   name: row.name,
   provider: row.provider,
@@ -87,6 +92,7 @@ const publicAccount = (row: { id: string; name: string; provider: string; role: 
     : isLiveContentKind(row.provider) ? [...CURATED_CONTENT_MODELS[row.provider]] : [],
   quota: { status: "unknown", remaining: null, unit: null },
   isFake: row.isFake,
+  enabled: row.enabled ?? true,
   version: row.version,
 });
 
@@ -452,7 +458,7 @@ export class ProviderAccountsService {
     userId: string,
     role: "admin" | "staff",
     expectedVersion: number,
-    input: { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string },
+    input: { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string; enabled?: boolean },
   ) {
     const row = await this.manageable(id, userId, role);
     if (!row || row === "forbidden") return row;
@@ -460,6 +466,7 @@ export class ProviderAccountsService {
     const name = input.name === undefined ? row.name : input.name.trim();
     const model = input.model === undefined ? row.model : input.model.trim();
     if (!name || !model) return "invalid" as const;
+    if (input.enabled !== undefined && (typeof input.enabled !== "boolean" || !SWITCHABLE_PROVIDERS.has(row.provider))) return "invalid" as const;
     if (row.provider === "orshot" && !isValidOrshotModel(model)) return "invalid" as const;
     if (input.model !== undefined && row.availableModels.length > 0 && !row.availableModels.includes(model)) return "model_unavailable" as const;
     const visionModel = input.visionModel === undefined ? row.visionModel : input.visionModel?.trim() || null;
@@ -484,6 +491,7 @@ export class ProviderAccountsService {
         model,
         visionModel,
         preferredModels,
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
         version: { increment: 1 },
         ...(modelSnapshotUpdate ? { modelSnapshot: modelSnapshotUpdate as unknown as object } : {}),
         ...(secret ? { encryptedSecret: encryptSecret(secret), status: "unverified", availableModels: [], modelSnapshot: [], visionModel: null, preferredModels: [] } : {}),

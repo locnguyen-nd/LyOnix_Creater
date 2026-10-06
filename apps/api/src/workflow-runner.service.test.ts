@@ -123,6 +123,8 @@ describe("WorkflowRunnerService", () => {
       // Retry idempotency check (workflow-runner.service.ts): no prior "current" audio for this
       // scene id by default, so the normal generate-a-fresh-voice path below is still exercised.
       audioVersion: { findFirst: vi.fn(async () => null) },
+      // Media on/off preflight (MediaPlanService.checkMediaSourcesEnabled): the chosen media account is an enabled Pexels one by default.
+      providerAccount: { findFirst: vi.fn(async () => ({ provider: "pexels", enabled: true })) },
       renderJob: { findFirst: vi.fn(async () => null) },
       workflowRun: {
         findFirst: vi.fn(async ({ where }: any) => {

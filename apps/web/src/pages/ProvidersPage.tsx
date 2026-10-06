@@ -156,6 +156,19 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
     } catch (err) { setError(err instanceof ApiError ? err.message : t("providers.verifyFail")); await refresh(); }
   };
 
+  const isSwitchable = (row: ApiProvider) => row.provider === "pexels" || row.provider === "apify";
+  const toggleEnabled = async (row: ApiProvider, enabled: boolean) => {
+    try {
+      setError(null);
+      const updated = await api<ApiProvider>(`/provider-accounts/${row.id}`, {
+        method: "PATCH",
+        headers: { ...(await csrfHeaders()), "If-Match": `"${row.version}"` },
+        body: JSON.stringify({ enabled }),
+      });
+      setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); await refresh(); }
+  };
+
   const rowsByRole = (role: ProviderRole) => rows.filter((row) => row.role === role);
   const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "pinterest" && row.provider !== "apify" && row.provider !== "creatomate" && row.provider !== "orshot";
 
@@ -185,7 +198,10 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                       <ProviderLogo provider={row.provider} />
                       <h3 className="text-[16px] font-semibold">{row.name}</h3>
                     </div>
-                    <StatusPill tone={row.status === "verified" ? "ok" : row.status === "failed" ? "danger" : "neutral"}>{t(`providers.${row.status}`)}</StatusPill>
+                    <div className="flex items-center gap-2">
+                      {isSwitchable(row) && row.enabled === false ? <StatusPill tone="neutral">{t("providers.statusOff")}</StatusPill> : null}
+                      <StatusPill tone={row.status === "verified" ? "ok" : row.status === "failed" ? "danger" : "neutral"}>{t(`providers.${row.status}`)}</StatusPill>
+                    </div>
                   </div>
                   <p className="text-[12px] text-lyx-fg-muted">{row.provider} · {row.scope === "personal" ? t("providers.personal") : t("providers.organization")}</p>
                   {hasModelChoice(row) ? (
@@ -206,6 +222,12 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                       </Field>
                       {row.role === "content" ? <p className="mt-2 text-[12px] text-lyx-fg-muted">{t("providers.readyModelCount", { count: readyModelCount(row) })}</p> : null}
                     </div>
+                  ) : null}
+                  {isSwitchable(row) ? (
+                    <label className="mt-3 flex items-center gap-2 text-[13px]">
+                      <input type="checkbox" role="switch" data-testid={`provider-switch-${row.id}`} checked={row.enabled !== false} onChange={(e) => void toggleEnabled(row, e.target.checked)} />
+                      <span>{row.enabled === false ? t("providers.sourceSwitchOff") : t("providers.sourceSwitchOn")}</span>
+                    </label>
                   ) : null}
                   {isInternalRenderProvider(row.provider) ? (
                     <p className="mt-3 text-[12px] text-lyx-fg-muted" data-testid="system-account-note">{t("renderEngine.systemAccountNote")}</p>

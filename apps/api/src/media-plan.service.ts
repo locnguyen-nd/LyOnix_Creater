@@ -216,6 +216,18 @@ export class MediaPlanService {
   ) {}
 
   /**
+   * Job-level check of the media on/off switches: the chosen media account (Pexels) must be on, or an Apify account must be on.
+   * Both off (or not usable) -> a clear failure before any provider is called.
+   */
+  async checkMediaSourcesEnabled(userId: string, role: "admin" | "staff", mediaAccountId: string): Promise<{ ok: true } | { ok: false; code: "PROVIDER_CAPABILITY_UNAVAILABLE"; message: string }> {
+    const selected = await this.prisma.providerAccount.findFirst({ where: { id: mediaAccountId, deletedAt: null }, select: { provider: true, enabled: true } });
+    if (selected?.provider === "pexels" && selected.enabled !== false) return { ok: true };
+    if (selected?.provider === "apify" && selected.enabled !== false) return { ok: true };
+    if (this.apify && (await this.apify.findAccountForUser(userId, role))) return { ok: true };
+    return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Các nguồn media (Pexels/Apify) đều đang tắt hoặc chưa sẵn sàng; bật ít nhất một nguồn trong cấu hình provider." };
+  }
+
+  /**
    * VE2E-55: Studio counterpart of the Auto runner's extraction. One call for all given segments lacking a valid ja
    * keyword; applies the result in place. Returns the reason to record when segments stay without a keyword
    * (`no_content_account` | `extraction_failed`), else null. Never throws; the call is recorded as a ProviderOperation.
