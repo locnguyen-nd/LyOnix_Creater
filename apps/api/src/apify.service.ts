@@ -610,6 +610,8 @@ export class ApifyService {
       allowUnverified?: boolean;
       /** Last resort: an `overlay_unavoidable` clip is kept (and flagged) rather than rejected. */
       keepOverlayFlagged?: boolean;
+      /** Best-effort fill: skip the strict social filter and the relevance threshold; vision rejections still apply. */
+      lenient?: boolean;
     },
   ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
@@ -626,6 +628,11 @@ export class ApifyService {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
       const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
       if (input.platform !== "tiktok") return eligible;
+      if (input.lenient) {
+        // Best effort: keep every importable candidate that was not already used (language/orientation/length rules are only preferences now).
+        quality.considered = eligible.length;
+        return eligible.filter((r) => !input.usedExternalIds.has(r.candidate.externalId)).slice(0, MAX_FILTERED_POOL);
+      }
       const selection = selectSocialCandidates(
         eligible.filter((r) => r.social).map((r) => ({ ref: r, signals: r.social! })),
         filterContext,
@@ -645,7 +652,7 @@ export class ApifyService {
     } catch {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }
-    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: !input.allowUnverified });
+    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: !input.allowUnverified && !input.lenient, ...(input.lenient ? { relevanceThreshold: 0 } : {}) });
     if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
     const chosen = byCandidateId.get(decision.chosen.candidateId);
     if (!chosen) return fail("apify_no_usable_candidate");

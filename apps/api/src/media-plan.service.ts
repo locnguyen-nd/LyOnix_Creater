@@ -336,7 +336,7 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified?: boolean },
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified?: boolean; lenient?: boolean },
   ): Promise<{ source: SegmentSource } | { reason: string | null; quality?: MediaPlanApifyQuality | null }> {
     if (!this.apify) return { reason: null };
     const keyword = apifyKeywordForSegment(input.segment);
@@ -347,6 +347,12 @@ export class MediaPlanService {
       const brief = this.segmentBrief(input.script, input.segment);
       // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
       const usedExternalIds = input.ledger.apifyPlainIds;
+      if (input.lenient) {
+        // Reservations of clips that were looked at but never committed (overlay/frame rejections of the strict pass) may be reconsidered now;
+        // a clip another segment really uses stays excluded (and a duplicate asset is rejected below anyway).
+        const committed = new Set([...input.ledger.externalIds].map((id) => plainExternalId(id)));
+        for (const id of [...usedExternalIds]) if (!committed.has(id)) usedExternalIds.delete(id);
+      }
       let outcome: Awaited<ReturnType<ApifyService["autoImportForSegment"]>> | null = null;
       let firstFailure: { reason: string; quality: MediaPlanApifyQuality | null } | null = null;
       // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
@@ -365,7 +371,9 @@ export class MediaPlanService {
           segmentDurationSeconds: input.segment.durationMs / 1000,
           ...(input.allowUnverified ? { allowUnverified: true } : {}),
           // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
-          ...(input.allowUnverified && platformIndex === platformList.length - 1 ? { keepOverlayFlagged: true } : {}),
+          ...((input.allowUnverified && platformIndex === platformList.length - 1) || input.lenient ? { keepOverlayFlagged: true } : {}),
+          // Best-effort fill: the best candidate not rejected by vision is taken even below the relevance threshold / without the strict social filter.
+          ...(input.lenient ? { lenient: true } : {}),
           ...(input.job ? { job: input.job } : {}),
         }));
         if (attempt.ok) { outcome = attempt; break; }
@@ -403,13 +411,21 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; bestEffort?: boolean },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const pexelsUsable = await this.pexelsFallbackUsable(input.providerAccountId);
     const apifyAttempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: !pexelsUsable });
     if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
     const fallbackReason = apifyAttempt.reason;
+    // Last resort (Auto): rather than leaving the timeline with a hole, take the best-fitting candidate vision does not reject.
+    const lenientApify = async (): Promise<SegmentSource | null> => {
+      if (!input.bestEffort) return null;
+      const attempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: true, lenient: true });
+      return "source" in attempt ? { ...attempt.source, fallbackReason: "best_effort_fill" } : null;
+    };
     if (!pexelsUsable) {
+      const filled = await lenientApify();
+      if (filled) return { ok: true, data: filled };
       // Pexels is off / not the chosen account: say WHY Apify found nothing instead of a misleading "Pexels unavailable".
       return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: `Apify không có nguồn phù hợp cho đoạn ${input.segment.segmentId} (${fallbackReason ?? "không rõ lý do"}). Pexels không dùng được làm dự phòng; chọn nguồn thủ công trong Studio hoặc thử lại.`, status: 422 };
     }
@@ -417,7 +433,7 @@ export class MediaPlanService {
     const brief = this.segmentBrief(input.script, input.segment);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
-    return input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
+    const pexelsResult = await input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
       const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
         providerAccountId: input.providerAccountId,
         sceneId: input.segment.sceneIds[0]!,
@@ -439,6 +455,9 @@ export class MediaPlanService {
       input.ledger.add(source);
       return { ok: true, data: source };
     });
+    if (pexelsResult.ok) return pexelsResult;
+    const filled = await lenientApify();
+    return filled ? { ok: true, data: filled } : pexelsResult;
   }
 
   /**
@@ -521,7 +540,7 @@ export class MediaPlanService {
       let source = await this.findReusableSource(projectId, segment, input.ledger);
       let errorCode: string | null = null;
       if (!source) {
-        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
+        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job, ...(input.stopOnFailure ? { bestEffort: true } : {}) });
         const imported = await (input.runImport ? input.runImport(segment, task) : task());
         if (imported.ok) {
           source = imported.data;

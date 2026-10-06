@@ -493,25 +493,34 @@ export class WorkflowRunnerService {
           const narrations = (outcome.response.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? "");
           const correction = narrationLengthCorrection(durationBudget, narrations);
           const capped = (response: typeof outcome.response): typeof outcome.response => (pageCap === null ? response : { ...response, draft: mergeScenesToCap(response.draft, pageCap) });
-          if (!correction || process.env.SCRIPT_LENGTH_CORRECTION === "0") return capped(outcome.response);
-          try {
-            const second = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
-              providerAccountId: contentConfig.providerAccountId,
-              language: profile.locale,
-              direction: `${direction}
+          const charsOf = (response: typeof outcome.response) => (response.draft.scenes ?? []).reduce((sum: number, scene: { narration?: string }) => sum + (scene.narration ?? "").trim().length, 0);
+          // VE2E-54: a draft far outside the narration budget (e.g. 40 s of voice for a 78 s target) is regenerated with an explicit length
+          // correction, up to twice (the 2nd attempt names the shortfall of the 1st); the draft closest to the target is kept. A failed
+          // call keeps the best draft so far (never fails the run). SCRIPT_LENGTH_CORRECTION=0 disables it.
+          let best = outcome.response;
+          if (process.env.SCRIPT_LENGTH_CORRECTION !== "0") {
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              const correction = narrationLengthCorrection(durationBudget, (best.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? ""));
+              if (!correction) break;
+              try {
+                const next = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
+                  providerAccountId: contentConfig.providerAccountId,
+                  language: profile.locale,
+                  direction: `${direction}
 
 ${correction.direction}`,
-              ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
-              durationBudget,
-            });
-            if (second && second !== "forbidden" && second.ok) {
-              const total = (second.response.draft.scenes ?? []).reduce((sum: number, scene: { narration?: string }) => sum + (scene.narration ?? "").trim().length, 0);
-              if (Math.abs(total - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) return capped(second.response);
+                  ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+                  durationBudget,
+                });
+                if (!next || next === "forbidden" || !next.ok) break;
+                if (Math.abs(charsOf(next.response) - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) best = next.response;
+                else break;
+              } catch {
+                break;
+              }
             }
-          } catch {
-            // keep the first draft
           }
-          return capped(outcome.response);
+          return capped(best);
         }),
       );
 
