@@ -30,7 +30,7 @@ export function presetLogoRegions(width: number, height: number, margins: Preset
     { x: 0, y: height - h, w, h },
     { x: width - w, y: height - h, w, h },
   ];
-  return corners.map((box) => ({ kind: "logo" as const, box: px(box) }));
+  return corners.map((box) => ({ kind: "logo" as const, box: px(box), soft: true }));
 }
 
 /** Horizontal strips (top margin, bottom band) where burned-in captions/handles/lower-thirds live; the middle is not scanned (capacity). */

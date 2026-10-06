@@ -21,6 +21,8 @@ export type ProbeInfo = {
     rotation: number;
     pixFmt: string | null;
     fps: number | null;
+    /** `r_frame_rate` (the lowest rate that represents every timestamp); differs from `fps` (average) for variable-frame-rate sources. */
+    rFps?: number | null;
   };
   audio: { codec: string } | null;
 };
@@ -83,6 +85,7 @@ export const parseProbeJson = (text: string): ProbeParse => {
         rotation,
         pixFmt: typeof video.pix_fmt === "string" ? video.pix_fmt : null,
         fps: parseRate(video.avg_frame_rate) ?? parseRate(video.r_frame_rate),
+        rFps: parseRate(video.r_frame_rate),
       },
       audio: audio ? { codec: typeof audio.codec_name === "string" ? audio.codec_name : "unknown" } : null,
     },
@@ -125,6 +128,13 @@ export const checkRange = (sourceDurationMs: number, startMs: number, durationMs
 const MP4_COPY_AUDIO_CODECS = new Set(["aac", "mp3"]);
 const COPY_PIX_FMTS = new Set(["yuv420p", "yuvj420p"]);
 
+/** Average and nominal frame rates further apart than this are a variable-frame-rate source (typical of phone/TikTok clips). */
+const VFR_TOLERANCE = 0.03;
+
+/** True when the source's frame timestamps are not evenly spaced: stream copy would carry the unevenness into the clip (visible stutter). */
+export const isVariableFrameRate = (video: Pick<ProbeInfo["video"], "fps" | "rFps">): boolean =>
+  video.fps !== null && video.fps !== undefined && video.rFps !== null && video.rFps !== undefined && Math.abs(video.fps - video.rFps) / Math.max(video.fps, video.rFps) > VFR_TOLERANCE;
+
 /** Static (range-independent) reasons a source cannot be stream-copied to the target. Empty => codec/size eligible. */
 export const copyIneligibilityReasons = (probe: ProbeInfo, target: ClipTarget, stripAudio: boolean): string[] => {
   const reasons: string[] = [];
@@ -134,6 +144,7 @@ export const copyIneligibilityReasons = (probe: ProbeInfo, target: ClipTarget, s
   if (shortEdge > Math.min(target.width, target.height) || longEdge > Math.max(target.width, target.height)) {
     reasons.push("resolution_above_1080p");
   }
+  if (isVariableFrameRate(probe.video)) reasons.push("variable_frame_rate");
   if (probe.video.pixFmt !== null && !COPY_PIX_FMTS.has(probe.video.pixFmt)) reasons.push(`pix_fmt_${probe.video.pixFmt}`);
   if (!stripAudio && probe.audio && !MP4_COPY_AUDIO_CODECS.has(probe.audio.codec)) reasons.push(`audio_codec_${probe.audio.codec}`);
   return reasons;
@@ -287,13 +298,24 @@ export const buildCropFilterParts = (plan: ReframeCropPlan, target: ClipTarget, 
   return parts;
 };
 
+/**
+ * Constant output frame rate of a re-encoded clip (VE2E-90). Every re-encode is forced to CFR so the clip never carries the source's
+ * uneven timestamps; the rate is the nearest of 24/25/30 and an even decimation of 50/60 fps (50 -> 25, 60 -> 30), so frames are never
+ * duplicated or dropped unevenly (the cause of judder). Unknown rate -> 30.
+ */
+export const normalizedFps = (sourceFps: number | null): number => {
+  if (sourceFps === null || !Number.isFinite(sourceFps) || sourceFps <= 0) return REENCODE_PROFILE.maxFps;
+  if (sourceFps > 45) return sourceFps < 55 ? 25 : 30;
+  return ([24, 25, 30] as const).reduce((best, candidate) => (Math.abs(candidate - sourceFps) <= Math.abs(best - sourceFps) ? candidate : best));
+};
+
 export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null, cropPlan?: ReframeCropPlan | null): string => {
   const parts = (cropPlan ? buildCropFilterParts(cropPlan, target) : null) ?? [
     `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
     `crop=${target.width}:${target.height}`,
     "setsar=1",
   ];
-  if (sourceFps !== null && sourceFps > REENCODE_PROFILE.maxFps + 0.5) parts.push(`fps=${REENCODE_PROFILE.maxFps}`);
+  parts.push(`fps=${normalizedFps(sourceFps)}`);
   return parts.join(",");
 };
 
@@ -312,6 +334,8 @@ export const buildReencodeArgs = (
   "-c:v", "libx264", "-preset", REENCODE_PROFILE.preset, "-crf", String(REENCODE_PROFILE.crf),
   "-maxrate", REENCODE_PROFILE.maxrate, "-bufsize", REENCODE_PROFILE.bufsize,
   "-pix_fmt", "yuv420p", "-profile:v", "high",
+  // CFR output + a keyframe at least every 2 s (clean seeking/cuts downstream, no GOP-length surprises).
+  "-fps_mode", "cfr", "-g", String(normalizedFps(sourceFps) * 2), "-sc_threshold", "0",
   ...commonTail(outputPath),
 ];
 
@@ -331,3 +355,36 @@ export const buildImageCropArgs = (inputPath: string, outputPath: string, target
     "-f", "image2", "-update", "1", outputPath,
   ];
 };
+
+export type Smoothness = {
+  frames: number;
+  /** Median spacing between presentation timestamps. */
+  medianDeltaMs: number;
+  maxDeltaMs: number;
+  /** Share of deltas that differ from the median by more than 20% (0 for a constant frame rate). */
+  irregularPct: number;
+  /** Frames repeated or missing against a perfect grid at the median rate (|expected - actual|). */
+  gridErrorFrames: number;
+  smooth: boolean;
+};
+
+/**
+ * VE2E-90 automated smoothness check: parses `ffprobe -select_streams v:0 -show_entries packet=pts_time -of csv=p=0` of a clip and
+ * reports timestamp regularity. A clip is smooth when (almost) every spacing equals the median (constant frame rate) and nothing
+ * stalls for more than 2.5 frames.
+ */
+export const measureSmoothness = (csv: string): Smoothness | null => {
+  const times = csv.split(/\r?\n/).map((line) => Number(line.trim().split(",")[0])).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (times.length < 3) return null;
+  const deltas = times.slice(1).map((time, index) => (time - times[index]!) * 1000);
+  const sorted = [...deltas].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)]!;
+  const irregular = deltas.filter((delta) => Math.abs(delta - median) > median * 0.2).length;
+  const max = Math.max(...deltas);
+  const spanMs = (times[times.length - 1]! - times[0]!) * 1000;
+  const gridErrorFrames = Math.abs(Math.round(spanMs / median) - (times.length - 1));
+  const irregularPct = Math.round((irregular / deltas.length) * 1000) / 10;
+  return { frames: times.length, medianDeltaMs: Math.round(median * 100) / 100, maxDeltaMs: Math.round(max * 100) / 100, irregularPct, gridErrorFrames, smooth: irregularPct <= 2 && max <= median * 2.5 && gridErrorFrames <= 1 };
+};
+
+export const buildSmoothnessProbeArgs = (path: string): string[] => ["-v", "error", "-hide_banner", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path];

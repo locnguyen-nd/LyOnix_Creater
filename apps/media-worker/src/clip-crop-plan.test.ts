@@ -30,14 +30,14 @@ const win = (tMs: number, xPx: number, yPx = 0) => ({ tMs, xPx, yPx, widthPx: 40
 
 describe("crop plan application (VE2E-67)", () => {
   it("static plan -> constant crop then lanczos scale to 1080x1920", () => {
-    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 30, cropPlan([win(0, 300)]))).toBe("crop=w=405:h=720:x=300:y=0,scale=1080:1920:flags=lanczos,setsar=1");
+    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 30, cropPlan([win(0, 300)]))).toBe("crop=w=405:h=720:x=300:y=0,scale=1080:1920:flags=lanczos,setsar=1,fps=30");
   });
 
   it("keyframed plan -> single-quoted piecewise-linear x expression in seconds; constant y stays a plain number", () => {
     const filter = buildReencodeFilter(DEFAULT_CLIP_TARGET, 30, cropPlan([win(0, 0), win(2000, 400), win(3500, 100)]));
     expect(filter).toContain("x='if(lt(t,2),0+(400)*(t-0)/2,if(lt(t,3.5),400+(-300)*(t-2)/1.5,100))'");
     expect(filter).toContain(":y=0,");
-    expect(filter).not.toContain("fps");
+    expect(filter).toContain("fps=30");
   });
 
   it("adds the fps cap after the crop for >30fps sources and skips scale when the window already is 1080x1920", () => {
@@ -51,7 +51,7 @@ describe("crop plan application (VE2E-67)", () => {
     const legacy = buildReencodeFilter(DEFAULT_CLIP_TARGET, 30);
     expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 30, full)).toBe(legacy);
     expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 30, null)).toBe(legacy);
-    expect(legacy).toBe("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1");
+    expect(legacy).toBe("scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30");
   });
 
   it("buildAxisExpression collapses constant axes and clamps outside the keyframe range", () => {
