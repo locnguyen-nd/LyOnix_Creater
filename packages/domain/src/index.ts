@@ -98,7 +98,7 @@ export {
   type AutoRenderAssignment,
   type AutoRenderAssignmentsResult,
 } from "./auto-render-assignments.js";
-export { orshotPageCount } from "./orshot-page-slots.js";
+export { orshotIncludePages, orshotMaxScenes, orshotPageCount } from "./orshot-page-slots.js";
 export {
   visionModerationDecisions,
   isRightsUsableForAuto,

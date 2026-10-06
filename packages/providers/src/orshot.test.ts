@@ -99,3 +99,14 @@ describe("orshot adapter", () => {
     await expect(probeOrshotAccount("k")).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" });
   });
 });
+
+describe("orshot includePages (script shorter than the template)", () => {
+  it("sends response.includePages so only the used pages render, and omits it otherwise", async () => {
+    const fetchMock = vi.fn(async () => json({ id: "r1", status: "pending" }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    await submitOrshotRender("k", { templateId: "5", modifications: {}, webhookUrl: "https://hook", includePages: [1, 2, 3, 4, 5, 6, 7, 8, 9] });
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string).response.includePages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    await submitOrshotRender("k", { templateId: "5", modifications: {}, webhookUrl: "https://hook" });
+    expect(JSON.parse(lastCall(fetchMock)[1].body as string).response).not.toHaveProperty("includePages");
+  });
+});

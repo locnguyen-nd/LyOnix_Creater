@@ -40,6 +40,7 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
   deriveSceneVisualKinds,
+  orshotMaxScenes,
   orshotPageCount,
   splitSegmentsByVisualKind,
 } from "@lyonix/domain";
@@ -454,7 +455,12 @@ export class WorkflowRunnerService {
     const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
     let approved = existingApproved;
     // VE2E-54: narration budget (targetChars + scene range) from the intake target, calibrated on this voice's history.
-    const { budget: durationBudget, calibrationSource } = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
+    const resolvedBudget = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
+    const { calibrationSource } = resolvedBudget;
+    // An Orshot page template carries one scene per page: ask the script for at most that many scenes (fewer is fine).
+    const pinnedSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
+    const pageCap = orshotMaxScenes((Array.isArray(pinnedSnapshot?.modifications) ? pinnedSnapshot.modifications : []) as unknown as AutoTemplateSlot[]);
+    const durationBudget = pageCap === null ? resolvedBudget.budget : { ...resolvedBudget.budget, sceneCount: { min: Math.min(resolvedBudget.budget.sceneCount.min, pageCap), max: Math.min(resolvedBudget.budget.sceneCount.max, pageCap) } };
     if (!approved) {
       await this.setStatus(run.id, "scripting");
       const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
@@ -511,8 +517,9 @@ export class WorkflowRunnerService {
     if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
     const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
     const orshotPages = orshotPageCount(slots);
-    if (orshotPages !== null && approved.scenes.length !== orshotPages) {
-      throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Chọn đúng ${orshotPages} cảnh hoặc template có số page tương ứng.`);
+    // Fewer scenes than pages is fine (only pages 1..N render); more cannot be added to a fixed template.
+    if (orshotPages !== null && approved.scenes.length > orshotPages) {
+      throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot chỉ có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Rút xuống tối đa ${orshotPages} cảnh hoặc chọn template nhiều page hơn.`);
     }
 
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
