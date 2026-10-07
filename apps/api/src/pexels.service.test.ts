@@ -287,16 +287,19 @@ describe("PexelsService", () => {
       const visionText = (text: string) =>
         new Response(JSON.stringify({ status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }] }), { status: 200 });
       const visionResponse = (body: Record<string, unknown>) => visionText(JSON.stringify(body));
+      // VE2E-131: covers are judged in ONE batched request ({"items":[{"index":1,...}]}); the capability probe keeps the single-verdict shape.
+      const visionReply = (init: RequestInit | undefined, body: Record<string, unknown>) =>
+        visionResponse(String(init?.body ?? "").includes("numbered 1 to") ? { items: [{ index: 1, ...body }] } : body);
 
       it("auto-selects a photo with no alt text once vision moderation accepts it", async () => {
         providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
-        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
           if (url.includes("/v1/photos/")) return new Response(JSON.stringify(photoDetail), { status: 200 });
           if (url.includes("api.openai.com/v1/responses")) {
-            return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "matches beat" });
+            return visionReply(init, { safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "matches beat" });
           }
           throw new Error(`unexpected fetch: ${url}`);
         });
@@ -314,12 +317,12 @@ describe("PexelsService", () => {
 
       it("routes a vision-rejected top photo to the existing rejected_by_moderation abstention instead of importing it", async () => {
         providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
-        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
           if (url.includes("api.openai.com/v1/responses")) {
-            return visionResponse({ safety_flag: true, safety_categories: ["violence"], scene_beat_relevance: 0.8, confidence: 0.95, notes: "unsafe content" });
+            return visionReply(init, { safety_flag: true, safety_categories: ["violence"], scene_beat_relevance: 0.8, confidence: 0.95, notes: "unsafe content" });
           }
           throw new Error(`unexpected fetch: ${url}`);
         });
@@ -337,7 +340,7 @@ describe("PexelsService", () => {
 
       it("falls back to the existing MEDIA_RELEVANCE_UNVERIFIED abstention when the vision call returns an unusable response (fail-closed)", async () => {
         providerAccounts.contentGenerationCandidates = vi.fn(async () => [visionAccount()]);
-        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos: [photoDetail] }), { status: 200 });
@@ -368,14 +371,14 @@ describe("PexelsService", () => {
           src: { ...photoDetail.src },
         }));
         let visionCallCount = 0;
-        const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url.includes("/videos/search")) return new Response(JSON.stringify({ videos: [] }), { status: 200 });
           if (url.includes("/v1/search")) return new Response(JSON.stringify({ photos }), { status: 200 });
           if (url.includes("/v1/photos/1")) return new Response(JSON.stringify(photos[0]), { status: 200 });
           if (url.includes("api.openai.com/v1/responses")) {
             visionCallCount += 1;
-            return visionResponse({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "ok" });
+            return visionReply(init, { safety_flag: false, safety_categories: [], scene_beat_relevance: 0.9, confidence: 0.9, notes: "ok" });
           }
           throw new Error(`unexpected fetch: ${url}`);
         });

@@ -85,4 +85,47 @@ describe("vision job budget", () => {
     expect(budget.calls).toBe(0);
     expect(pool[0]!.moderationDecision).toBeNull();
   });
+
+  describe("VE2E-131 batched cover pass", () => {
+    const covers = (n: number) => Array.from({ length: n }, (_, i) => candidate(`c${i}`));
+    const verdict = (safe: boolean) => ({ safetyFlag: !safe, safetyCategories: safe ? [] : ["violence"], sceneBeatRelevance: 0.9, confidence: 0.9, notes: "x" });
+
+    it("judges up to 5 covers in ONE request and applies each verdict", async () => {
+      const budget = new VisionBudget({ maxCalls: 6 });
+      const moderateBatch = vi.fn(async (input: { items: Array<{ id: string }> }) => ({
+        verdicts: new Map(input.items.map((item, i) => [item.id, verdict(i !== 1)] as const)),
+        capabilityVerifiedAt: "2026-10-07T00:00:00.000Z",
+        evidenceRefs: ["request:r1"],
+      }));
+      const pool = await moderatePoolWithBudget({ ...base(budget, "seg"), pool: covers(7), moderateBatch: moderateBatch as never });
+      expect(moderateBatch).toHaveBeenCalledTimes(1);
+      expect(moderateBatch.mock.calls[0]![0].items).toHaveLength(5);
+      expect(budget.calls).toBe(2); // probe + one batch request
+      expect(budget.moderated).toBe(5);
+      expect(pool.filter((c) => c.moderationDecision === "rejected")).toHaveLength(1);
+      expect(pool.filter((c) => c.moderationDecision === null)).toHaveLength(2);
+    });
+
+    it("a vision timeout / quota failure leaves the pool on metadata ranking and never throws", async () => {
+      const budget = new VisionBudget({ maxCalls: 6 });
+      const moderateBatch = vi.fn(async () => ({ verdicts: new Map(), capabilityVerifiedAt: null, evidenceRefs: [], failureCode: "PROVIDER_TIMEOUT" as const }));
+      const input = base(budget, "seg");
+      const pool = await moderatePoolWithBudget({ ...input, pool: covers(3), moderateBatch: moderateBatch as never });
+      expect(pool.every((c) => c.moderationDecision === null)).toBe(true);
+      expect(budget.skipReasonFor("seg")).toBe("vision_skipped_quota");
+      const limited = new VisionBudget({ maxCalls: 6 });
+      const quota = vi.fn(async () => ({ verdicts: new Map(), capabilityVerifiedAt: null, evidenceRefs: [], failureCode: "PROVIDER_QUOTA_EXHAUSTED" as const, quotaScope: "daily" as const }));
+      const out = await moderatePoolWithBudget({ ...base(limited, "seg2"), pool: covers(3), moderateBatch: quota as never });
+      expect(out.every((c) => c.moderationDecision === null)).toBe(true);
+      expect(limited.skipReasonFor("seg2")).toBe("vision_skipped_quota");
+    });
+
+    it("an exhausted job budget skips vision without a request", async () => {
+      const budget = new VisionBudget({ maxCalls: 0 });
+      const moderateBatch = vi.fn();
+      await moderatePoolWithBudget({ ...base(budget, "seg"), pool: covers(3), moderateBatch: moderateBatch as never });
+      expect(moderateBatch).not.toHaveBeenCalled();
+      expect(budget.skipReasonFor("seg")).toBe("vision_skipped_budget");
+    });
+  });
 });
