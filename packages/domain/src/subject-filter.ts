@@ -22,10 +22,13 @@ const asStrings = (value: unknown): string[] => {
   return out;
 };
 
-/** Reads the subject description off a planned segment (`segment.subject` + `segment.keywords.{subject,aliases,mustInclude,mustExclude}`). */
-export function subjectProfileOf(segment: { subject?: string | null; keywords?: unknown }): SubjectProfile {
+/**
+ * Reads the VIDEO-level subject off a planned segment (`segment.keywords.{subject,aliases,mustInclude,mustExclude}`, VE2E-88).
+ * `segment.subject` is the segment's own topic, not the video subject, so it is never used for anchoring.
+ */
+export function subjectProfileOf(segment: { keywords?: unknown }): SubjectProfile {
   const record = segment.keywords && typeof segment.keywords === "object" ? (segment.keywords as Record<string, unknown>) : {};
-  const subject = (typeof record.subject === "string" && record.subject.trim()) || segment.subject?.trim() || null;
+  const subject = (typeof record.subject === "string" && record.subject.trim()) || null;
   const aliases = asStrings(record.aliases);
   return { subject, aliases, mustInclude: asStrings(record.mustInclude), mustExclude: asStrings(record.mustExclude) };
 }
@@ -67,14 +70,14 @@ export function anchorKeywordToSubject(keyword: string, profile: SubjectProfile,
  * already names the subject wins, else the first one gets the subject prepended. `broad` falls back to the subject itself (never `mood`).
  * A tier whose keyword repeats an earlier tier's is dropped. `isValidJa` filters the ja list (no valid ja -> no ja tier).
  */
-export function subjectTierKeywords(raw: unknown, profile: SubjectProfile, isValidJa: (value: string) => boolean = () => true): Array<{ tier: KeywordTier; keyword: string }> {
+export function subjectTierKeywords(raw: unknown, profile: SubjectProfile, isValidJa: (value: string) => boolean = () => true, broadFallback?: string | null): Array<{ tier: KeywordTier; keyword: string }> {
   const parsed = parseSegmentKeywords(raw);
   const names = subjectNames(profile);
   const pick = (list: string[]): string | null => list.find((item) => containsName(item, names)) ?? list[0] ?? null;
   const candidates: Array<{ tier: KeywordTier; keyword: string | null }> = [
     { tier: "ja", keyword: pick(parsed.ja.filter(isValidJa)) },
     { tier: "en", keyword: pick(parsed.en) },
-    { tier: "broad", keyword: pick(parsed.broad) ?? profile.subject?.trim() ?? null },
+    { tier: "broad", keyword: pick(parsed.broad) ?? profile.subject?.trim() ?? broadFallback?.trim() ?? null },
   ];
   const seen = new Set<string>();
   const out: Array<{ tier: KeywordTier; keyword: string }> = [];
@@ -89,7 +92,7 @@ export function subjectTierKeywords(raw: unknown, profile: SubjectProfile, isVal
 }
 
 /** Candidate metadata (caption + hashtags + author names) vs the subject: 1 = name in caption/hashtag, 0.5 = name only in the author, 0 = none. */
-export function subjectMatchScore(profile: SubjectProfile, meta: { text?: string | null; author?: string | null }): number {
+export function subjectMatchScore(profile: SubjectProfile, meta: { text?: string | null | undefined; author?: string | null | undefined }): number {
   const names = subjectNames(profile);
   if (names.length === 0) return 0;
   if (meta.text && containsName(meta.text, names)) return 1;

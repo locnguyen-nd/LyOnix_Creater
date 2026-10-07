@@ -53,7 +53,7 @@ describe("relaxed en/broad tiers (VE2E-130; replaces the repeated lenient pass)"
 
   const run = async (relaxedWorks: boolean) => {
     const prisma = { providerAccount: { findFirst: vi.fn(async () => ({ provider: "pexels", enabled: false, status: "verified", isFake: false })) } };
-    const autoImport = vi.fn(async (...args: unknown[]) => ((args[4] as { lenient?: boolean }).lenient && relaxedWorks ? found : { ok: false, reason: "apify_abstained:below_relevance_threshold", quality: null }));
+    const autoImport = vi.fn(async (...args: unknown[]) => ((args[4] as { lang?: string }).lang === "en" && relaxedWorks ? found : { ok: false, reason: "apify_abstained:below_relevance_threshold", quality: null }));
     const apify = { findAccountForUser: vi.fn(async () => ({ id: "ap", encryptedSecret: "x" })), autoImportForSegment: autoImport };
     const service = new MediaPlanService(prisma as never, {} as never, { autoImportForScene: vi.fn() } as never, apify as never);
     const ledger = { externalIds: new Set<string>(), apifyPlainIds: new Set<string>(), assetIds: new Set<string>(), add: vi.fn(), release: vi.fn() } as never;
@@ -64,8 +64,8 @@ describe("relaxed en/broad tiers (VE2E-130; replaces the repeated lenient pass)"
   it("the strict ja tier abstains but the relaxed en tier fills the segment in the same race (one call per tier, no repeated pass)", async () => {
     const { outcome, autoImport } = await run(true);
     expect(outcome).toMatchObject({ ok: true, data: { provider: "apify", tier: "en" } });
-    const calls = autoImport.mock.calls.map((call) => call[4] as { keyword: string; lenient?: boolean });
-    expect(calls.map((c) => [c.keyword, Boolean(c.lenient)])).toEqual([["阪神 引退試合", false], ["baseball", true], ["x", true]]);
+    const calls = autoImport.mock.calls.map((call) => call[4] as { keyword: string; lang?: string });
+    expect(calls.map((c) => [c.keyword, c.lang ?? "ja"])).toEqual([["阪神 引退試合", "ja"], ["baseball", "en"], ["x", "en"]]);
   });
 
   it("when every tier abstains the primary sourcing reports ok:false with the per-tier reasons (Auto then degrades, Studio asks the user)", async () => {

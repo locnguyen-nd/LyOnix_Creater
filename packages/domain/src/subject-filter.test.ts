@@ -3,7 +3,7 @@ import { applySubjectToBrief, anchorKeywordToSubject, isOffTopic, subjectMatchSc
 import { rankMediaCandidates, decideMediaSelection, type SceneBrief } from "./media-ranking.js";
 import type { MediaCandidate } from "./media-candidate.js";
 
-const profile = subjectProfileOf({ subject: "Taro Yamada", keywords: { aliases: ["山田太郎", "Yamada"], mustExclude: ["tutorial"] } });
+const profile = subjectProfileOf({ keywords: { subject: "Taro Yamada", aliases: ["山田太郎", "Yamada"], mustExclude: ["tutorial"] } });
 const brief: SceneBrief = { sceneId: "s1", beat: "hook", language: "ja", entities: ["goal"], action: [], setting: [], mood: [], exclusions: [], phrases: [], shotIntent: "", verticalOnly: true, targetDurationSeconds: 8 };
 const cand = (id: string, text: string | null, author = "someone", heightPx = 1920): MediaCandidate =>
   ({ candidateId: id, source: "apify:tiktok", externalId: id, mediaType: "video", accessMethod: "api_download", previewUrl: null, embedUrl: null, importUrl: "u", durationSeconds: 10, widthPx: 1080, heightPx, attribution: { name: author, profileUrl: null, sourcePageUrl: null }, provenance: { query: "q", providerAccountId: "a", queriedAt: "t", catalogVersion: "v" }, rightsStatus: "owner_accepted_risk", capabilityEvidence: null, metadataScore: 0, descriptorText: text, visionFindings: null, relevanceScore: 0, moderationDecision: null, eligibility: { autoEligible: true } }) as unknown as MediaCandidate;
