@@ -15,7 +15,7 @@ export type AutomationProfileConfig = {
   /** VE2E-06: Pexels account for the Auto media-preparing fallback (project library checked first). Required for an Auto submit, optional at profile-creation time (a Studio-only profile may omit it). */
   mediaConfig?: { providerAccountId: string } | null;
   /** VE2E-06: Creatomate account + pinned `TemplateSnapshot` for the Auto render step. Required for an Auto submit, optional at profile-creation time. */
-  renderConfig?: { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif"; orshot?: OrshotRenderOptions } | null;
+  renderConfig?: { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif"; orshot?: OrshotRenderOptions; /** VE2E-94: preset caption option values. */ captionStyle?: Record<string, string> } | null;
   /** Legacy/unused by the VE2E-06 orchestrator (no code ever read this field before now — confirmed by repo-wide grep) — kept only for backward compatibility with rows/tests created before `mediaConfig`/`renderConfig` existed. */
   templateSnapshotRef?: string | null;
   brandOptions?: Record<string, unknown>;

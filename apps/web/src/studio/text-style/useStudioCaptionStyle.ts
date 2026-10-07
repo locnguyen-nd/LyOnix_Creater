@@ -3,7 +3,7 @@ import type { CaptionTemplateDefaults, CaptionTextStyle, CaptionTextStylePatch }
 import type { CaptionStyleEngine } from "@lyonix/domain/caption-style-capabilities";
 import {
   applySceneCaptionEdit,
-  applyVideoCaptionEdit,
+  applyVideoEdit,
   previewCaptionStyle,
   resetVideoCaptionStyle,
   studioCaptionEngine,
@@ -49,7 +49,7 @@ export function useStudioCaptionStyle<D extends CaptionDraft>(input: {
   const commit = (edit: CaptionStyleEdit) =>
     write((prev) =>
       edit.scope === "video"
-        ? ({ ...prev, optionValues: applyVideoCaptionEdit(ctxFor(prev.optionValues), edit.changes) } as D)
+        ? ({ ...prev, optionValues: applyVideoEdit(ctxFor(prev.optionValues), edit) } as D)
         : withSceneOverride(prev, edit.sceneId, (current) => applySceneCaptionEdit(ctxFor(prev.optionValues), current, edit.changes)),
     );
   const resetScene = (sceneId: string) => write((prev) => withSceneOverride(prev, sceneId, () => null));

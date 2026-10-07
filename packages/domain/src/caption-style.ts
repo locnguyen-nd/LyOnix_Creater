@@ -216,10 +216,22 @@ export const CAPTION_STYLE_OPTION_KEYS: Readonly<Record<CaptionPatchField, strin
 };
 /** VE2E-26 free-text font name: still honoured when no `captionFontId` is set, never written by VE2E-93 (cleared by an explicit font choice). */
 export const LEGACY_CAPTION_FONT_FAMILY_KEY = "dynamicStyle.captionFontFamily";
+/**
+ * VE2E-94: the caption preset the whole-video style was last taken from - UI metadata only (Studio shows "preset X" / "customised from
+ * X"). Renderers never read it: the style values themselves are stored, so a later catalog change never alters an existing video.
+ */
+export const CAPTION_PRESET_OPTION_KEY = "dynamicStyle.captionPresetId";
+const PRESET_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 const CAPTION_OPTION_KEY_TO_FIELD = new Map(Object.entries(CAPTION_STYLE_OPTION_KEYS).map(([field, key]) => [key, field as CaptionPatchField]));
 
-export const isCaptionStyleOptionKey = (key: string): boolean => CAPTION_OPTION_KEY_TO_FIELD.has(key) || key === LEGACY_CAPTION_FONT_FAMILY_KEY;
+export const isCaptionStyleOptionKey = (key: string): boolean => CAPTION_OPTION_KEY_TO_FIELD.has(key) || key === LEGACY_CAPTION_FONT_FAMILY_KEY || key === CAPTION_PRESET_OPTION_KEY;
+
+/** The preset id stored with the whole-video style (format only: a preset removed from the catalog later is reported, not rejected). */
+export const captionPresetIdFromOptionValues = (values: Readonly<Record<string, string>> | null | undefined): string | null => {
+  const raw = values?.[CAPTION_PRESET_OPTION_KEY];
+  return raw && PRESET_ID_RE.test(raw) ? raw : null;
+};
 
 /** VE2E-26 rules, unchanged: Creatomate-safe font name (<= 60 chars) and any `#RGB/#RGBA/#RRGGBB/#RRGGBBAA` fill colour. */
 const LEGACY_FONT_RE = /^[A-Za-z0-9 _-]+$/;
@@ -232,9 +244,28 @@ const LEGACY_FONT_MAX_LENGTH = 60;
 export function isValidCaptionStyleOptionValue(key: string, value: string): boolean {
   if (value === "") return isCaptionStyleOptionKey(key);
   if (key === LEGACY_CAPTION_FONT_FAMILY_KEY) return value.trim().length > 0 && value.length <= LEGACY_FONT_MAX_LENGTH && LEGACY_FONT_RE.test(value);
+  if (key === CAPTION_PRESET_OPTION_KEY) return PRESET_ID_RE.test(value);
   if (key === CAPTION_STYLE_OPTION_KEYS.fillColor) return normalizeHexColor(value) !== null || isAlphaHexColor(value);
   const field = CAPTION_OPTION_KEY_TO_FIELD.get(key);
   return field !== undefined && parseCaptionPatchValue(field, value) !== undefined;
+}
+
+/**
+ * VE2E-94: an untrusted map of whole-video caption option values (e.g. a preset resolved by the Auto form). Only VE2E-93 keys (never the
+ * legacy free-text font) with valid, non-empty values. `strict` (save time) reports every bad entry; otherwise (read time) bad entries are
+ * dropped so stored data can never break a run.
+ */
+export function sanitizeCaptionStyleOptionValues(raw: unknown, options: { strict: boolean }): { ok: true; value: Record<string, string> } | { ok: false; errors: string[] } {
+  if (raw === undefined || raw === null) return { ok: true, value: {} };
+  if (typeof raw !== "object" || Array.isArray(raw)) return options.strict ? { ok: false, errors: ["captionStyle phải là object"] } : { ok: true, value: {} };
+  const value: Record<string, string> = {};
+  const errors: string[] = [];
+  for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === LEGACY_CAPTION_FONT_FAMILY_KEY || !isCaptionStyleOptionKey(key)) errors.push(`key không hỗ trợ: ${key}`);
+    else if (typeof entry !== "string" || entry === "" || !isValidCaptionStyleOptionValue(key, entry)) errors.push(`giá trị không hợp lệ: ${key}`);
+    else value[key] = entry;
+  }
+  return options.strict && errors.length > 0 ? { ok: false, errors } : { ok: true, value };
 }
 
 export type CaptionStyleIssue =
@@ -284,6 +315,7 @@ export function clearCaptionStyleOptionValues(values: Readonly<Record<string, st
   const next = { ...values };
   for (const key of Object.values(CAPTION_STYLE_OPTION_KEYS)) delete next[key];
   delete next[LEGACY_CAPTION_FONT_FAMILY_KEY];
+  delete next[CAPTION_PRESET_OPTION_KEY];
   return next;
 }
 

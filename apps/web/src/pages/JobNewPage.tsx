@@ -14,12 +14,19 @@ import {
   accountForTemplate,
   categoryCounts,
   filterByCategory,
+  templateRecipeId,
   templateSelectionState,
   toLibraryTemplates,
   uniqueTemplates,
   type CategoryFilter,
 } from "../studio/template-catalog";
 import type { PreviewableTemplate } from "../studio/template-preview";
+import { captionPresetById, captionPresetOptionValues, captionPresetSupport } from "@lyonix/domain/caption-presets";
+import { captionDefaultsFromRecipeCaptions } from "@lyonix/domain/caption-style";
+import { recipeRegistry } from "@lyonix/render-recipes";
+import { CaptionPresetPicker } from "../components/CaptionPresetPicker";
+import { CAPTION_REASON_KEY } from "../studio/text-style/CaptionPresetViews";
+import { studioCaptionEngine } from "../studio/text-style/caption-style-model";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
@@ -125,6 +132,13 @@ export function JobNewPage() {
   const previewTemplates = useMemo(() => uniqueTemplates(library), [library]);
   // V04-01: the chosen template against the chosen render account - Auto is blocked unless it is compatible AND ready to render.
   const templateState = templateSelectionState(library, form.templateId, form.renderAccountId);
+  // VE2E-94: the caption preset against the engine of the chosen template + render account (Orshot draws no caption style).
+  const captionTemplate = templateState.kind === "none" || templateState.kind === "missing" ? null : templateState.template;
+  const captionEngine = studioCaptionEngine(captionTemplate, renderProvider);
+  const captionRecipe = captionTemplate ? recipeRegistry.latest(templateRecipeId(captionTemplate) ?? "") : null;
+  const captionDefaults = captionRecipe ? captionDefaultsFromRecipeCaptions(captionRecipe.captions) : null;
+  const captionPreset = captionPresetById(form.captionPresetId);
+  const captionPresetCheck = captionPreset && captionEngine ? captionPresetSupport(captionEngine, captionPreset) : ({ ok: true } as const);
   const renderAccountKey = renderAccounts.map((account) => account.id).join(",");
   // Auto resolves against the same target duration the Auto profile is created with (midpoint of the range).
   const autoSegmentRange = resolveBackgroundSegmentRange({ mode: "auto" }, midpoint(form.durationTarget));
@@ -464,6 +478,11 @@ export function JobNewPage() {
                   const state = templateSelectionState(library, values.templateId, values.renderAccountId);
                   if (state.kind === "incompatible") throw new ApiError("VALIDATION_FAILED", t("templates.library.blockReason.incompatible_account"));
                   if (state.kind === "not_ready") throw new ApiError("VALIDATION_FAILED", t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${state.reason}`) }));
+                  // VE2E-94: a caption preset the template's engine cannot draw never starts a run; a valid one is sent as VALUES.
+                  const preset = captionPresetById(values.captionPresetId);
+                  const presetEngine = state.kind === "ok" ? studioCaptionEngine(state.template, renderAccounts.find((account) => account.id === values.renderAccountId)?.provider) : null;
+                  const presetSupport = preset && presetEngine ? captionPresetSupport(presetEngine, preset) : null;
+                  if (preset && presetSupport && !presetSupport.ok) throw new ApiError("VALIDATION_FAILED", t("captionPresets.incompatibleSelected", { name: t(preset.nameKey), reason: t(CAPTION_REASON_KEY[presetSupport.reason]) }));
                   const snapshot = await pinTemplateSnapshot(values.renderAccountId, values.templateId);
                   const setup = await setupAutoProfile({
                     name: (values.topic || values.autoArticleUrl || "Auto video").slice(0, 60),
@@ -474,6 +493,7 @@ export function JobNewPage() {
                     renderAccountId: values.renderAccountId,
                     templateSnapshotId: snapshot.id,
                     ...(isOrshotRender ? { renderOptions: compactOrshotOptions({ ...(values.orshotFormat ? { format: values.orshotFormat } : {}), ...(values.orshotSize ? { size: values.orshotSize } : {}) }) } : {}),
+                    ...(preset && presetEngine && presetEngine !== "orshot" ? { captionStyle: captionPresetOptionValues(preset) } : {}),
                     locale: values.language,
                     durationSec: midpoint(values.durationTarget),
                     sceneCount: midpoint(values.sceneCountTarget),
@@ -714,6 +734,16 @@ export function JobNewPage() {
                   </div>
                 </Field>
               ) : null}
+              {/* VE2E-94: shared caption presets (same catalog as Studio); stored with the draft / defaults like every option. */}
+              <section className="flex flex-col gap-1.5" aria-label={t("captionPresets.title")} data-testid="auto-caption-style">
+                <span className="text-[14px] font-medium">{t("captionPresets.title")}</span>
+                <CaptionPresetPicker selectedId={form.captionPresetId} engine={captionEngine} defaults={captionDefaults} onChoose={(id) => update({ captionPresetId: id })} />
+                {captionPreset && !captionPresetCheck.ok ? (
+                  <Banner variant="warn">
+                    <span data-testid="caption-preset-incompatible">{t("captionPresets.incompatibleSelected", { name: t(captionPreset.nameKey), reason: t(CAPTION_REASON_KEY[captionPresetCheck.reason]) })}</span>
+                  </Banner>
+                ) : null}
+              </section>
             </div>
           ) : null}
 

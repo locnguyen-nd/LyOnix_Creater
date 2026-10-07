@@ -20,7 +20,8 @@
     "./render-router": "./src/render-router.ts",
     "./caption-fonts": "./src/caption-fonts.ts",
     "./caption-style-capabilities": "./src/caption-style-capabilities.ts",
-    "./caption-style": "./src/caption-style.ts"
+    "./caption-style": "./src/caption-style.ts",
+    "./caption-presets": "./src/caption-presets.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

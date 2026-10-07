@@ -22,6 +22,7 @@ import {
   parseBackgroundSegmentsSetting,
   readBackgroundSegmentsSetting,
   resolveBackgroundSegmentRange,
+  sanitizeCaptionStyleOptionValues,
   type BackgroundSegmentCountBounds,
 } from "@lyonix/domain";
 import type { DurationBudgetDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
@@ -46,6 +47,8 @@ export type AutoProfileSetupInput = {
   templateSnapshotId: string;
   /** Orshot render account only: format/fps/size/fit-to-narration (sanitized below; ignored by Creatomate). */
   renderOptions?: unknown;
+  /** VE2E-94: whole-video caption option values of the chosen preset (resolved by the form; validated below, stored as values). */
+  captionStyle?: unknown;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;
@@ -113,6 +116,8 @@ export class VideoProductionsService {
     }
     const orshotOptions = sanitizeOrshotOptions(input.renderOptions);
     if (!orshotOptions.ok) return { ok: false, code: "VALIDATION_FAILED", message: orshotOptions.message };
+    const captionStyle = sanitizeCaptionStyleOptionValues(input.captionStyle, { strict: true });
+    if (!captionStyle.ok) return { ok: false, code: "VALIDATION_FAILED", message: `Kiểu phụ đề không hợp lệ: ${captionStyle.errors.join("; ")}` };
     const preflight = await this.renderPreflight(input.renderAccountId, input.templateSnapshotId, false);
     if (!preflight.ok) return preflight;
     const project = await this.prisma.project.create({ data: { name: input.name.trim(), createdByUserId: userId } });
@@ -123,7 +128,12 @@ export class VideoProductionsService {
       contentConfig: { providerAccountId: input.contentAccountId },
       voiceConfig: { providerAccountId: input.voiceAccountId, voiceId: input.voiceId },
       mediaConfig: { providerAccountId: input.mediaAccountId },
-      renderConfig: { providerAccountId: input.renderAccountId, templateSnapshotId: input.templateSnapshotId, ...(Object.keys(orshotOptions.data).length > 0 ? { orshot: orshotOptions.data } : {}) },
+      renderConfig: {
+        providerAccountId: input.renderAccountId,
+        templateSnapshotId: input.templateSnapshotId,
+        ...(Object.keys(orshotOptions.data).length > 0 ? { orshot: orshotOptions.data } : {}),
+        ...(Object.keys(captionStyle.value).length > 0 ? { captionStyle: captionStyle.value } : {}),
+      },
       outputPreset: { aspectRatio: "9:16", width: 1080, height: 1920, fps: 30 },
       locale: input.locale ?? "vi",
       durationSec: input.durationSec ?? 60,

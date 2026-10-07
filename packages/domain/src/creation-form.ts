@@ -9,6 +9,7 @@
  * There is no "model" field: the model is the content account's own pinned model (`ProviderAccount.model`).
  */
 import { BACKGROUND_SEGMENT_COUNT_DEFAULT_BOUNDS } from "./background-segments.js";
+import { CAPTION_PRESETS } from "./caption-presets.js";
 
 export const CREATION_FLOW_TYPES = ["job_new"] as const;
 export type CreationFlowType = (typeof CREATION_FLOW_TYPES)[number];
@@ -20,6 +21,8 @@ export const AUTO_SOURCE_TYPES = ["topic", "raw_script", "article_url"] as const
 export const CONTENT_LANGUAGES = ["vi", "en", "ja", "ko"] as const;
 export const DURATION_TARGETS = ["30-45s", "45-65s", "65-90s"] as const;
 export const SCENE_COUNT_TARGETS = ["6-8", "8-12", "12-16"] as const;
+/** VE2E-94: "" = the template's own caption style, else a caption preset id (an id no longer in the catalog is dropped on restore). */
+export const CAPTION_PRESET_CHOICES: readonly string[] = ["", ...CAPTION_PRESETS.map((item) => item.id)];
 export const ORSHOT_FORMAT_CHOICES = ["", "mp4", "webm", "mov", "gif"] as const;
 /** VE2E-40: "auto" or a fixed count within the placeholder bounds (the server re-validates on submit). */
 export const BACKGROUND_SEGMENT_CHOICES: readonly string[] = [
@@ -49,6 +52,7 @@ export type JobNewFormValues = {
   templateId: string;
   orshotFormat: (typeof ORSHOT_FORMAT_CHOICES)[number];
   orshotSize: string;
+  captionPresetId: string;
 };
 
 export type JobNewFieldKey = keyof JobNewFormValues;
@@ -76,6 +80,7 @@ export const SYSTEM_CREATION_DEFAULTS: JobNewFormValues = {
   templateId: "",
   orshotFormat: "",
   orshotSize: "",
+  captionPresetId: "",
 };
 
 /** Job content: in a draft, never in defaults. */
@@ -98,6 +103,7 @@ export const CREATION_PREFERENCE_KEYS = [
   "templateId",
   "orshotFormat",
   "orshotSize",
+  "captionPresetId",
 ] as const satisfies readonly JobNewFieldKey[];
 /** Identifiers of things that can disappear or lose access after they were saved (checked again on restore). */
 export const CREATION_REFERENCE_KEYS = ["channelId", "contentAccountId", "voiceAccountId", "voiceId", "mediaAccountId", "renderAccountId", "templateId"] as const satisfies readonly JobNewFieldKey[];
@@ -122,6 +128,7 @@ const ENUMS: Partial<Record<JobNewFieldKey, readonly string[]>> = {
   sceneCountTarget: SCENE_COUNT_TARGETS,
   backgroundSegmentsChoice: BACKGROUND_SEGMENT_CHOICES,
   orshotFormat: ORSHOT_FORMAT_CHOICES,
+  captionPresetId: CAPTION_PRESET_CHOICES,
 };
 const CONTENT_KEY_SET = new Set<string>(CREATION_CONTENT_KEYS);
 // eslint-disable-next-line no-control-regex

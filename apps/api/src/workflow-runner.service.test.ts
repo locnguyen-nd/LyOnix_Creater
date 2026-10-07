@@ -91,6 +91,8 @@ describe("asAccountRef / asVoiceRef / asRenderRef", () => {
     // an invalid / empty Orshot block is dropped, never forwarded
     expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", orshot: { fps: 25 } })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1" });
     expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", orshot: {} })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1" });
+    // VE2E-94: the preset caption values come back validated; a bad entry is dropped, never forwarded
+    expect(asRenderRef({ providerAccountId: "a", templateSnapshotId: "s1", captionStyle: { "dynamicStyle.captionFontSizePx": "80", "dynamicStyle.captionMaxLines": "9", evil: "x" } })).toEqual({ providerAccountId: "a", templateSnapshotId: "s1", captionStyle: { "dynamicStyle.captionFontSizePx": "80" } });
   });
 });
 
@@ -372,6 +374,23 @@ describe("WorkflowRunnerService", () => {
       { modificationKey: "Caption.text", kind: "text", text: "Tiêu đề" },
     ]);
     expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("VE2E-94: the caption preset chosen in the Auto form reaches the timeline as stored values (Creatomate/LyOnix), never for Orshot", async () => {
+    const captionStyle = { "dynamicStyle.captionFontSizePx": "96", "dynamicStyle.captionPosition": "middle", "dynamicStyle.captionPresetId": "sports-punch" };
+    prisma.automationProfileVersion.findUnique = vi.fn(async () => profileRow({ renderConfig: { providerAccountId: "render-acc", templateSnapshotId, captionStyle } }));
+    await service.processNext();
+    expect(persistedTimeline().optionValues).toEqual(captionStyle);
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
+  it("VE2E-94 (15): an Orshot template applies no caption style, so the timeline gets none of the preset values", async () => {
+    const captionStyle = { "dynamicStyle.captionFontSizePx": "96", "dynamicStyle.captionPresetId": "sports-punch" };
+    prisma.automationProfileVersion.findUnique = vi.fn(async () => profileRow({ renderConfig: { providerAccountId: "render-acc", templateSnapshotId, captionStyle } }));
+    prisma.templateSnapshot.findUnique = vi.fn(async () => ({ id: templateSnapshotId, providerAccountId: "render-acc", engine: "orshot", modifications: templateSlots }));
+    await service.processNext();
+    expect(timelines.persistApprovedForWorkflowRun).toHaveBeenCalled();
+    expect(Object.keys(persistedTimeline().optionValues).filter((key) => key.startsWith("dynamicStyle."))).toEqual([]);
   });
 
   it("VE2E-42: a timeline persistence failure is classified like any other step failure and never submits a render", async () => {
