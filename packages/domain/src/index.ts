@@ -273,6 +273,23 @@ export {
 } from "./duration-budget.js";
 
 export {
+  runQualityGate,
+  qualityGateConfigFromEnv,
+  estimateCaptionLines,
+  QUALITY_GATE_DEFAULT_REPEAT_WINDOW,
+  QUALITY_GATE_DEFAULT_MIN_SHORT_SIDE_PX,
+  QUALITY_GATE_MAX_SUBTITLE_LINES,
+  type QualityGateScene,
+  type QualityGateAsset,
+  type QualityGateConfig,
+  type QualityGateFix,
+  type QualityGateWarning,
+  type QualityGateCheck,
+  type QualityGateResult,
+  type QualityGateFailure,
+} from "./quality-gate.js";
+
+export {
   planReframe,
   reframeOptionsFromEnv,
   REFRAME_PLAN_VERSION,
