@@ -16,6 +16,8 @@ type FakeOptions = {
   source?: Record<string, unknown>;
   output?: Record<string, unknown>;
   keyframesCsv?: string;
+  /** VE2E-90: ffprobe packet list returned for the smoothness probe (no -read_intervals); one entry per ffmpeg run if an array. */
+  smoothCsv?: string | string[];
   ffmpegFailures?: number;
   ffmpegTimeouts?: number;
 };
@@ -38,7 +40,11 @@ const fakeRunner = (options: FakeOptions = {}) => {
     calls.push({ binary, args });
     const last = args[args.length - 1]!;
     if (binary === "ffprobe" && args.includes("-show_entries")) {
-      return { exitCode: 0, stdout: options.keyframesCsv ?? "0.000000,K__\n2.000000,K__\n4.000000,K__\n", stderrTail: "" };
+      const keyframes = options.keyframesCsv ?? "0.000000,K__\n2.000000,K__\n4.000000,K__\n";
+      if (args.includes("-read_intervals") || options.smoothCsv === undefined) return { exitCode: 0, stdout: keyframes, stderrTail: "" };
+      const runs = Math.max(1, calls.filter((c) => c.binary === "ffmpeg").length);
+      const csv = Array.isArray(options.smoothCsv) ? options.smoothCsv[Math.min(runs, options.smoothCsv.length) - 1]! : options.smoothCsv;
+      return { exitCode: 0, stdout: csv, stderrTail: "" };
     }
     if (binary === "ffprobe") {
       if (last.endsWith(".partial")) {
@@ -98,6 +104,41 @@ describe("ClipPrepareProcessor", () => {
     expect(result.output).toMatchObject({ retentionClass: "working", hasAudio: false, videoCodec: "h264", width: 1080, height: 1920, expiresAt: "2026-10-06T00:00:00.000Z" });
     expect(result.source).toMatchObject({ mediaAssetVersionId: "mav-1", videoCodec: "h264", audioCodec: "aac" });
     expect(fake.ffmpegCalls()[0]!.args).toEqual(expect.arrayContaining(["-c", "copy", "-an"]));
+  });
+
+  it("VE2E-90: a stream copy that is not smooth is redone as a re-encode (job still succeeds)", async () => {
+    const even = Array.from({ length: 150 }, (_, i) => `${(i / 30).toFixed(4)},___`).join("\n");
+    const stalled = Array.from({ length: 150 }, (_, i) => `${(i / 30 + (i >= 70 ? 0.3 : 0)).toFixed(4)},___`).join("\n");
+    const fake = fakeRunner({ smoothCsv: [stalled, even] });
+    const logs: string[] = [];
+    const processor = new ClipPrepareProcessor({ config: cfg(), runner: fake.runner, ffmpegVersion: "v", log: (m) => logs.push(m) });
+    const result = await processor.handle(job());
+    expect(result.ok && result.mode).toBe("reencode");
+    expect(result.ok && result.reencodeReasons).toContain("copy_output_not_smooth");
+    expect(fake.ffmpegCalls()).toHaveLength(2);
+    expect(logs.some((m) => m.includes("copy output not smooth"))).toBe(true);
+  });
+
+  it("VE2E-90: a smooth copy is kept; smoothCheck=false skips the probe", async () => {
+    const even = Array.from({ length: 150 }, (_, i) => `${(i / 30).toFixed(4)},___`).join("\n");
+    const stalled = Array.from({ length: 150 }, (_, i) => `${(i / 30 + (i >= 70 ? 0.3 : 0)).toFixed(4)},___`).join("\n");
+    const smooth = fakeRunner({ smoothCsv: even });
+    const kept = await new ClipPrepareProcessor({ config: cfg(), runner: smooth.runner, ffmpegVersion: "v" }).handle(job());
+    expect(kept.ok && kept.mode).toBe("copy");
+    const off = fakeRunner({ smoothCsv: stalled });
+    const skipped = await new ClipPrepareProcessor({ config: { ...cfg(), smoothCheck: false }, runner: off.runner, ffmpegVersion: "v" }).handle(job({ jobKey: "clip:off" }));
+    expect(skipped.ok && skipped.mode).toBe("copy");
+    expect(off.ffmpegCalls()).toHaveLength(1);
+  });
+
+  it("VE2E-90: a non-smooth re-encode only warns (no retry loop, no failure)", async () => {
+    const stalled = Array.from({ length: 150 }, (_, i) => `${(i / 30 + (i >= 70 ? 0.3 : 0)).toFixed(4)},___`).join("\n");
+    const fake = fakeRunner({ source: { video: { width: 3840, height: 2160 } }, smoothCsv: stalled });
+    const logs: string[] = [];
+    const result = await new ClipPrepareProcessor({ config: cfg(), runner: fake.runner, ffmpegVersion: "v", log: (m) => logs.push(m) }).handle(job());
+    expect(result.ok && result.mode).toBe("reencode");
+    expect(fake.ffmpegCalls()).toHaveLength(1);
+    expect(logs.some((m) => m.includes("WARNING re-encoded output not smooth"))).toBe(true);
   });
 
   it("re-encodes when the source is above 1080p", async () => {
@@ -343,6 +384,13 @@ describe("loadMediaWorkerConfig", () => {
     expect(loadMediaWorkerConfig({ MEDIA_WORKER_PREFETCH: "2", MEDIA_WORKER_FFMPEG_THREADS: "6" }, "/repo", 16)).toMatchObject({ prefetch: 2, ffmpegThreads: 6 });
     expect(() => loadMediaWorkerConfig({ MEDIA_WORKER_PREFETCH: "0" }, "/repo", 4)).toThrow(MediaWorkerConfigError);
     expect(() => loadMediaWorkerConfig({ MEDIA_WORKER_FFMPEG_THREADS: "x" }, "/repo", 4)).toThrow(MediaWorkerConfigError);
+  });
+
+  it("VE2E-90: MEDIA_WORKER_SMOOTH_CHECK defaults on and can be switched off", () => {
+    expect(loadMediaWorkerConfig({}, "/repo", 4).smoothCheck).toBe(true);
+    expect(loadMediaWorkerConfig({ MEDIA_WORKER_SMOOTH_CHECK: "0" }, "/repo", 4).smoothCheck).toBe(false);
+    expect(loadMediaWorkerConfig({ MEDIA_WORKER_SMOOTH_CHECK: "off" }, "/repo", 4).smoothCheck).toBe(false);
+    expect(() => loadMediaWorkerConfig({ MEDIA_WORKER_SMOOTH_CHECK: "maybe" }, "/repo", 4)).toThrow(MediaWorkerConfigError);
   });
 
   it("reads overrides and rejects out-of-range values", () => {

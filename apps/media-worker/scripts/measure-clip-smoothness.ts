@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { buildClipPrepareJob } from "@lyonix/media-jobs";
 import { ClipPrepareProcessor } from "../src/clip-prepare.js";
-import { analyzeSmoothness, buildProbeArgs, buildSmoothnessProbeArgs, parseProbeJson, type SmoothnessReport } from "../src/clip-plan.js";
+import { analyzeSmoothness, buildProbeArgs, buildSmoothnessProbeArgs, measureSmoothness, parseProbeJson, type SmoothnessReport } from "../src/clip-plan.js";
 import { runProcess } from "../src/process.js";
 
 const ffmpeg = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
@@ -62,7 +62,7 @@ const main = async () => {
     const row: Record<string, unknown> = { name, source: { ...fpsOf(src(`${name}.mp4`)), smoothness: measure(src(`${name}.mp4`)) } };
     if (result.ok) {
       const out = join(root, result.output.relativePath);
-      row.output = { mode: result.mode, reasons: result.reencodeReasons, wallMs: ms, fps: fpsOf(out), smoothness: measure(out), driftMs: result.drift };
+      row.output = { mode: result.mode, reasons: result.reencodeReasons, wallMs: ms, fps: fpsOf(out), smoothness: measure(out), smoothnessInterior: measureSmoothness(spawnSync(ffprobe, buildSmoothnessProbeArgs(out), { encoding: "utf8" }).stdout, { trimEdgeFrames: 2 }), driftMs: result.drift };
     } else row.output = { error: result.error };
     // what a forced stream copy of the same range would have produced (the legacy behaviour for VFR/long GOP)
     const copyOut = join(root, `${name}-copy.mp4`);
