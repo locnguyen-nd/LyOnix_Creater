@@ -387,4 +387,25 @@ export const measureSmoothness = (csv: string): Smoothness | null => {
   return { frames: times.length, medianDeltaMs: Math.round(median * 100) / 100, maxDeltaMs: Math.round(max * 100) / 100, irregularPct, gridErrorFrames, smooth: irregularPct <= 2 && max <= median * 2.5 && gridErrorFrames <= 1 };
 };
 
-export const buildSmoothnessProbeArgs = (path: string): string[] => ["-v", "error", "-hide_banner", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", path];
+export const buildSmoothnessProbeArgs = (path: string): string[] => ["-v", "error", "-hide_banner", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", path];
+
+export type SmoothnessReport = Smoothness & {
+  /** Largest gap between consecutive keyframes (ms); null when the packets carry no keyframe flag. */
+  maxKeyframeGapMs: number | null;
+  keyframes: number;
+};
+
+/** `measureSmoothness` plus the keyframe interval, from the same `buildSmoothnessProbeArgs` output (`pts_time,flags`). */
+export const analyzeSmoothness = (csv: string): SmoothnessReport | null => {
+  const base = measureSmoothness(csv);
+  if (!base) return null;
+  const keys = csv
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(","))
+    .filter(([pts, flags]) => pts && flags?.includes("K") && Number.isFinite(Number(pts)))
+    .map(([pts]) => Number(pts) * 1000)
+    .sort((a, b) => a - b);
+  let maxGap: number | null = null;
+  for (let i = 1; i < keys.length; i += 1) maxGap = Math.max(maxGap ?? 0, keys[i]! - keys[i - 1]!);
+  return { ...base, maxKeyframeGapMs: maxGap === null ? null : Math.round(maxGap), keyframes: keys.length };
+};
