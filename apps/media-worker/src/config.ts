@@ -20,6 +20,8 @@ export type MediaWorkerConfig = {
   /** FFmpeg `-threads` per job: cpuCount / prefetch (>= 1) so parallel cuts do not starve each other. */
   ffmpegThreads: number;
   sweepIntervalMs: number;
+  /** VE2E-90: ffprobe smoothness check of every clip.prepare output (MEDIA_WORKER_SMOOTH_CHECK, default on; 0/false/off disables). A non-smooth stream copy is redone as a re-encode; a non-smooth re-encode only logs a warning. */
+  smoothCheck: boolean;
 };
 
 export class MediaWorkerConfigError extends Error {
@@ -28,6 +30,14 @@ export class MediaWorkerConfigError extends Error {
     this.name = "MediaWorkerConfigError";
   }
 }
+
+const readFlag = (env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean => {
+  const raw = env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["0", "false", "off", "no"].includes(raw)) return false;
+  if (["1", "true", "on", "yes"].includes(raw)) return true;
+  throw new MediaWorkerConfigError(`${name} must be 0/1/true/false (got "${raw}")`);
+};
 
 const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number, min: number, max: number): number => {
   const raw = env[name]?.trim();
@@ -48,6 +58,7 @@ const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
  *   MEDIA_WORKER_MAX_ATTEMPTS (default 2),
  *   MEDIA_WORKER_PREFETCH (default min(3, CPU count), 1..16; always capped at the CPU count so FFmpeg jobs do not starve each other),
  *   MEDIA_WORKER_FFMPEG_THREADS (default floor(CPU count / prefetch), >= 1; 1..64),
+ *   MEDIA_WORKER_SMOOTH_CHECK (default 1; VE2E-90 post-cut smoothness check),
  *   MEDIA_WORKER_SWEEP_INTERVAL_MS (default 6h)
  */
 export const DEFAULT_MEDIA_WORKER_PREFETCH = 3;
@@ -67,6 +78,7 @@ export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string, 
     maxAttempts: readInt(env, "MEDIA_WORKER_MAX_ATTEMPTS", 2, 1, 5),
     prefetch,
     ffmpegThreads: readInt(env, "MEDIA_WORKER_FFMPEG_THREADS", Math.max(1, Math.floor(cpus / prefetch)), 1, 64),
+    smoothCheck: readFlag(env, "MEDIA_WORKER_SMOOTH_CHECK", true),
     sweepIntervalMs: readInt(env, "MEDIA_WORKER_SWEEP_INTERVAL_MS", 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
   };
 };

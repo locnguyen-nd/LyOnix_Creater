@@ -24,8 +24,10 @@ import {
   buildKeyframeProbeArgs,
   buildProbeArgs,
   buildReencodeArgs,
+  buildSmoothnessProbeArgs,
   checkRange,
   isFullFrameCropPlan,
+  measureSmoothness,
   parseKeyframePackets,
   parseProbeJson,
   planClip,
@@ -62,7 +64,7 @@ export const sha256File = (path: string): Promise<string> =>
 const toPosix = (path: string) => path.split(sep).join("/");
 
 export type ClipPrepareProcessorDeps = {
-  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts"> & Partial<Pick<MediaWorkerConfig, "ffmpegThreads">>;
+  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts"> & Partial<Pick<MediaWorkerConfig, "ffmpegThreads" | "smoothCheck">>;
   runner: ProcessRunner;
   ffmpegVersion: string;
   now?: () => Date;
@@ -225,6 +227,24 @@ export class ClipPrepareProcessor {
     }
   }
 
+  /**
+   * VE2E-90: timestamp regularity of an output clip. Returns null when the check is disabled, ffprobe fails or the clip has too few
+   * frames to judge (never fails the job). `trimEdgeFrames` ignores the reorder hole a stream copy leaves at its ends.
+   */
+  private async checkSmooth(path: string, trimEdgeFrames: number): Promise<{ smooth: boolean; detail: string } | null> {
+    if (this.deps.config.smoothCheck === false) return null;
+    try {
+      const result = await this.deps.runner(this.deps.config.ffprobePath, buildSmoothnessProbeArgs(path), { timeoutMs: this.deps.config.jobTimeoutMs });
+      if (result.exitCode !== 0) return null;
+      const report = measureSmoothness(result.stdout, { trimEdgeFrames });
+      if (!report) return null;
+      return { smooth: report.smooth, detail: `median ${report.medianDeltaMs}ms max ${report.maxDeltaMs}ms irregular ${report.irregularPct}% gridError ${report.gridErrorFrames}` };
+    } catch (error) {
+      if (error instanceof BinaryNotFoundError) throw error;
+      return null;
+    }
+  }
+
   private async encode(args: string[]): Promise<void> {
     // VE2E-61: cap encoder threads (output option, inserted before the output path) so parallel jobs share the CPUs.
     const threads = this.deps.config.ffmpegThreads;
@@ -367,6 +387,20 @@ export class ClipPrepareProcessor {
       this.log(`clip.prepare ${job.jobKey}: copy output ${outputProbe.durationMs}ms outside tolerance; re-encoding`);
       plan = reencodePlan(["copy_output_duration_drift"]);
       outputProbe = await runPlan(plan);
+    }
+
+    if (plan.mode === "copy") {
+      const copySmooth = await this.checkSmooth(partialPath, 2);
+      if (copySmooth && !copySmooth.smooth) {
+        // Stream copy carried source judder into the clip: redo it as a CFR re-encode instead of failing the job.
+        this.log(`clip.prepare ${job.jobKey}: copy output not smooth (${copySmooth.detail}); re-encoding`);
+        plan = reencodePlan(["copy_output_not_smooth"]);
+        outputProbe = await runPlan(plan);
+      }
+    }
+    if (plan.mode === "reencode") {
+      const encoded = await this.checkSmooth(partialPath, 0);
+      if (encoded && !encoded.smooth) this.log(`clip.prepare ${job.jobKey}: WARNING re-encoded output not smooth (${encoded.detail})`);
     }
 
     if (job.stripAudio && outputProbe.audio) throw new MediaJobError("OUTPUT_INVALID", "stripAudio requested but output still has an audio track");
