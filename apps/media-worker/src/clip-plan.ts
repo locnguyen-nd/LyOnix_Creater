@@ -373,8 +373,12 @@ export type Smoothness = {
  * reports timestamp regularity. A clip is smooth when (almost) every spacing equals the median (constant frame rate) and nothing
  * stalls for more than 2.5 frames.
  */
-export const measureSmoothness = (csv: string): Smoothness | null => {
-  const times = csv.split(/\r?\n/).map((line) => Number(line.trim().split(",")[0])).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+export const measureSmoothness = (csv: string, options: { trimEdgeFrames?: number } = {}): Smoothness | null => {
+  const all = csv.split(/\r?\n/).map((line) => Number(line.trim().split(",")[0])).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  // A stream copy of an H.264 stream with B-frames leaves a one-frame hole at the first/last timestamps (reorder delay). That is not
+  // mid-clip judder, so the copy check ignores the outermost frames.
+  const trim = Math.max(0, options.trimEdgeFrames ?? 0);
+  const times = trim > 0 ? all.slice(trim, all.length - trim) : all;
   if (times.length < 3) return null;
   const deltas = times.slice(1).map((time, index) => (time - times[index]!) * 1000);
   const sorted = [...deltas].sort((a, b) => a - b);
@@ -396,8 +400,8 @@ export type SmoothnessReport = Smoothness & {
 };
 
 /** `measureSmoothness` plus the keyframe interval, from the same `buildSmoothnessProbeArgs` output (`pts_time,flags`). */
-export const analyzeSmoothness = (csv: string): SmoothnessReport | null => {
-  const base = measureSmoothness(csv);
+export const analyzeSmoothness = (csv: string, options: { trimEdgeFrames?: number } = {}): SmoothnessReport | null => {
+  const base = measureSmoothness(csv, options);
   if (!base) return null;
   const keys = csv
     .split(/\r?\n/)
