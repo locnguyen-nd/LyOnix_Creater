@@ -29,6 +29,8 @@ const asList = (value: unknown): string[] => {
   return out;
 };
 
+const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : value === undefined || value === null ? [] : [value]);
+
 const firstDefined = (record: Record<string, unknown>, keys: string[]): unknown => {
   for (const key of keys) if (record[key] !== undefined && record[key] !== null) return record[key];
   return undefined;
@@ -42,8 +44,9 @@ export function parseSegmentKeywords(raw: unknown): ParsedSegmentKeywords {
   if (!raw || typeof raw !== "object") return { ja: [], en: [], broad: [], mood: null };
   const record = raw as Record<string, unknown>;
   return {
-    ja: asList(record.ja),
-    en: asList(record.en),
+    // VE2E-88: `jaAll`/`enAll` are the full ordered lists next to the first-phrase strings `ja`/`en`.
+    ja: asList([...asArray(record.ja), ...asArray(record.jaAll)]),
+    en: asList([...asArray(record.en), ...asArray(record.enAll)]),
     broad: asList(firstDefined(record, ["broad_en", "broadEn", "broad"])),
     mood: asList(firstDefined(record, ["mood_en", "moodEn", "mood"]))[0] ?? null,
   };
