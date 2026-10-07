@@ -22,6 +22,7 @@
  * (the raw `visualQuery`/`screenText` strings are preserved verbatim, never translated), but the
  * `entities`/`action`/`setting`/`mood` buckets stay coarse (see `bucketize`) for ja/ko.
  */
+import { subjectMatchScore } from "./subject-filter.js";
 import { isRightsUsableForAuto } from "./media-candidate.js";
 import type {
   MediaCandidate,
@@ -64,6 +65,10 @@ export type SceneBrief = {
   shotIntent: string;
   verticalOnly: boolean;
   targetDurationSeconds: number;
+  /** VE2E-89: names/aliases of the video's main subject; a caption/hashtag/author hit adds {@link SUBJECT_MATCH_WEIGHT} to the combined score (ranking signal only). */
+  subjectAliases?: string[];
+  /** VE2E-89: authors of clips already chosen for the subject in this job; a tiny coherence bonus for a subject-matching clip of the same author. */
+  preferredAuthors?: string[];
 };
 
 export type SceneBriefOptions = {
@@ -252,8 +257,14 @@ export type MediaRankingOptions = {
   allowedTypes?: readonly MediaCandidateType[];
 };
 
+/** VE2E-89: max boost of a subject metadata match / of same-author coherence (only with a subject-matching clip). */
+export const SUBJECT_MATCH_WEIGHT = 0.15;
+export const SUBJECT_COHERENCE_WEIGHT = 0.04;
+
 export type RankedMediaCandidate = {
   candidate: MediaCandidate;
+  /** VE2E-89: 0..1 subject metadata match (absent without `brief.subjectAliases`). */
+  subjectMatch?: number;
   semanticScore: number;
   /** False when `semanticScore` is only the blind `NEUTRAL_SEMANTIC_SCORE` default (no descriptor text, no vision findings) - i.e. we have literally no evidence the candidate matches the scene, as opposed to having checked and found a middling match. `decideMediaSelection` must never auto-select on this alone (spec §5: "do not label them as visually verified or let Auto silently accept a weak match"). */
   hasVerifiedSemanticSignal: boolean;
@@ -300,6 +311,11 @@ const computeSemanticScore = (candidate: MediaCandidate, brief: SceneBrief): num
 /** True only when the semantic score above is backed by real evidence (candidate metadata text, or a real vision inspection) rather than the blind neutral default. */
 const hasVerifiedSemanticSignal = (candidate: MediaCandidate): boolean =>
   Boolean(candidate.descriptorText?.trim()) || (candidate.visionFindings != null && candidate.visionFindings.sceneBeatRelevance !== null);
+
+const candidateAuthor = (candidate: MediaCandidate): string | null => candidate.attribution?.name ?? candidate.provenance?.apify?.author ?? null;
+
+const computeSubjectMatch = (candidate: MediaCandidate, brief: SceneBrief): number =>
+  brief.subjectAliases?.length ? subjectMatchScore({ subject: null, aliases: brief.subjectAliases, mustInclude: [], mustExclude: [] }, { text: candidate.descriptorText, author: candidateAuthor(candidate) }) : 0;
 
 /** A candidate whose own descriptive text matches an explicit scene exclusion is a hard filter, not just a low score - only checkable when the source provides descriptive text at all. */
 const matchesExclusion = (candidate: MediaCandidate, brief: SceneBrief): boolean => {
@@ -360,15 +376,22 @@ export function rankMediaCandidates(
       const qualityScore = computeQualityScore(candidate);
       const costScore = computeCostScore(candidate);
       const excluded = matchesExclusion(candidate, brief);
+      const subjectMatch = computeSubjectMatch(candidate, brief);
+      const author = candidateAuthor(candidate)?.toLowerCase();
+      const coherence = subjectMatch > 0 && author && brief.preferredAuthors?.some((name) => name.toLowerCase() === author) ? SUBJECT_COHERENCE_WEIGHT : 0;
       const combinedRaw =
         MEDIA_RANKING_WEIGHTS.semantic * semanticScore +
         MEDIA_RANKING_WEIGHTS.continuity * continuityScore +
         MEDIA_RANKING_WEIGHTS.quality * qualityScore +
-        MEDIA_RANKING_WEIGHTS.cost * costScore;
+        MEDIA_RANKING_WEIGHTS.cost * costScore +
+        SUBJECT_MATCH_WEIGHT * subjectMatch +
+        coherence;
       return {
         candidate,
+        ...(brief.subjectAliases?.length ? { subjectMatch } : {}),
         semanticScore,
-        hasVerifiedSemanticSignal: hasVerifiedSemanticSignal(candidate),
+        // A caption/hashtag naming the subject is real metadata evidence (VE2E-89), not the blind neutral default.
+        hasVerifiedSemanticSignal: hasVerifiedSemanticSignal(candidate) || subjectMatch >= 1,
         continuityScore,
         qualityScore,
         costScore,

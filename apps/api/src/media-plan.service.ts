@@ -30,7 +30,12 @@ import {
   parseSegmentKeywords,
   mediaSegmentDeadlineMs,
   raceByPriority,
-  segmentTierKeywords,
+  applySubjectToBrief,
+  subjectNames,
+  subjectProfileOf,
+  subjectShareTargetFromEnv,
+  subjectTierKeywords,
+  anchorKeywordToSubject,
   type ClipWindow,
   type DegradedTier,
   type KenBurnsPlan,
@@ -132,9 +137,12 @@ export class SegmentSourceLedger {
   readonly apifyPlainIds = new Set<string>();
   /** VE2E-130 (L4): video clips already chosen in this job, by asset id, with the windows other segments occupy. */
   kenBurnsCount = 0;
+  /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
+  readonly authors = new Set<string>();
   readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | undefined; windows: ClipWindow[] }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
+    if (source.apifyProvenance?.author) this.authors.add(source.apifyProvenance.author);
     if (source.externalId) {
       this.externalIds.add(source.externalId);
       this.apifyPlainIds.add(plainExternalId(source.externalId));
@@ -207,7 +215,8 @@ export const apifyKeywordForSegment = (segment: PlannedSegment): string | null =
 };
 
 /** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
-export const segmentsNeedingKeywords = (segments: readonly PlannedSegment[]): PlannedSegment[] => segments.filter((segment) => apifyKeywordForSegment(segment) === null);
+export const segmentsNeedingKeywords = (segments: readonly PlannedSegment[]): PlannedSegment[] =>
+  segments.filter((segment) => apifyKeywordForSegment(segment) === null && parseSegmentKeywords(segment.keywords).en.length === 0);
 
 /** Narration of a segment's scenes in script order (the only text the keyword extraction sees). */
 export const segmentNarration = (script: MediaPlanScript, segment: PlannedSegment): string =>
@@ -235,10 +244,20 @@ const registerClipWindow = (ledger: SegmentSourceLedger, source: SegmentSource, 
   ledger.clips.set(source.mediaAssetVersionId, clip);
 };
 
+/** Primary Pexels tier queries (en, broad), both anchored on the video subject; empty = keep the brief's own phrase. At most 2 tries. */
+const pexelsSubjectQueries = (segment: PlannedSegment): string[] => {
+  const profile = subjectProfileOf(segment);
+  if (subjectNames(profile).length === 0) return [];
+  const keywords = parseSegmentKeywords(segment.keywords);
+  return [...new Set([keywords.en[0], keywords.broad[0], profile.subject].filter((value): value is string => Boolean(value)).map((value) => anchorKeywordToSubject(value, profile, "en")))].slice(0, 2);
+};
+
 /** L5 stock-photo queries: subject-bound keywords first (en, broad, subject), the generic `mood` only as the last resort; at most 2 tries (Pexels is fast but metered). */
 const stockImageQueries = (segment: PlannedSegment): string[] => {
   const keywords = parseSegmentKeywords(segment.keywords);
-  return [...new Set([keywords.en[0], keywords.broad[0], segment.subject?.trim(), keywords.mood].filter((value): value is string => Boolean(value)))].slice(0, 2);
+  const profile = subjectProfileOf(segment);
+  const bound = [keywords.en[0], keywords.broad[0], segment.subject?.trim()].filter((value): value is string => Boolean(value)).map((value) => anchorKeywordToSubject(value, profile, "en"));
+  return [...new Set([...bound, keywords.mood].filter((value): value is string => Boolean(value)))].slice(0, 2);
 };
 
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
@@ -324,7 +343,8 @@ export class MediaPlanService {
 
   planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
     const scenes: MediaPlanScene[] = script.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: sceneDuration(scene) }));
-    return planBackgroundSegments(scenes, script.visualPlan, range);
+    // VE2E-88/89: weighted allocation so the main subject gets its share (env SUBJECT_SHARE_TARGET, default 0.6).
+    return planBackgroundSegments(scenes, script.visualPlan, range, { subjectShareTarget: subjectShareTargetFromEnv() });
   }
 
   /**
@@ -351,12 +371,13 @@ export class MediaPlanService {
    * on the timeline segment for the future Apify source, VE2E-34), and targeting the WHOLE segment's
    * duration so ranking prefers clips long enough to run across all its scenes.
    */
-  segmentBrief(script: MediaPlanScript, segment: PlannedSegment): SceneBrief {
+  segmentBrief(script: MediaPlanScript, segment: PlannedSegment, ledger?: SegmentSourceLedger): SceneBrief {
     const firstIndex = Math.max(0, script.scenes.findIndex((scene) => scene.sceneId === segment.sceneIds[0]));
     const brief = deriveSceneBrief({ language: script.language, scenes: script.scenes.map((scene) => ({ ...scene, durationHintMs: sceneDuration(scene) })) }, firstIndex);
     const english = parseSegmentKeywords(segment.keywords).en[0];
     const phrases = english ? [english, ...brief.phrases.filter((phrase) => phrase.trim().toLowerCase() !== english.toLowerCase())].slice(0, MAX_QUERY_VARIANTS) : brief.phrases;
-    return { ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 };
+    // VE2E-89: subject aliases (ranking bonus), mustExclude (hard filter), subject in the vision entities only for the main-subject segment.
+    return applySubjectToBrief({ ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 }, subjectProfileOf(segment), { priority: segment.priority, ...(ledger ? { preferredAuthors: [...(ledger.authors ?? [])] } : {}) });
   }
 
   /**
@@ -412,7 +433,7 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified: boolean; tier: "ja" | "en" | "broad"; keyword: string; account: { id: string; encryptedSecret: string } },
   ): Promise<{ source: SegmentSource } | { reason: string; quality: MediaPlanApifyQuality | null }> {
     try {
-      const brief = this.segmentBrief(input.script, input.segment);
+      const brief = this.segmentBrief(input.script, input.segment, input.ledger);
       const visualKind = segmentVisualKind(input.segment);
       const platform = (visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv())[0] ?? "tiktok";
       // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments/tiers run in parallel never share a clip.
@@ -428,7 +449,9 @@ export class MediaPlanService {
         segmentDurationSeconds: input.segment.durationMs / 1000,
         ...(input.allowUnverified ? { allowUnverified: true } : {}),
         // The degraded ladder (L4-L6) now guarantees a source, so only the relaxed tiers accept a flagged overlay / below-threshold clip.
-        ...(input.tier !== "ja" ? { keepOverlayFlagged: true, lenient: true } : {}),
+        // VE2E-131/89: the en/broad tiers search with the English keyword and the loosened en filter (no `lenient` any more), bound to the subject aliases.
+        ...(input.tier !== "ja" ? { keepOverlayFlagged: true, lang: "en" as const } : {}),
+        ...(subjectNames(subjectProfileOf(input.segment)).length > 0 ? { subjectAliases: subjectNames(subjectProfileOf(input.segment)) } : {}),
         ...(input.job ? { job: input.job } : {}),
       });
       if (!attempt.ok) return { reason: attempt.reason, quality: attempt.quality ?? null };
@@ -468,7 +491,7 @@ export class MediaPlanService {
     role: "admin" | "staff",
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; pexelsAccountId: string; mediaType?: "video" | "image"; queries?: string[] },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
-    const brief = this.segmentBrief(input.script, input.segment);
+    const brief = this.segmentBrief(input.script, input.segment, input.ledger);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     const excluded = new Set<string>();
     const queries = input.queries && input.queries.length > 0 ? input.queries : [brief.phrases[0] ?? firstScene?.visualQuery ?? ""];
@@ -516,7 +539,7 @@ export class MediaPlanService {
     role: "admin" | "staff",
     input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
-    const tierKeywords = this.apify ? segmentTierKeywords(input.segment.keywords, input.segment.subject, isValidJaSearchKeyword) : [];
+    const tierKeywords = this.apify ? subjectTierKeywords(input.segment.keywords, subjectProfileOf(input.segment), isValidJaSearchKeyword, input.segment.subject) : [];
     // The Apify account is only looked up when at least one tier has a keyword to search.
     const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
     const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels", string>> = {};
@@ -546,7 +569,8 @@ export class MediaPlanService {
       tiers.push({
         name: "pexels",
         run: async () => {
-          const outcome = await this.pexelsTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), pexelsAccountId });
+          const queries = pexelsSubjectQueries(input.segment);
+          const outcome = await this.pexelsTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), pexelsAccountId, ...(queries.length > 0 ? { queries } : {}) });
           if (outcome.ok) return outcome.data;
           holder.pexelsFailure = outcome;
           reasons.pexels = outcome.code;

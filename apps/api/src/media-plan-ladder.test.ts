@@ -67,7 +67,9 @@ describe("VE2E-130 media ladder", () => {
       const segment = { ...service.planSegments(script, { min: 1, max: 1 })[0]!, subject: "Shohei Ohtani" };
       await service.importSegmentSource(projectId, "u", "staff", { providerAccountId: "p", script, segment, ledger: new SegmentSourceLedger() });
       expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => c[4].keyword)).toEqual(["東京夜景1", "tokyo 1", "Shohei Ohtani"]);
-      expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => Boolean(c[4].lenient))).toEqual([false, true, true]);
+      // VE2E-89: the relaxed tiers use the en language filter (VE2E-131), no `lenient` pass any more.
+      expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => c[4].lang)).toEqual([undefined, "en", "en"]);
+      expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => Boolean(c[4].lenient))).toEqual([false, false, false]);
     });
 
     it("reads the multi-tier keyword format (arrays, broad_en) next to the legacy one", async () => {
