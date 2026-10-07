@@ -290,6 +290,7 @@ export {
 export { newsRecapJpTemplate, top5CountdownTemplate } from "./fixtures/creatomate-templates.js";
 export {
   probeApifyAccount,
+  fetchApifyConcurrencyLimit,
   searchApify,
   normalizeApifyItems,
   buildActorInput,
@@ -349,7 +350,13 @@ export {
 export {
   moderateMediaWithVision,
   moderateSceneCandidate,
+  moderateSceneCandidatesBatch,
   MAX_MODERATION_FRAMES,
+  VISION_CALL_TIMEOUT_MS,
+  VISION_BATCH_MIN,
+  VISION_BATCH_MAX,
+  type SceneBatchInput,
+  type SceneBatchOutcome,
   type VisionModerationOperation,
   type VisionModerationSceneContext,
   type VisionModerationFrame,

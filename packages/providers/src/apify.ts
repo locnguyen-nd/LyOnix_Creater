@@ -102,6 +102,23 @@ export async function probeApifyAccount(accessToken: string, deps?: ApifyDeps): 
   return failFromResponse(response, accessToken);
 }
 
+/**
+ * VE2E-131: the plan's real concurrent Actor-run cap, read-only `GET /v2/users/me/limits` (`data.limits.maxConcurrentActorJobs`,
+ * Apify docs: Starter 32). Best-effort: any failure/unexpected shape returns `null` (callers then keep the env value). Never starts a run.
+ * NOT yet verified against a live account in this repo (no probe was run); the shape is read defensively.
+ */
+export async function fetchApifyConcurrencyLimit(accessToken: string, deps?: ApifyDeps): Promise<number | null> {
+  try {
+    const response = await apifyFetch(deps, "/v2/users/me/limits", accessToken);
+    if (!response.ok) return null;
+    const body = (await response.json().catch(() => null)) as { data?: { limits?: { maxConcurrentActorJobs?: unknown } } } | null;
+    const value = body?.data?.limits?.maxConcurrentActorJobs;
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- pinned Actor allowlist -------------------------------------------------------------------
 
 export const apifyPlatforms = ["tiktok", "pinterest", "x", "google_image", "google_video"] as const;
