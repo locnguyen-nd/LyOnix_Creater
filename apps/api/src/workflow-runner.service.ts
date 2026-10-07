@@ -37,6 +37,11 @@ import {
   buildNarrationBudget,
   calibrateCharsPerSecond,
   checkDurationBand,
+  qualityGateConfigFromEnv,
+  runQualityGate,
+  type QualityGateAsset,
+  type QualityGateResult,
+  type QualityGateScene,
   type NarrationBudget,
   readBackgroundSegmentsSetting,
   resolveBackgroundSegmentRange,
@@ -409,6 +414,69 @@ export class WorkflowRunnerService {
     } catch (error) {
       await this.saveStepDiagnostics(run, "keyword_extraction_diagnostics", { requested, extracted: [], failed: error instanceof Error ? error.message.slice(0, 200) : "error", reason: "no_ja_keywords" });
     }
+  }
+
+  /**
+   * VE2E-85: pre-render quality gate. Reads the plan, applies the auto-fixes (other window / other clip of the job) to `mediaPlan` in place and records
+   * the `quality_gate` StepRun (checks, fixes, warnings, quality_degraded summary). Only an invalid range stops the run (VALIDATION_FAILED, clear reason);
+   * warnings and degraded sources never do. An internal gate error is swallowed: the gate must never be the reason a job is lost. `QUALITY_GATE=0` disables it.
+   */
+  private async applyQualityGate(
+    run: WorkflowRunRow,
+    ctx: {
+      mediaPlan: ReturnType<MediaPlanService["buildBindings"]>;
+      sourced: SourcedSegment[];
+      narrationByScene: Map<string, string>;
+      durationByScene: Map<string, number>;
+      targetSec: number;
+    },
+  ): Promise<void> {
+    const config = qualityGateConfigFromEnv();
+    if (!config.enabled) return;
+    let result: QualityGateResult;
+    try {
+      const degradedBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.degraded ?? null] as const));
+      const sourceByAsset = new Map(ctx.sourced.flatMap((piece) => (piece.source ? [[piece.source.mediaAssetVersionId, piece.source] as const] : [])));
+      let dims = new Map<string, { widthPx: number | null; heightPx: number | null }>();
+      try {
+        const rows: Array<{ id: string; widthPx: number | null; heightPx: number | null }> = await this.prisma.mediaAssetVersion.findMany({ where: { id: { in: [...sourceByAsset.keys()] } }, select: { id: true, widthPx: true, heightPx: true } });
+        dims = new Map(rows.map((row) => [row.id, { widthPx: row.widthPx, heightPx: row.heightPx }] as const));
+      } catch {
+        // Unknown resolution is simply not checked.
+      }
+      const assets: QualityGateAsset[] = [...sourceByAsset.entries()].map(([id, source]) => ({ id, kind: source.kind, durationMs: source.durationMs, widthPx: dims.get(id)?.widthPx ?? null, heightPx: dims.get(id)?.heightPx ?? null }));
+      const scenes: QualityGateScene[] = ctx.mediaPlan.scenes.map((scene) => ({
+        sceneId: scene.sceneId,
+        segmentId: scene.segmentId,
+        assetId: scene.mediaAssetVersionId,
+        kind: scene.mediaKind,
+        sourceStartMs: scene.sourceStartMs,
+        sourceDurationMs: scene.sourceDurationMs,
+        sceneDurationMs: ctx.durationByScene.get(scene.sceneId) ?? 0,
+        narration: ctx.narrationByScene.get(scene.sceneId) ?? "",
+        degradedTier: scene.segmentId ? degradedBySegment.get(scene.segmentId) ?? null : null,
+      }));
+      result = runQualityGate({ scenes, assets, targetSec: ctx.targetSec, config });
+    } catch {
+      return;
+    }
+    if (!result.failure) {
+      const byScene = new Map(result.scenes.map((scene) => [scene.sceneId, scene] as const));
+      for (const target of ctx.mediaPlan.scenes) {
+        const fixed = byScene.get(target.sceneId);
+        if (!fixed) continue;
+        target.mediaAssetVersionId = fixed.assetId;
+        target.mediaKind = fixed.kind;
+        target.sourceStartMs = fixed.sourceStartMs;
+      }
+      for (const fix of result.fixes) {
+        if (fix.type !== "source_swapped") continue;
+        const segment = ctx.mediaPlan.segments.find((candidate) => candidate.segmentId === fix.segmentId);
+        if (segment) segment.mediaAssetVersionId = fix.toAssetId;
+      }
+    }
+    await this.saveStepDiagnostics(run, "quality_gate", { checks: result.checks, fixes: result.fixes, warnings: result.warnings, degraded: result.degraded, failure: result.failure });
+    if (result.failure) throw new WorkflowStepFailure("VALIDATION_FAILED", `Cổng chất lượng: ${result.failure.reason}`);
   }
 
   /** VE2E-54: chars/sec from this voice's (and model's) historical scene audio in the run's language -> narration budget for the script prompt. Best-effort: any failure falls back to the language default. */
@@ -817,6 +885,14 @@ ${correction.direction}`,
     if (sourcing.visionUsage) {
       await this.appendRunUsage(run, { step: "vision_moderation", kind: "content", provider: null, modelId: sourcing.visionUsage.modelId, inputTokens: null, outputTokens: null, costAmount: null, costCurrency: null, calls: sourcing.visionUsage.calls, at: new Date().toISOString() });
     }
+    // VE2E-85: pre-render quality gate (pure computation, no provider call). Auto-corrects the plan in place; a missing source never stops the job.
+    await this.applyQualityGate(run, {
+      mediaPlan,
+      sourced,
+      narrationByScene: new Map(approved.scenes.map((scene: { sceneId: string; narration?: string }) => [scene.sceneId, scene.narration ?? ""] as const)),
+      durationByScene,
+      targetSec: profile.durationSec,
+    });
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
 
