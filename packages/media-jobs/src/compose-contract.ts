@@ -55,6 +55,11 @@ export type ComposeScene = {
   /** Static on-screen text for the scene (may be empty). */
   text: string;
   captionCues: Array<{ text: string; startMs: number; endMs: number; charTimings?: Array<{ startMs: number; endMs: number }> }>;
+  /**
+   * VE2E-93: this scene's caption style override as flat `dynamicStyle.caption*` values (same keys as `plan.params`, which holds the
+   * whole-video style). Omitted when the scene has none, so plans without overrides keep their fingerprint/job key.
+   */
+  captionParams?: Record<string, string>;
   effectIn: ComposeSceneEffect;
   effectOut: ComposeSceneEffect;
   transitionIn: ComposeTransition;
@@ -318,6 +323,9 @@ export const validateVideoComposeJob = (input: unknown): Validation<VideoCompose
             errors.push(`${label}.captionCues[${cueIndex}].charTimings must have one entry per character`);
           }
         });
+      }
+      if (scene.captionParams !== undefined && (!isRecord(scene.captionParams) || Object.values(scene.captionParams).some((v) => typeof v !== "string" || v.length > MAX_COMPOSE_TEXT_LENGTH))) {
+        errors.push(`${label}.captionParams must be a string map`);
       }
       validateEffect(`${label}.effectIn`, scene.effectIn, errors);
       validateEffect(`${label}.effectOut`, scene.effectOut, errors);

@@ -283,3 +283,6 @@ export * from "./render-router.js";
 export * from "./subtitle-edit.js";
 export * from "./creation-form.js";
 export { mergeScenesToCap } from "./script-scene-cap.js";
+export * from "./caption-fonts.js";
+export * from "./caption-style-capabilities.js";
+export * from "./caption-style.js";

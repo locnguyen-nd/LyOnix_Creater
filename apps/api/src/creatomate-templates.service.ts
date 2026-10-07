@@ -9,8 +9,10 @@
  */
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import type { Prisma } from "@lyonix/db";
+import { captionDefaultsFromRecipeCaptions, type CaptionTemplateDefaults } from "@lyonix/domain";
 import {
   ProviderError,
+  captionDefaultsFromCreatomateTemplate,
   deriveTemplateModifications,
   deriveOrshotModifications,
   getCreatomateTemplate,
@@ -21,7 +23,7 @@ import {
 } from "@lyonix/providers";
 import type { CreatomateTemplateSummaryResponse, ErrorCode, RenderEngine, TemplateSnapshotResponse } from "@lyonix/contracts";
 import { slotsWithTtsProvider, templateTtsWarnings } from "./template-tts.js";
-import { RELEASED_RECIPES } from "@lyonix/render-recipes";
+import { RELEASED_RECIPES, recipeRegistry } from "@lyonix/render-recipes";
 import { PrismaService } from "./prisma.service.js";
 import { LYONIX_PROVIDER, RenderEngineStoreService, recipeExternalId } from "./render-engine-store.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -54,12 +56,31 @@ const mapProviderError = (error: unknown, provider: string = "creatomate"): { co
 
 const toSlotResponse = (slot: TemplateModificationSlot) => ({ key: slot.key, kind: slot.kind, label: slot.label, required: slot.required, ...(slot.ttsProvider ? { ttsProvider: slot.ttsProvider } : {}) });
 
+/**
+ * VE2E-93: the template's own caption style for Studio's text style panel and preview - LyOnix: the pinned recipe's captions; Creatomate:
+ * the caption element the dynamic composition lifts its style from. Orshot (no caption style is applied) or an underivable template: none.
+ */
+const captionStyleDefaultsFor = (engine: string | undefined, rawTemplate: unknown): CaptionTemplateDefaults | null => {
+  try {
+    if (engine === "orshot") return null;
+    if (engine === "lyonix") {
+      const raw = rawTemplate as { id?: unknown; version?: unknown } | null;
+      const recipe = typeof raw?.id === "string" && typeof raw.version === "number" ? recipeRegistry.get(raw.id, raw.version) : null;
+      return recipe ? captionDefaultsFromRecipeCaptions(recipe.captions) : null;
+    }
+    return captionDefaultsFromCreatomateTemplate(rawTemplate);
+  } catch {
+    return null;
+  }
+};
+
 const toSnapshotResponse = (row: {
   id: string; externalTemplateId: string; name: string; previewUrl: string | null; modifications: unknown; capturedAt: Date; rawTemplate?: unknown;
   engine?: string; rolloutPercent?: number; fallbackSnapshotIds?: unknown; providerAccountId?: string;
 }): TemplateSnapshotResponse => {
   const slots = Array.isArray(row.modifications) ? (row.modifications as TemplateSnapshotResponse["modifications"]) : [];
   const warnings = templateTtsWarnings(row.rawTemplate);
+  const captionStyleDefaults = captionStyleDefaultsFor(row.engine, row.rawTemplate);
   return {
   id: row.id,
   externalTemplateId: row.externalTemplateId,
@@ -70,6 +91,7 @@ const toSnapshotResponse = (row: {
   ...(row.providerAccountId ? { providerAccountId: row.providerAccountId } : {}),
   ...(row.engine ? { engine: row.engine as RenderEngine, rolloutPercent: row.rolloutPercent ?? 0, fallbackSnapshotIds: Array.isArray(row.fallbackSnapshotIds) ? row.fallbackSnapshotIds.filter((id): id is string => typeof id === "string") : [] } : {}),
   ...(warnings.length > 0 ? { warnings } : {}),
+  ...(captionStyleDefaults ? { captionStyleDefaults } : {}),
   };
 };
 

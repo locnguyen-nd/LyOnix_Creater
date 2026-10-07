@@ -13,6 +13,9 @@ import {
   type FullPreviewSceneInput,
 } from "./full-preview";
 import { buildPreviewPlan, pageAt } from "./full-preview-plan";
+import { captionLayoutOptions, type CaptionTextStyle } from "@lyonix/domain/caption-style";
+import type { CaptionStyleEngine } from "@lyonix/domain/caption-style-capabilities";
+import { CaptionPreview } from "./text-style/CaptionPreview";
 
 type Props = {
   /** Ordered timeline scenes (excluded ones are skipped by the sequencer). */
@@ -22,6 +25,9 @@ type Props = {
   /** Fired when the playhead enters another scene, so the scene board can follow. */
   onSceneChange?: (sceneId: string) => void;
   onClose: () => void;
+  /** VE2E-93: each scene's effective caption style and the engine that renders it (captions are then drawn with that style). */
+  captionStyles?: ReadonlyMap<string, CaptionTextStyle>;
+  captionEngine?: CaptionStyleEngine | null;
 };
 
 /**
@@ -30,12 +36,20 @@ type Props = {
  * It is an approximation of the Creatomate render (no template layout/fonts/transitions) and
  * is never render evidence. No FFmpeg, no backend call.
  */
-export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClose }: Props) {
+export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClose, captionStyles, captionEngine }: Props) {
   const { t } = useTranslation();
   const sequence = useMemo(() => buildFullPreviewSequence(scenes), [scenes]);
   const readiness = useMemo(() => summarizeReadiness(sequence), [sequence]);
+  const engine = captionEngine ?? "lyonix";
   // VE2E-114: the render engine's own plan + caption layout, so the preview wraps captions where the render will.
-  const previewPlan = useMemo(() => buildPreviewPlan(sequence.segments), [sequence]);
+  // VE2E-93: laid out with each scene's effective caption style.
+  const previewPlan = useMemo(
+    () => buildPreviewPlan(sequence.segments, undefined, (sceneId) => {
+      const style = captionStyles?.get(sceneId);
+      return style ? captionLayoutOptions(style, engine) : undefined;
+    }),
+    [sequence, captionStyles, engine],
+  );
   const total = sequence.totalDurationMs;
 
   const [globalMs, setGlobalMs] = useState(() => {
@@ -206,7 +220,15 @@ export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClo
                 {next?.mediaKind === "image" && next.mediaUrl ? <img key={`ni-${next.sceneId}`} src={next.mediaUrl} alt="" className="hidden" /> : null}
                 {next?.audioUrl ? <audio key={`na-${next.sceneId}`} src={next.audioUrl} preload="auto" className="hidden" /> : null}
                 {current ? (() => {
-                  const page = pageAt(previewPlan.captionPages.get(current.sceneId) ?? [], located?.offsetMs ?? 0);
+                  const offsetMs = located?.offsetMs ?? 0;
+                  const page = pageAt(previewPlan.captionPages.get(current.sceneId) ?? [], offsetMs);
+                  const style = captionStyles?.get(current.sceneId);
+                  if (page && style) {
+                    // estimated per-character progress through the page (the render uses the real TTS timing when it has it)
+                    const chars = page.lines.join("").length;
+                    const progress = page.endMs > page.startMs ? (offsetMs - page.startMs) / (page.endMs - page.startMs) : 1;
+                    return <CaptionPreview page={page} style={style} engine={engine} sceneIndex={current.index} spokenChars={Math.round(Math.min(1, Math.max(0, progress)) * chars)} testId="full-preview-caption" />;
+                  }
                   return page ? (
                     <p
                       className="absolute inset-x-0 text-center font-bold text-white"

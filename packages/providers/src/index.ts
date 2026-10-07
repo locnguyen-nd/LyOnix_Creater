@@ -277,6 +277,8 @@ export {
   isValidDynamicStyleOptionValue,
   DEFAULT_DYNAMIC_SCENE_STYLE,
   DYNAMIC_STYLE_OPTION_KEYS,
+  captionDefaultsFromCreatomateTemplate,
+  findTemplateCaptionNode,
   type DynamicSceneInput,
   type DynamicSceneStyle,
   type DynamicImageAnimation,

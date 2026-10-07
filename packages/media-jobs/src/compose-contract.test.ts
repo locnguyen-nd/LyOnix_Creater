@@ -88,6 +88,14 @@ describe("validateVideoComposeJob (VE2E-104)", () => {
     timings.plan.scenes[0]!.captionCues = [{ text: "ab", startMs: 0, endMs: 100, charTimings: [{ startMs: 0, endMs: 50 }] }];
     expect(validateVideoComposeJob(timings)).toMatchObject({ ok: false });
 
+    // VE2E-93: a scene's caption style override travels as a flat string map
+    const styled = job();
+    styled.plan.scenes[0]!.captionParams = { "dynamicStyle.captionFillColor": "#FF0000" };
+    expect(validateVideoComposeJob(styled)).toMatchObject({ ok: true });
+    const badStyle = job();
+    (badStyle.plan.scenes[0] as unknown as Record<string, unknown>).captionParams = { "dynamicStyle.captionFontSizePx": 80 };
+    expect(validateVideoComposeJob(badStyle)).toMatchObject({ ok: false });
+
     expect(validateVideoComposeJob(job({ recipe: { id: "Bad Id", version: 1 } }))).toMatchObject({ ok: false });
     expect(validateVideoComposeJob(job({ jobKey: "bad key!" }))).toMatchObject({ ok: false });
     expect(validateVideoComposeJob({ ...job(), plan: { ...plan(), scenes: [] } })).toMatchObject({ ok: false });

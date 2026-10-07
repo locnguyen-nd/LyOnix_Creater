@@ -93,7 +93,11 @@ import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/au
 import { SourceBadge } from "../studio/SourceBadge";
 import { SubtitleEditor } from "../studio/SubtitleEditor";
 import { sameCaptionText } from "@lyonix/domain/subtitle-edit";
+import { normalizeCaptionTextStylePatch, type CaptionTextStylePatch } from "@lyonix/domain/caption-style";
 import { fetchVideoProductionStudioContext } from "../video-productions-api";
+import { TextStylePanel } from "../studio/text-style/TextStylePanel";
+import { SceneCaptionPreview } from "../studio/text-style/CaptionPreview";
+import { useStudioCaptionStyle } from "../studio/text-style/useStudioCaptionStyle";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
 type SdkPreviewState = "off" | "unsupported" | "not_configured" | "loading" | "ready" | "error" | "empty";
@@ -134,6 +138,8 @@ type SceneDraft = {
   segmentId: string | null;
   sourceStartMs: number | null;
   sourceDurationMs: number | null;
+  /** VE2E-93: this scene's caption style override (only the fields that differ from the whole-video style). */
+  captionStyleOverride: CaptionTextStylePatch | null;
 };
 
 type TimelineDraft = {
@@ -181,6 +187,7 @@ const draftFromContext = (context: StudioContextResponse): TimelineDraft => {
         segmentId: bound?.segmentId ?? null,
         sourceStartMs: bound?.sourceStartMs ?? null,
         sourceDurationMs: bound?.sourceDurationMs ?? null,
+        captionStyleOverride: normalizeCaptionTextStylePatch(bound?.captionStyleOverride),
       };
     }),
   };
@@ -780,6 +787,9 @@ export function StudioProPage() {
     mutate((prev) => ({ ...prev, optionValues: { ...prev.optionValues, [key]: value } }));
   };
 
+  // VE2E-93: caption text style (engine from the pinned template + render account; one draft change per committed edit).
+  const caption = useStudioCaptionStyle({ template, renderProvider: usableAccounts(providers, "render").find((account) => account.id === renderAccountId)?.provider, draft, setDraft, undo: undoStack.current });
+
   const setScreenTextOverride = (sceneId: string, value: string) => {
     mutate((prev) => ({ ...prev, scenes: prev.scenes.map((scene) => (scene.sceneId === sceneId ? { ...scene, screenTextOverride: value } : scene)) }));
   };
@@ -1264,6 +1274,8 @@ export function StudioProPage() {
           initialSceneId={selectedSceneId}
           onSceneChange={setSelectedSceneId}
           onClose={() => setShowFullPreview(false)}
+          captionStyles={caption.stylesByScene()}
+          captionEngine={caption.engine}
         />
       ) : null}
 
@@ -1637,10 +1649,9 @@ export function StudioProPage() {
                       </div>
                     </>
                   ) : null}
+                  {/* VE2E-93: the caption with the scene's effective style, laid out like the render (max 2 lines). */}
                   {selectedScene ? (
-                    <p className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 to-transparent px-3 pb-3 pt-8 text-[12px] font-bold text-white">
-                      {selectedSceneDraft?.screenTextOverride || selectedScene.screenText || "…"}
-                    </p>
+                    <SceneCaptionPreview text={selectedSceneDraft?.screenTextOverride || selectedScene.screenText || selectedScene.narration || "…"} style={caption.styleOf(selectedScene.sceneId)} engine={caption.engine ?? "lyonix"} sceneIndex={Math.max(0, selectedSceneIndex)} durationMs={selectedScene.durationHintMs} />
                   ) : null}
                 </>
               ) : null}
@@ -1852,46 +1863,19 @@ export function StudioProPage() {
                   <p className="text-[11px] text-lyx-fg-muted">{t("templates.pinNote")}</p>
                 )}
 
-                {/* VE2E-26: whole-video style overrides for the dynamic render path Studio
-                    actually submits through (submitDynamicRenderFromTimeline) - schema-backed
-                    against the same fixed key/value whitelist the server validates on save
-                    and applies identically in both the SDK preview and the final render
-                    payload (`applyDynamicStyleOverrides` in @lyonix/providers). Unlike the
-                    per-scene template modification fields above, these apply to every scene
-                    at once (they override the template-derived caption/animation style, not
-                    a specific Creatomate element), so they are not scene-dependent. */}
+                {/* VE2E-93: caption text style (whole video / this scene) - replaces the VE2E-26 font/colour
+                    overrides; the same values reach the preview and both render engines. */}
+                <TextStylePanel
+                  {...caption.panelProps(
+                    { sceneId: selectedScene.sceneId, index: Math.max(0, selectedSceneIndex), patch: selectedSceneDraft.captionStyleOverride, text: selectedSceneDraft.screenTextOverride || selectedScene.narration || selectedScene.screenText },
+                    orderedScenes.map((scene) => draft.scenes.find((row) => row.sceneId === scene.sceneId)?.screenTextOverride || scene.narration || scene.screenText),
+                  )}
+                />
+
+                {/* VE2E-26: background image/video effect override (whole video) for the dynamic render path -
+                    validated against the same fixed whitelist the server applies (`applyDynamicStyleOverrides`). */}
                 {template ? (
                   <div className="flex flex-col gap-2 border-t border-lyx-border pt-2">
-                    <p className="text-[10px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("studioPro.dynamicStyleOverrides")}</p>
-                    <p className="text-[10px] text-lyx-fg-muted">{t("studioPro.dynamicStyleOverridesHint")}</p>
-                    <div>
-                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionFont")}</label>
-                      <Select
-                        className="w-full"
-                        value={draft.optionValues["dynamicStyle.captionFontFamily"] ?? ""}
-                        onChange={(event) => setOptionValue("dynamicStyle.captionFontFamily", event.target.value)}
-                      >
-                        <option value="">{t("studioPro.overrideUseTemplateDefault")}</option>
-                        <option>Inter Bold</option>
-                        <option>Inter Medium</option>
-                        <option>Noto Sans</option>
-                      </Select>
-                    </div>
-                    <div>
-                      <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideCaptionColor")}</label>
-                      <div className="flex items-center gap-1.5">
-                        {["", "#ffffff", "#f5f5f5", "#facc15"].map((hex) => (
-                          <button
-                            key={hex || "default"}
-                            type="button"
-                            aria-label={hex || t("studioPro.overrideUseTemplateDefault")}
-                            onClick={() => setOptionValue("dynamicStyle.captionFillColor", hex)}
-                            className={`h-[22px] w-[22px] rounded-[4px] border ${(draft.optionValues["dynamicStyle.captionFillColor"] ?? "") === hex ? "border-lyx-fg" : "border-lyx-border"}`}
-                            style={hex ? { backgroundColor: hex } : { background: "repeating-linear-gradient(45deg,#ccc,#ccc 2px,#fff 2px,#fff 4px)" }}
-                          />
-                        ))}
-                      </div>
-                    </div>
                     <div>
                       <label className="mb-1 block font-mono text-[10px] text-lyx-fg-muted">{t("studioPro.overrideImageAnimation")}</label>
                       <Select

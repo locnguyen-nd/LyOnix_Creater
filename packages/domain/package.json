@@ -17,7 +17,10 @@
     "./caption-ass": "./src/caption-ass.ts",
     "./subtitle-edit": "./src/subtitle-edit.ts",
     "./creation-form": "./src/creation-form.ts",
-    "./render-router": "./src/render-router.ts"
+    "./render-router": "./src/render-router.ts",
+    "./caption-fonts": "./src/caption-fonts.ts",
+    "./caption-style-capabilities": "./src/caption-style-capabilities.ts",
+    "./caption-style": "./src/caption-style.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

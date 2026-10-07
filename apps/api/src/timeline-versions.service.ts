@@ -13,7 +13,7 @@
  * and renders exactly as before.
  */
 import { Inject, Injectable } from "@nestjs/common";
-import { canAccessProject, TIMELINE_ADDED_SCENE_ID_PREFIX, validateTimelineEditState, validateTimelineSegmentStructure } from "@lyonix/domain";
+import { canAccessProject, normalizeCaptionTextStylePatch, TIMELINE_ADDED_SCENE_ID_PREFIX, validateCaptionTextStylePatch, validateTimelineEditState, validateTimelineSegmentStructure } from "@lyonix/domain";
 import { isDynamicStyleOptionKey, isValidDynamicStyleOptionValue } from "@lyonix/providers";
 import type {
   ErrorCode,
@@ -59,7 +59,14 @@ export const toTimelineSceneBindingResponse = (scene: Partial<TimelineSceneBindi
   segmentId: typeof scene.segmentId === "string" && scene.segmentId ? scene.segmentId : null,
   sourceStartMs: nullableInt(scene.sourceStartMs),
   sourceDurationMs: nullableInt(scene.sourceDurationMs),
+  // VE2E-93: a stored override is re-checked on read (invalid fields dropped), so bad JSON never reaches Studio or a render.
+  captionStyleOverride: normalizeCaptionTextStylePatch(scene.captionStyleOverride),
 });
+
+const withCaptionStyleOverride = (raw: unknown): { captionStyleOverride?: NonNullable<TimelineSceneBindingResponse["captionStyleOverride"]> } => {
+  const patch = normalizeCaptionTextStylePatch(raw);
+  return patch ? { captionStyleOverride: patch } : {};
+};
 
 const toTimelineSegmentResponse = (segment: Partial<TimelineSegmentResponse>): TimelineSegmentResponse => ({
   segmentId: String(segment.segmentId ?? ""),
@@ -178,6 +185,8 @@ export class TimelineVersionsService {
       if (scene.annotation && scene.annotation.length > MAX_ANNOTATION_LENGTH) {
         return { ok: false, code: "VALIDATION_FAILED", message: `annotation quá dài cho scene ${sceneId}` };
       }
+      const captionStyle = validateCaptionTextStylePatch(scene.captionStyleOverride);
+      if (!captionStyle.ok) return { ok: false, code: "VALIDATION_FAILED", message: `captionStyleOverride không hợp lệ cho scene ${sceneId}: ${captionStyle.errors.join("; ")}` };
     }
 
     // VE2E-42: optional segments + per-scene source ranges - pure structural rules first (no DB).
@@ -267,6 +276,8 @@ export class TimelineVersionsService {
           segmentId: scene.segmentId?.trim() || null,
           sourceStartMs: scene.sourceStartMs ?? null,
           sourceDurationMs: scene.sourceDurationMs ?? null,
+          // VE2E-93: only stored when the scene has one, so timelines without overrides keep their exact JSON (render fingerprints).
+          ...withCaptionStyleOverride(scene.captionStyleOverride),
         })),
         segments: segmentList.map((segment) => ({
           segmentId: segment.segmentId.trim(),
@@ -433,7 +444,8 @@ export class TimelineVersionsService {
     if (latest && latest.workflowRunId === workflowRunId && latest.status === "approved" && latest.templateSnapshotId === input.templateSnapshotId) {
       const existing = toTimelineVersionResponse(latest);
       if (
-        stableJson(existing.scenes) === stableJson(content.data.scenes) &&
+        // both sides in the read shape (VE2E-93: the stored JSON omits `captionStyleOverride` when a scene has none)
+        stableJson(existing.scenes) === stableJson(content.data.scenes.map(toTimelineSceneBindingResponse)) &&
         stableJson(existing.segments) === stableJson(content.data.segments) &&
         stableJson(existing.addedScenes) === stableJson(content.data.addedScenes) &&
         stableJson(existing.removedSceneIds) === stableJson(content.data.removedSceneIds) &&

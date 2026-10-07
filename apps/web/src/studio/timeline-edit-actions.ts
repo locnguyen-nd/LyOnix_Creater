@@ -17,7 +17,7 @@ import {
   type TimelineAddedSceneDef,
   type TimelineEditState,
 } from "@lyonix/domain/timeline-edit";
-import type { StudioSceneContextResponse, TimelineAddedSceneInput, TimelineSegmentResponse } from "@lyonix/contracts";
+import type { CaptionTextStylePatch, StudioSceneContextResponse, TimelineAddedSceneInput, TimelineSegmentResponse } from "@lyonix/contracts";
 
 export type EditableScene = {
   sceneId: string;
@@ -31,6 +31,8 @@ export type EditableScene = {
   segmentId: string | null;
   sourceStartMs: number | null;
   sourceDurationMs: number | null;
+  /** VE2E-93: kept by duplicate (copy) and split (both halves) - see @lyonix/domain/timeline-edit. */
+  captionStyleOverride?: CaptionTextStylePatch | null;
 };
 
 export type EditableDraft<S extends EditableScene = EditableScene> = {
@@ -54,7 +56,7 @@ const toState = <D extends EditableDraft>(draft: D): TimelineEditState<D["scenes
 /** Domain blank bindings carry no `mediaLabel`; keep the draft's field non-undefined. */
 const fromState = <D extends EditableDraft>(draft: D, state: TimelineEditState<D["scenes"][number], TimelineSegmentResponse>): D => ({
   ...draft,
-  scenes: state.scenes.map((scene) => ({ ...scene, mediaLabel: scene.mediaLabel ?? null })),
+  scenes: state.scenes.map((scene) => ({ ...scene, mediaLabel: scene.mediaLabel ?? null, captionStyleOverride: scene.captionStyleOverride ?? null })),
   segments: state.segments,
   addedScenes: state.addedScenes,
   removedSceneIds: state.removedSceneIds,

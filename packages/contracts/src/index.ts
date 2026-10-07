@@ -523,6 +523,8 @@ export type TemplateSnapshotResponse = {
   fallbackSnapshotIds?: string[];
   /** VE2E-47: non-blocking template problems (currently: audio elements with a Creatomate TTS provider). Omitted/empty when clean. */
   warnings?: TemplateSnapshotWarning[];
+  /** VE2E-93: the template's own caption style (LyOnix recipe / Creatomate template); omitted for Orshot or when it cannot be derived. */
+  captionStyleDefaults?: CaptionTemplateDefaultsResponse;
 };
 
 /**
@@ -1011,6 +1013,11 @@ export type TimelineSceneBindingInput = {
    */
   sourceStartMs?: number | null;
   sourceDurationMs?: number | null;
+  /**
+   * VE2E-93 (optional, additive): this scene's caption style override. Absent/null = the scene uses the whole-video caption style
+   * (`dynamicStyle.caption*` option values). Validated by the API (unknown fields or out-of-range values are rejected).
+   */
+  captionStyleOverride?: CaptionTextStylePatch | null;
 };
 
 export type TimelineSceneBindingResponse = {
@@ -1027,6 +1034,40 @@ export type TimelineSceneBindingResponse = {
   /** VE2E-42: see `TimelineSceneBindingInput.sourceStartMs`; `null` = no range (source used as before). */
   sourceStartMs: number | null;
   sourceDurationMs: number | null;
+  /** VE2E-93: see `TimelineSceneBindingInput.captionStyleOverride`; the API always sends it (`null` = inherit everything). */
+  captionStyleOverride?: CaptionTextStylePatch | null;
+};
+
+/**
+ * VE2E-93: a caption style override - only the fields that differ from what the scope inherits (scene -> whole video -> template ->
+ * system default). Same shape as `CaptionTextStylePatch` in `@lyonix/domain/caption-style`, which owns the rules (ranges, values).
+ * Font size and stroke width are pixels on the 1080x1920 canvas; colours `#RRGGBB`.
+ */
+export type CaptionTextStylePatch = {
+  fontId?: string;
+  fontSizePx?: number;
+  fillColor?: string;
+  strokeEnabled?: boolean;
+  strokeColor?: string;
+  strokeWidthPx?: number;
+  position?: "top" | "middle" | "bottom";
+  maxLines?: 1 | 2;
+  animation?: "none" | "word_highlight";
+};
+
+/** VE2E-93: caption style defaults of a pinned template in canonical units (same shape as `CaptionTemplateDefaults` in `@lyonix/domain/caption-style`). */
+export type CaptionTemplateDefaultsResponse = {
+  fontFamily: string;
+  fontSizePx: number;
+  minFontSizePx: number;
+  bold: boolean;
+  fillColor: string;
+  highlightColor: string | null;
+  stroke: { enabled: boolean; color: string; widthPx: number };
+  position: { anchor: "top" | "center" | "bottom"; percent: number };
+  maxLines: 1 | 2;
+  animation: "none" | "word_highlight";
+  colorCycle: string[] | null;
 };
 
 /**

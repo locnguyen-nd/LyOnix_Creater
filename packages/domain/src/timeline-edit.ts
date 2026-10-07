@@ -18,6 +18,7 @@
  * the existing "Sinh giọng" flow only generates for scenes missing audio, so nothing is paid twice.
  */
 import { splitIntoSentences } from "./caption-segmentation.js";
+import type { CaptionTextStylePatch } from "./caption-style.js";
 import {
   normalizeTimelineSegments,
   TIMELINE_SOURCE_RANGE_MAX_MS,
@@ -45,6 +46,8 @@ export type TimelineEditScene = TimelineSceneRangeLike & {
   screenTextOverride?: string | null;
   annotation?: string | null;
   excluded?: boolean;
+  /** VE2E-93: the scene's caption style override (only the fields that differ from the whole-video style). */
+  captionStyleOverride?: CaptionTextStylePatch | null;
 };
 
 export type TimelineAddedSceneDef = {
@@ -114,6 +117,7 @@ const blankBinding = (sceneId: string): TimelineEditScene => ({
   segmentId: null,
   sourceStartMs: null,
   sourceDurationMs: null,
+  captionStyleOverride: null,
 });
 
 /**
@@ -161,6 +165,8 @@ export function duplicateScene<S extends TimelineEditScene, G extends TimelineSe
           screenTextOverride: original.screenTextOverride ?? null,
           sourceStartMs: original.sourceStartMs ?? null,
           sourceDurationMs: original.sourceDurationMs ?? null,
+          // VE2E-93: the copy looks the same as the original.
+          captionStyleOverride: original.captionStyleOverride ?? null,
         } as S)
       : scene,
   );
@@ -308,6 +314,8 @@ export function splitScene<S extends TimelineEditScene, G extends TimelineSegmen
       segmentId: original.segmentId ?? null,
       sourceStartMs: range ? range.start : null,
       sourceDurationMs: range ? range.duration : null,
+      // VE2E-93: both halves keep the original scene's caption style.
+      captionStyleOverride: original.captionStyleOverride ?? null,
     }) as S;
 
   const scenes = [...state.scenes.slice(0, index), half(firstId, firstRange, true), half(secondId, secondRange, false), ...state.scenes.slice(index + 1)];

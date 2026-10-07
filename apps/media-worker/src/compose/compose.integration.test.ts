@@ -202,6 +202,17 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
     expect(conflict).toMatchObject({ ok: false, error: { code: "JOB_KEY_CONFLICT" } });
   }, 240_000);
 
+  it("VE2E-93: renders a whole-video caption style plus a scene with its own style (several ASS styles, middle anchor) through the full QC gate", async () => {
+    const texts = japaneseFont ? ["政府は新しい経済対策を発表しました。", "物価高への対応を急ぐ方針です。", "来月から実施される見通しです。"] : ["Scene one caption", "Scene two caption", "Scene three caption"];
+    const params = { "dynamicStyle.captionFontSizePx": "80", "dynamicStyle.captionPosition": "middle", "dynamicStyle.captionStrokeWidthPx": "8", "dynamicStyle.captionFillColor": "#FFE600" };
+    const plan = makePlan(files, { texts, params });
+    plan.scenes[1]!.captionParams = { "dynamicStyle.captionFillColor": "#00FF00", "dynamicStyle.captionPosition": "top", "dynamicStyle.captionMaxLines": "1", "dynamicStyle.captionAnimation": "none" };
+    const result = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-caption-style", recipe: { id: "test-telop", version: 1 }, plan }));
+    if (!result.ok) throw new Error(`compose failed: ${result.error.code}: ${result.error.message}`);
+    expect(result.qc.passed).toBe(true);
+    expect(result.output.width).toBe(1080);
+  }, 240_000);
+
   it("fails with a clear code for missing sources, unknown recipes and unsafe paths (no output left behind)", async () => {
     const plan = makePlan(files, { voiceSeconds: [1, 1, 1] });
     const missing = structuredClone(plan);
