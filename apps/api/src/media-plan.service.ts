@@ -65,6 +65,7 @@ import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { createHash, randomUUID } from "node:crypto";
 import { BRAND_BACKGROUND_HEIGHT, BRAND_BACKGROUND_WIDTH, brandBackgroundColorFromEnv, buildBrandBackgroundPng } from "./brand-background.js";
+import { MediaLibraryService, libraryL0Enabled } from "./media-library.service.js";
 import { MediaService } from "./media.service.js";
 import { writeQuarantineFile } from "./quarantine.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
@@ -109,7 +110,9 @@ export type SegmentSource = {
   /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: search tier that produced this (non-degraded) source. */
-  tier?: "ja" | "en" | "broad" | "pexels";
+  tier?: "ja" | "en" | "broad" | "pexels" | "library";
+  /** VE2E-135 (L0): match score of a prepared-library clip (`tier: "library"`). */
+  libraryScore?: number;
   /** VE2E-130: ladder level L4-L6 (flagged `quality_degraded`); absent = a normal source. */
   degraded?: DegradedTier;
   /** VE2E-130 (L4): the window of the (shared) clip this segment uses; ranges are laid out inside it. */
@@ -128,6 +131,8 @@ const plainExternalId = (id: string) => (id.startsWith("apify:") ? id.split(":")
 
 /** Tracks what earlier segments of one plan already used - a new segment must never pick any of these. */
 export class SegmentSourceLedger {
+  /** VE2E-135: identity of this video (job) for the library repeat window. */
+  readonly jobKey = randomUUID();
   readonly externalIds = new Set<string>();
   readonly assetIds = new Set<string>();
   /**
@@ -274,6 +279,8 @@ export class MediaPlanService {
     @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
     /** VE2E-130: registers the L6 brand-background placeholder asset. Absent = L6 unavailable (L4/L5 still apply). */
     @Optional() @Inject(MediaService) private readonly media?: MediaService,
+    /** VE2E-135: prepared media library (ladder L0 + tags on import). Absent = no L0, unchanged behaviour. */
+    @Optional() @Inject(MediaLibraryService) private readonly library?: MediaLibraryService,
   ) {}
 
   /**
@@ -539,6 +546,13 @@ export class MediaPlanService {
     role: "admin" | "staff",
     input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
+    // L0 (VE2E-135): the prepared library answers first (< 1 s); empty/untagged/no match falls straight through to the tiers below.
+    if (this.library && libraryL0Enabled()) {
+      const hit = await this.library.findForSegment(projectId, input.segment, input.ledger);
+      if (hit) {
+        return { ok: true, data: { mediaAssetVersionId: hit.assetId, kind: "video", durationMs: hit.durationMs, externalId: hit.externalId, sourcing: "reused", ...(hit.provider ? { provider: hit.provider } : {}), tier: "library", libraryScore: hit.score } };
+      }
+    }
     const tierKeywords = this.apify ? subjectTierKeywords(input.segment.keywords, subjectProfileOf(input.segment), isValidJaSearchKeyword, input.segment.subject) : [];
     // The Apify account is only looked up when at least one tier has a keyword to search.
     const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
@@ -593,6 +607,7 @@ export class MediaPlanService {
     const reasonText = (["ja", "en", "broad", "pexels"] as const).filter((name) => reasons[name]).map((name) => `${name}:${reasons[name]}`).join("; ");
     if (winner) {
       const source = winner.value;
+      await this.tagImportedSource(input.segment, source);
       if (source.provider !== "pexels") return { ok: true, data: source };
       const apifyQuality = qualities.ja ?? qualities.en ?? qualities.broad ?? null;
       return { ok: true, data: { ...source, fallbackReason: reasons.ja ?? reasons.en ?? reasons.broad ?? null, ...(apifyQuality ? { apifyQuality } : {}) } };
@@ -605,6 +620,27 @@ export class MediaPlanService {
       status: 422,
       reasons: reasonText,
     };
+  }
+
+  /** VE2E-135: tags a freshly imported clip (ja/en/broad keywords, subject, aliases, source, author) so L0 can reuse it. Best effort, never throws. */
+  private async tagImportedSource(segment: PlannedSegment, source: SegmentSource): Promise<void> {
+    if (!this.library || source.sourcing !== "imported" || source.kind !== "video") return;
+    try {
+      const keywords = parseSegmentKeywords(segment.keywords);
+      const profile = subjectProfileOf(segment);
+      await this.library.tagAsset(source.mediaAssetVersionId, {
+        ja: keywords.ja,
+        en: keywords.en,
+        broad: keywords.broad,
+        subject: profile.subject ?? segment.subject ?? null,
+        aliases: profile.aliases,
+        source: source.provider ?? null,
+        author: source.apifyProvenance?.author ?? null,
+        externalId: source.externalId,
+      });
+    } catch {
+      /* tagging must never fail a segment */
+    }
   }
 
   /**
@@ -913,6 +949,7 @@ export class MediaPlanService {
         ...(source?.apifyQuality ? { apifyQuality: source.apifyQuality } : {}),
         ...(source?.visionSkipped ? { visionSkipped: source.visionSkipped } : {}),
         ...(source?.tier ? { sourceTier: source.tier } : {}),
+        ...(source?.libraryScore !== undefined ? { libraryScore: source.libraryScore } : {}),
         ...(source?.degraded
           ? {
               qualityDegraded: true,
