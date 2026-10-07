@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { mediaRoot } from "./handoff-workspace.js";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
-import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, normalizeCaptionTextStylePatch, type RenderJobStatus } from "@lyonix/domain";
+import { canAccessProject, estimateProviderCostUsd, isSafeRelativePath, isTerminalRenderStatus, nextRenderJobStatus, normalizeCaptionTextStylePatch, orshotIncludePages, orshotPageCount, type RenderJobStatus } from "@lyonix/domain";
 import {
   ProviderError,
   applyDynamicStyleOverrides,
@@ -325,7 +325,7 @@ export class RenderJobsService {
     const modifications = built.data;
 
     // Orshot-only: fit the video length to the narration, pick format/fps/size, and estimate cost (1 credit = 1 s) BEFORE any provider call.
-    const orshotPlan = account.data.provider === "orshot" ? this.planOrshotRender(orshotExtra) : null;
+    const orshotPlan = account.data.provider === "orshot" ? this.planOrshotRender(orshotExtra, orshotIncludePages(slots, input.assignments.map((assignment) => assignment.modificationKey))) : null;
     if (orshotPlan && !orshotPlan.ok) return orshotPlan;
     const orshot = orshotPlan?.ok ? orshotPlan.data : null;
 
@@ -515,7 +515,7 @@ export class RenderJobsService {
   }
 
   /** Orshot render plan for one submit: validated options, `submit` provider args and a cost estimate (null cost = no narration to fit/estimate). */
-  private planOrshotRender(extra: { options: OrshotRenderOptions; durationMs: number } | undefined): RenderOutcome<{ submit: { outputFormat?: "mp4" | "webm" | "mov" | "gif"; size?: string; videoOptions?: { duration?: number; fps?: number } }; cost: ReturnType<typeof estimateOrshotCost> | null }> {
+  private planOrshotRender(extra: { options: OrshotRenderOptions; durationMs: number } | undefined, includePages: number[] | null = null): RenderOutcome<{ submit: { outputFormat?: "mp4" | "webm" | "mov" | "gif"; size?: string; videoOptions?: { duration?: number; fps?: number }; includePages?: number[] }; cost: ReturnType<typeof estimateOrshotCost> | null }> {
     const options = extra?.options ?? {};
     const durationMs = extra?.durationMs ?? 0;
     const pricing = resolveOrshotPricing();
@@ -523,7 +523,7 @@ export class RenderJobsService {
     if (cost?.exceedsPlanLimit) return { ok: false, code: "VALIDATION_FAILED", message: `Video dài ${cost.durationSec}s vượt giới hạn ${cost.maxVideoSeconds}s của gói Orshot (ORSHOT_MAX_VIDEO_SECONDS). Rút ngắn kịch bản hoặc nâng gói.` };
     const fit = options.fitDurationToNarration !== false && cost !== null;
     const videoOptions = { ...(fit ? { duration: cost!.durationSec } : {}), ...(options.fps ? { fps: options.fps } : {}) };
-    return { ok: true, data: { submit: { ...(options.format ? { outputFormat: options.format } : {}), ...(options.size ? { size: options.size } : {}), ...(Object.keys(videoOptions).length ? { videoOptions } : {}) }, cost } };
+    return { ok: true, data: { submit: { ...(options.format ? { outputFormat: options.format } : {}), ...(options.size ? { size: options.size } : {}), ...(Object.keys(videoOptions).length ? { videoOptions } : {}), ...(includePages ? { includePages } : {}) }, cost } };
   }
 
   /** Narration length of the timeline's included scenes + the sanitized Orshot options (only when the request carries any / the provider is Orshot). */
@@ -826,6 +826,9 @@ export class RenderJobsService {
     // VE2E-52: the fixed-slot (modification) path only when the scene count equals the template's Scene slots;
     // any other count (fewer or more) is composed by the template-scaled generator so no scene/narration is dropped.
     const includedScenes = resolved.filter((scene) => !scene.excluded);
+    const orshotPages = account.data.provider === "orshot" ? orshotPageCount(RenderJobsService.snapshotSlots(snapshot)) : null;
+    // Fewer scenes than pages is fine (only pages 1..N are rendered via `includePages`); more scenes than pages cannot be added to a fixed template.
+    if (orshotPages !== null && includedScenes.length > orshotPages) return { ok: false, code: "VALIDATION_FAILED", message: `Template Orshot chỉ có ${orshotPages} page nhưng timeline có ${includedScenes.length} cảnh. Rút xuống tối đa ${orshotPages} cảnh hoặc chọn template nhiều page hơn.` };
     const slotCount = countTemplateSceneSlots(snapshot.rawTemplate);
     const fixedSlotsOk = fixedSlotPathApplies({
       slotCount,

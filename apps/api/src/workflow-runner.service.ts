@@ -40,6 +40,10 @@ import {
   type AutoSceneMedia,
   type AutoTemplateSlot,
   deriveSceneVisualKinds,
+  mergeScenesToCap,
+  narrationLengthCorrection,
+  orshotMaxScenes,
+  orshotPageCount,
   splitSegmentsByVisualKind,
 } from "@lyonix/domain";
 import { ProviderError, type ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
@@ -324,7 +328,11 @@ export class WorkflowRunnerService {
     ctx: { userId: string; role: "admin" | "staff"; contentAccountId: string; script: MediaPlanScript; title: string; segments: PlannedSegment[] },
   ): Promise<void> {
     const needing = segmentsNeedingKeywords(ctx.segments);
-    if (needing.length === 0) return;
+    if (needing.length === 0) {
+      // The script's own visualPlan already carries valid Japanese keywords: record that as the keyword stage (no extra LLM call).
+      await this.recordStep(run, "keywords_from_script", null, async () => ({ source: "visualPlan", segments: ctx.segments.map((segment) => ({ segmentId: segment.segmentId, ja: segment.keywords?.ja ?? null, en: segment.keywords?.en ?? null })) })).catch(() => undefined);
+      return;
+    }
     if (!(await this.mediaPlans.apifyAvailable(ctx.userId, ctx.role))) return;
     const requested = needing.map((segment) => segment.segmentId);
     try {
@@ -453,10 +461,20 @@ export class WorkflowRunnerService {
     const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
     let approved = existingApproved;
     // VE2E-54: narration budget (targetChars + scene range) from the intake target, calibrated on this voice's history.
-    const { budget: durationBudget, calibrationSource } = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
+    const resolvedBudget = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
+    const { calibrationSource } = resolvedBudget;
+    // An Orshot page template carries one scene per page: ask the script for at most that many scenes (fewer is fine).
+    const pinnedSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
+    const pageCap = orshotMaxScenes((Array.isArray(pinnedSnapshot?.modifications) ? pinnedSnapshot.modifications : []) as unknown as AutoTemplateSlot[]);
+    const durationBudget = pageCap === null ? resolvedBudget.budget : { ...resolvedBudget.budget, sceneCount: { min: Math.min(resolvedBudget.budget.sceneCount.min, pageCap), max: Math.min(resolvedBudget.budget.sceneCount.max, pageCap) } };
+    // A previously approved script with more scenes than the fixed-page template has pages cannot be rendered: generate a new one (capped).
+    if (approved && pageCap !== null && approved.scenes.length > pageCap) approved = null;
+    // A retried run reuses its approved script; one whose narration is far outside the duration budget (e.g. 40 s of voice for 78 s) is replaced too.
+    if (approved && process.env.SCRIPT_LENGTH_CORRECTION !== "0" && narrationLengthCorrection(durationBudget, approved.scenes.map((scene: { narration?: string }) => scene.narration ?? "")) !== null) approved = null;
     if (!approved) {
       await this.setStatus(run.id, "scripting");
-      const direction = buildAutoDirection(profile.locale, profile.durationSec, profile.sceneCount);
+      // The scene count asked for never exceeds the template's page count (the profile default of 14 contradicted a 10-page template).
+      const direction = buildAutoDirection(profile.locale, profile.durationSec, pageCap === null ? profile.sceneCount : Math.min(profile.sceneCount, pageCap));
       const generation = await this.recordStep(
         run,
         "generate_script",
@@ -472,7 +490,39 @@ export class WorkflowRunnerService {
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
           if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-          return outcome.response;
+          // VE2E-54: a draft far outside the narration budget (e.g. 28 s of voice for a 78 s target) is regenerated ONCE with an explicit
+          // length correction; the closer of the two drafts is kept. A failed second call keeps the first draft (never fails the run).
+          const narrations = (outcome.response.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? "");
+          const correction = narrationLengthCorrection(durationBudget, narrations);
+          const capped = (response: typeof outcome.response): typeof outcome.response => (pageCap === null ? response : { ...response, draft: mergeScenesToCap(response.draft, pageCap) });
+          const charsOf = (response: typeof outcome.response) => (response.draft.scenes ?? []).reduce((sum: number, scene: { narration?: string }) => sum + (scene.narration ?? "").trim().length, 0);
+          // VE2E-54: a draft far outside the narration budget (e.g. 40 s of voice for a 78 s target) is regenerated with an explicit length
+          // correction, up to twice (the 2nd attempt names the shortfall of the 1st); the draft closest to the target is kept. A failed
+          // call keeps the best draft so far (never fails the run). SCRIPT_LENGTH_CORRECTION=0 disables it.
+          let best = outcome.response;
+          if (process.env.SCRIPT_LENGTH_CORRECTION !== "0") {
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              const correction = narrationLengthCorrection(durationBudget, (best.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? ""));
+              if (!correction) break;
+              try {
+                const next = await this.scriptGeneration.generate(sourceVersionId, userId, role, {
+                  providerAccountId: contentConfig.providerAccountId,
+                  language: profile.locale,
+                  direction: `${direction}
+
+${correction.direction}`,
+                  ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
+                  durationBudget,
+                });
+                if (!next || next === "forbidden" || !next.ok) break;
+                if (Math.abs(charsOf(next.response) - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) best = next.response;
+                else break;
+              } catch {
+                break;
+              }
+            }
+          }
+          return capped(best);
         }),
       );
 
@@ -504,6 +554,16 @@ export class WorkflowRunnerService {
       });
     }
     if (approved.scenes.length === 0) throw new WorkflowStepFailure("VALIDATION_FAILED", "Script được duyệt không có scene nào");
+    // Orshot cannot expand a fixed page template. Check before paid voice/media work.
+    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
+    if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
+    if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
+    const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
+    const orshotPages = orshotPageCount(slots);
+    // Fewer scenes than pages is fine (only pages 1..N render); more cannot be added to a fixed template.
+    if (orshotPages !== null && approved.scenes.length > orshotPages) {
+      throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot chỉ có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Rút xuống tối đa ${orshotPages} cảnh hoặc chọn template nhiều page hơn.`);
+    }
 
     // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
     await this.setStatus(run.id, "voice_generating");
@@ -603,6 +663,8 @@ export class WorkflowRunnerService {
       const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
       plannedSegments = splitSegmentsByVisualKind(plannedSegments, kindByScene, durationByScene);
     }
+    const mediaCheck = await this.mediaPlans.checkMediaSourcesEnabled(userId, role, mediaConfig.providerAccountId);
+    if (!mediaCheck.ok) throw new WorkflowStepFailure(mediaCheck.code, mediaCheck.message);
     const ledger = new SegmentSourceLedger();
     // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
     const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {
@@ -641,16 +703,13 @@ export class WorkflowRunnerService {
 
     // --- 6. timeline: preflight the positional slot mapping, then persist it as an auto-approved TimelineVersion (VE2E-42) ---
     await this.setStatus(run.id, "editing");
-    const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId } });
-    if (!snapshot) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy template snapshot đã pin trong renderConfig");
-    if (snapshot.providerAccountId !== renderConfig.providerAccountId) throw new WorkflowStepFailure("VALIDATION_FAILED", "renderConfig.providerAccountId không khớp với template snapshot đã pin");
-    const slots = (Array.isArray(snapshot.modifications) ? snapshot.modifications : []) as unknown as AutoTemplateSlot[];
     const sceneMedia: AutoSceneMedia[] = approved.scenes.map((scene) => ({
       sceneId: scene.sceneId,
       orderIndex: scene.orderIndex,
       // narration (not the separately LLM-authored screenText) - see AutoSceneMedia.displayText's
       // own doc comment: the on-screen caption must be exactly what the voice says, word for word.
       displayText: scene.narration,
+      tagText: scene.screenText,
       visualMediaAssetVersionId: mediaByScene.get(scene.sceneId)?.id ?? null,
       visualKind: mediaByScene.get(scene.sceneId)?.kind ?? null,
       audioMediaAssetVersionId: audioByScene.get(scene.sceneId)?.mediaAssetVersionId ?? null,
@@ -667,7 +726,7 @@ export class WorkflowRunnerService {
       imageSceneCount: sceneMedia.filter((scene) => scene.visualKind === "image").length,
       templateImageSlots: slots.filter((slot) => slot.kind === "image").length,
     });
-    const built = fixedSlots ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
+    const built = fixedSlots || orshotPages !== null ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
     if (!built.ok) {
       const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
       throw new WorkflowStepFailure("VALIDATION_FAILED", detail);
@@ -693,8 +752,8 @@ export class WorkflowRunnerService {
           sourceDurationMs: planByScene.get(scene.sceneId)?.sourceDurationMs ?? null,
         })),
         segments: mediaPlan.segments,
-        // Internal (`lyonix`) recipes have no positional text slots: the script title is the telop headline.
-        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
+        // Only the telop recipe has a headline slot; other internal recipes must not receive an unknown option key.
+        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() && slots.some((slot) => slot.key === "headline") ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
       });
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
       return outcome.data;

@@ -261,18 +261,18 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     expect(pexels.autoImportForScene.mock.calls[0]![3]).not.toHaveProperty("mediaType");
   });
 
-  it("parses the per-kind platform lists (video default tiktok, image default pinterest; wrong-kind platforms are ignored)", () => {
+  it("parses the per-kind platform lists (video default tiktok then x, image default pinterest; wrong-kind platforms are ignored)", () => {
     delete process.env.APIFY_VIDEO_PLATFORMS;
     delete process.env.APIFY_AUTO_PLATFORMS;
     delete process.env.APIFY_IMAGE_PLATFORMS;
-    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok"]);
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok", "x"]);
     expect(apifyImagePlatformsFromEnv()).toEqual(["pinterest"]);
     process.env.APIFY_VIDEO_PLATFORMS = "pinterest, google_video, x, instagram, tiktok, x";
     expect(apifyAutoPlatformsFromEnv()).toEqual(["x", "tiktok"]);
     process.env.APIFY_IMAGE_PLATFORMS = "tiktok, google_image, pinterest";
     expect(apifyImagePlatformsFromEnv()).toEqual(["google_image", "pinterest"]);
     process.env.APIFY_VIDEO_PLATFORMS = "instagram";
-    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok"]);
+    expect(apifyAutoPlatformsFromEnv()).toEqual(["tiktok", "x"]);
     delete process.env.APIFY_VIDEO_PLATFORMS;
     process.env.APIFY_AUTO_PLATFORM = "x";
     expect(apifyAutoPlatformsFromEnv()).toEqual(["x"]);

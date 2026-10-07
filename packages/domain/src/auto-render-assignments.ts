@@ -16,6 +16,7 @@
  * may run FFmpeg, and this pure module has no I/O at all). Templates intended for Auto
  * narration should define one audio element per scene.
  */
+import { orshotPageCount } from "./orshot-page-slots.js";
 
 export type AutoModificationKind = "text" | "video" | "image" | "audio" | "color" | "font" | "volume";
 
@@ -37,6 +38,8 @@ export type AutoSceneMedia = {
    * independently-written copy of it that could diverge (paraphrase, drop words, reformat).
    */
   displayText: string;
+  /** Short on-screen label for Orshot pageN@tag; falls back to displayText. */
+  tagText?: string;
   visualMediaAssetVersionId: string | null;
   visualKind: "video" | "image" | null;
   audioMediaAssetVersionId: string | null;
@@ -63,6 +66,30 @@ export function buildAutoRenderAssignments(
 ): AutoRenderAssignmentsResult {
   if (scenes.length === 0) return { ok: false, reason: "no_scenes" };
   const orderedScenes = [...scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+  const pageCount = orshotPageCount(slots);
+  if (pageCount !== null) {
+    const assignments: AutoRenderAssignment[] = [];
+    const assigned = new Set<string>();
+    const slotByKey = new Map(slots.map((slot) => [slot.key, slot]));
+    for (const [index, scene] of orderedScenes.entries()) {
+      const page = index + 1;
+      if (page > pageCount) break;
+      const putText = (key: string, value: string) => {
+        if (slotByKey.get(key)?.kind !== "text" || !value.trim()) return;
+        assignments.push({ modificationKey: key, kind: "text", text: value.trim() });
+        assigned.add(key);
+      };
+      const mediaKey = `page${page}@media`;
+      if (scene.visualMediaAssetVersionId && scene.visualKind === slotByKey.get(mediaKey)?.kind) {
+        assignments.push({ modificationKey: mediaKey, kind: scene.visualKind, mediaAssetVersionId: scene.visualMediaAssetVersionId });
+        assigned.add(mediaKey);
+      }
+      putText(`page${page}@subtitle`, scene.displayText);
+      putText(`page${page}@tag`, scene.tagText?.trim() || scene.displayText);
+    }
+    const missingKeys = slots.filter((slot) => slot.required && !assigned.has(slot.key)).map((slot) => slot.key);
+    return missingKeys.length ? { ok: false, reason: "missing_required_slot", missingKeys } : { ok: true, assignments };
+  }
 
   const videoQueue = slots.filter((s) => s.kind === "video");
   const imageQueue = slots.filter((s) => s.kind === "image");
@@ -120,6 +147,7 @@ export function buildAutoTimelineOptionValues(
   scenes: AutoSceneMedia[],
   extraText: { title?: string; caption?: string } = {},
 ): Record<string, string> {
+  if (orshotPageCount(slots) !== null) return {};
   const textSlots = slots.filter((slot) => slot.kind === "text");
   const sceneTextCount = scenes.filter((scene) => scene.displayText.trim()).length;
   const leftover = textSlots.slice(Math.min(sceneTextCount, textSlots.length));

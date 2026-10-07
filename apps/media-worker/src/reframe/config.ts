@@ -68,6 +68,7 @@ export function loadReframeConfig(env: NodeJS.ProcessEnv, repoRoot: string, cpuC
     logoTemplateThreshold: readFloat(env, "REFRAME_LOGO_TEMPLATE_THRESHOLD", 0.8, 0.3, 0.99),
     concurrency: readInt(env, "REFRAME_CONCURRENCY", Math.max(1, Math.floor(cpus / 4)), 1, 32),
     ortThreads: readInt(env, "REFRAME_ORT_THREADS", 1, 1, 16),
-    plan: reframeOptionsFromEnv(env),
+    // Hard overlay residual up to 15% is accepted (the preset corner margins are soft and never count); tune with REFRAME_UNAVOIDABLE_MIN_PCT.
+    plan: { unavoidableMinPct: 15, ...reframeOptionsFromEnv(env) },
   };
 }

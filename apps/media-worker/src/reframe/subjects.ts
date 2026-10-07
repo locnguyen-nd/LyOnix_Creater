@@ -15,6 +15,8 @@ export const MIN_PERSON_HEIGHT_RATIO = 0.12;
 export const FACE_EXPAND = { widthFactor: 2.4, topFactor: 0.7, heightFactor: 3.4 } as const;
 /** PLACEHOLDER: max subject tracks kept (the planner only follows the primary one; the rest are for ranking/diagnostics). */
 export const MAX_TRACKS = 5;
+/** PLACEHOLDER: share of a sample's area weight that does not depend on being near the frame centre (default ranking). */
+export const CENTRAL_BASE = 0.6;
 
 export type FrameDetections = {
   /** Time inside the analysed window, ms. */
@@ -101,13 +103,14 @@ export function rankSubjects(frames: FrameDetections[], srcWidth: number, srcHei
   const scored = buildTracks(frames, srcWidth, srcHeight).map((track) => {
     const presence = track.samples.length / total;
     const sum = track.samples.reduce((acc, s) => {
-      const area = boxArea(s.box);
-      if (preference === "center") {
-        const c = centre(s.box);
-        const d = Math.hypot(c.x - srcWidth / 2, c.y - srcHeight / 2) / (0.35 * Math.max(srcWidth, srcHeight));
-        return acc + area * Math.exp(-d * d);
-      }
-      return acc + area;
+      // Detector confidence weights every sample, so a faint background face never outranks a clear one of similar size.
+      const area = boxArea(s.box) * Math.max(0.05, Math.min(1, s.score));
+      const c = centre(s.box);
+      const d = Math.hypot(c.x - srcWidth / 2, c.y - srcHeight / 2) / (0.35 * Math.max(srcWidth, srcHeight));
+      const closeness = Math.exp(-d * d);
+      // `center`: area fully weighted by closeness to the centre. Default: mostly area, but the person near the middle of the frame
+      // beats an equally large bystander at the edge (the main character is framed, extras are not).
+      return acc + area * (preference === "center" ? closeness : CENTRAL_BASE + (1 - CENTRAL_BASE) * closeness);
     }, 0);
     return { track, score: presence < 0.5 ? sum * 0.5 : sum };
   });

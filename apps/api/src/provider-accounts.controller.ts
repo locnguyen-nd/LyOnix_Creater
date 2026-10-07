@@ -7,7 +7,7 @@ import { CURATED_CONTENT_MODELS, CURATED_ELEVENLABS_MODELS } from "@lyonix/provi
 import { ProviderAccountsService, type ProviderRole, type ProviderScope } from "./provider-accounts.service.js";
 
 type CreateBody = { name?: string; provider?: string; role?: ProviderRole; scope?: ProviderScope; model?: string; secret?: string };
-type UpdateBody = { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string };
+type UpdateBody = { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string; enabled?: boolean };
 
 const expectedVersion = (raw: string | undefined) => {
   const match = raw?.trim().match(/^(?:W\/)?"?(\d+)"?$/);
@@ -89,14 +89,14 @@ export class ProviderAccountsController {
     requireCsrf(request, response, session);
     const version = expectedVersion(ifMatch);
     if (version === null) throw normalizedError("VALIDATION_FAILED", "Thiếu If-Match phiên bản tài khoản", requestId(response));
-    if (body.name === undefined && body.model === undefined && body.visionModel === undefined && body.preferredModels === undefined && body.secret === undefined) throw normalizedError("VALIDATION_FAILED", "Không có thay đổi tài khoản", requestId(response));
+    if (body.name === undefined && body.model === undefined && body.visionModel === undefined && body.preferredModels === undefined && body.secret === undefined && body.enabled === undefined) throw normalizedError("VALIDATION_FAILED", "Không có thay đổi tài khoản", requestId(response));
     if (body.visionModel !== undefined && body.visionModel !== null && typeof body.visionModel !== "string") throw normalizedError("VALIDATION_FAILED", "Model kiểm duyệt ảnh không hợp lệ", requestId(response));
     if (body.preferredModels !== undefined && (!Array.isArray(body.preferredModels) || body.preferredModels.length > 20 || body.preferredModels.some((item) => typeof item !== "string"))) throw normalizedError("VALIDATION_FAILED", "Danh sách model ưu tiên không hợp lệ", requestId(response));
     const account = await this.accounts.update(id, user.id, user.role, version, body);
     if (!account) throw normalizedError("NOT_FOUND", "Không tìm thấy tài khoản provider", requestId(response), 404);
     if (account === "forbidden") throw normalizedError("FORBIDDEN", "Không có quyền sửa tài khoản provider này", requestId(response), 403);
     if (account === "conflict") throw normalizedError("VERSION_CONFLICT", "Tài khoản đã được cập nhật ở nơi khác. Hãy tải lại.", requestId(response), 409);
-    if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Tên/model không hợp lệ (Orshot Embed ID: chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
+    if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Tên/model không hợp lệ, hoặc chỉ Pexels/Apify mới bật/tắt được (Orshot Embed ID: chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
     if (account === "model_unavailable") throw normalizedError("PROVIDER_CAPABILITY_UNAVAILABLE", "Model không nằm trong capability đã xác thực", requestId(response));
     response.setHeader("ETag", `"${account.version}"`);
     return success(account, requestId(response));

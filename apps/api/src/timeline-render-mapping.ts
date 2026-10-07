@@ -18,7 +18,7 @@
  */
 import type { TemplateModificationSlotResponse, TimelineOptionValues, TimelineSceneBindingResponse } from "@lyonix/contracts";
 import type { RenderAssignmentInput } from "@lyonix/contracts";
-import { sameCaptionText } from "@lyonix/domain";
+import { orshotPageCount, sameCaptionText } from "@lyonix/domain";
 import type { PrismaService } from "./prisma.service.js";
 
 export type TimelineSceneMediaKind = "video" | "image" | null;
@@ -103,6 +103,41 @@ export function buildRenderAssignmentsFromTimeline(
   optionValues: TimelineOptionValues,
 ): BuiltTimelineAssignments {
   const orderedScenes = [...scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+  const pageCount = orshotPageCount(slots);
+  if (pageCount !== null) {
+    const assignments: RenderAssignmentInput[] = [];
+    const claimed = new Set<string>();
+    const slotByKey = new Map(slots.map((slot) => [slot.key, slot]));
+    const videoSlotKeyBySceneId: Record<string, string> = {};
+    for (const [index, scene] of orderedScenes.entries()) {
+      const page = index + 1;
+      if (page > pageCount) break;
+      const mediaKey = `page${page}@media`;
+      if (scene.mediaAssetVersionId && scene.mediaKind === slotByKey.get(mediaKey)?.kind) {
+        assignments.push({ modificationKey: mediaKey, kind: scene.mediaKind, mediaAssetVersionId: scene.mediaAssetVersionId });
+        claimed.add(mediaKey);
+        if (scene.mediaKind === "video") videoSlotKeyBySceneId[scene.sceneId] = mediaKey;
+      }
+      const subtitle = (scene.screenTextOverride?.trim() || scene.audioNarration?.trim() || scene.fallbackScreenText?.trim() || "");
+      const tag = scene.fallbackScreenText?.trim() || subtitle;
+      for (const [key, value] of [[`page${page}@subtitle`, subtitle], [`page${page}@tag`, tag]] as const) {
+        if (slotByKey.get(key)?.kind !== "text" || !value) continue;
+        assignments.push({ modificationKey: key, kind: "text", text: value });
+        claimed.add(key);
+      }
+    }
+    for (const slot of slots) {
+      if (claimed.has(slot.key) || optionValues[slot.key] === undefined) continue;
+      const value = optionValues[slot.key]!;
+      if (slot.kind === "text") assignments.push({ modificationKey: slot.key, kind: "text", text: value });
+      else if (slot.kind === "color") assignments.push({ modificationKey: slot.key, kind: "color", color: value });
+      else if (slot.kind === "font") assignments.push({ modificationKey: slot.key, kind: "font", fontFamily: value });
+      else if (slot.kind === "volume") assignments.push({ modificationKey: slot.key, kind: "volume", volumePercent: Number(value) });
+      else continue;
+      claimed.add(slot.key);
+    }
+    return { assignments, filledModificationKeys: [...claimed], missingRequiredModificationKeys: slots.filter((slot) => slot.required && !claimed.has(slot.key)).map((slot) => slot.key), videoSlotKeyBySceneId };
+  }
   const videoSlots = byKind(slots, "video");
   const imageSlots = byKind(slots, "image");
   const audioSlots = byKind(slots, "audio");

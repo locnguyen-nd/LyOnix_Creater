@@ -171,6 +171,16 @@ describe("ClipDerivativesService.prepare", () => {
     expect(await service.prepare(projectId, "u", [{ sceneId: "s1", parentMediaAssetVersionId: pexelsParent.id, startMs: 0, durationMs: 3000, stripAudio: true }])).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED", retryable: false });
   });
 
+  it("reports a client-side INVALID_JOB validation reason without suggesting a retry", async () => {
+    const store = mediaAssetStore([pexelsParent]);
+    const preparer = { prepareClip: vi.fn(async () => { throw new MediaJobClientError("INVALID_JOB", "cropPlan.keyframes[0].tMs must start at 0 and strictly increase"); }) };
+    const service = new ClipDerivativesService({ mediaAssetVersion: store } as never, preparer);
+    service.log = () => undefined;
+    const outcome = await service.prepare(projectId, "u", [{ sceneId: "s1", parentMediaAssetVersionId: pexelsParent.id, startMs: 0, durationMs: 3000, stripAudio: true }]);
+    expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED", retryable: false });
+    expect(!outcome.ok && outcome.message).toContain("cropPlan.keyframes[0].tMs");
+  });
+
   it("rejects ranges on non-video media and on assets outside the project", async () => {
     const { worker, service } = await setup();
     expect(await service.prepare(projectId, "u", [{ sceneId: "s1", parentMediaAssetVersionId: imageParent.id, startMs: 0, durationMs: 3000, stripAudio: true }])).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });

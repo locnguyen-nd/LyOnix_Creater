@@ -1275,6 +1275,8 @@ export type ExclusionRegion = {
   box: ReframePixelBox;
   startMs?: number;
   endMs?: number;
+  /** Guessed region (preset margin): steers the window but never counts as an unavoidable overlay. */
+  soft?: boolean;
 };
 export type CropKeyframe = { tMs: number; xPx: number; yPx: number; widthPx: number; heightPx: number };
 export type CropPlan = {

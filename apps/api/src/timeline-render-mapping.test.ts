@@ -55,6 +55,19 @@ const scene = (overrides: Partial<SceneBindingForMapping>): SceneBindingForMappi
 });
 
 describe("buildRenderAssignmentsFromTimeline", () => {
+  it("maps Orshot subtitle and tag by page, without shifting text to later pages", () => {
+    const pageSlots: TemplateModificationSlotResponse[] = [1, 2].flatMap((page) => [
+      { key: `page${page}@media`, kind: "video" as const, label: "Media", required: true },
+      { key: `page${page}@subtitle`, kind: "text" as const, label: "Subtitle", required: true },
+      { key: `page${page}@tag`, kind: "text" as const, label: "Tag", required: true },
+    ]);
+    const scenes = [scene({ sceneId: "s1", orderIndex: 0, mediaKind: "video", mediaAssetVersionId: "m1", screenTextOverride: "Narration 1", fallbackScreenText: "Tag 1" }), scene({ sceneId: "s2", orderIndex: 1, mediaKind: "video", mediaAssetVersionId: "m2", screenTextOverride: "Narration 2", fallbackScreenText: "Tag 2" })];
+    const built = buildRenderAssignmentsFromTimeline(pageSlots, scenes, {});
+    expect(built.missingRequiredModificationKeys).toEqual([]);
+    expect(built.assignments).toContainEqual({ modificationKey: "page2@subtitle", kind: "text", text: "Narration 2" });
+    expect(built.assignments).toContainEqual({ modificationKey: "page2@tag", kind: "text", text: "Tag 2" });
+    expect(built.videoSlotKeyBySceneId.s2).toBe("page2@media");
+  });
   it("zips ordered scenes onto same-kind slots positionally", () => {
     const scenes: SceneBindingForMapping[] = [
       scene({ sceneId: "s1", orderIndex: 0, mediaAssetVersionId: "media-1", mediaKind: "video", screenTextOverride: "Hello" }),

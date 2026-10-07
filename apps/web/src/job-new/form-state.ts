@@ -16,7 +16,11 @@ import type { PublicChannel } from "../channel-api";
 import type { ApiProvider } from "../jobs-api";
 
 export const usableAccounts = (providers: readonly ApiProvider[], role: ApiProvider["role"]) =>
-  providers.filter((item) => item.role === role && (item.isFake || item.status === "verified"));
+  providers.filter((item) => item.role === role && item.enabled !== false && (item.isFake || item.status === "verified"));
+
+/** Media accounts a job can use: any media source (Pexels or Apify) that is verified AND switched on. */
+export const MEDIA_SOURCE_PROVIDERS: readonly string[] = ["pexels", "apify"];
+export const mediaAccountsOf = (providers: readonly ApiProvider[]) => usableAccounts(providers, "visual").filter((item) => MEDIA_SOURCE_PROVIDERS.includes(item.provider));
 
 /** Ids the user can pick right now, per reference field. */
 export type CreationLists = { channelIds: string[]; contentIds: string[]; voiceIds: string[]; mediaIds: string[]; renderIds: string[] };
@@ -26,7 +30,7 @@ export function creationLists(channels: readonly PublicChannel[], providers: rea
     channelIds: channels.map((channel) => channel.id),
     contentIds: usableAccounts(providers, "content").map((account) => account.id),
     voiceIds: usableAccounts(providers, "tts").map((account) => account.id),
-    mediaIds: usableAccounts(providers, "visual").filter((account) => account.provider === "pexels").map((account) => account.id),
+    mediaIds: mediaAccountsOf(providers).map((account) => account.id),
     renderIds: usableAccounts(providers, "render").map((account) => account.id),
   };
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "../components/feedback";
 import { useNavigate } from "react-router-dom";
 import { Ban, Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
 import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome";
@@ -45,6 +46,7 @@ const isRetriable = (status: WorkflowRunStatus) => ["failed", "blocked_provider"
 
 export function VideoProductionsPage() {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const [rows, setRows] = useState<VideoProductionListItemResponse[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +110,7 @@ export function VideoProductionsPage() {
   // Only a run still waiting in the queue can be cancelled; the API refuses (409) once a worker claimed it, in which case the list is refreshed.
   const cancelQueued = async (row: VideoProductionListItemResponse) => {
     const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
-    if (!window.confirm(t("videoProductions.queueCancelConfirm", { title }))) return;
+    if (!(await confirm({ title, message: t("videoProductions.queueCancelConfirm", { title }), tone: "warn" }))) return;
     setCancelling(row.id);
     setError(null);
     try {
@@ -136,7 +138,7 @@ export function VideoProductionsPage() {
 
   const remove = async (row: VideoProductionListItemResponse) => {
     const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
-    if (!window.confirm(t("videoProductions.deleteConfirm", { title }))) return;
+    if (!(await confirm({ title, message: t("videoProductions.deleteConfirm", { title }) }))) return;
     setDeleting(row.id);
     setError(null);
     try {

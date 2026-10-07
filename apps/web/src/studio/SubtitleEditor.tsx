@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "../components/feedback";
 import type { AudioVersionResponse, SubtitleVersionResponse } from "@lyonix/contracts";
 import { SUBTITLE_EDIT_LIMITS, mergeWithNext, nudgeCue, splitCue, validateSubtitleCues, type SubtitleCue, type SubtitleCueError } from "@lyonix/domain/subtitle-edit";
 import { ApiError } from "../api";
@@ -30,6 +31,7 @@ const toCues = (subtitle: SubtitleVersionResponse | null): SubtitleCue[] => (sub
  */
 export function SubtitleEditor({ audio, pinnedSubtitleVersionId, audioUrl, onSaved, onUseLatest }: SubtitleEditorProps) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const [base, setBase] = useState<SubtitleVersionResponse | null>(audio.subtitleVersion);
   const [cues, setCues] = useState<SubtitleCue[]>(() => toCues(audio.subtitleVersion));
   const [busy, setBusy] = useState(false);
@@ -87,8 +89,8 @@ export function SubtitleEditor({ audio, pinnedSubtitleVersionId, audioUrl, onSav
     void persist(() => saveSubtitleVersion(audio.id, { basedOnSubtitleVersionId: base.id, cues: validation.cues }));
   };
 
-  const reset = () => {
-    if (!window.confirm(t("studioPro.subtitleResetConfirm"))) return;
+  const reset = async () => {
+    if (!(await confirm({ title: t("studioPro.subtitleResetConfirm"), message: t("studioPro.subtitleResetConfirm"), tone: "warn" }))) return;
     void persist(() => resetSubtitleVersion(audio.id, { basedOnSubtitleVersionId: base.id }));
   };
 

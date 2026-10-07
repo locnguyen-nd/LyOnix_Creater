@@ -97,7 +97,12 @@ export class ApifyJobContext {
   readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
   /** VE2E-57: per-job vision-moderation budget shared by every segment of the job. */
-  readonly vision = new VisionBudget();
+  readonly vision: VisionBudget;
+  /** Clip ids whose download/import failed in this job: never picked again (a retry then moves on to the next ranked candidate). */
+  readonly failedIds = new Set<string>();
+  constructor(opts: { visionMaxCalls?: number } = {}) {
+    this.vision = new VisionBudget(opts.visionMaxCalls ? { maxCalls: opts.visionMaxCalls } : {});
+  }
   /**
    * VE2E-67: what a plan-time `overlay_unavoidable` verdict does. `swap` (Auto): the candidate fails and the existing fallback (next
    * platform, then Pexels) supplies another source. `flag` (Studio, default): the candidate is kept and the flag is shown to the user.
@@ -182,6 +187,7 @@ export class ApifyService {
     const account = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null } });
     if (!account) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Apify không tồn tại hoặc đã bị xóa", status: 503 };
     if (account.role !== "visual" || account.provider !== "apify") return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải Apify (visual)", status: 503 };
+    if (account.enabled === false) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Nguồn Apify đang tắt trong cấu hình provider", status: 403 };
     const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
     if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Apify chưa verify", status: 503 };
     return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret } };
@@ -422,6 +428,7 @@ export class ApifyService {
         provider: "apify",
         role: "visual",
         deletedAt: null,
+        enabled: true,
         ...(process.env.NODE_ENV === "test" ? {} : { status: "verified", isFake: false }),
         ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
       },
@@ -601,6 +608,12 @@ export class ApifyService {
       /** The segment's duration: candidates shorter than this are rejected (they would loop). */
       segmentDurationSeconds?: number;
       job?: ApifyJobContext;
+      /** No other source can replace this one (Pexels off): accept the best metadata-ranked candidate when vision moderation could not run, instead of abstaining. */
+      allowUnverified?: boolean;
+      /** Last resort: an `overlay_unavoidable` clip is kept (and flagged) rather than rejected. */
+      keepOverlayFlagged?: boolean;
+      /** Best-effort fill: skip the strict social filter and the relevance threshold; vision rejections still apply. */
+      lenient?: boolean;
     },
   ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
@@ -615,8 +628,13 @@ export class ApifyService {
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
-      const eligible = results.filter((r) => (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
+      const eligible = results.filter((r) => !job.failedIds.has(r.candidate.externalId) && (r.download !== null || r.deferredPostUrl) && r.candidate.accessMethod === "api_download" && r.candidate.eligibility.autoEligible && (wantedType === null || r.candidate.mediaType === wantedType));
       if (input.platform !== "tiktok") return eligible;
+      if (input.lenient) {
+        // Best effort: keep every importable candidate that was not already used (language/orientation/length rules are only preferences now).
+        quality.considered = eligible.length;
+        return eligible.filter((r) => !input.usedExternalIds.has(r.candidate.externalId)).slice(0, MAX_FILTERED_POOL);
+      }
       const selection = selectSocialCandidates(
         eligible.filter((r) => r.social).map((r) => ({ ref: r, signals: r.social! })),
         filterContext,
@@ -636,7 +654,7 @@ export class ApifyService {
     } catch {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }
-    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: true });
+    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: !input.allowUnverified && !input.lenient, ...(input.lenient ? { relevanceThreshold: 0 } : {}) });
     if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
     const chosen = byCandidateId.get(decision.chosen.candidateId);
     if (!chosen) return fail("apify_no_usable_candidate");
@@ -655,7 +673,7 @@ export class ApifyService {
       job.usage.libraryReuses += 1;
       quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
       if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
-      if ((await this.reframeCheck(library, input, job, quality)) === "reject") return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
+      if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
       return done(library, decision.chosen);
     }
 
@@ -696,8 +714,9 @@ export class ApifyService {
     const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
     if (!imported.ok) {
       input.usedExternalIds.delete(importedId);
+      job.failedIds.add(importedId);
       release();
-      return fail(`apify_import_failed:${imported.code}`);
+      return fail(`apify_import_failed:${imported.code}:${String((imported as { message?: string }).message ?? "").slice(0, 120)}`);
     }
     quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
     if (quality.frameCheck === "rejected") {
@@ -705,7 +724,7 @@ export class ApifyService {
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
       return fail("apify_frames_rejected");
     }
-    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject") {
+    if ((await this.reframeCheck(imported.data.asset, input, job, quality)) === "reject" && !input.keepOverlayFlagged) {
       // Auto + overlay_unavoidable (CR-SUBJECT-REFRAME Q5): same handling as a rejected candidate - unbind it and let the existing fallback pick another source.
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);
       return fail("apify_overlay_unavoidable");

@@ -24,6 +24,7 @@ import {
   elapsedLabel,
   formatUsd,
   hasBlockingSlotMismatch,
+  orshotPageCountFromSlots,
   orshotEmbedIdOf,
   parseOrshotEmbedMessage,
   slotCompatibility,
@@ -139,7 +140,7 @@ export function OrshotStudioPanel(props: OrshotStudioPanelProps) {
   };
 
   const rows = useMemo(() => (template ? slotCompatibility(template.modifications, supply) : []), [template, supply]);
-  const blocking = hasBlockingSlotMismatch(rows);
+  const blocking = hasBlockingSlotMismatch(rows) || (Boolean(template) && orshotPageCountFromSlots(template!.modifications) > 0 && supply.scenes !== orshotPageCountFromSlots(template!.modifications));
   const embedUrl = embedId ? buildOrshotEmbedUrl(embedId, { templateId: template?.externalTemplateId ?? null, lang: i18n.language, userId: perUser ? me.id : null }) : null;
   const canRender = timelineApproved && !dirty && Boolean(template) && !blocking && !submitting && !isActive(renderJob) && !estimate?.exceedsPlanLimit;
   const disabledReason = !timelineApproved ? t("studioPro.orshotRenderNeedsApproval") : dirty ? t("studioPro.submitRenderDirtyHint") : !template ? t("studioPro.orshotRenderNeedsTemplate") : blocking ? t("studioPro.orshotRenderBlocked") : estimate?.exceedsPlanLimit ? t("studioPro.orshotCostOver", { max: estimate.maxVideoSeconds }) : undefined;

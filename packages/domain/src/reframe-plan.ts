@@ -37,6 +37,11 @@ export type ExclusionRegion = {
   /** Active interval [startMs, endMs); both omitted = whole clip. */
   startMs?: number;
   endMs?: number;
+  /**
+   * A guessed region (preset corner margin for a social watermark), not a detection. It steers the window position and may add a
+   * little zoom (`softMaxZoomPermille`) but never counts toward `overlayUnavoidable` / `residualOverlayPct`.
+   */
+  soft?: boolean;
 };
 export type CropKeyframe = { tMs: number; xPx: number; yPx: number; widthPx: number; heightPx: number };
 export type CropPlan = {
@@ -77,6 +82,10 @@ export type PlanReframeOptions = {
   smoothingMs?: number;
   /** Pan speed cap in source px per second (default: REFRAME_MAX_PAN_PCT_PER_SEC_DEFAULT % of the window width). */
   maxPanPxPerSec?: number;
+  /** Largest zoom (permille) the planner may spend only to avoid `soft` regions (default 1150). Hard regions and the subject may use `maxZoomPermille`. */
+  softMaxZoomPermille?: number;
+  /** Hard overlay residual (percent) up to which the plan is still accepted: `overlayUnavoidable` is `residual > this` (default 0 = any). */
+  unavoidableMinPct?: number;
   /** Force this subject as primary (e.g. from `visualPlan.subject`) when it exists in `subjects`. */
   preferredSubjectId?: string;
 };
@@ -87,7 +96,11 @@ export function reframeOptionsFromEnv(env: Record<string, string | undefined> = 
   const zoom = num(env.REFRAME_MAX_ZOOM);
   const pan = num(env.REFRAME_MAX_PAN_PX_PER_SEC);
   const smooth = num(env.REFRAME_SMOOTHING_MS);
+  const softZoom = num(env.REFRAME_SOFT_MAX_ZOOM);
+  const minPct = num(env.REFRAME_UNAVOIDABLE_MIN_PCT);
   return {
+    ...(Number.isFinite(softZoom) && softZoom >= 1 ? { softMaxZoomPermille: Math.round(softZoom * 1000) } : {}),
+    ...(Number.isFinite(minPct) && minPct >= 0 && minPct <= 100 ? { unavoidableMinPct: Math.floor(minPct) } : {}),
     maxZoomPermille: Number.isFinite(zoom) && zoom >= 1 ? Math.round(zoom * 1000) : Math.round(REFRAME_MAX_ZOOM_DEFAULT * 1000),
     ...(Number.isFinite(pan) && pan > 0 ? { maxPanPxPerSec: Math.floor(pan) } : {}),
     ...(Number.isFinite(smooth) && smooth >= 0 ? { smoothingMs: Math.floor(smooth) } : {}),
@@ -135,16 +148,17 @@ function boxAt(samples: SubjectTrackSample[], tMs: number): PixelBox {
   return { xPx: mix(a.box.xPx, b.box.xPx), yPx: mix(a.box.yPx, b.box.yPx), widthPx: mix(a.box.widthPx, b.box.widthPx), heightPx: mix(a.box.heightPx, b.box.heightPx) };
 }
 
-type Frame = { tMs: number; subject: PixelBox | null; overlays: PixelBox[] };
+type Frame = { tMs: number; subject: PixelBox | null; overlays: PixelBox[]; soft: PixelBox[] };
 type Pos = { xPx: number; yPx: number };
-type Score = { miss: number; overlay: number };
+type Score = { miss: number; overlay: number; soft: number };
 
 const scoreAt = (frame: Frame, win: PixelBox): Score => ({
   miss: frame.subject ? area(frame.subject) - intersectArea(frame.subject, win) : 0,
   overlay: frame.overlays.reduce((total, box) => total + intersectArea(box, win), 0),
+  soft: frame.soft.reduce((total, box) => total + intersectArea(box, win), 0),
 });
 /** True when `a` is strictly worse than `b`: subject loss dominates, overlay breaks ties. */
-const worse = (a: Score, b: Score) => a.miss > b.miss || (a.miss === b.miss && a.overlay > b.overlay);
+const worse = (a: Score, b: Score) => a.miss > b.miss || (a.miss === b.miss && (a.overlay > b.overlay || (a.overlay === b.overlay && a.soft > b.soft)));
 
 function windowSize(srcW: number, srcH: number, tw: number, th: number, zoomPermille: number): { w: number; h: number } {
   if (srcW * th >= srcH * tw) {
@@ -168,7 +182,7 @@ function bestPosition(frame: Frame, srcW: number, srcH: number, w: number, h: nu
     xs.add(clamp(subj.xPx + subj.widthPx - w, 0, maxX)).add(clamp(subj.xPx, 0, maxX));
     ys.add(clamp(subj.yPx + subj.heightPx - h, 0, maxY)).add(clamp(subj.yPx, 0, maxY));
   }
-  for (const o of frame.overlays) {
+  for (const o of [...frame.overlays, ...frame.soft]) {
     xs.add(clamp(o.xPx + o.widthPx, 0, maxX)).add(clamp(o.xPx - w, 0, maxX));
     ys.add(clamp(o.yPx + o.heightPx, 0, maxY)).add(clamp(o.yPx - h, 0, maxY));
   }
@@ -194,6 +208,8 @@ export function planReframe(input: PlanReframeInput, options: PlanReframeOptions
   if (!(srcW > 0 && srcH > 0 && tw > 0 && th > 0)) throw new RangeError("planReframe: source and target sizes must be positive integers");
   const maxZoom = Math.max(1000, Math.floor(options.maxZoomPermille ?? Math.round(REFRAME_MAX_ZOOM_DEFAULT * 1000)));
   const smoothingMs = Math.max(0, Math.floor(options.smoothingMs ?? REFRAME_SMOOTHING_MS_DEFAULT));
+  const softCap = Math.min(maxZoom, Math.max(1000, Math.floor(options.softMaxZoomPermille ?? 1150)));
+  const unavoidableMinPct = Math.min(100, Math.max(0, Math.floor(options.unavoidableMinPct ?? 0)));
 
   const primary = pickPrimary(input.subjects ?? [], options.preferredSubjectId);
   const samples = primary ? primary.samples.map((s) => ({ tMs: Math.max(0, Math.round(s.tMs)), box: s.box })).sort((a, b) => a.tMs - b.tMs) : [];
@@ -201,17 +217,19 @@ export function planReframe(input: PlanReframeInput, options: PlanReframeOptions
   const durationMs = Math.max(0, Math.round(input.durationMs ?? (samples.length ? samples[samples.length - 1]!.tMs : 0)));
 
   // Timeline: subject sample times plus every overlay on/off boundary, within [0, duration].
-  const times = new Set<number>(samples.map((s) => Math.min(s.tMs, durationMs)));
+  // Detectors sample video frames inside the window (often first at ~300ms), but clip.prepare
+  // requires the crop trajectory to cover the cut from its first frame at t=0.
+  const times = new Set<number>([0, ...samples.map((s) => Math.min(s.tMs, durationMs))]);
   for (const e of exclusions) {
     if (e.startMs !== undefined) times.add(clamp(Math.round(e.startMs), 0, durationMs));
     if (e.endMs !== undefined) times.add(clamp(Math.round(e.endMs) - 1, 0, durationMs));
   }
-  if (times.size === 0) times.add(0);
   const timeline = [...times].sort((a, b) => a - b);
   const frames: Frame[] = timeline.map((tMs) => ({
     tMs,
     subject: samples.length ? boxAt(samples, tMs) : null,
-    overlays: exclusions.filter((e) => (e.startMs === undefined || tMs >= e.startMs) && (e.endMs === undefined || tMs < e.endMs)).map((e) => e.box),
+    overlays: exclusions.filter((e) => !e.soft && (e.startMs === undefined || tMs >= e.startMs) && (e.endMs === undefined || tMs < e.endMs)).map((e) => e.box),
+    soft: exclusions.filter((e) => e.soft && (e.startMs === undefined || tMs >= e.startMs) && (e.endMs === undefined || tMs < e.endMs)).map((e) => e.box),
   }));
 
   // One zoom for the whole clip (no pumping): the smallest that keeps the subject whole with no overlay; else the best worst-case.
@@ -222,9 +240,11 @@ export function planReframe(input: PlanReframeInput, options: PlanReframeOptions
   for (const zoom of zooms) {
     const { w, h } = windowSize(srcW, srcH, tw, th, zoom);
     const results = frames.map((frame) => bestPosition(frame, srcW, srcH, w, h));
-    const worst = results.reduce<Score>((acc, r) => ({ miss: Math.max(acc.miss, r.score.miss), overlay: Math.max(acc.overlay, r.score.overlay) }), { miss: 0, overlay: 0 });
-    if (!chosen || worse(chosen.worst, worst)) chosen = { zoom, w, h, raw: results.map((r) => r.pos), worst };
-    if (worst.miss === 0 && worst.overlay === 0) break;
+    const worst = results.reduce<Score>((acc, r) => ({ miss: Math.max(acc.miss, r.score.miss), overlay: Math.max(acc.overlay, r.score.overlay), soft: Math.max(acc.soft, r.score.soft) }), { miss: 0, overlay: 0, soft: 0 });
+    // Zoom beyond `softCap` is never spent on soft regions alone: past it they stop counting in the comparison.
+    const comparable: Score = zoom > softCap ? { ...worst, soft: 0 } : worst;
+    if (!chosen || worse(chosen.worst, comparable)) chosen = { zoom, w, h, raw: results.map((r) => r.pos), worst: comparable };
+    if (worst.miss === 0 && worst.overlay === 0 && (worst.soft === 0 || zoom >= softCap)) break;
   }
   const { zoom, w, h, raw } = chosen!;
 
@@ -290,7 +310,7 @@ export function planReframe(input: PlanReframeInput, options: PlanReframeOptions
     mode: isStatic ? "static" : "keyframes",
     keyframes,
     primarySubjectId: primary?.subjectId ?? null,
-    overlayUnavoidable: residual > 0,
+    overlayUnavoidable: residual > unavoidableMinPct,
     residualOverlayPct: residual,
     subjectCoveragePct: coverage,
   };

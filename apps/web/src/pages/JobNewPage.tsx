@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "../components/feedback";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
 import { Button, Field, Select, TextArea } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
-import { CategoryChips, TemplateCard } from "../components/TemplateCard";
+import { TemplatePicker } from "../components/TemplatePicker";
 import { Modal } from "../components/Modal";
 import { mergeTemplateEntries, type TemplateEntry } from "../studio/template-gallery";
 import {
@@ -41,7 +42,7 @@ import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/or
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
-import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, usableAccounts, type CreationLists } from "../job-new/form-state";
+import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, mediaAccountsOf, usableAccounts, type CreationLists } from "../job-new/form-state";
 
 const toBackgroundSegmentsSetting = (choice: string): BackgroundSegmentsSetting => (choice === "auto" ? { mode: "auto" } : { mode: "fixed", count: Number(choice) });
 
@@ -69,6 +70,7 @@ const TARGET_HINT_BY_LOCALE: Record<UiLocale, (durationSeconds: string, sceneCou
 
 export function JobNewPage() {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [channels, setChannels] = useState<PublicChannel[]>([]);
@@ -111,7 +113,8 @@ export function JobNewPage() {
 
   const contentAccounts = usableAccounts(providers, "content");
   const voiceAccounts = usableAccounts(providers, "tts");
-  const mediaAccounts = usableAccounts(providers, "visual").filter((item) => item.provider === "pexels");
+  const mediaAccounts = mediaAccountsOf(providers);
+  const renderAccountChoices = providers.filter((item) => item.role === "render");
   const renderAccounts = usableAccounts(providers, "render");
   const lists: CreationLists = creationLists(channels, providers);
   const renderProvider = renderAccounts.find((account) => account.id === form.renderAccountId)?.provider;
@@ -119,7 +122,7 @@ export function JobNewPage() {
   const library = useMemo(() => toLibraryTemplates(libraryEntries), [libraryEntries]);
   const counts = useMemo(() => categoryCounts(uniqueTemplates(library)), [library]);
   // V04-XX / V04-01: the cards (one per template) and the preview browse the filtered list; previewing never selects.
-  const previewTemplates = useMemo(() => uniqueTemplates(filterByCategory(library, category)), [library, category]);
+  const previewTemplates = useMemo(() => uniqueTemplates(library), [library]);
   // V04-01: the chosen template against the chosen render account - Auto is blocked unless it is compatible AND ready to render.
   const templateState = templateSelectionState(library, form.templateId, form.renderAccountId);
   const renderAccountKey = renderAccounts.map((account) => account.id).join(",");
@@ -361,7 +364,7 @@ export function JobNewPage() {
   };
 
   const resetDefaults = async () => {
-    if (!window.confirm(t("jobs.defaultsResetConfirm"))) return;
+    if (!(await confirm({ title: t("jobs.defaultsResetConfirm"), message: t("jobs.defaultsResetConfirm"), tone: "warn" }))) return;
     setDefaultsBusy(true);
     setDefaultsMessage(null);
     try {
@@ -648,18 +651,25 @@ export function JobNewPage() {
                 <Field label={t("jobs.autoMediaAccount")}>
                   <Select value={form.mediaAccountId} onChange={(e) => update({ mediaAccountId: e.target.value })}>
                     {placeholder(form.mediaAccountId)}
-                    {mediaAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                    {mediaAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.provider}</option>)}
                   </Select>
                 </Field>
               ) : null}
-              {renderAccounts.length > 1 || (renderAccounts.length > 0 && !form.renderAccountId) ? (
+              <>
                 <Field label={t("jobs.autoRenderAccount")}>
                   <Select value={form.renderAccountId} onChange={(e) => update({ renderAccountId: e.target.value }, ["templateId"])}>
                     {placeholder(form.renderAccountId)}
-                    {renderAccounts.map((account) => <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>)}
+                    {renderAccountChoices.map((account) => (
+                      <option key={account.id} value={account.id} disabled={!renderAccounts.some((usable) => usable.id === account.id)}>
+                        {renderAccountOptionLabel(account)}{account.status !== "verified" && !account.isFake ? ` · ${t(`providers.${account.status}`)}` : ""}
+                      </option>
+                    ))}
                   </Select>
                 </Field>
-              ) : null}
+                {!renderAccounts.some((account) => account.provider === "orshot") ? (
+                  <Link className="text-[12px] underline" to="/settings?tab=providers">{t("jobs.autoAddOrshot")}</Link>
+                ) : null}
+              </>
               {isOrshotRender ? (
                 <div className="flex flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border p-3">
                   <p className="text-[12px] text-lyx-fg-muted">{t("jobs.autoOrshotHint")}</p>
@@ -685,7 +695,12 @@ export function JobNewPage() {
                   {/* VE2E-13 / V04-XX / V04-01: the library of every render account, filtered by group. A card only opens the 9:16
                       preview; only "Chọn template này" in the preview applies a template (and its render account). */}
                   <div className="flex flex-col gap-2.5">
-                    <CategoryChips filters={CATEGORY_FILTERS} value={category} counts={counts} onChange={setCategory} label={t("templates.library.categoryFilter")} />
+                    <TemplatePicker
+                      templates={library}
+                      selectedId={templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? form.templateId : null}
+                      onChoose={(tpl) => chooseTemplate(tpl)}
+                      onPreviewSelected={(tpl) => { const at = previewTemplates.findIndex((item) => item.externalTemplateId === tpl.externalTemplateId); if (at >= 0) setPreviewIndex(at); }}
+                    />
                     {templateState.kind === "ok" || templateState.kind === "not_ready" || templateState.kind === "incompatible" ? (
                       <p className="text-[12px] text-lyx-fg-muted" data-testid="template-selected-line">{t("templates.library.selectedLine", { name: templateState.template.name })}</p>
                     ) : null}
@@ -696,12 +711,6 @@ export function JobNewPage() {
                       <Banner variant="warn"><span data-testid="template-not-ready-warning">{t("templates.library.notReadyWarning", { reason: t(`templates.library.blockReason.${templateState.reason}`) })}</span></Banner>
                     ) : null}
                     {libraryFailed.length > 0 ? <p className="text-[11.5px] text-lyx-danger">{t("templates.library.loadPartial", { names: libraryFailed.join(", ") })}</p> : null}
-                    {previewTemplates.length === 0 && library.length > 0 ? <p className="text-[12px] text-lyx-fg-muted">{t("templates.library.emptyCategory")}</p> : null}
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      {previewTemplates.map((tpl, index) => (
-                        <TemplateCard key={tpl.key} template={tpl} selected={form.templateId === tpl.externalTemplateId} onPreview={() => setPreviewIndex(index)} />
-                      ))}
-                    </div>
                   </div>
                 </Field>
               ) : null}

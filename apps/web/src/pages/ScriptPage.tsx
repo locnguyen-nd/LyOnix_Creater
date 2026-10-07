@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm } from "../components/feedback";
 import { useNavigate, useParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button, Field, Select, TextArea, TextInput } from "../components/ui";
@@ -32,6 +33,7 @@ export function ScriptPage() {
   const { t } = useTranslation();
   const { id } = useParams();
   const navigate = useNavigate();
+  const confirm = useConfirm();
   const [job, setJob] = useState<ApiJob | null>(null);
   const [providers, setProviders] = useState<ApiProvider[]>([]);
   const [nextAccountId, setNextAccountId] = useState("");
@@ -58,10 +60,12 @@ export function ScriptPage() {
     const onClick = (event: MouseEvent) => {
       const anchor = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
       if (!anchor || !isInAppNavigation(event, anchor, window.location)) return;
-      if (!window.confirm(t("script.unsavedLeaveConfirm"))) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
+      // The in-app dialog is asynchronous: hold the navigation, then follow the link only when the user confirms.
+      event.preventDefault();
+      event.stopPropagation();
+      void confirm({ title: t("script.unsavedLeaveConfirm"), message: t("script.unsavedLeaveConfirm"), tone: "warn" }).then((ok) => {
+        if (ok) navigate(`${anchor.pathname}${anchor.search}${anchor.hash}`);
+      });
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     document.addEventListener("click", onClick, true);
@@ -69,7 +73,7 @@ export function ScriptPage() {
       window.removeEventListener("beforeunload", onBeforeUnload);
       document.removeEventListener("click", onClick, true);
     };
-  }, [dirty, t]);
+  }, [dirty, t, confirm, navigate]);
   useEffect(() => { void load().catch((err) => setError(err instanceof ApiError ? err.message : t("common.error"))); }, [id]);
   useEffect(() => {
     void api<ApiProvider[]>("/provider-accounts").then((rows) => {

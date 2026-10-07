@@ -171,9 +171,9 @@ describe("FFmpeg argument building", () => {
     expect(withAudio).not.toContain("-an");
   });
 
-  it("does not add an fps filter for <=30fps sources", () => {
-    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 29.97)).not.toContain("fps=");
-    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, null)).not.toContain("fps=");
+  it("always adds a constant-fps filter (CFR), also for <=30fps and unknown-rate sources", () => {
+    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, 29.97)).toContain("fps=30");
+    expect(buildReencodeFilter(DEFAULT_CLIP_TARGET, null)).toContain("fps=30");
   });
 
   it("keyframe probe is bounded by a read interval around the start", () => {

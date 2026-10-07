@@ -8,6 +8,7 @@ import {
   REFRAME_ANALYZE_PROFILE_VERSION,
   REFRAME_ANALYZE_RESULT_TYPE,
   reframeAnalyzeFingerprint,
+  validateCropPlanShape,
   validateReframeAnalyzeJob,
   type ReframeAnalyzeFailure,
   type ReframeAnalyzeJob,
@@ -158,6 +159,7 @@ export class ReframeAnalyzeProcessor {
       return this.failure(jobKey, new MediaJobError("JOB_KEY_CONFLICT", "jobKey was already used for a different reframe.analyze input"), 0);
     }
     if (manifest.configDigest !== digest) return null; // worker settings/models changed: recompute
+    if (validateCropPlanShape(manifest.result.cropPlan).length > 0) return null; // discard plans cached before the t=0 fix
     if (new Date(manifest.result.expiresAt).getTime() <= this.now().getTime()) return null;
     return { ...manifest.result, reused: true };
   }

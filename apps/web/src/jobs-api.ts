@@ -15,6 +15,8 @@ export type ApiProvider = {
   preferredModels: string[];
   modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   isFake: boolean;
+  /** On/off switch for media sources (pexels/apify); missing = on. */
+  enabled?: boolean;
   version: number;
 };
 

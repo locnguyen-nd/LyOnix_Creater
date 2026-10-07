@@ -163,6 +163,8 @@ export type SubmitOrshotRenderInput = {
   size?: string;
   /** Orshot-only `videoOptions`: total length in seconds (fits the template to the narration) and output fps. */
   videoOptions?: { duration?: number; fps?: number };
+  /** `response.includePages`: render only these pages of a multi-page template (a shorter script than the template has pages). */
+  includePages?: number[];
 };
 
 /** `POST /studio/render` in async mode: always answers 202 with a job, never a file. */
@@ -176,7 +178,7 @@ export async function submitOrshotRender(apiKey: string, input: SubmitOrshotRend
       body: JSON.stringify({
         templateId: Number.isFinite(numericId) ? numericId : input.templateId,
         modifications: input.modifications,
-        response: { mode: "async", type: "url", format: input.outputFormat ?? "mp4", ...(input.size ? { size: input.size } : {}) },
+        response: { mode: "async", type: "url", format: input.outputFormat ?? "mp4", ...(input.size ? { size: input.size } : {}), ...(input.includePages && input.includePages.length > 0 ? { includePages: input.includePages } : {}) },
         ...(input.videoOptions && Object.keys(input.videoOptions).length > 0 ? { videoOptions: input.videoOptions } : {}),
         webhook_url: input.webhookUrl,
       }),

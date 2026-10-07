@@ -1,4 +1,4 @@
-import { Inbox } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Inbox, Info, XCircle } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 export function PageHeader({
@@ -21,20 +21,30 @@ export function PageHeader({
   );
 }
 
+const BANNER_STYLE = {
+  info: { box: "border-lyx-border bg-lyx-muted/40 text-lyx-fg", bar: "bg-lyx-fg-subtle", Icon: Info },
+  success: { box: "border-lyx-ok/30 bg-lyx-ok-bg text-lyx-fg", bar: "bg-lyx-ok", Icon: CheckCircle2 },
+  warn: { box: "border-lyx-warn/40 bg-lyx-warn-bg text-lyx-fg", bar: "bg-lyx-warn", Icon: AlertTriangle },
+  danger: { box: "border-lyx-danger/40 bg-lyx-danger-bg text-lyx-fg", bar: "bg-lyx-danger", Icon: XCircle },
+} as const;
+
+/** Inline notice: tone bar + icon + readable text. Warnings and errors are announced to assistive tech (role="alert"). */
 export function Banner({
   variant = "info",
   children,
 }: {
-  variant?: "info" | "warn" | "danger";
+  variant?: "info" | "success" | "warn" | "danger";
   children: ReactNode;
 }) {
-  const style =
-    variant === "danger"
-      ? "border-lyx-danger/40 bg-lyx-danger-bg text-lyx-danger"
-      : variant === "warn"
-        ? "border-lyx-warn/40 bg-lyx-warn-bg text-lyx-warn"
-        : "border-lyx-border text-lyx-fg";
-  return <div className={`mb-4 rounded-[var(--lyx-radius)] border px-3 py-2 text-[12.5px] ${style}`}>{children}</div>;
+  const style = BANNER_STYLE[variant];
+  const iconTone = variant === "danger" ? "text-lyx-danger" : variant === "warn" ? "text-lyx-warn" : variant === "success" ? "text-lyx-ok" : "text-lyx-fg-muted";
+  return (
+    <div role={variant === "danger" || variant === "warn" ? "alert" : "status"} data-variant={variant} className={`relative mb-4 flex items-start gap-2.5 overflow-hidden rounded-[var(--lyx-radius)] border py-2.5 pl-4 pr-3 text-[12.5px] leading-5 ${style.box}`}>
+      <span className={`absolute inset-y-0 left-0 w-1 ${style.bar}`} aria-hidden="true" />
+      <style.Icon size={16} className={`mt-[2px] shrink-0 ${iconTone}`} aria-hidden="true" />
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
 }
 
 export function EmptyState({

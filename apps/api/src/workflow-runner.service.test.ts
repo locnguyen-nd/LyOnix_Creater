@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkflowRunnerService, asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
 import type { AudioVersionsService } from "./audio-versions.service.js";
 import type { PexelsService } from "./pexels.service.js";
@@ -108,6 +108,10 @@ describe("WorkflowRunnerService", () => {
   let mediaAssets: any[];
   let stepRuns: any[];
 
+  // Fixtures use tiny drafts; the narration-length correction (regenerating out-of-band scripts) has its own domain tests.
+  beforeEach(() => { process.env.SCRIPT_LENGTH_CORRECTION = "0"; });
+  afterEach(() => { delete process.env.SCRIPT_LENGTH_CORRECTION; });
+
   beforeEach(() => {
     runs = [draftRun()];
     mediaAssets = [];
@@ -123,6 +127,8 @@ describe("WorkflowRunnerService", () => {
       // Retry idempotency check (workflow-runner.service.ts): no prior "current" audio for this
       // scene id by default, so the normal generate-a-fresh-voice path below is still exercised.
       audioVersion: { findFirst: vi.fn(async () => null) },
+      // Media on/off preflight (MediaPlanService.checkMediaSourcesEnabled): the chosen media account is an enabled Pexels one by default.
+      providerAccount: { findFirst: vi.fn(async () => ({ provider: "pexels", enabled: true, status: "verified", isFake: false })) },
       renderJob: { findFirst: vi.fn(async () => null) },
       workflowRun: {
         findFirst: vi.fn(async ({ where }: any) => {
@@ -513,6 +519,18 @@ describe("WorkflowRunnerService", () => {
     expect(calls.map((call) => [call[3].sceneId, call[3].mediaType])).toEqual([["scene-1", "image"], ["scene-2", "video"]]);
   });
 
+  it("only sends a headline option to internal recipes that declare the headline slot", async () => {
+    prisma.templateSnapshot.findUnique = vi.fn(async () => ({
+      id: templateSnapshotId, providerAccountId: "render-acc", engine: "lyonix",
+      modifications: [{ key: "badge", kind: "text", label: "Badge", required: false }],
+    }));
+    await service.processNext();
+    expect(timelines.persistApprovedForWorkflowRun).toHaveBeenCalledWith(
+      "run-1", projectId, userId, "staff", expect.objectContaining({ optionValues: {} }),
+    );
+    expect(runs[0]).toMatchObject({ status: "render_queued" });
+  });
+
   it("bounded-retries a transient provider failure (re-queues to draft, increments attempts) then fails after maxAttempts", async () => {
     audioVersions.generateForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "rate limited" }));
     await service.processNext();
@@ -562,6 +580,9 @@ describe("WorkflowRunnerService", () => {
   });
 
   describe("VE2E-61 concurrency", () => {
+    // These fixtures use tiny drafts: the one-shot length correction would double the (counted) script calls.
+    beforeEach(() => { process.env.SCRIPT_LENGTH_CORRECTION = "0"; });
+    afterEach(() => { delete process.env.SCRIPT_LENGTH_CORRECTION; });
     const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     const persistedTimelineScenes = () => persistedTimeline().scenes.map((scene: any) => scene.audioVersionId);
     const gatedVoice = () => {

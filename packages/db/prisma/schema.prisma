@@ -279,6 +279,8 @@ model ProviderAccount {
   cooldownUntil      DateTime?
   configVersion      Int                       @default(1)
   isFake             Boolean                   @default(false)
+  /// Admin/owner on-off switch for media sources (pexels/apify). Off = never called by jobs or Studio; default on for every existing account.
+  enabled            Boolean                   @default(true)
   version            Int                       @default(1)
   createdAt          DateTime                  @default(now())
   updatedAt          DateTime                  @updatedAt

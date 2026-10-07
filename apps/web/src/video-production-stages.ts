@@ -32,7 +32,7 @@ export const STAGE_COLORS: Record<StageKey, string> = {
 export function stageOfStep(stepKey: string): StageKey | null {
   // Bookkeeping steps (`*_diagnostics`, `duration_budget`, `run_usage`) are rewritten later in the run (e.g. on resume), so their
   // start/end span minutes and would stretch a stage; only real work steps place a stage on the timeline.
-  if (stepKey === "extract_keywords") return "keywords";
+  if (stepKey === "extract_keywords" || stepKey === "keywords_from_script") return "keywords";
   if (stepKey.startsWith("generate_audio")) return "voice";
   if (stepKey.startsWith("import_media")) return "media";
   if (stepKey === "persist_timeline_version" || stepKey === "submit_render") return "render";

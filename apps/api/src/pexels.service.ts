@@ -138,8 +138,9 @@ export class PexelsService {
     const account = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, deletedAt: null } });
     if (!account) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản provider không tồn tại hoặc đã bị xóa", status: 503 };
     if (account.role !== "visual" || account.provider !== "pexels") {
-      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Tài khoản không phải Pexels (visual)", status: 503 };
+      return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: account.provider === "apify" ? "Tài khoản media đang chọn là Apify; không dùng Pexels dự phòng" : "Tài khoản không phải Pexels (visual)", status: 503 };
     }
+    if (account.enabled === false) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Nguồn Pexels đang tắt trong cấu hình provider", status: 403 };
     const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
     if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản Pexels chưa verify", status: 503 };
     return { ok: true, data: { id: account.id, encryptedSecret: account.encryptedSecret } };

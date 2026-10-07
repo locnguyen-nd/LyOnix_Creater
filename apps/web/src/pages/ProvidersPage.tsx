@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useConfirm, useToast } from "../components/feedback";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Modal } from "../components/Modal";
 import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
@@ -7,6 +8,7 @@ import { useMe } from "../session";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
 import { isInternalRenderProvider } from "../studio/render-provider";
+import { readyModelCount } from "./provider-model-summary";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
 type AddableKind = "openai" | "gemini" | "xai" | "openrouter" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate" | "orshot";
@@ -62,6 +64,8 @@ function ProviderLogo({ provider }: { provider: string }) {
 
 export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
+  const toast = useToast();
   const me = useMe();
   const [rows, setRows] = useState<ApiProvider[]>([]);
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
@@ -78,7 +82,6 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [editPreferredModels, setEditPreferredModels] = useState("");
   const [replacementSecret, setReplacementSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   // V00-10: the static catalog is only a pre-connection suggestion for the "add account" form
   // (no account exists yet, so nothing has been verified). Once an account row exists,
   // `row.availableModels` is real account-scoped/generate-probed data - see `modelOptionsFor`.
@@ -95,14 +98,14 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
     return t(`providers.modelStatus.${entry.status}`, { defaultValue: entry.status });
   };
   const refresh = async () => { setRows(await api<ApiProvider[]>("/provider-accounts")); };
-  const confirmVerificationCost = () => window.confirm(t("providers.verifyCostWarning"));
+  const confirmVerificationCost = () => confirm({ title: t("providers.verify"), message: t("providers.verifyCostWarning"), tone: "warn", confirmLabel: t("providers.verify") });
   useEffect(() => {
     void refresh().catch((err) => setError(err instanceof ApiError ? err.message : t("common.error")));
     void api<CatalogItem[]>("/provider-catalog").then(setCatalog).catch(() => undefined);
   }, []);
 
   const save = async () => {
-    if (!confirmVerificationCost()) return;
+    if (!(await confirmVerificationCost())) return;
     try {
       setError(null);
       const role = PROVIDER_ROLE[provider];
@@ -110,7 +113,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       const created = await api<ApiProvider>("/provider-accounts", { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ name, provider, role, scope, model, secret }) });
       try {
         const verified = await api<ApiProvider>(`/provider-accounts/${created.id}/verify`, { method: "POST", headers: await csrfHeaders() });
-        setNotice(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`);
+        toast.success(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`);
       } catch (err) { setError(err instanceof ApiError ? err.message : t("providers.verifyFail")); }
       await refresh();
       setSecret(""); setEmbedId(""); setOpen(false);
@@ -130,29 +133,42 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
         headers: { ...(await csrfHeaders()), "If-Match": `\"${editing.version}\"` },
         body: JSON.stringify({ name: editName, model: editing.provider === "orshot" ? editModel.trim() || NO_MODEL_PLACEHOLDER : editModel, ...(editing.role === "content" ? { visionModel: editVisionModel || null, preferredModels: editPreferredModels.split(",").map((item) => item.trim()).filter(Boolean) } : {}), ...(replacementSecret ? { secret: replacementSecret } : {}) }),
       });
-      await refresh(); setEditing(null); setReplacementSecret(""); setNotice(t("providers.updated"));
+      await refresh(); setEditing(null); setReplacementSecret(""); toast.success(t("providers.updated"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
   };
 
   const remove = async (row: ApiProvider) => {
-    if (!window.confirm(t("providers.deleteConfirm", { name: row.name }))) return;
+    if (!(await confirm({ title: t("providers.delete"), message: t("providers.deleteConfirm", { name: row.name }), confirmLabel: t("providers.delete") }))) return;
     try {
       setError(null);
       await api(`/provider-accounts/${row.id}`, {
         method: "DELETE",
         headers: { ...(await csrfHeaders()), "If-Match": `\"${row.version}\"` },
       });
-      await refresh(); setNotice(t("providers.deleted"));
+      await refresh(); toast.success(t("providers.deleted"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
   };
 
   const verifyRow = async (row: ApiProvider) => {
-    if (!confirmVerificationCost()) return;
+    if (!(await confirmVerificationCost())) return;
     try {
       setError(null);
       const verified = await api<ApiProvider>(`/provider-accounts/${row.id}/verify`, { method: "POST", headers: await csrfHeaders() });
-      setNotice(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`); await refresh();
+      toast.success(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`); await refresh();
     } catch (err) { setError(err instanceof ApiError ? err.message : t("providers.verifyFail")); await refresh(); }
+  };
+
+  const isSwitchable = (row: ApiProvider) => row.provider === "pexels" || row.provider === "apify";
+  const toggleEnabled = async (row: ApiProvider, enabled: boolean) => {
+    try {
+      setError(null);
+      const updated = await api<ApiProvider>(`/provider-accounts/${row.id}`, {
+        method: "PATCH",
+        headers: { ...(await csrfHeaders()), "If-Match": `"${row.version}"` },
+        body: JSON.stringify({ enabled }),
+      });
+      setRows((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); await refresh(); }
   };
 
   const rowsByRole = (role: ProviderRole) => rows.filter((row) => row.role === role);
@@ -169,7 +185,6 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
         <PageHeader title={t("providers.title")} actions={<Button onClick={() => setOpen(true)}>{t("providers.add")}</Button>} />
       )}
       {error ? <Banner variant="danger">{error}</Banner> : null}
-      {notice ? <Banner variant="info">{notice}</Banner> : null}
       {ROLE_ORDER.map((role) => {
         const group = rowsByRole(role);
         if (!group.length) return null;
@@ -184,7 +199,10 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                       <ProviderLogo provider={row.provider} />
                       <h3 className="text-[16px] font-semibold">{row.name}</h3>
                     </div>
-                    <StatusPill tone={row.status === "verified" ? "ok" : row.status === "failed" ? "danger" : "neutral"}>{t(`providers.${row.status}`)}</StatusPill>
+                    <div className="flex items-center gap-2">
+                      {isSwitchable(row) && row.enabled === false ? <StatusPill tone="neutral">{t("providers.statusOff")}</StatusPill> : null}
+                      <StatusPill tone={row.status === "verified" ? "ok" : row.status === "failed" ? "danger" : "neutral"}>{t(`providers.${row.status}`)}</StatusPill>
+                    </div>
                   </div>
                   <p className="text-[12px] text-lyx-fg-muted">{row.provider} · {row.scope === "personal" ? t("providers.personal") : t("providers.organization")}</p>
                   {hasModelChoice(row) ? (
@@ -203,8 +221,14 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                           {modelOptionsFor(row).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(row, item)}</option>)}
                         </Select>
                       </Field>
-                      {row.role === "content" ? <div className="mt-2 space-y-1 text-[11px] text-lyx-fg-muted">{modelOptionsFor(row).map((item) => <p key={item}>{item}: {modelStatusLabel(row, item)}</p>)}</div> : null}
+                      {row.role === "content" ? <p className="mt-2 text-[12px] text-lyx-fg-muted">{t("providers.readyModelCount", { count: readyModelCount(row) })}</p> : null}
                     </div>
+                  ) : null}
+                  {isSwitchable(row) ? (
+                    <label className="mt-3 flex items-center gap-2 text-[13px]">
+                      <input type="checkbox" role="switch" data-testid={`provider-switch-${row.id}`} checked={row.enabled !== false} onChange={(e) => void toggleEnabled(row, e.target.checked)} />
+                      <span>{row.enabled === false ? t("providers.sourceSwitchOff") : t("providers.sourceSwitchOn")}</span>
+                    </label>
                   ) : null}
                   {isInternalRenderProvider(row.provider) ? (
                     <p className="mt-3 text-[12px] text-lyx-fg-muted" data-testid="system-account-note">{t("renderEngine.systemAccountNote")}</p>
@@ -272,7 +296,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                 {modelOptionsFor(editing).map((item) => <option key={item} value={item}>{item} · {modelStatusLabel(editing, item)}</option>)}
               </Select>
             </Field> : null}
-            {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })} hint={modelOptionsFor(editing).join(", ")}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
+            {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
             <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
             <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>

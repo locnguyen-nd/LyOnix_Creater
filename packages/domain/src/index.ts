@@ -98,6 +98,7 @@ export {
   type AutoRenderAssignment,
   type AutoRenderAssignmentsResult,
 } from "./auto-render-assignments.js";
+export { orshotIncludePages, orshotMaxScenes, orshotPageCount } from "./orshot-page-slots.js";
 export {
   visionModerationDecisions,
   isRightsUsableForAuto,
@@ -251,7 +252,7 @@ export {
   DEFAULT_CHARS_PER_SECOND,
   defaultCharsPerSecond,
   calibrateCharsPerSecond,
-  buildNarrationBudget,
+  buildNarrationBudget, narrationLengthCorrection,
   checkDurationBand,
   buildDurationBudgetPromptLines,
   type DurationSample,
@@ -281,6 +282,7 @@ export * from "./caption-ass.js";
 export * from "./render-router.js";
 export * from "./subtitle-edit.js";
 export * from "./creation-form.js";
+export { mergeScenesToCap } from "./script-scene-cap.js";
 export * from "./caption-fonts.js";
 export * from "./caption-style-capabilities.js";
 export * from "./caption-style.js";

@@ -161,11 +161,11 @@ const parsePlatformList = (raw: string, allowed: ReadonlySet<ApifyPlatform>, fal
   return unique.length > 0 ? unique : fallback;
 };
 
-/** Platforms for VIDEO slots, in order: env `APIFY_VIDEO_PLATFORMS` (alias `APIFY_AUTO_PLATFORMS`; legacy single `APIFY_AUTO_PLATFORM`), default TikTok. Image-only platforms are never used for a video slot. */
+/** Platforms for VIDEO slots, in order: env `APIFY_VIDEO_PLATFORMS` (alias `APIFY_AUTO_PLATFORMS`; legacy single `APIFY_AUTO_PLATFORM`), default TikTok then X (the next platform is searched only when the previous one yields no usable clip). Image-only platforms are never used for a video slot. */
 export const apifyAutoPlatformsFromEnv = (): ApifyPlatform[] => {
   const raw = process.env.APIFY_VIDEO_PLATFORMS ?? process.env.APIFY_AUTO_PLATFORMS;
-  if (raw !== undefined) return parsePlatformList(raw, VIDEO_PLATFORMS, ["tiktok"]);
-  return process.env.APIFY_AUTO_PLATFORM ? [apifyAutoPlatformFromEnv()] : ["tiktok"];
+  if (raw !== undefined) return parsePlatformList(raw, VIDEO_PLATFORMS, ["tiktok", "x"]);
+  return process.env.APIFY_AUTO_PLATFORM ? [apifyAutoPlatformFromEnv()] : ["tiktok", "x"];
 };
 
 /** Platforms for IMAGE slots, in order: env `APIFY_IMAGE_PLATFORMS`, default Pinterest. */
@@ -214,6 +214,18 @@ export class MediaPlanService {
     /** VE2E-55: keyword extraction for Studio plans. Absent = no extraction (segments without a ja keyword go to Pexels). */
     @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
   ) {}
+
+  /**
+   * Job-level check of the media on/off switches: the chosen media account (Pexels) must be on, or an Apify account must be on.
+   * Both off (or not usable) -> a clear failure before any provider is called.
+   */
+  async checkMediaSourcesEnabled(userId: string, role: "admin" | "staff", mediaAccountId: string): Promise<{ ok: true } | { ok: false; code: "PROVIDER_CAPABILITY_UNAVAILABLE"; message: string }> {
+    const selected = await this.prisma.providerAccount.findFirst({ where: { id: mediaAccountId, deletedAt: null }, select: { provider: true, enabled: true } });
+    if (selected?.provider === "pexels" && selected.enabled !== false) return { ok: true };
+    if (selected?.provider === "apify" && selected.enabled !== false) return { ok: true };
+    if (this.apify && (await this.apify.findAccountForUser(userId, role))) return { ok: true };
+    return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Các nguồn media (Pexels/Apify) đều đang tắt hoặc chưa sẵn sàng; bật ít nhất một nguồn trong cấu hình provider." };
+  }
 
   /**
    * VE2E-55: Studio counterpart of the Auto runner's extraction. One call for all given segments lacking a valid ja
@@ -304,6 +316,17 @@ export class MediaPlanService {
     return { ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 };
   }
 
+  /** True when the chosen media account is an enabled, verified Pexels account (a usable fallback). Unknown/mock environments count as usable. */
+  private async pexelsFallbackUsable(mediaAccountId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.providerAccount.findFirst({ where: { id: mediaAccountId, deletedAt: null }, select: { provider: true, enabled: true, status: true, isFake: true } });
+      if (!row) return true;
+      return row.provider === "pexels" && row.enabled !== false && (row.isFake ? process.env.NODE_ENV === "test" : row.status === "verified");
+    } catch {
+      return true;
+    }
+  }
+
   /**
    * VE2E-46: Apify first. Runs only when the segment has `keywords.ja` AND the user can see a verified Apify account; a single
    * Apify search (ja) is ranked + moderated once by `ApifyService.autoImportForSegment`. Returns the source, or the reason to
@@ -313,7 +336,7 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified?: boolean; lenient?: boolean },
   ): Promise<{ source: SegmentSource } | { reason: string | null; quality?: MediaPlanApifyQuality | null }> {
     if (!this.apify) return { reason: null };
     const keyword = apifyKeywordForSegment(input.segment);
@@ -324,25 +347,47 @@ export class MediaPlanService {
       const brief = this.segmentBrief(input.script, input.segment);
       // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
       const usedExternalIds = input.ledger.apifyPlainIds;
+      if (input.lenient) {
+        // Reservations of clips that were looked at but never committed (overlay/frame rejections of the strict pass) may be reconsidered now;
+        // a clip another segment really uses stays excluded (and a duplicate asset is rejected below anyway).
+        const committed = new Set([...input.ledger.externalIds].map((id) => plainExternalId(id)));
+        for (const id of [...usedExternalIds]) if (!committed.has(id)) usedExternalIds.delete(id);
+      }
       let outcome: Awaited<ReturnType<ApifyService["autoImportForSegment"]>> | null = null;
       let firstFailure: { reason: string; quality: MediaPlanApifyQuality | null } | null = null;
       // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
       const visualKind = segmentVisualKind(input.segment);
-      for (const platform of visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv()) {
-        // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
-        const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
-          platform,
-          mediaType: visualKind,
-          keyword,
-          brief: { ...brief, phrases: [keyword, ...brief.phrases.filter((phrase) => phrase !== keyword)].slice(0, MAX_QUERY_VARIANTS) },
-          sceneId: input.segment.sceneIds[0]!,
-          usedExternalIds,
-          scriptLanguage: input.script.language,
-          segmentDurationSeconds: input.segment.durationMs / 1000,
-          ...(input.job ? { job: input.job } : {}),
-        }));
-        if (attempt.ok) { outcome = attempt; break; }
-        firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
+      const platformList = visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv();
+      // Strict pass: the segment's Japanese keyword. Best-effort pass: also its English keyword and its subject (Pinterest/X index them better,
+      // and segments split from one plan segment would otherwise exhaust the same 10 results).
+      const keywords = input.lenient ? [...new Set([keyword, input.segment.keywords?.en.trim() ?? "", input.segment.subject?.trim() ?? ""].filter(Boolean))] : [keyword];
+      // A failed download / frame check / unavoidable overlay only rejects THAT clip: the next ranked candidate gets up to 3 tries per platform.
+      const retryable = (reason: string) => reason.startsWith("apify_import_failed") || reason.startsWith("apify_frames_rejected") || reason.startsWith("apify_overlay_unavoidable");
+      search: for (const searchKeyword of keywords) {
+        for (const [platformIndex, platform] of platformList.entries()) {
+          for (let tries = 0; tries < 3; tries += 1) {
+            // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
+            const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
+              platform,
+              mediaType: visualKind,
+              keyword: searchKeyword,
+              brief: { ...brief, phrases: [searchKeyword, ...brief.phrases.filter((phrase) => phrase !== searchKeyword)].slice(0, MAX_QUERY_VARIANTS) },
+              sceneId: input.segment.sceneIds[0]!,
+              usedExternalIds,
+              scriptLanguage: input.script.language,
+              segmentDurationSeconds: input.segment.durationMs / 1000,
+              ...(input.allowUnverified ? { allowUnverified: true } : {}),
+              // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
+              ...((input.allowUnverified && platformIndex === platformList.length - 1) || input.lenient ? { keepOverlayFlagged: true } : {}),
+              // Best-effort fill: the best candidate not rejected by vision is taken even below the relevance threshold / without the strict social filter.
+              ...(input.lenient ? { lenient: true } : {}),
+              ...(input.job ? { job: input.job } : {}),
+            }));
+            if (attempt.ok) { outcome = attempt; break search; }
+            firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
+            if (!retryable(attempt.reason)) break;
+          }
+        }
       }
       if (!outcome) return { reason: firstFailure?.reason ?? "apify_no_platform", quality: firstFailure?.quality ?? null };
       const asset = outcome.data.asset;
@@ -376,16 +421,32 @@ export class MediaPlanService {
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; bestEffort?: boolean },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
-    const apifyAttempt = await this.tryApify(projectId, userId, role, input);
+    const pexelsUsable = await this.pexelsFallbackUsable(input.providerAccountId);
+    const apifyAttempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: !pexelsUsable });
     if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
     const fallbackReason = apifyAttempt.reason;
+    // Last resort (Auto): rather than leaving the timeline with a hole, take the best-fitting candidate vision does not reject.
+    let lenientReason: string | null = null;
+    const lenientApify = async (): Promise<SegmentSource | null> => {
+      if (!input.bestEffort) return null;
+      const attempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: true, lenient: true });
+      if ("source" in attempt) return { ...attempt.source, fallbackReason: "best_effort_fill" };
+      lenientReason = attempt.reason ?? "không rõ lý do";
+      return null;
+    };
+    if (!pexelsUsable) {
+      const filled = await lenientApify();
+      if (filled) return { ok: true, data: filled };
+      // Pexels is off / not the chosen account: say WHY Apify found nothing instead of a misleading "Pexels unavailable".
+      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: `Apify không có nguồn phù hợp cho đoạn ${input.segment.segmentId} (${fallbackReason ?? "không rõ lý do"}${lenientReason ? `; lấp đầy tối đa: ${lenientReason}` : ""}). Pexels không dùng được làm dự phòng; chọn nguồn thủ công trong Studio hoặc thử lại.`, status: 422 };
+    }
     const apifyQuality = apifyAttempt.quality ?? null;
     const brief = this.segmentBrief(input.script, input.segment);
     const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
-    return input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
+    const pexelsResult = await input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
       const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
         providerAccountId: input.providerAccountId,
         sceneId: input.segment.sceneIds[0]!,
@@ -407,6 +468,9 @@ export class MediaPlanService {
       input.ledger.add(source);
       return { ok: true, data: source };
     });
+    if (pexelsResult.ok) return pexelsResult;
+    const filled = await lenientApify();
+    return filled ? { ok: true, data: filled } : pexelsResult;
   }
 
   /**
@@ -444,7 +508,8 @@ export class MediaPlanService {
       for (const segment of input.segments) if (!(await this.findReusableSource(projectId, segment, input.ledger))) pending.push(segment);
       if (pending.length > 0) extractionReason = (await input.beforeSourcing(pending)) ?? null;
     }
-    const job = new ApifyJobContext();
+    // The vision budget scales with the number of segments (default 6 calls/job starved later segments of any verification); VISION_MAX_CALLS_PER_JOB still overrides.
+    const job = new ApifyJobContext(process.env.VISION_MAX_CALLS_PER_JOB ? {} : { visionMaxCalls: Math.max(6, input.segments.length * 2) });
     // VE2E-67 (CR-SUBJECT-REFRAME Q5): Auto (`stopOnFailure`) swaps a candidate whose overlay cannot be avoided; Studio only flags it.
     job.overlayPolicy = input.stopOnFailure ? "swap" : "flag";
     const results: Array<SourcedSegment[] | undefined> = new Array(input.segments.length).fill(undefined);
@@ -457,6 +522,13 @@ export class MediaPlanService {
      * sourced as their own segment (`<id>-b`), up to {@link MAX_SECOND_SOURCE_SPLITS} times. If the extra source cannot be found the
      * original single-source behaviour is kept, so a run never fails because of this refinement.
      */
+    const takenIds = new Set(input.segments.map((item) => item.segmentId));
+    const uniqueSegmentId = (base: string): string => {
+      let candidate = base;
+      for (let n = 2; takenIds.has(candidate); n += 1) candidate = `${base}${n}`;
+      takenIds.add(candidate);
+      return candidate;
+    };
     const withSecondSource = async (head: SourcedSegment, depth: number): Promise<SourcedSegment[]> => {
       const { segment, source } = head;
       if (!source || depth >= MAX_SECOND_SOURCE_SPLITS || source.kind !== "video") return [head];
@@ -466,7 +538,7 @@ export class MediaPlanService {
       const uncovered = new Set(plan.uncoveredSceneIds);
       const tailIds = segment.sceneIds.filter((sceneId) => uncovered.has(sceneId));
       const coveredIds = segment.sceneIds.filter((sceneId) => !uncovered.has(sceneId));
-      const tailSegment: PlannedSegment = { ...segment, segmentId: `${segment.segmentId}-b`, sceneIds: tailIds, durationMs: segmentMs(tailIds) };
+      const tailSegment: PlannedSegment = { ...segment, segmentId: uniqueSegmentId(`${segment.segmentId}-b`), sceneIds: tailIds, durationMs: segmentMs(tailIds) };
       try {
         const tail = await sourceOne(tailSegment, depth + 1);
         if (tail.some((piece) => !piece.source)) return [head];
@@ -481,7 +553,7 @@ export class MediaPlanService {
       let source = await this.findReusableSource(projectId, segment, input.ledger);
       let errorCode: string | null = null;
       if (!source) {
-        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
+        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job, ...(input.stopOnFailure ? { bestEffort: true } : {}) });
         const imported = await (input.runImport ? input.runImport(segment, task) : task());
         if (imported.ok) {
           source = imported.data;

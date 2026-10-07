@@ -105,6 +105,18 @@ describe("planReframe (VE2E-65)", () => {
     }
   });
 
+  it("starts a moving crop at t=0 when the first detector sample is later", () => {
+    const track: SubjectTrack = {
+      subjectId: "late",
+      kind: "person",
+      samples: [296, 888, 1480, 2072].map((tMs, i) => ({ tMs, box: box(100 + i * 400, 300, 200, 500) })),
+    };
+    const plan = planReframe({ sourceWidthPx: 1920, sourceHeightPx: 1080, durationMs: 2400, subjects: [track] });
+    expect(plan.mode).toBe("keyframes");
+    expect(plan.keyframes[0]!.tMs).toBe(0);
+    expect(plan.keyframes.map((frame) => frame.tMs)).toEqual([...new Set(plan.keyframes.map((frame) => frame.tMs))]);
+  });
+
   it("overlay active only for part of the clip is dodged during that part", () => {
     const track: SubjectTrack = { subjectId: "a", kind: "person", samples: [{ tMs: 0, box: box(1300, 300, 200, 500) }, { tMs: 4000, box: box(1300, 300, 200, 500) }] };
     const logo: ExclusionRegion = { kind: "logo", box: box(1500, 0, 400, 150), startMs: 2000, endMs: 4000 };
