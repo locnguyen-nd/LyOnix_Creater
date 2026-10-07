@@ -14,7 +14,7 @@
  * derivative cut (`decideStripAudio`, VE2E-37).
  *
  * No FFmpeg here; results/runs are bounded (<=20 items, 120 s, 1 retry) inside the adapter. A per
- * (project, platform) single-flight guard and a 15-minute result cache avoid paying twice for the same query.
+ * (project, platform) single-flight guard and a result cache (24 h search-only, 15 min with download links) avoid paying twice for the same query.
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -23,11 +23,13 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
   APIFY_HOST_ALLOWLIST,
+  APIFY_MAX_BATCH_POSTS,
   ProviderError,
   addApifyUsage,
   emptyApifyUsage,
   fetchApifyConcurrencyLimit,
   fetchApifyTikTokPost,
+  fetchApifyTikTokPosts,
   hostMatchesSuffix,
   isLiveContentKind,
   isApifyPlatform,
@@ -73,10 +75,23 @@ export type ApifyOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCo
 const IMPORT_REF_TTL_MS = 30 * 60 * 1000;
 /** VE2E-51: TTL of the shared search cache (memory + file, so the API process (Studio) and the worker process (Auto) share it). Env `APIFY_CACHE_TTL_MS`. */
 const DEFAULT_RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
-const resultCacheTtlMs = () => {
-  const value = Number(process.env.APIFY_CACHE_TTL_MS);
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_RESULT_CACHE_TTL_MS;
+/** VE2E-132 (CR-MEDIA-SLA 3.2): search-only results (candidate metadata, no files) are reusable across jobs of the same topic for 24 h. */
+const DEFAULT_SEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** `APIFY_CACHE_TTL_MS`, when set, applies to both kinds; otherwise search-only = 24 h and a result carrying download links = 15 min (links expire). */
+const resultCacheTtlMs = (kind: "search" | "download" = "download") => {
+  const raw = process.env.APIFY_CACHE_TTL_MS;
+  const value = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+  if (Number.isFinite(value) && value >= 0) return value;
+  return kind === "search" ? DEFAULT_SEARCH_CACHE_TTL_MS : DEFAULT_RESULT_CACHE_TTL_MS;
 };
+/**
+ * VE2E-132: download the chosen posts of a job in ONE Actor run (env `APIFY_BATCH_DOWNLOAD`). Default OFF until the owner-approved probe
+ * confirms `clockworks/tiktok-scraper` takes several `postURLs` (and the field name, `APIFY_TIKTOK_POST_URL_FIELD`). OFF = one run per clip.
+ */
+export const apifyBatchDownloadEnabled = () => flagOn(process.env.APIFY_BATCH_DOWNLOAD, false);
+/** Batch window (ms) after the first registered post before the single run starts (env `APIFY_BATCH_WINDOW_MS`, default 1500) and size threshold (`APIFY_BATCH_MAX`, default 8, <= adapter max). */
+const apifyBatchWindowMs = () => { const v = Number(process.env.APIFY_BATCH_WINDOW_MS); return Number.isFinite(v) && v >= 0 ? v : 1500; };
+const apifyBatchMax = () => { const v = Math.floor(Number(process.env.APIFY_BATCH_MAX)); return Number.isFinite(v) && v >= 1 ? Math.min(v, APIFY_MAX_BATCH_POSTS) : 8; };
 /**
  * VE2E-131: Actor runs allowed at once per (project, platform) (env `APIFY_MAX_CONCURRENT_RUNS`, default 10). More searches WAIT in a FIFO
  * queue (up to `APIFY_QUEUE_WAIT_TIMEOUT_MS`, default 15 min) instead of failing with PROVIDER_RATE_LIMITED.
@@ -100,6 +115,9 @@ export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, tr
  * VE2E-51: state of ONE sourcing job (Auto run or Studio media plan): accumulated Apify spend and the identical
  * (platform, keyword) searches already made, so segments with the same keyword share one Actor run.
  */
+type PostBatchEntry = { chosen: ApifyCandidateResult; waiters: Array<(r: { ok: true; result: ApifyCandidateResult } | { ok: false; code: string }) => void> };
+type PostBatch = { entries: Map<string, PostBatchEntry>; timer: ReturnType<typeof setTimeout> | null };
+
 export class ApifyJobContext {
   readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
@@ -107,6 +125,8 @@ export class ApifyJobContext {
   readonly vision: VisionBudget;
   /** Clip ids whose download/import failed in this job: never picked again (a retry then moves on to the next ranked candidate). */
   readonly failedIds = new Set<string>();
+  /** VE2E-132: posts waiting for the shared download run, per (account, lang). */
+  readonly postBatches = new Map<string, PostBatch>();
   constructor(opts: { visionMaxCalls?: number } = {}) {
     this.vision = new VisionBudget(opts.visionMaxCalls ? { maxCalls: opts.visionMaxCalls } : {});
   }
@@ -246,7 +266,7 @@ export class ApifyService {
       // Best-effort prune of expired entries (working files are short-lived, never kept for days).
       for (const name of await readdir(dir)) {
         const info = await stat(join(dir, name)).catch(() => null);
-        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, 60_000)) await unlink(join(dir, name)).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, resultCacheTtlMs("search"), 60_000)) await unlink(join(dir, name)).catch(() => undefined);
       }
     } catch {
       // The cache is an optimisation only.
@@ -320,10 +340,11 @@ export class ApifyService {
     const limit = Math.min(Math.max(Math.floor(input.limit ?? 10), 1), 20);
     const keyword = input.keyword.trim().replace(/\s+/g, " ");
     const download = input.download !== false;
-    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
+    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.normalize("NFKC").toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
     const key = keyFor(download);
     const altKey = download ? null : keyFor(true);
-    const ttl = resultCacheTtlMs();
+    const ttlFor = (dl: boolean) => resultCacheTtlMs(dl ? "download" : "search");
+    const ttl = ttlFor(download);
 
     const memo = job?.searches.get(key);
     if (memo) {
@@ -331,14 +352,17 @@ export class ApifyService {
       return { outcome: await memo, reused: true };
     }
     const work = (async (): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> => {
-      if (ttl > 0) {
+      {
         const now = Date.now();
         for (const candidate of altKey ? [key, altKey] : [key]) {
           const hit = this.cache.get(candidate);
-          if (hit && now - hit.at < ttl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
+          const candidateTtl = ttlFor(candidate === altKey ? true : download);
+          if (hit && candidateTtl > 0 && now - hit.at < candidateTtl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
         }
         for (const candidate of altKey ? [key, altKey] : [key]) {
-          const hit = await this.readFileCache(candidate, ttl);
+          const candidateTtl = ttlFor(candidate === altKey ? true : download);
+          if (candidateTtl <= 0) continue;
+          const hit = await this.readFileCache(candidate, candidateTtl);
           if (hit) {
             this.cache.set(candidate, { at: now, outcome: hit });
             return { outcome: { ok: true, data: hit }, reused: true };
@@ -364,7 +388,7 @@ export class ApifyService {
           if (ttl > 0) {
             const now = Date.now();
             this.cache.set(key, { at: now, outcome });
-            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= ttl) this.cache.delete(k);
+            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= Math.max(ttl, resultCacheTtlMs("search"))) this.cache.delete(k);
             await this.writeFileCache(key, outcome, ttl);
           }
           return { ok: true, data: outcome };
@@ -617,6 +641,66 @@ export class ApifyService {
     }
   }
 
+  /**
+   * VE2E-132: segments sourced in parallel register their chosen post here; the first registration opens a short window
+   * (`APIFY_BATCH_WINDOW_MS`), reaching `APIFY_BATCH_MAX` posts flushes at once, then ONE Actor run downloads them all and every segment
+   * receives its own result (matched by video id). A clip missing from the result fails only its own segment (-> next candidate).
+   */
+  private joinPostBatch(account: { id: string; encryptedSecret: string }, chosen: ApifyCandidateResult, job: ApifyJobContext, lang: ApifyLang): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    const batchKey = `${account.id}:${lang}`;
+    let batch = job.postBatches.get(batchKey);
+    if (!batch) {
+      batch = { entries: new Map(), timer: null };
+      job.postBatches.set(batchKey, batch);
+    }
+    const open = batch;
+    return new Promise((resolve) => {
+      const id = chosen.candidate.externalId;
+      const entry = open.entries.get(id) ?? { chosen, waiters: [] };
+      entry.waiters.push(resolve);
+      open.entries.set(id, entry);
+      const flush = () => {
+        if (open.timer) clearTimeout(open.timer);
+        open.timer = null;
+        if (job.postBatches.get(batchKey) === open) job.postBatches.delete(batchKey);
+        void this.runPostBatch(account, open, job, lang);
+      };
+      if (open.entries.size >= apifyBatchMax()) flush();
+      else if (!open.timer) open.timer = setTimeout(flush, apifyBatchWindowMs());
+    });
+  }
+
+  private async runPostBatch(account: { id: string; encryptedSecret: string }, batch: PostBatch, job: ApifyJobContext, lang: ApifyLang): Promise<void> {
+    const entries = [...batch.entries.entries()];
+    const usage = emptyApifyUsage();
+    const settle = (id: string, value: { ok: true; result: ApifyCandidateResult } | { ok: false; code: string }) => {
+      for (const waiter of batch.entries.get(id)!.waiters) waiter(value);
+    };
+    try {
+      const outcome = await this.actorCall(() => fetchApifyTikTokPosts(
+        decryptSecret(account.encryptedSecret),
+        {
+          posts: entries.map(([id, e]) => ({ postUrl: e.chosen.deferredPostUrl ?? "", expectedVideoId: id })),
+          lang,
+          providerAccountId: account.id,
+          runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+          usageSink: usage,
+          ...(process.env.APIFY_TIKTOK_POST_URL_FIELD ? { postUrlField: process.env.APIFY_TIKTOK_POST_URL_FIELD } : {}),
+        },
+        this.apifyDeps,
+      ));
+      for (const [id] of entries) {
+        const found = outcome.byVideoId.get(id);
+        settle(id, found?.ok ? { ok: true, result: found.result } : { ok: false, code: found && !found.ok ? found.code : "PROVIDER_SCHEMA_INVALID" });
+      }
+    } catch (error) {
+      const code = error instanceof ProviderError ? error.code : "PROVIDER_UNAVAILABLE";
+      for (const [id] of entries) settle(id, { ok: false, code });
+    } finally {
+      job.addRun(usage); // the whole batch is ONE run: counted once
+    }
+  }
+
   /** Phase 2: run the primary TikTok Actor for ONE chosen post with download on; the result is import-ready. Usage goes to the job. */
   private async fetchChosenPost(
     account: { id: string; encryptedSecret: string },
@@ -624,6 +708,7 @@ export class ApifyService {
     job: ApifyJobContext,
     lang: ApifyLang = "ja",
   ): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    if (apifyBatchDownloadEnabled() && chosen.deferredPostUrl) return this.joinPostBatch(account, chosen, job, lang);
     const usage = emptyApifyUsage();
     try {
       const outcome = await this.actorCall(() => fetchApifyTikTokPost(

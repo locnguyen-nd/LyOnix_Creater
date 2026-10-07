@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
-import { APIFY_DOWNLOAD_RUN_TIMEOUT_SECS, buildActorInput, buildTikTokPostInput, fetchApifyTikTokPost, normalizeApifyItems, searchApify, type ApifyDeps } from "./apify.js";
+import { APIFY_DOWNLOAD_RUN_TIMEOUT_SECS, buildActorInput, buildTikTokPostInput, fetchApifyTikTokPost, fetchApifyTikTokPosts, normalizeApifyItems, searchApify, type ApifyDeps } from "./apify.js";
 
 // VE2E-51: fixtures mirror the FIELD SHAPES of the owner-job dataset (VE2E-50 diagnosis); every value is fake.
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -143,5 +143,46 @@ describe("phase 2: fetchApifyTikTokPost (VE2E-51)", () => {
     const s = stub([]);
     await expect(fetchApifyTikTokPost("tok", { ...post, postUrl: "https://evil.example/v/1" }, s.deps)).rejects.toMatchObject({ code: "PROVIDER_SCHEMA_INVALID" });
     expect(s.calls).toHaveLength(0);
+  });
+});
+
+describe("batch phase 2: fetchApifyTikTokPosts (VE2E-132)", () => {
+  const url = (id: string) => `https://www.tiktok.com/@fake/video/${id}`;
+  const base = { lang: "ja" as const, providerAccountId: "acct-1" };
+
+  it("one run with N postURLs; results matched by video id (dataset order ignored); one usage entry", async () => {
+    const s = stub([{ status: "SUCCEEDED", usd: 0.02, secs: 30, items: [withFile("3"), withFile("1"), withFile("2")] }]);
+    const out = await fetchApifyTikTokPosts("tok", { ...base, posts: ["1", "2", "3"].map((id) => ({ postUrl: url(id), expectedVideoId: id })) }, s.deps);
+    expect(s.calls.filter((c) => c.method === "POST" && c.url.includes("/runs"))).toHaveLength(1);
+    expect(s.calls[0]!.url).toContain("maxItems=3");
+    expect(s.calls[0]!.body.postURLs).toEqual([url("1"), url("2"), url("3")]);
+    for (const id of ["1", "2", "3"]) {
+      const entry = out.byVideoId.get(id)!;
+      expect(entry.ok && entry.result.candidate.externalId).toBe(id);
+    }
+    expect(out.usage).toEqual({ runs: 1, seconds: 30, usd: 0.02 });
+  });
+
+  it("a missing id fails only that id, not the batch", async () => {
+    const s = stub([{ status: "SUCCEEDED", items: [withFile("1"), searchOnlyItem({ id: "2" })] }]);
+    const out = await fetchApifyTikTokPosts("tok", { ...base, posts: ["1", "2", "3"].map((id) => ({ postUrl: url(id), expectedVideoId: id })) }, s.deps);
+    expect(out.byVideoId.get("1")!.ok).toBe(true);
+    expect(out.byVideoId.get("2")).toMatchObject({ ok: false, code: "PROVIDER_SCHEMA_INVALID" });
+    expect(out.byVideoId.get("3")).toMatchObject({ ok: false, code: "PROVIDER_SCHEMA_INVALID" });
+  });
+
+  it("dedupes ids, honours the field override, flags a non-tiktok URL per id without calling Apify for it", async () => {
+    const s = stub([{ status: "SUCCEEDED", items: [withFile("1")] }]);
+    const out = await fetchApifyTikTokPosts("tok", { ...base, postUrlField: "startUrls", posts: [{ postUrl: url("1"), expectedVideoId: "1" }, { postUrl: url("1"), expectedVideoId: "1" }, { postUrl: "https://evil.example/v/9", expectedVideoId: "9" }] }, s.deps);
+    expect(s.calls[0]!.body.startUrls).toEqual([url("1")]);
+    expect(out.byVideoId.get("9")).toMatchObject({ ok: false });
+    expect(out.byVideoId.get("1")!.ok).toBe(true);
+  });
+
+  it("an all-invalid batch throws without a run; a failed run throws", async () => {
+    const none = stub([]);
+    await expect(fetchApifyTikTokPosts("tok", { ...base, posts: [{ postUrl: "https://evil.example/x", expectedVideoId: "9" }] }, none.deps).then((o) => o.byVideoId.get("9"))).resolves.toMatchObject({ ok: false });
+    expect(none.calls).toHaveLength(0);
+    await expect(fetchApifyTikTokPosts("tok", { ...base, posts: [] }, none.deps)).rejects.toMatchObject({ code: "PROVIDER_SCHEMA_INVALID" });
   });
 });
