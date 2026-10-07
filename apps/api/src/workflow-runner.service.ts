@@ -25,11 +25,13 @@
  * repo-wide grep before writing this) — wiring real per-provider cost/usage into a
  * `CostLedger` is a separate, adapter-level scope change, not invented here.
  */
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
 import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, OrshotRenderOptions } from "@lyonix/contracts";
 import { sanitizeOrshotOptions } from "./orshot-render.js";
+import { EarlyClipCutter, earlyClipCutEnabled } from "./workflow-early-clips.js";
+import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
 import {
   buildAutoRenderAssignments,
@@ -176,6 +178,8 @@ export class WorkflowRunnerService {
     @Inject(MediaPlanService) private readonly mediaPlans: MediaPlanService,
     @Inject(RenderJobsService) private readonly renderJobs: RenderJobsService,
     @Inject(TimelineVersionsService) private readonly timelines: TimelineVersionsService,
+    // VE2E-134b: optional so a worker without the media-jobs wiring simply skips early cutting (the render step cuts as before).
+    @Optional() @Inject(ClipDerivativesService) private readonly clipDerivatives?: ClipDerivativesService,
   ) {}
 
   /** VE2E-61: test/DI overrides (plain fields, not constructor params, so Nest DI is unaffected); default = shared process limiter + env config. */
@@ -767,6 +771,17 @@ ${correction.direction}`,
           ),
       });
 
+    // VE2E-134b: early clip cut (fire-and-forget; EARLY_CLIP_CUT=0 disables). Ranges come from buildBindings, i.e. the same ones the render step asks for.
+    const earlyCuts = new EarlyClipCutter(this.clipDerivatives, run.projectId, userId, undefined, (message) => console.warn(message));
+    const launchEarlyCuts = (script: MediaPlanScript, sourcedNow: SourcedSegment[]) => {
+      if (!this.clipDerivatives || !earlyClipCutEnabled()) return;
+      try {
+        const placeholders = new Set(sourcedNow.filter((piece) => piece.source?.placeholder).flatMap((piece) => piece.segment.sceneIds));
+        earlyCuts.launch(this.mediaPlans.buildBindings(script, sourcedNow).scenes, placeholders);
+      } catch (error) {
+        console.warn(`[early-clip-cut] skipped: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
     const branchMs: { voice?: number; media?: number } = {};
     const phaseStartedAt = Date.now();
     // VE2E-61: scenes are voiced with bounded parallelism (WORKFLOW_VOICE_PARALLELISM) AND the shared per-provider limiter
@@ -818,6 +833,7 @@ ${correction.direction}`,
     const sourcingBranch = this.settle(this.recordStep(run, "media_sourcing", null, async () => {
       // Early pass: durations are hints unless every scene's audio already exists (retry); the post-TTS reconcile pass splits uncovered tails.
       const result = await runSourcing(earlyScript, earlyPlan, earlyVoiceMs.size === orderedScenes.length);
+      launchEarlyCuts(earlyScript, result.sourced);
       branchMs.media = Date.now() - phaseStartedAt;
       return result;
     }));
@@ -856,6 +872,8 @@ ${correction.direction}`,
     let secondPass: Awaited<ReturnType<typeof runSourcing>> | null = null;
     if (reconciled.toSource.length > 0) secondPass = await runSourcing(planScript, reconciled.toSource);
     const sourced: SourcedSegment[] = orderByScript([...reconciled.reused, ...(secondPass?.sourced ?? [])], orderedScenes.map((scene) => scene.sceneId));
+    // Final (real voice duration) ranges: only scenes whose range drifted > 300 ms from the early request are cut again.
+    if (!secondPass?.failure && !earlySourcing.failure) launchEarlyCuts(planScript, sourced);
     const sourcing = {
       sourced,
       failure: secondPass?.failure ?? null,

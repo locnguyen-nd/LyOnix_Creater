@@ -971,4 +971,87 @@ describe("WorkflowRunnerService", () => {
       expect(await service.fillSlots(new Set(), 3)).toBe(0);
     });
   });
+  describe("VE2E-134b: early clip cut wiring", () => {
+    afterEach(() => { delete process.env.EARLY_CLIP_CUT; });
+    const withVideo = (voiceMs?: Record<string, number>) => {
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 30_000 } as any, externalId: `ext-${input.sceneId}` } }));
+      if (voiceMs) audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: voiceMs[id] ?? 5000, subtitleVersion: null } as any }));
+    };
+    const attach = (prepareEarly: (...args: any[]) => Promise<unknown>) => {
+      (service as any).clipDerivatives = { prepareEarly };
+      return prepareEarly;
+    };
+    const requestsOf = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.flatMap((call) => call[2] as Array<{ sceneId: string; parentMediaAssetVersionId: string; startMs: number; durationMs: number; stripAudio: boolean }>);
+    const finalRanges = () => (timelines.persistApprovedForWorkflowRun as ReturnType<typeof vi.fn>).mock.calls[0]![4].scenes.map((scene: any) => ({ sceneId: scene.sceneId, startMs: scene.sourceStartMs, durationMs: scene.sourceDurationMs }));
+
+    it("cuts early after sourcing and before submit, with the same ranges the timeline persists when the voice equals the hint", async () => {
+      withVideo({ "scene-db-1": 5000, "scene-db-2": 5000 });
+      const order: string[] = [];
+      const prepareEarly = vi.fn(async () => { order.push("early"); return { ok: true }; });
+      attach(prepareEarly);
+      (renderJobs.enqueueTimelineRender as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { order.push("submit"); return { ok: true as const, data: { id: "render-job-1", status: "preparing_clips" } as any }; });
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      expect(order[0]).toBe("early");
+      expect(order.indexOf("early")).toBeLessThan(order.indexOf("submit"));
+      const requested = requestsOf(prepareEarly as never);
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((r) => r.stripAudio === true && r.parentMediaAssetVersionId.startsWith("pexels-"))).toBe(true);
+      const ranges = finalRanges();
+      for (const range of ranges) {
+        const match = requested.find((r) => r.sceneId === range.sceneId)!;
+        expect(match).toMatchObject({ startMs: range.startMs, durationMs: range.durationMs });
+      }
+      // identical range in the post-reconcile pass is not requested a second time
+      expect(requested).toHaveLength(new Set(requested.map((r) => r.sceneId)).size);
+    });
+
+    it("a real voice that drifts more than 300 ms is requested again with the new range (old cut is simply not reused)", async () => {
+      withVideo({ "scene-db-1": 7000, "scene-db-2": 5000 });
+      const prepareEarly = attach(vi.fn(async () => ({ ok: true })));
+      await service.processNext();
+      const requested = requestsOf(prepareEarly as never).filter((r) => r.sceneId === "scene-1");
+      expect(requested.length).toBeGreaterThanOrEqual(1);
+      const last = requested[requested.length - 1]!;
+      expect(last.durationMs).toBe(finalRanges().find((r: any) => r.sceneId === "scene-1").durationMs);
+    });
+
+    it("never blocks the pipeline: a prepareEarly that never resolves does not stop the run", async () => {
+      withVideo();
+      attach(vi.fn(() => new Promise(() => undefined)));
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("a prepareEarly that rejects or throws does not fail the run and leaves no unhandled rejection", async () => {
+      withVideo();
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        attach(vi.fn(async () => { throw new Error("boom"); }));
+        vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        await service.processNext();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(runs[0]).toMatchObject({ status: "render_queued" });
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it.each(["0", "false", "off"])("EARLY_CLIP_CUT=%s disables early cutting", async (value) => {
+      withVideo();
+      process.env.EARLY_CLIP_CUT = value;
+      const prepareEarly = attach(vi.fn(async () => ({ ok: true })));
+      await service.processNext();
+      expect(prepareEarly).not.toHaveBeenCalled();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("without ClipDerivativesService wired nothing is cut early and the run completes", async () => {
+      withVideo();
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+  });
 });
