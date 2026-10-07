@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
-import { probeApifyAccount } from "./apify.js";
+import { fetchApifyConcurrencyLimit, probeApifyAccount } from "./apify.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 const TOKEN = "stub_token_value_1234567890abcdef";
@@ -48,5 +48,19 @@ describe("probeApifyAccount", () => {
     const error = await probeApifyAccount(TOKEN).catch((e) => e);
     expect(error).toMatchObject({ code: "PROVIDER_TIMEOUT" });
     expect(error.message).not.toContain(TOKEN);
+  });
+});
+
+describe("fetchApifyConcurrencyLimit (VE2E-131)", () => {
+  it("reads maxConcurrentActorJobs from the read-only limits endpoint (stub, not a live probe)", async () => {
+    const mock = stub(200, { data: { limits: { maxConcurrentActorJobs: 32 } } });
+    expect(await fetchApifyConcurrencyLimit(TOKEN)).toBe(32);
+    expect(String((mock.mock.calls as unknown[][])[0]![0])).toBe("https://api.apify.com/v2/users/me/limits");
+  });
+  it("returns null (caller keeps the env value) on errors or an unexpected shape", async () => {
+    stub(403, {});
+    expect(await fetchApifyConcurrencyLimit(TOKEN)).toBeNull();
+    stub(200, { data: {} });
+    expect(await fetchApifyConcurrencyLimit(TOKEN)).toBeNull();
   });
 });

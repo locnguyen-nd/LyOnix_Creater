@@ -97,3 +97,24 @@ describe("ProviderLimiter", () => {
     expect(limiter.limitFor("unknown")).toBe(3);
   });
 });
+
+describe("ProviderLimiter VE2E-131 options", () => {
+  it("reentrantKeys: a nested run of the same key reuses the held slot instead of deadlocking", async () => {
+    const limiter = new ProviderLimiter({ limits: { apify: 1 }, reentrantKeys: ["apify"], waitTimeoutMs: 200 });
+    expect(await limiter.run("apify", () => limiter.run("apify", async () => "ok"))).toBe("ok");
+    const strict = new ProviderLimiter({ limits: { apify: 1 }, waitTimeoutMs: 50 });
+    await expect(strict.run("apify", () => strict.run("apify", async () => "x"))).rejects.toMatchObject({ code: "PROVIDER_RATE_LIMITED" });
+  });
+  it("waitTimeoutMsByKey overrides the generic wait and setLimit changes the cap", async () => {
+    const limiter = new ProviderLimiter({ limits: { apify: 1, other: 1 }, waitTimeoutMs: 20, waitTimeoutMsByKey: { apify: 500 } });
+    const hold = deferred();
+    const first = limiter.run("apify", () => hold.promise);
+    await tick();
+    const queued = limiter.run("apify", async () => "late");
+    setTimeout(() => hold.resolve(), 60);
+    expect(await queued).toBe("late");
+    await first;
+    limiter.setLimit("apify", 3);
+    expect(limiter.limitFor("apify")).toBe(3);
+  });
+});

@@ -23,7 +23,8 @@ describe("resolveConcurrencyConfig", () => {
   it("falls back to defaults on invalid values and reports them", () => {
     const config = resolveConcurrencyConfig({ WORKFLOW_CONCURRENCY: "65", WORKFLOW_VOICE_PARALLELISM: "abc", PROVIDER_CONCURRENCY_APIFY: "0", PROVIDER_LIMIT_WAIT_TIMEOUT_MS: "5" });
     expect(config).toMatchObject({ workflow: 5, voiceParallelism: 3, providerWaitTimeoutMs: 120_000 });
-    expect(config.providerLimits.apify).toBe(3);
+    expect(config.providerLimits.apify).toBe(DEFAULT_PROVIDER_LIMITS.apify);
+    expect(DEFAULT_PROVIDER_LIMITS.apify).toBe(20);
     expect(config.warnings).toHaveLength(4);
     expect(resolveWorkflowConcurrency({ WORKFLOW_CONCURRENCY: "64" })).toBe(64);
   });
@@ -65,5 +66,18 @@ describe("mapBounded", () => {
 
   it("handles empty input", async () => {
     expect(await mapBounded([], 3, async () => 1)).toEqual([]);
+  });
+});
+
+describe("VE2E-131 apify queue config", () => {
+  it("defaults to a patient queue and reads env overrides", () => {
+    expect(resolveConcurrencyConfig({})).toMatchObject({ apifyMaxConcurrentRuns: 10, apifyQueueWaitTimeoutMs: 900_000 });
+    expect(resolveConcurrencyConfig({ APIFY_MAX_CONCURRENT_RUNS: "24", APIFY_QUEUE_WAIT_TIMEOUT_MS: "60000" })).toMatchObject({ apifyMaxConcurrentRuns: 24, apifyQueueWaitTimeoutMs: 60_000 });
+  });
+  it("shared limiter: apify waits longer than the generic timeout and a nested run reuses the slot (no deadlock)", async () => {
+    const limiter = createProviderLimiter(resolveConcurrencyConfig({ PROVIDER_CONCURRENCY_APIFY: "1", PROVIDER_LIMIT_WAIT_TIMEOUT_MS: "1000" }));
+    const out = await limiter.run("apify", () => limiter.run("apify", async () => "inner"));
+    expect(out).toBe("inner");
+    expect(limiter.snapshot("apify")).toMatchObject({ inFlight: 0, queued: 0 });
   });
 });
