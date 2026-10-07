@@ -835,6 +835,20 @@ export type MediaPlanSegmentDiagnostics = {
   apifyQuality?: MediaPlanApifyQuality | null;
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
+  /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
+  sourceTier?: "ja" | "en" | "broad" | "pexels";
+  /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */
+  qualityDegraded?: boolean;
+  /** VE2E-130: which degraded level was used (`reuse_window` = L4, `stock_image` = L5, `brand_background` = L6). */
+  degradedTier?: "reuse_window" | "stock_image" | "brand_background";
+  /** VE2E-130: the source is a generated placeholder (flat brand background), not footage. */
+  placeholder?: boolean;
+  /** VE2E-130 (L5): slow zoom/pan for a still image, applied by the render/media-worker (never FFmpeg in the API). */
+  kenBurns?: { zoomFrom: number; zoomTo: number; fromX: number; fromY: number; toX: number; toY: number; durationMs: number } | null;
+  /** VE2E-130 (L4): the window of the reused clip this segment uses (ms in the clip's own timeline). */
+  reusedWindow?: { startMs: number; durationMs: number } | null;
+  /** VE2E-130: why the primary tiers (L0-L3) produced no source before the ladder degraded (per tier, e.g. `ja:apify_no_usable_candidate`). */
+  degradeReason?: string | null;
 };
 
 /** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
