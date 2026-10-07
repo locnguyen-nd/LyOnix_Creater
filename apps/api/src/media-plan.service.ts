@@ -705,6 +705,12 @@ export class MediaPlanService {
       concurrency?: number;
       stopOnFailure?: boolean;
       /**
+       * VE2E-53 second source for a clip whose window cannot cover every scene. Default on. The Auto runner turns it OFF for the early
+       * (TTS-parallel, VE2E-133) pass that only knows `durationHintMs`: a hint above the real voice length would make clips look too short and
+       * pay for needless extra sources; the post-TTS reconcile pass searches the uncovered tail with the real durations.
+       */
+      allowSecondSource?: boolean;
+      /**
        * VE2E-130 (Auto): the media step never fails the job. A segment the primary tiers (ja/en/broad/Pexels) cannot source - including
        * one whose `runImport` threw - falls down the degraded ladder L4 (other window of a clip of this job) -> L5 (stock image + Ken
        * Burns) -> L6 (brand background), flagged `quality_degraded`. Replaces `stopOnFailure` for Auto; implies swap-overlay policy.
@@ -750,7 +756,7 @@ export class MediaPlanService {
     };
     const withSecondSource = async (head: SourcedSegment, depth: number): Promise<SourcedSegment[]> => {
       const { segment, source } = head;
-      if (!source || depth >= MAX_SECOND_SOURCE_SPLITS || source.kind !== "video") return [head];
+      if (!source || input.allowSecondSource === false || depth >= MAX_SECOND_SOURCE_SPLITS || source.kind !== "video") return [head];
       const durations = segment.sceneIds.map((sceneId) => ({ sceneId, durationMs: segmentMs([sceneId]) }));
       const plan = computeSocialWindowRanges(durations, source.durationMs, windowOptionsFor(source.provider));
       if (!plan || !plan.needsSecondSource || plan.uncoveredSceneIds.length === 0) return [head];

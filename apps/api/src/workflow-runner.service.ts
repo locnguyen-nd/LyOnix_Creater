@@ -743,12 +743,13 @@ ${correction.direction}`,
     const earlyPlan = planFor(earlyScript);
     const ledger = new SegmentSourceLedger();
     // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
-    const runSourcing = (script: MediaPlanScript, segments: PlannedSegment[]) =>
+    const runSourcing = (script: MediaPlanScript, segments: PlannedSegment[], allowSecondSource = true) =>
       this.mediaPlans.sourceSegments(run.projectId, userId, role, {
         providerAccountId: mediaConfig.providerAccountId,
         script,
         segments,
         ledger,
+        allowSecondSource,
         // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
         guaranteeSource: true,
         // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
@@ -815,7 +816,8 @@ ${correction.direction}`,
     // Both branches get their own wall-clock StepRun (`voice_generation`, `media_sourcing`) next to the per-scene/per-segment ones,
     // so `report:failures` (VE2E-84) sees the two parallel durations (their max is the real critical path, not their sum).
     const sourcingBranch = this.settle(this.recordStep(run, "media_sourcing", null, async () => {
-      const result = await runSourcing(earlyScript, earlyPlan);
+      // Early pass: durations are hints unless every scene's audio already exists (retry); the post-TTS reconcile pass splits uncovered tails.
+      const result = await runSourcing(earlyScript, earlyPlan, earlyVoiceMs.size === orderedScenes.length);
       branchMs.media = Date.now() - phaseStartedAt;
       return result;
     }));
