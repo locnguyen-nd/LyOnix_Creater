@@ -131,6 +131,8 @@ export {
   MEDIA_RANKING_POLICY_VERSION,
   MEDIA_RANKING_WEIGHTS,
   MEDIA_RELEVANCE_THRESHOLD,
+  SUBJECT_MATCH_WEIGHT,
+  SUBJECT_COHERENCE_WEIGHT,
   type NarrativeBeat,
   type SceneBriefSourceScene,
   type SceneBriefSourceScript,
@@ -315,3 +317,14 @@ export {
   type KenBurnsPlan,
   type DegradedTier,
 } from "./media-ladder.js";
+export {
+  subjectProfileOf,
+  subjectNames,
+  anchorKeywordToSubject,
+  subjectTierKeywords,
+  subjectMatchScore,
+  isOffTopic,
+  applySubjectToBrief,
+  HIGH_PRIORITY_MAX,
+  type SubjectProfile,
+} from "./subject-filter.js";
