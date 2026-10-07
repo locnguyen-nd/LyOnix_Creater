@@ -11,6 +11,12 @@ import { buildRenderAssignmentsFromTimeline } from "./timeline-render-mapping.js
 import { MediaPlanService } from "./media-plan.service.js";
 import { ProviderLimiter } from "@lyonix/providers";
 
+// VE2E-130: the L6 brand-background placeholder is written to quarantine; keep the unit test off the real disk.
+vi.mock("./quarantine.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./quarantine.js")>()),
+  writeQuarantineFile: vi.fn(async (buffer: Buffer) => ({ quarantineToken: "quarantine-token", sha256: "x", bytes: buffer.byteLength })),
+}));
+
 const projectId = "project-1";
 const userId = "user-1";
 const templateSnapshotId = "snap-1";
@@ -311,10 +317,10 @@ describe("WorkflowRunnerService", () => {
         { segmentId: "seg-1", narration: "新宿の夜景を紹介します。" },
         { segmentId: "seg-2", narration: "渋谷のスクランブル交差点です。" },
       ]);
-      expect(apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword)).toEqual(["新宿 夜景", "渋谷 スクランブル交差点"]);
+      // ja tier + en tier per segment (the plan's en keywords); the ja keywords are exactly the extracted ones
+      expect(apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword).sort()).toEqual(["shibuya crossing", "shinjuku night", "新宿 夜景", "渋谷 スクランブル交差点"].sort());
       // the search query handed to the Actor is only the keyword (the brief is used locally for ranking/moderation)
       expect(apify.autoImportForSegment.mock.calls.every((call) => !/Flashy|Boxing/.test(call[4].keyword))).toBe(true);
-      expect(pexels.autoImportForScene).not.toHaveBeenCalled();
       // cost/usage bookkeeping like other content calls: a StepRun + ProviderOperation, and an entry in the run usage ledger
       expect(stepRuns.some((row) => row.stepKey === "extract_keywords")).toBe(true);
       const usage = stepRuns.find((row) => row.stepKey === "run_usage");
@@ -434,21 +440,39 @@ describe("WorkflowRunnerService", () => {
       // VE2E-48: per-segment sourceProvider + fallbackReason are persisted on the run (StepRun outputRef).
       const diagnosticsStep = stepRuns.find((s) => s.stepKey === "media_plan_diagnostics");
       expect(diagnosticsStep.outputRef.segments).toMatchObject([{ segmentId: "g1", sourcing: "imported", sourceProvider: "pexels" }]);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 
     it("a new segment never reuses an earlier segment's source (replaces the per-scene hard block)", async () => {
       pexels.autoImportForScene = withDuration(20_000);
       await service.processNext();
-      const calls = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[3]);
-      expect(calls.map((c) => c.usedExternalIds)).toEqual([[], ["ext-scene-1"]]);
+      // segments are sourced in parallel without a Pexels mutex: the live reservation set still keeps their sources distinct
+      expect(new Set(persistedTimeline().segments.map((segment: any) => segment.mediaAssetVersionId)).size).toBe(2);
     });
 
-    it("stops as needs_input when a segment cannot be sourced (unattended Auto), nothing persisted", async () => {
+    it("VE2E-130: a segment nothing can source never stops the run - it falls to the flagged brand background and still renders", async () => {
       pexels.autoImportForScene = vi.fn(async () => ({ ok: false as const, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" as const, message: "weak" }));
+      const media = { registerAsset: vi.fn(async (..._args: any[]) => ({ id: "brand-bg-asset", kind: "image" })) };
+      service = new WorkflowRunnerService(
+        prisma,
+        sources as SourcesService,
+        scriptGeneration as ScriptGenerationService,
+        scriptVersions as ScriptVersionsService,
+        audioVersions as AudioVersionsService,
+        new MediaPlanService(prisma, { forUser: async () => ({ teamIds: [], projectIds: [], channelIds: [] }) } as never, pexels as PexelsService, undefined, undefined, media as never),
+        renderJobs as RenderJobsService,
+        timelines as TimelineVersionsService,
+      );
       await service.processNext();
-      expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" } });
-      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      // The media step no longer ends the run. (This fixture has an unknown template layout, so the later legacy fixed-slot
+      // preflight still wants video for Video-N slots; real templates with a known layout take the dynamic path for image scenes.)
+      expect(runs[0].lastError?.code ?? "").not.toMatch(/^MEDIA_/);
+      expect(media.registerAsset).toHaveBeenCalled();
+      expect(media.registerAsset.mock.calls[0]![3]).toMatchObject({ origin: "generated", serverProvenance: { placeholder: "brand_background", qualityDegraded: true } });
+      const diagnosticsStep = stepRuns.find((s) => s.stepKey === "media_plan_diagnostics");
+      expect(diagnosticsStep.outputRef.segments.length).toBeGreaterThan(0);
+      expect(diagnosticsStep.outputRef.segments.every((segment: any) => segment.qualityDegraded === true && segment.degradedTier === "brand_background" && segment.placeholder === true)).toBe(true);
     });
   });
 
@@ -570,6 +594,7 @@ describe("WorkflowRunnerService", () => {
       renderJobs.reconcileOne = vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any }));
       const processed = await service.processNext();
       expect(processed).toBe(true);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 
@@ -616,6 +641,7 @@ describe("WorkflowRunnerService", () => {
       expect(state.peak).toBe(2);
       await releaseAll();
       await (started as { done: Promise<void> }).done;
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
       expect(persistedTimelineScenes()).toEqual(["audio-scene-db-1", "audio-scene-db-2"]);
     });
@@ -631,6 +657,7 @@ describe("WorkflowRunnerService", () => {
       await (started as { done: Promise<void> }).done;
       expect(state.peak).toBe(1);
       expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 

@@ -203,8 +203,7 @@ export const segmentVisualKind = (segment: PlannedSegment): "video" | "image" =>
  * global template/greenscreen TikToks). No valid keyword -> `null` -> Pexels with reason `no_ja_keywords`.
  */
 export const apifyKeywordForSegment = (segment: PlannedSegment): string | null => {
-  const planned = segment.keywords?.ja.trim();
-  return planned && isValidJaSearchKeyword(planned) ? planned : null;
+  return parseSegmentKeywords(segment.keywords).ja.find((candidate) => isValidJaSearchKeyword(candidate)) ?? null;
 };
 
 /** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
@@ -219,7 +218,8 @@ export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extr
   for (const segment of segments) {
     const found = extracted[segment.segmentId];
     if (!found || !isValidJaSearchKeyword(found.ja)) continue;
-    segment.keywords = { ja: found.ja.trim(), en: segment.keywords?.en.trim() || found.en.trim() };
+    // `en` from the plan wins (legacy string or VE2E-88 list); other tier fields of the new format are kept.
+    segment.keywords = { ...(segment.keywords as object | null), ja: found.ja.trim(), en: parseSegmentKeywords(segment.keywords).en[0] || found.en.trim() };
   }
 };
 
@@ -354,7 +354,7 @@ export class MediaPlanService {
   segmentBrief(script: MediaPlanScript, segment: PlannedSegment): SceneBrief {
     const firstIndex = Math.max(0, script.scenes.findIndex((scene) => scene.sceneId === segment.sceneIds[0]));
     const brief = deriveSceneBrief({ language: script.language, scenes: script.scenes.map((scene) => ({ ...scene, durationHintMs: sceneDuration(scene) })) }, firstIndex);
-    const english = segment.keywords?.en.trim();
+    const english = parseSegmentKeywords(segment.keywords).en[0];
     const phrases = english ? [english, ...brief.phrases.filter((phrase) => phrase.trim().toLowerCase() !== english.toLowerCase())].slice(0, MAX_QUERY_VARIANTS) : brief.phrases;
     return { ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 };
   }
@@ -516,18 +516,19 @@ export class MediaPlanService {
     role: "admin" | "staff",
     input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
-    const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), this.findApifyAccount(userId, role)]);
+    const tierKeywords = this.apify ? segmentTierKeywords(input.segment.keywords, input.segment.subject, isValidJaSearchKeyword) : [];
+    // The Apify account is only looked up when at least one tier has a keyword to search.
+    const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
     const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels", string>> = {};
     const qualities: Partial<Record<"ja" | "en" | "broad", MediaPlanApifyQuality | null>> = {};
     const settled = new Set<string>();
     const tiers: Array<{ name: "ja" | "en" | "broad" | "pexels"; run: () => Promise<SegmentSource | null> }> = [];
     const holder: { pexelsFailure: MediaPlanOutcome<SegmentSource> | null } = { pexelsFailure: null };
     if (this.apify) {
-      const keywords = segmentTierKeywords(input.segment.keywords, input.segment.subject, isValidJaSearchKeyword);
-      if (!keywords.some((entry) => entry.tier === "ja")) reasons.ja = "no_ja_keywords";
-      if (!account) reasons.ja = "no_apify_account";
-      else {
-        for (const { tier, keyword } of keywords) {
+      if (!tierKeywords.some((entry) => entry.tier === "ja")) reasons.ja = "no_ja_keywords";
+      if (tierKeywords.length > 0 && !account) reasons.ja = "no_apify_account";
+      else if (account) {
+        for (const { tier, keyword } of tierKeywords) {
           tiers.push({
             name: tier,
             run: async () => {

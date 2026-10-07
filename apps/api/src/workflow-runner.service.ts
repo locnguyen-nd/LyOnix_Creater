@@ -637,8 +637,8 @@ ${correction.direction}`,
     // fallback, count from the run's VE2E-40 setting); each segment gets ONE source (reused from the
     // project library on retry, else searched by keywords.en through the Pexels rank/moderation/
     // rights gate) and a new segment never reuses an earlier segment's source. Replaces the old
-    // per-scene `usedExternalIds` hard block. Unattended Auto stops at the first unsourceable
-    // segment (needs_input), same as the old per-scene abstention.
+    // per-scene `usedExternalIds` hard block. Unattended Auto never stops here (VE2E-130): an unsourceable
+    // segment degrades down the ladder (other clip window / stock image + Ken Burns / brand background).
     await this.setStatus(run.id, "media_preparing");
     const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
     const planScript: MediaPlanScript = {
@@ -672,7 +672,8 @@ ${correction.direction}`,
       script: planScript,
       segments: plannedSegments,
       ledger,
-      stopOnFailure: true,
+      // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
+      guaranteeSource: true,
       // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
       beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script: planScript, title: approved.title, segments: pending }),
       runImport: (segment, task) =>

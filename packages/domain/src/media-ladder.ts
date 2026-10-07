@@ -83,7 +83,8 @@ export type RaceResult<T> = { index: number; value: T };
  * A task that returns `null` or throws counts as "no value". `onDiscard` receives every value that is not chosen (also late ones),
  * so the caller can release reservations / clean up.
  */
-export function raceByPriority<T>(tasks: ReadonlyArray<() => Promise<T | null>>, deadlineMs: number, onDiscard?: (index: number, value: T) => void): Promise<RaceResult<T> | null> {
+export function raceByPriority<T>(tasks: ReadonlyArray<() => Promise<T | null>>, deadlineMs: number, discardHandler?: (index: number, value: T) => void): Promise<RaceResult<T> | null> {
+  const onDiscard = discardHandler ? (index: number, value: T) => { try { discardHandler(index, value); } catch { /* cleanup is best-effort */ } } : undefined;
   return new Promise((resolve) => {
     const state: Array<"pending" | "value" | "none"> = tasks.map(() => "pending");
     const values: Array<T | null> = tasks.map(() => null);
