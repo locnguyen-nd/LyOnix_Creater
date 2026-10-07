@@ -46,6 +46,26 @@ export const MAX_MODERATION_FRAMES = 6;
 /** ~2.2MB decoded per frame (base64 is ~1.37x binary size) - generous headroom over a compressed keyframe, bounds worst-case request egress per call. */
 const MAX_FRAME_BASE64_LENGTH = 3_000_000;
 
+/** VE2E-131: hard per-call deadline for vision (probe and moderation each). A timeout is a normal "vision unavailable" outcome, never a failed run. */
+export const VISION_CALL_TIMEOUT_MS = 8_000;
+/** VE2E-131: cover images judged in ONE request (4-6; the adapter clamps to this range). */
+export const VISION_BATCH_MIN = 4;
+export const VISION_BATCH_MAX = 6;
+
+const withDeadline = async <T>(work: Promise<T>, ms: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ProviderError("PROVIDER_TIMEOUT", `Vision call exceeded ${ms} ms`, true)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const MODERATION_SCHEMA: JsonSchema = {
   type: "object",
   additionalProperties: false,
@@ -133,6 +153,8 @@ export type SceneModerationInput = {
   /** Last known real capability-probe evidence for this exact account/model/inputKind, if any (e.g. persisted on a provider account row, mirroring `ContentModelSnapshotEntry`). `null`/stale forces a fresh `probeVisionCapability` call before the real moderation call - never trusts a catalog entry alone (spec §5.1). */
   capabilityEvidence?: { verifiedAt: string } | null;
   freshnessTtlMs?: number;
+  /** Per-call deadline (probe and moderation), default {@link VISION_CALL_TIMEOUT_MS}. */
+  timeoutMs?: number;
 };
 
 /**
@@ -171,17 +193,96 @@ export async function moderateSceneCandidate(input: SceneModerationInput): Promi
     : null;
   if (!capabilityVerifiedAt) {
     try {
-      const probed = await probeVisionCapability(input.kind, input.apiKey, input.modelId, inputKind);
+      const probed = await withDeadline(probeVisionCapability(input.kind, input.apiKey, input.modelId, inputKind), input.timeoutMs ?? VISION_CALL_TIMEOUT_MS);
       capabilityVerifiedAt = probed.verifiedAt;
     } catch (error) {
       return { raw: null, capabilityVerifiedAt: null, evidenceRefs: [], ...failureOf(error) };
     }
   }
   try {
-    const result = await moderateMediaWithVision({ kind: input.kind, apiKey: input.apiKey, modelId: input.modelId, operation: input.operation, sceneContext: input.sceneContext, frames: input.frames });
+    const result = await withDeadline(moderateMediaWithVision({ kind: input.kind, apiKey: input.apiKey, modelId: input.modelId, operation: input.operation, sceneContext: input.sceneContext, frames: input.frames }), input.timeoutMs ?? VISION_CALL_TIMEOUT_MS);
     const evidenceRefs = [...(result.requestId ? [`request:${result.requestId}`] : []), ...result.sampledTimestampsMs.map((ms) => `frame_ts_ms:${ms}`)];
     return { raw: result.raw, capabilityVerifiedAt, evidenceRefs };
   } catch (error) {
     return { raw: null, capabilityVerifiedAt, evidenceRefs: [], ...failureOf(error) };
+  }
+}
+
+// --- VE2E-131: several cover images, ONE request ---------------------------------------------------------------
+
+const BATCH_SCHEMA: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["index", "safety_flag", "safety_categories", "scene_beat_relevance", "confidence", "notes"],
+        properties: {
+          index: { type: "number" },
+          safety_flag: { type: "boolean" },
+          safety_categories: { type: "array", items: { type: "string" } },
+          scene_beat_relevance: { type: "number" },
+          confidence: { type: "number" },
+          notes: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+const buildBatchPrompt = (ctx: VisionModerationSceneContext, count: number): string =>
+  [
+    buildPrompt("image_moderation", ctx, 1, []).replace("You are shown one still image.", `You are shown ${count} still images, numbered 1 to ${count} in the order given. Judge EACH image independently.`),
+    `Reply with exactly one JSON object {"items":[...]} holding one entry per image, each with "index" (1-based image number) plus the fields above. No other text.`,
+  ].join(" ");
+
+export type SceneBatchInput = Omit<SceneModerationInput, "frames" | "operation"> & {
+  /** One cover frame per candidate; the adapter keeps at most {@link VISION_BATCH_MAX}. */
+  items: ReadonlyArray<{ id: string; frame: VisionModerationFrame }>;
+};
+
+export type SceneBatchOutcome = {
+  /** Candidate id -> verdict; ids missing from the model's answer are absent (caller keeps their metadata score). */
+  verdicts: Map<string, VisionModerationRawResult>;
+  capabilityVerifiedAt: string | null;
+  evidenceRefs: string[];
+  failureCode?: ProviderError["code"];
+  retryAfterMs?: number;
+  quotaScope?: ProviderError["quotaScope"];
+};
+
+/** Same fail-soft contract as {@link moderateSceneCandidate} (never throws, timeout 8 s), for up to 6 images in one request. */
+export async function moderateSceneCandidatesBatch(input: SceneBatchInput): Promise<SceneBatchOutcome> {
+  const timeoutMs = input.timeoutMs ?? VISION_CALL_TIMEOUT_MS;
+  const items = input.items.filter((i) => i.frame.base64.length > 0 && i.frame.base64.length <= MAX_FRAME_BASE64_LENGTH).slice(0, VISION_BATCH_MAX);
+  const empty = (extra: Partial<SceneBatchOutcome> = {}): SceneBatchOutcome => ({ verdicts: new Map(), capabilityVerifiedAt: null, evidenceRefs: [], ...extra });
+  if (items.length === 0) return empty();
+  let capabilityVerifiedAt = isFreshCheckedAt(input.capabilityEvidence?.verifiedAt, input.freshnessTtlMs ?? CONTENT_MODEL_FRESHNESS_TTL_MS) ? (input.capabilityEvidence?.verifiedAt ?? null) : null;
+  if (!capabilityVerifiedAt) {
+    try {
+      capabilityVerifiedAt = (await withDeadline(probeVisionCapability(input.kind, input.apiKey, input.modelId, "image"), timeoutMs)).verifiedAt;
+    } catch (error) {
+      return empty(failureOf(error));
+    }
+  }
+  try {
+    const prompt = buildBatchPrompt(input.sceneContext, items.length);
+    const result = await withDeadline(generateVisionStructuredOnce<unknown>(input.kind, input.apiKey, input.modelId, prompt, items.map((i) => ({ mimeType: i.frame.mimeType, base64: i.frame.base64 })), BATCH_SCHEMA), timeoutMs);
+    const rows = result.output && typeof result.output === "object" ? (result.output as { items?: unknown }).items : null;
+    if (!Array.isArray(rows)) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Vision batch response had no items list", false);
+    const verdicts = new Map<string, VisionModerationRawResult>();
+    for (const row of rows) {
+      const index = row && typeof row === "object" ? Number((row as { index?: unknown }).index) : NaN;
+      const target = Number.isInteger(index) ? items[index - 1] : undefined;
+      const raw = parseRaw(row);
+      if (target && raw && !verdicts.has(target.id)) verdicts.set(target.id, raw);
+    }
+    return { verdicts, capabilityVerifiedAt, evidenceRefs: result.usage.providerRequestId ? [`request:${result.usage.providerRequestId}`] : [] };
+  } catch (error) {
+    return empty({ capabilityVerifiedAt, ...failureOf(error) });
   }
 }

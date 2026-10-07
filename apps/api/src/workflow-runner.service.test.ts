@@ -11,6 +11,12 @@ import { buildRenderAssignmentsFromTimeline } from "./timeline-render-mapping.js
 import { MediaPlanService } from "./media-plan.service.js";
 import { ProviderLimiter } from "@lyonix/providers";
 
+// VE2E-130: the L6 brand-background placeholder is written to quarantine; keep the unit test off the real disk.
+vi.mock("./quarantine.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./quarantine.js")>()),
+  writeQuarantineFile: vi.fn(async (buffer: Buffer) => ({ quarantineToken: "quarantine-token", sha256: "x", bytes: buffer.byteLength })),
+}));
+
 const projectId = "project-1";
 const userId = "user-1";
 const templateSnapshotId = "snap-1";
@@ -311,10 +317,10 @@ describe("WorkflowRunnerService", () => {
         { segmentId: "seg-1", narration: "新宿の夜景を紹介します。" },
         { segmentId: "seg-2", narration: "渋谷のスクランブル交差点です。" },
       ]);
-      expect(apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword)).toEqual(["新宿 夜景", "渋谷 スクランブル交差点"]);
+      // ja tier + en tier per segment (the plan's en keywords); the ja keywords are exactly the extracted ones
+      expect(apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword).sort()).toEqual(["shibuya crossing", "shinjuku night", "新宿 夜景", "渋谷 スクランブル交差点"].sort());
       // the search query handed to the Actor is only the keyword (the brief is used locally for ranking/moderation)
       expect(apify.autoImportForSegment.mock.calls.every((call) => !/Flashy|Boxing/.test(call[4].keyword))).toBe(true);
-      expect(pexels.autoImportForScene).not.toHaveBeenCalled();
       // cost/usage bookkeeping like other content calls: a StepRun + ProviderOperation, and an entry in the run usage ledger
       expect(stepRuns.some((row) => row.stepKey === "extract_keywords")).toBe(true);
       const usage = stepRuns.find((row) => row.stepKey === "run_usage");
@@ -355,6 +361,76 @@ describe("WorkflowRunnerService", () => {
     await service.processNext();
     const diag = stepRuns.find((s) => s.stepKey === "duration_budget");
     expect(diag.outputRef).toMatchObject({ totalSec: 30, inBand: true, flag: null });
+  });
+
+  describe("VE2E-85: pre-render quality gate", () => {
+    afterEach(() => { delete process.env.QUALITY_GATE; });
+    const stepOrder = () => stepRuns.map((s) => s.stepKey);
+    /** Rewrites what the media plan hands to the gate (two scenes sharing one clip, overlapping windows). */
+    const overlapPlan = (secondStart = 0) => {
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const real = mediaPlans.buildBindings.bind(mediaPlans);
+      vi.spyOn(mediaPlans, "buildBindings").mockImplementation((script: any, sourced: any) => {
+        const plan = real(script, sourced);
+        plan.scenes.forEach((scene, i) => {
+          scene.mediaAssetVersionId = plan.scenes[0]!.mediaAssetVersionId;
+          scene.mediaKind = "video";
+          scene.sourceStartMs = i === 0 ? 0 : secondStart;
+          scene.sourceDurationMs = 5_000;
+        });
+        return plan;
+      });
+    };
+
+    it("runs before submit_render, records checks, and does not block on warnings only (duration out of band)", async () => {
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 3000, subtitleVersion: null } as any }));
+      await service.processNext();
+      const gate = stepRuns.find((s) => s.stepKey === "quality_gate");
+      expect(gate.status).toBe("succeeded");
+      expect(stepOrder().indexOf("quality_gate")).toBeLessThan(stepOrder().indexOf("submit_render"));
+      expect(gate.outputRef.checks.map((c: any) => c.name)).toEqual(expect.arrayContaining(["repeat_scenes", "duration_band", "subtitle_lines", "min_resolution", "source_degraded"]));
+      expect(gate.outputRef.warnings.map((w: any) => w.code)).toContain("duration_out_of_band");
+      expect(gate.outputRef.failure).toBeNull();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      expect(renderJobs.enqueueTimelineRender).toHaveBeenCalledOnce();
+    });
+
+    it("QUALITY_GATE=0 skips the gate", async () => {
+      process.env.QUALITY_GATE = "0";
+      await service.processNext();
+      expect(stepRuns.some((s) => s.stepKey === "quality_gate")).toBe(false);
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("an invalid video range fails early with a clear reason, before the timeline is persisted and before any render", async () => {
+      overlapPlan();
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const spied = mediaPlans.buildBindings as unknown as ReturnType<typeof vi.fn>;
+      const wrapped = spied.getMockImplementation()!;
+      spied.mockImplementation((script: any, srcd: any) => {
+        const plan = wrapped(script, srcd);
+        plan.scenes[0]!.sourceDurationMs = -1;
+        return plan;
+      });
+      await service.processNext();
+      expect(runs[0].status).toBe("needs_input");
+      expect(runs[0].lastError).toMatchObject({ code: "VALIDATION_FAILED", message: expect.stringContaining("Cổng chất lượng") });
+      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      expect(renderJobs.enqueueTimelineRender).not.toHaveBeenCalled();
+      expect(stepRuns.find((s) => s.stepKey === "quality_gate").outputRef.failure).toMatchObject({ code: "invalid_range", sceneId: "scene-1" });
+    });
+
+    it("auto-fixes an overlapping window of the same clip in the persisted timeline", async () => {
+      overlapPlan(2_000);
+      prisma.mediaAssetVersion.findMany = vi.fn(async () => []);
+      // A 30 s video per segment, so the (rewritten) shared clip has a free window after the first scene's 0-5 s.
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 30_000 } as any, externalId: `ext-${input.sceneId}` } }));
+      await service.processNext();
+      const gate = stepRuns.find((s) => s.stepKey === "quality_gate");
+      expect(gate.outputRef.fixes).toEqual([expect.objectContaining({ type: "window_changed", sceneId: "scene-2", fromStartMs: 2_000, toStartMs: 5_000, reason: "repeat" })]);
+      expect(persistedTimeline().scenes[1]).toMatchObject({ sourceStartMs: 5_000, sourceDurationMs: 5_000 });
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
   });
 
   it("VE2E-42: title/caption fill leftover template text slots through the timeline optionValues, same as the old raw-assignment path", async () => {
@@ -422,7 +498,8 @@ describe("WorkflowRunnerService", () => {
       expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
       const call = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls[0]![3];
       expect(call.sceneBrief.phrases[0]).toBe("soccer star dribbling");
-      expect(call.sceneBrief.targetDurationSeconds).toBeCloseTo(7.3);
+      // VE2E-133: the search starts before TTS finishes, so its target length is the script hint (2 x 5 s); the REAL voice durations (7.3 s) only cut the ranges below.
+      expect(call.sceneBrief.targetDurationSeconds).toBeCloseTo(10);
       expect(call.usedExternalIds).toEqual([]);
       const persisted = persistedTimeline();
       expect(persisted.scenes.map((s: any) => [s.mediaAssetVersionId, s.segmentId, s.sourceStartMs, s.sourceDurationMs])).toEqual([
@@ -434,21 +511,39 @@ describe("WorkflowRunnerService", () => {
       // VE2E-48: per-segment sourceProvider + fallbackReason are persisted on the run (StepRun outputRef).
       const diagnosticsStep = stepRuns.find((s) => s.stepKey === "media_plan_diagnostics");
       expect(diagnosticsStep.outputRef.segments).toMatchObject([{ segmentId: "g1", sourcing: "imported", sourceProvider: "pexels" }]);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 
     it("a new segment never reuses an earlier segment's source (replaces the per-scene hard block)", async () => {
       pexels.autoImportForScene = withDuration(20_000);
       await service.processNext();
-      const calls = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[3]);
-      expect(calls.map((c) => c.usedExternalIds)).toEqual([[], ["ext-scene-1"]]);
+      // segments are sourced in parallel without a Pexels mutex: the live reservation set still keeps their sources distinct
+      expect(new Set(persistedTimeline().segments.map((segment: any) => segment.mediaAssetVersionId)).size).toBe(2);
     });
 
-    it("stops as needs_input when a segment cannot be sourced (unattended Auto), nothing persisted", async () => {
+    it("VE2E-130: a segment nothing can source never stops the run - it falls to the flagged brand background and still renders", async () => {
       pexels.autoImportForScene = vi.fn(async () => ({ ok: false as const, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" as const, message: "weak" }));
+      const media = { registerAsset: vi.fn(async (..._args: any[]) => ({ id: "brand-bg-asset", kind: "image" })) };
+      service = new WorkflowRunnerService(
+        prisma,
+        sources as SourcesService,
+        scriptGeneration as ScriptGenerationService,
+        scriptVersions as ScriptVersionsService,
+        audioVersions as AudioVersionsService,
+        new MediaPlanService(prisma, { forUser: async () => ({ teamIds: [], projectIds: [], channelIds: [] }) } as never, pexels as PexelsService, undefined, undefined, media as never),
+        renderJobs as RenderJobsService,
+        timelines as TimelineVersionsService,
+      );
       await service.processNext();
-      expect(runs[0]).toMatchObject({ status: "needs_input", lastError: { code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" } });
-      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      // The media step no longer ends the run. (This fixture has an unknown template layout, so the later legacy fixed-slot
+      // preflight still wants video for Video-N slots; real templates with a known layout take the dynamic path for image scenes.)
+      expect(runs[0].lastError?.code ?? "").not.toMatch(/^MEDIA_/);
+      expect(media.registerAsset).toHaveBeenCalled();
+      expect(media.registerAsset.mock.calls[0]![3]).toMatchObject({ origin: "generated", serverProvenance: { placeholder: "brand_background", qualityDegraded: true } });
+      const diagnosticsStep = stepRuns.find((s) => s.stepKey === "media_plan_diagnostics");
+      expect(diagnosticsStep.outputRef.segments.length).toBeGreaterThan(0);
+      expect(diagnosticsStep.outputRef.segments.every((segment: any) => segment.qualityDegraded === true && segment.degradedTier === "brand_background" && segment.placeholder === true)).toBe(true);
     });
   });
 
@@ -570,12 +665,183 @@ describe("WorkflowRunnerService", () => {
       renderJobs.reconcileOne = vi.fn(async () => ({ ok: true as const, data: { id: "render-job-1", status: "queued" } as any }));
       const processed = await service.processNext();
       expect(processed).toBe(true);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 
     it("returns false from processNext when there is nothing to claim or reconcile", async () => {
       runs = [];
       expect(await service.processNext()).toBe(false);
+    });
+  });
+
+  describe("VE2E-133 critical path: media sourcing parallel to TTS, resume, no orphaned branch", () => {
+    const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const settleTicks = async (n = 15) => { for (let i = 0; i < n; i += 1) await tick(); };
+    const voiceResult = (id: string, durationMs: number) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs, subtitleVersion: { id: `subtitle-${id}` } } as any });
+    const withDuration = (durationMs: number) =>
+      vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs } as any, externalId: `ext-${input.sceneId}` } }));
+    const step = (key: string) => stepRuns.find((s) => s.stepKey === key);
+    const oneSegmentPlan = { segments: [{ segmentId: "g1", sceneIds: ["scene-1", "scene-2"], subject: "Messi", priority: 1, keywords: { ja: "メッシ", en: "soccer star dribbling" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } }] };
+    const diag = (key: string) => step(key)?.outputRef;
+    beforeEach(() => {
+      prisma.stepRun.findMany = vi.fn(async ({ where }: any) => stepRuns.filter((s) => s.workflowRunId === where.workflowRunId && s.attempt === where.attempt));
+    });
+
+    it("starts finding media while TTS is still running, cuts ranges only after the real voice duration, and records both branches' timings", async () => {
+      const gates: Array<() => void> = [];
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => {
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return voiceResult(id, 4000);
+      });
+      pexels.autoImportForScene = withDuration(20_000);
+      const started = await service.startNextDraft();
+      await settleTicks();
+      // TTS is still blocked, yet both segments' media were already searched/imported (critical path = max, not sum).
+      expect(gates.length).toBeGreaterThan(0);
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      expect(step("media_sourcing")).toMatchObject({ status: "succeeded" });
+      expect(step("voice_generation")).toMatchObject({ status: "running" });
+      while (gates.length) gates.shift()!();
+      await settleTicks();
+      await (started as { done: Promise<void> }).done;
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      // both branch StepRuns carry real, overlapping start/end timestamps (what report:failures p95 reads)
+      const voice = step("voice_generation");
+      const media = step("media_sourcing");
+      for (const row of [voice, media]) {
+        expect(row.status).toBe("succeeded");
+        expect(row.startedAt).toBeInstanceOf(Date);
+        expect(row.endedAt.getTime()).toBeGreaterThanOrEqual(row.startedAt.getTime());
+      }
+      expect(media.startedAt.getTime()).toBeLessThanOrEqual(voice.endedAt.getTime());
+      expect(voice.startedAt.getTime()).toBeLessThanOrEqual(media.endedAt.getTime() + 1);
+      // the timeline (ranges) is only persisted after BOTH branches are done
+      expect(step("persist_timeline_version").startedAt.getTime()).toBeGreaterThanOrEqual(Math.max(voice.endedAt.getTime(), media.endedAt.getTime()));
+      expect(diag("parallel_pipeline_diagnostics")).toMatchObject({ structureChanged: false, reconcile: { exact: 2, resourced: 0 }, researchedSegmentIds: [] });
+    });
+
+    it("real voice duration close to the hint: ranges use the real voice, no media is searched twice", async () => {
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan: oneSegmentPlan } });
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => voiceResult(id, id === "scene-db-1" ? 4200 : 3100));
+      pexels.autoImportForScene = withDuration(20_000);
+      runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 1 } })];
+      await service.processNext();
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
+      expect(persistedTimeline().scenes.map((s: any) => [s.segmentId, s.sourceStartMs, s.sourceDurationMs])).toEqual([["g1", 0, 4200], ["g1", 4200, 3100]]);
+    });
+
+    it("a voice much longer than the hint that the early clip cannot cover: keeps the found source, searches ONLY the uncovered scene", async () => {
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan: oneSegmentPlan } });
+      // hint 10 s fits a 12 s clip; the real voice (4.2 s + 9 s = 13.2 s) does not.
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => voiceResult(id, id === "scene-db-1" ? 4200 : 9000));
+      pexels.autoImportForScene = withDuration(12_000);
+      runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 1 } })];
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      const sceneIdsSearched = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[3].sceneId);
+      expect(sceneIdsSearched).toEqual(["scene-1", "scene-2"]);
+      const persisted = persistedTimeline();
+      expect(persisted.segments.map((segment: any) => [segment.segmentId, segment.sceneIds, segment.mediaAssetVersionId])).toEqual([["g1", ["scene-1"], "pexels-scene-1"], ["g1-b", ["scene-2"], "pexels-scene-2"]]);
+      expect(persisted.scenes.map((s: any) => [s.sceneId, s.mediaAssetVersionId, s.sourceStartMs, s.sourceDurationMs])).toEqual([["scene-1", "pexels-scene-1", 0, 4200], ["scene-2", "pexels-scene-2", 0, 9000]]);
+      expect(diag("parallel_pipeline_diagnostics")).toMatchObject({ reconcile: { exact: 1, resourced: 1 }, researchedSegmentIds: ["g1-b"] });
+    });
+
+    it("a voice failure while media is still being found: the media branch is awaited (not orphaned) and its assets stay for the retry", async () => {
+      let releaseMedia!: () => void;
+      const mediaGate = new Promise<void>((resolve) => { releaseMedia = resolve; });
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => {
+        await mediaGate;
+        return { ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 20_000 } as any, externalId: `ext-${input.sceneId}` } };
+      });
+      audioVersions.generateForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "429" }));
+      const started = await service.startNextDraft();
+      await settleTicks();
+      // TTS already failed, media is still in flight: the failure is NOT applied yet (that would let the retry race the live branch).
+      expect(runs[0].status).not.toBe("draft");
+      expect(step("voice_generation")).toMatchObject({ status: "failed" });
+      releaseMedia();
+      await (started as { done: Promise<void> }).done;
+      expect(step("media_sourcing")).toMatchObject({ status: "succeeded" });
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED", retryable: true } });
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+    });
+
+    it("a media-branch failure while TTS is running: TTS finishes and is kept, the retry does not pay TTS again (idempotent)", async () => {
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const real = mediaPlans.sourceSegments.bind(mediaPlans);
+      let fail = true;
+      vi.spyOn(mediaPlans, "sourceSegments").mockImplementation(async (...args: Parameters<MediaPlanService["sourceSegments"]>) => {
+        if (fail) throw new Error("db hiccup");
+        return real(...args);
+      });
+      const audioRows = new Map<string, any>();
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => {
+        await tick();
+        await tick();
+        const data = { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 4000, subtitleVersion: { id: `subtitle-${id}` } };
+        audioRows.set(id, { ...data, sceneDraftVersionId: id, status: "current", subtitleVersions: [{ id: `subtitle-${id}` }] });
+        return { ok: true as const, data: data as any };
+      });
+      prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) => audioRows.get(where.sceneDraftVersionId) ?? null);
+      await service.processNext();
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+      expect(step("voice_generation")).toMatchObject({ status: "succeeded" });
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2 });
+      fail = false;
+      await service.processNext();
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2); // not charged again
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      const resume = stepRuns.find((s) => s.stepKey === "resume_diagnostics" && s.attempt === 2)!.outputRef;
+      expect(resume).toMatchObject({ attempt: 2, resumed: true, reusedAudioScenes: 2, totalScenes: 2, previousAttempt: { failedStep: "media_sourcing" } });
+    });
+
+    it("retry resumes: reuses script, audio and media already found, and reports exactly which steps were resumed", async () => {
+      runs = [draftRun({ attempts: 2 })];
+      stepRuns.push(
+        { id: "old-1", workflowRunId: "run-1", stepKey: "generate_audio_scene-1", attempt: 1, status: "succeeded", startedAt: new Date(1000), endedAt: new Date(2000) },
+        { id: "old-2", workflowRunId: "run-1", stepKey: "submit_render", attempt: 1, status: "failed", startedAt: new Date(3000), endedAt: new Date(3500) },
+      );
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: approvedScript });
+      prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) => ({ id: `audio-old-${where.sceneDraftVersionId}`, sceneDraftVersionId: where.sceneDraftVersionId, status: "current", mediaAssetVersionId: `m-${where.sceneDraftVersionId}`, durationMs: 4000, subtitleVersions: [{ id: `sub-${where.sceneDraftVersionId}` }] }));
+      mediaAssets.push({ projectId, sceneId: "scene-1", id: "lib-1", kind: "video", durationMs: 20_000, originalFileName: "pexels-1.mp4", createdAt: new Date() }, { projectId, sceneId: "scene-2", id: "lib-2", kind: "video", durationMs: 20_000, originalFileName: "pexels-2.mp4", createdAt: new Date() });
+      await service.processNext();
+      expect(scriptGeneration.generate).not.toHaveBeenCalled();
+      expect(audioVersions.generateForWorkflowRun).not.toHaveBeenCalled();
+      expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      expect(stepRuns.find((s) => s.stepKey === "resume_diagnostics" && s.attempt === 2)!.outputRef).toMatchObject({
+        resumed: true,
+        reusedScript: true,
+        reusedAudioScenes: 2,
+        reusedMediaSegments: 2,
+        totalMediaSegments: 2,
+        previousAttempt: { failedStep: "submit_render", succeededSteps: ["generate_audio_scene-1"] },
+      });
+    });
+
+    it("concurrent run_usage appends from the two branches never lose an entry (and runs never share one)", async () => {
+      const append = (run: any, label: string) => (service as any).appendRunUsage(run, { step: label, kind: "content", provider: null, modelId: null, inputTokens: null, outputTokens: null, costAmount: null, costCurrency: null, at: "t" });
+      const runA = draftRun({ id: "run-a" });
+      const runB = draftRun({ id: "run-b" });
+      await Promise.all([...[1, 2, 3, 4, 5].map((n) => append(runA, `a${n}`)), ...[1, 2, 3].map((n) => append(runB, `b${n}`))]);
+      const entries = (id: string) => stepRuns.find((s) => s.workflowRunId === id && s.stepKey === "run_usage")!.outputRef.entries.map((e: any) => e.step).sort();
+      expect(entries("run-a")).toEqual(["a1", "a2", "a3", "a4", "a5"]);
+      expect(entries("run-b")).toEqual(["b1", "b2", "b3"]);
+    });
+
+    it("two runs in parallel keep separate ledgers: each run's own segments are sourced once and both reach render_queued", async () => {
+      runs = [draftRun({ id: "run-1", createdAt: new Date(1) }), draftRun({ id: "run-2", requestFingerprint: "fp-2", correlationId: "corr-2", createdAt: new Date(2) })];
+      pexels.autoImportForScene = withDuration(20_000);
+      const inflight = new Set<Promise<void>>();
+      await service.fillSlots(inflight, 2);
+      while (inflight.size > 0) await Promise.race([...inflight]);
+      expect(runs.map((r) => r.status)).toEqual(["render_queued", "render_queued"]);
+      expect((pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
+      for (const id of ["run-1", "run-2"]) {
+        expect(stepRuns.filter((s) => s.workflowRunId === id && s.stepKey.startsWith("import_media_"))).toHaveLength(2);
+      }
     });
   });
 
@@ -616,6 +882,7 @@ describe("WorkflowRunnerService", () => {
       expect(state.peak).toBe(2);
       await releaseAll();
       await (started as { done: Promise<void> }).done;
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
       expect(persistedTimelineScenes()).toEqual(["audio-scene-db-1", "audio-scene-db-2"]);
     });
@@ -631,6 +898,7 @@ describe("WorkflowRunnerService", () => {
       await (started as { done: Promise<void> }).done;
       expect(state.peak).toBe(1);
       expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+      expect(runs[0].lastError).toBeNull();
       expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
 
@@ -701,6 +969,89 @@ describe("WorkflowRunnerService", () => {
       runs.length = 0;
       expect(await service.startNextDraft()).toBeNull();
       expect(await service.fillSlots(new Set(), 3)).toBe(0);
+    });
+  });
+  describe("VE2E-134b: early clip cut wiring", () => {
+    afterEach(() => { delete process.env.EARLY_CLIP_CUT; });
+    const withVideo = (voiceMs?: Record<string, number>) => {
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 30_000 } as any, externalId: `ext-${input.sceneId}` } }));
+      if (voiceMs) audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: voiceMs[id] ?? 5000, subtitleVersion: null } as any }));
+    };
+    const attach = (prepareEarly: (...args: any[]) => Promise<unknown>) => {
+      (service as any).clipDerivatives = { prepareEarly };
+      return prepareEarly;
+    };
+    const requestsOf = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.flatMap((call) => call[2] as Array<{ sceneId: string; parentMediaAssetVersionId: string; startMs: number; durationMs: number; stripAudio: boolean }>);
+    const finalRanges = () => (timelines.persistApprovedForWorkflowRun as ReturnType<typeof vi.fn>).mock.calls[0]![4].scenes.map((scene: any) => ({ sceneId: scene.sceneId, startMs: scene.sourceStartMs, durationMs: scene.sourceDurationMs }));
+
+    it("cuts early after sourcing and before submit, with the same ranges the timeline persists when the voice equals the hint", async () => {
+      withVideo({ "scene-db-1": 5000, "scene-db-2": 5000 });
+      const order: string[] = [];
+      const prepareEarly = vi.fn(async () => { order.push("early"); return { ok: true }; });
+      attach(prepareEarly);
+      (renderJobs.enqueueTimelineRender as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => { order.push("submit"); return { ok: true as const, data: { id: "render-job-1", status: "preparing_clips" } as any }; });
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      expect(order[0]).toBe("early");
+      expect(order.indexOf("early")).toBeLessThan(order.indexOf("submit"));
+      const requested = requestsOf(prepareEarly as never);
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((r) => r.stripAudio === true && r.parentMediaAssetVersionId.startsWith("pexels-"))).toBe(true);
+      const ranges = finalRanges();
+      for (const range of ranges) {
+        const match = requested.find((r) => r.sceneId === range.sceneId)!;
+        expect(match).toMatchObject({ startMs: range.startMs, durationMs: range.durationMs });
+      }
+      // identical range in the post-reconcile pass is not requested a second time
+      expect(requested).toHaveLength(new Set(requested.map((r) => r.sceneId)).size);
+    });
+
+    it("a real voice that drifts more than 300 ms is requested again with the new range (old cut is simply not reused)", async () => {
+      withVideo({ "scene-db-1": 7000, "scene-db-2": 5000 });
+      const prepareEarly = attach(vi.fn(async () => ({ ok: true })));
+      await service.processNext();
+      const requested = requestsOf(prepareEarly as never).filter((r) => r.sceneId === "scene-1");
+      expect(requested.length).toBeGreaterThanOrEqual(1);
+      const last = requested[requested.length - 1]!;
+      expect(last.durationMs).toBe(finalRanges().find((r: any) => r.sceneId === "scene-1").durationMs);
+    });
+
+    it("never blocks the pipeline: a prepareEarly that never resolves does not stop the run", async () => {
+      withVideo();
+      attach(vi.fn(() => new Promise(() => undefined)));
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("a prepareEarly that rejects or throws does not fail the run and leaves no unhandled rejection", async () => {
+      withVideo();
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        attach(vi.fn(async () => { throw new Error("boom"); }));
+        vi.spyOn(console, "warn").mockImplementation(() => undefined);
+        await service.processNext();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(runs[0]).toMatchObject({ status: "render_queued" });
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+    });
+
+    it.each(["0", "false", "off"])("EARLY_CLIP_CUT=%s disables early cutting", async (value) => {
+      withVideo();
+      process.env.EARLY_CLIP_CUT = value;
+      const prepareEarly = attach(vi.fn(async () => ({ ok: true })));
+      await service.processNext();
+      expect(prepareEarly).not.toHaveBeenCalled();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("without ClipDerivativesService wired nothing is cut early and the run completes", async () => {
+      withVideo();
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
     });
   });
 });

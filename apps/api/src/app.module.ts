@@ -33,6 +33,8 @@ import { ElevenLabsVoiceController } from "./elevenlabs-voice.controller.js";
 import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
 import { MediaPlanController } from "./media-plan.controller.js";
 import { MediaPlanService } from "./media-plan.service.js";
+import { MediaLibraryService } from "./media-library.service.js";
+import { MediaLibraryPrefetchService } from "./media-library-prefetch.service.js";
 import { PexelsController } from "./pexels.controller.js";
 import { PexelsService } from "./pexels.service.js";
 import { ApifyController } from "./apify.controller.js";
@@ -123,6 +125,8 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     ElevenLabsVoiceService,
     PexelsService,
     ApifyService,
+    MediaLibraryService,
+    MediaLibraryPrefetchService,
     MediaPlanService,
     RenderEngineStoreService,
     RenderEngineAdminService,

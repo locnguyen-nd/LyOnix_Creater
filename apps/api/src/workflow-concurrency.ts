@@ -1,3 +1,14 @@
+/**
+ * VE2E-133 (what is and is not shared between concurrent runs; recommended ceiling is NOT fixed here until measured):
+ * - Per run (never shared): `SegmentSourceLedger`, `ApifyJobContext`, the media/voice branch promises, the `run_usage` append chain.
+ * - Shared on purpose, process-wide: the provider limiter (`getSharedProviderLimiter`: content, elevenlabs, apify, creatomate, ...), which
+ *   is the real ceiling on provider calls however many runs are in flight. Each run now holds up to
+ *   `WORKFLOW_VOICE_PARALLELISM` TTS calls plus `MEDIA_PLAN_SOURCING_CONCURRENCY` (3) segment searches at the same time (the two
+ *   branches overlap), so the per-run peak of local CPU/IO work (image/ONNX reframe in media sourcing + TTS I/O) is higher than before.
+ * - Raise `WORKFLOW_CONCURRENCY` only together with `PROVIDER_CONCURRENCY_*`; the recommended maximum is taken from the VE2E-119
+ *   measurement (p95 run time from claim to `render_queued` stays under the 300 s SLO, no `apify_queue_timeout`/RATE_LIMITED rise in
+ *   `pnpm report:failures`), not from this comment.
+ */
 /** Auto runs the workflow worker keeps in flight at once (each run is one video). Env `WORKFLOW_CONCURRENCY`, default 5, clamped to 1..10. */
 export const DEFAULT_WORKFLOW_CONCURRENCY = 5;
 export const MAX_WORKFLOW_CONCURRENCY = 10;

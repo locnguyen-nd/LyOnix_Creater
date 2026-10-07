@@ -241,7 +241,7 @@ describe("ScriptGenerationService.extractSegmentKeywords (VE2E-50)", () => {
 
   it("makes one call for all segments and returns validated keywords with usage", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      output_text: JSON.stringify({ segments: [{ segmentId: "seg-1", ja: "新宿 夜景", en: "shinjuku night" }, { segmentId: "seg-2", ja: "crossing", en: "shibuya crossing" }] }),
+      output_text: JSON.stringify({ segments: [{ segmentId: "seg-1", ja: "新宿 夜景", en: "shinjuku night" }, { segmentId: "seg-2", ja: "crossing", en: "shibuya crossing." }] }),
       usage: { input_tokens: 120, output_tokens: 25 },
     }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);

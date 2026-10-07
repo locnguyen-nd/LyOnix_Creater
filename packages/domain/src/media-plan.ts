@@ -27,12 +27,33 @@ export type MediaPlanScene = {
   durationMs: number;
 };
 
+/**
+ * VE2E-88: segment keywords. `ja`/`en` are the first phrase as plain strings (every pre-88 reader keeps
+ * working); the rest is optional/additive. `jaAll`/`enAll`/`broadEn` are the ordered search tiers (all
+ * anchored on the video subject); `moodEn` is a generic backdrop for the photo/brand tiers (L5/L6) ONLY.
+ * `subject`/`aliases`/`mustInclude`/`mustExclude` describe the video's main subject for candidate filters.
+ */
+export type SegmentKeywords = {
+  ja: string;
+  en: string;
+  jaAll?: string[];
+  enAll?: string[];
+  broadEn?: string[];
+  moodEn?: string;
+  subject?: string;
+  aliases?: string[];
+  mustInclude?: string[];
+  mustExclude?: string[];
+};
+
+export type MediaPlanVideoSubject = { main: string; aliases?: string[]; mustInclude?: string[]; mustExclude?: string[] };
+
 export type MediaPlanVisualSegment = {
   segmentId: string;
   sceneIds: string[];
   subject: string;
   priority: number;
-  keywords: { ja: string; en: string };
+  keywords: Omit<SegmentKeywords, "subject" | "aliases" | "mustInclude" | "mustExclude">;
 };
 
 export type PlannedSegment = {
@@ -41,7 +62,7 @@ export type PlannedSegment = {
   subject: string | null;
   /** 1 = main subject; `null` for fallback groups (no plan to say). */
   priority: number | null;
-  keywords: { ja: string; en: string } | null;
+  keywords: SegmentKeywords | null;
   durationMs: number;
   origin: "visual_plan" | "fallback";
   /** Kind the pinned template expects for this segment's scenes (set by `splitSegmentsByVisualKind`); undefined = legacy video behaviour. */
@@ -97,12 +118,28 @@ export function groupScenesByDuration(scenes: MediaPlanScene[], count: number): 
   return result;
 }
 
-const toPlanned = (segment: MediaPlanVisualSegment, durations: Map<string, number>): PlannedSegment => ({
+const plannedKeywords = (segment: MediaPlanVisualSegment, videoSubject: MediaPlanVideoSubject | null | undefined): SegmentKeywords => {
+  const k = segment.keywords;
+  return {
+    ja: k.ja,
+    en: k.en,
+    ...(k.jaAll ? { jaAll: [...k.jaAll] } : {}),
+    ...(k.enAll ? { enAll: [...k.enAll] } : {}),
+    ...(k.broadEn ? { broadEn: [...k.broadEn] } : {}),
+    ...(k.moodEn ? { moodEn: k.moodEn } : {}),
+    ...(videoSubject?.main ? { subject: videoSubject.main } : {}),
+    ...(videoSubject?.aliases?.length ? { aliases: [...videoSubject.aliases] } : {}),
+    ...(videoSubject?.mustInclude?.length ? { mustInclude: [...videoSubject.mustInclude] } : {}),
+    ...(videoSubject?.mustExclude?.length ? { mustExclude: [...videoSubject.mustExclude] } : {}),
+  };
+};
+
+const toPlanned = (segment: MediaPlanVisualSegment, durations: Map<string, number>, videoSubject?: MediaPlanVideoSubject | null): PlannedSegment => ({
   segmentId: segment.segmentId,
   sceneIds: [...segment.sceneIds],
   subject: segment.subject || null,
   priority: segment.priority,
-  keywords: { ja: segment.keywords.ja, en: segment.keywords.en },
+  keywords: plannedKeywords(segment, videoSubject),
   durationMs: sum(segment.sceneIds.map((id) => durations.get(id) ?? 0)),
   origin: "visual_plan",
 });
@@ -172,16 +209,87 @@ const coversScenesInOrder = (plan: MediaPlanVisualSegment[], sceneIds: string[])
   return flattened.length === sceneIds.length && flattened.every((id, index) => id === sceneIds[index]) && plan.every((segment) => segment.sceneIds.length > 0);
 };
 
+/** VE2E-88: default share of the video's duration given to the main subject (priority 1). Env `SUBJECT_SHARE_TARGET` (0..0.95, fraction or percent like "60"); invalid -> default. */
+export const DEFAULT_SUBJECT_SHARE_TARGET = 0.6;
+export const SUBJECT_SHARE_TARGET_MAX = 0.95;
+
+export function subjectShareTargetFromEnv(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.SUBJECT_SHARE_TARGET;
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_SUBJECT_SHARE_TARGET;
+  const fraction = n > 1 ? n / 100 : n;
+  return Math.min(SUBJECT_SHARE_TARGET_MAX, fraction);
+}
+
+/** Fraction of the total duration that belongs to main-subject (priority 1) segments; 0 when there is no duration. */
+export function mainSubjectShare(segments: PlannedSegment[]): number {
+  const total = sum(segments.map((s) => s.durationMs));
+  return total > 0 ? sum(segments.filter(isMainSubject).map((s) => s.durationMs)) / total : 0;
+}
+
+/**
+ * VE2E-88 weighted allocation: when the main subject (priority 1) holds less than `target` of the
+ * duration, move boundary scenes from the neighbouring non-main segments into the adjacent main
+ * segment (one scene at a time, the scene next to the boundary whose move gets closest to the target
+ * without overshooting by more than that scene), never emptying a non-main segment (each keeps >= 1
+ * scene - related B-roll stays short but present) and never touching consecutive order. No-op when
+ * there is no main segment, `target <= 0`, or the target is already met.
+ */
+export function allocateSubjectShare(segments: PlannedSegment[], scenes: MediaPlanScene[], target: number): PlannedSegment[] {
+  if (!(target > 0) || !segments.some(isMainSubject)) return segments;
+  const durations = new Map(scenes.map((scene) => [scene.sceneId, Math.max(0, scene.durationMs)]));
+  const result = segments.map((s) => ({ ...s, sceneIds: [...s.sceneIds] }));
+  const goal = Math.min(SUBJECT_SHARE_TARGET_MAX, target);
+  const total = sum(result.map((s) => s.durationMs));
+  if (total <= 0) return segments;
+  const share = () => sum(result.filter(isMainSubject).map((s) => s.durationMs)) / total;
+  const move = (from: number, to: number, takeFirst: boolean): boolean => {
+    const source = result[from]!;
+    if (source.sceneIds.length < 2 || isMainSubject(source)) return false;
+    const sceneId = takeFirst ? source.sceneIds.shift()! : source.sceneIds.pop()!;
+    const ms = durations.get(sceneId) ?? 0;
+    const dest = result[to]!;
+    if (takeFirst) dest.sceneIds.push(sceneId);
+    else dest.sceneIds.unshift(sceneId);
+    source.durationMs -= ms;
+    dest.durationMs += ms;
+    return true;
+  };
+  let guard = result.reduce((n, s) => n + s.sceneIds.length, 0);
+  while (share() < goal && guard-- > 0) {
+    let moved = false;
+    for (let i = 0; i < result.length && share() < goal; i += 1) {
+      if (!isMainSubject(result[i]!)) continue;
+      // A non-main neighbour AFTER the main segment gives its first scene; one BEFORE gives its last scene.
+      if (i + 1 < result.length && move(i + 1, i, true)) moved = true;
+      if (share() >= goal) break;
+      if (i > 0 && move(i - 1, i, false)) moved = true;
+    }
+    if (!moved) break;
+  }
+  return result;
+}
+
+export type PlanBackgroundOptions = {
+  /** VE2E-88: the video's main subject (copied onto every planned segment's keywords for candidate filtering). */
+  videoSubject?: MediaPlanVideoSubject | null;
+  /** VE2E-88: opt-in weighted allocation target (fraction 0..0.95); see {@link allocateSubjectShare}. Absent = no re-allocation (pre-88 behaviour). */
+  subjectShareTarget?: number | null;
+};
+
 export function planBackgroundSegments(
   scenes: MediaPlanScene[],
-  visualPlan: { segments: MediaPlanVisualSegment[] } | null | undefined,
+  visualPlan: { segments: MediaPlanVisualSegment[]; videoSubject?: MediaPlanVideoSubject | null } | null | undefined,
   range: SegmentCountRange | null,
+  options: PlanBackgroundOptions = {},
 ): PlannedSegment[] {
   if (scenes.length === 0) return [];
   const durations = new Map(scenes.map((scene) => [scene.sceneId, Math.max(0, scene.durationMs)]));
   const sceneIds = scenes.map((scene) => scene.sceneId);
   if (visualPlan && visualPlan.segments.length > 0 && coversScenesInOrder(visualPlan.segments, sceneIds)) {
-    return fitSegmentsToRange(visualPlan.segments.map((segment) => toPlanned(segment, durations)), range, durations);
+    const videoSubject = options.videoSubject ?? visualPlan.videoSubject ?? null;
+    const fitted = fitSegmentsToRange(visualPlan.segments.map((segment) => toPlanned(segment, durations, videoSubject)), range, durations);
+    return options.subjectShareTarget ? allocateSubjectShare(fitted, scenes, options.subjectShareTarget) : fitted;
   }
   const count = chooseFallbackSegmentCount(sum([...durations.values()]), scenes.length, range);
   return groupScenesByDuration(scenes, count).map((group, index) => ({

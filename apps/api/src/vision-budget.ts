@@ -1,5 +1,5 @@
 import { applyVisionFindings, decideVisionModeration, rankMediaCandidates, type MediaCandidate, type SceneBrief } from "@lyonix/domain";
-import { ProviderError, moderateSceneCandidate, type LiveContentKind, type SceneModerationOutcome, type VisionModerationFrame, type VisionModerationSceneContext } from "@lyonix/providers";
+import { ProviderError, VISION_BATCH_MAX, VISION_BATCH_MIN, moderateSceneCandidate, moderateSceneCandidatesBatch, type LiveContentKind, type SceneBatchOutcome, type SceneModerationOutcome, type VisionModerationFrame, type VisionModerationSceneContext } from "@lyonix/providers";
 import { callContentWithModelFailover, type ModelFailoverAccounts } from "./content-model-failover.js";
 
 /**
@@ -19,6 +19,9 @@ const positiveInt = (raw: string | undefined, fallback: number): number => {
 
 export const visionMaxCallsPerJob = (env: NodeJS.ProcessEnv = process.env) => positiveInt(env.VISION_MAX_CALLS_PER_JOB, DEFAULT_VISION_MAX_CALLS_PER_JOB);
 export const visionMaxCandidatesPerSegment = (env: NodeJS.ProcessEnv = process.env) => positiveInt(env.VISION_MAX_CANDIDATES_PER_SEGMENT, DEFAULT_VISION_MAX_CANDIDATES_PER_SEGMENT);
+
+/** VE2E-131: cover images judged per vision request (env `VISION_BATCH_SIZE`, clamped to 4..6). */
+export const visionBatchSize = (env: NodeJS.ProcessEnv = process.env) => Math.min(VISION_BATCH_MAX, Math.max(VISION_BATCH_MIN, positiveInt(env.VISION_BATCH_SIZE, 5)));
 
 export type ModelAvailability = ModelFailoverAccounts;
 
@@ -41,6 +44,8 @@ export class VisionBudget {
   /** Provider requests spent by vision (a capability probe counts as one, the moderation request as one). */
   calls = 0;
   moderated = 0;
+  /** VE2E-131: Auto (unattended) job. When vision could not run, the metadata ranking decides instead of abstaining. Set by the job context. */
+  unattended = false;
   /** scopeKey (scene id) -> why vision was skipped for it. */
   readonly skips = new Map<string, VisionSkipReason>();
   private readonly capability = new Map<string, string>();
@@ -113,8 +118,10 @@ export type BudgetedModerationInput = {
   /** VE2E-30: several frames of ONE video (extracted by the media worker); takes precedence over `fetchFrame`. One verdict per call. */
   fetchFrames?: (candidate: MediaCandidate) => Promise<VisionModerationFrame[]>;
   availability: ModelAvailability;
-  /** Test seam; defaults to the real adapter. */
+  /** Test seam; defaults to the real adapter. Passing it forces the legacy one-request-per-candidate path. */
   moderate?: typeof moderateSceneCandidate;
+  /** VE2E-131 test seam for the batched cover pass (default: the real adapter). */
+  moderateBatch?: typeof moderateSceneCandidatesBatch;
 };
 
 /**
@@ -126,6 +133,7 @@ export async function moderatePoolWithBudget(input: BudgetedModerationInput): Pr
   const { pool, budget, account } = input;
   const moderate = input.moderate ?? moderateSceneCandidate;
   budget.setModel(account.model);
+  if (!input.moderate && !input.fetchFrames && input.fetchFrame) return moderateCoversInBatch(input);
   const order = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }).slice(0, budget.maxCandidatesPerSegment).map((r) => r.candidate.candidateId);
   const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
   for (const candidateId of order) {
@@ -165,6 +173,60 @@ export async function moderatePoolWithBudget(input: BudgetedModerationInput): Pr
     const findings = decideVisionModeration({ raw: selected.value.raw, provider: account.provider, model: selected.modelId, operation: "image_moderation", evidenceRefs: selected.value.evidenceRefs });
     byId.set(candidateId, applyVisionFindings(candidate, findings));
     if (findings.decision === "accepted") break;
+  }
+  return pool.map((c) => byId.get(c.candidateId) ?? c);
+}
+
+/**
+ * VE2E-131: ONE vision request judges the top 4-6 cover images (8 s deadline inside the adapter). Any failure (quota, rate limit,
+ * timeout, malformed answer, exhausted budget) leaves the pool untouched so the metadata ranking decides - vision never blocks a pick.
+ * A timeout is reported as `vision_skipped_quota` (model unavailable) to keep the contract's skip-reason union unchanged.
+ */
+async function moderateCoversInBatch(input: BudgetedModerationInput): Promise<MediaCandidate[]> {
+  const { pool, budget, account } = input;
+  const moderateBatch = input.moderateBatch ?? moderateSceneCandidatesBatch;
+  const order = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }).slice(0, visionBatchSize()).map((r) => r.candidate.candidateId);
+  const byId = new Map(pool.map((c) => [c.candidateId, c] as const));
+  if (budget.calls >= budget.maxCalls) {
+    budget.note(input.scopeKey, "vision_skipped_budget");
+    return pool;
+  }
+  const fetched = await Promise.all(order.map(async (id) => {
+    const candidate = byId.get(id);
+    if (!candidate?.previewUrl) return null;
+    const frame = await input.fetchFrame?.(candidate).catch(() => null);
+    return frame ? { id, frame } : null;
+  }));
+  const items = fetched.filter((i): i is { id: string; frame: VisionModerationFrame } => i !== null);
+  if (items.length === 0) return pool;
+  const selected = await callContentWithModelFailover(input.availability, account.id, account.models ?? [account.model], async (modelId) => {
+    const modelKey = `${account.id}:${modelId}`;
+    const cachedCapability = budget.capabilityFor(modelKey);
+    if (!budget.reserve(cachedCapability ? 1 : 2)) throw new VisionBudgetExhausted();
+    const outcome: SceneBatchOutcome = await moderateBatch({
+      kind: account.provider as LiveContentKind,
+      apiKey: account.apiKey,
+      modelId,
+      sceneContext: input.sceneContext,
+      items,
+      ...(cachedCapability ? { capabilityEvidence: { verifiedAt: cachedCapability } } : {}),
+    });
+    if (outcome.capabilityVerifiedAt) budget.setCapability(modelKey, outcome.capabilityVerifiedAt);
+    if (outcome.failureCode) throw new ProviderError(outcome.failureCode, "Vision model unavailable", true, outcome.retryAfterMs, outcome.quotaScope);
+    return outcome;
+  }, { markCapabilityUnusable: false });
+  if (!selected.ok) {
+    if (selected.thrown instanceof VisionBudgetExhausted) budget.note(input.scopeKey, "vision_skipped_budget");
+    else budget.note(input.scopeKey, "vision_skipped_quota");
+    return pool;
+  }
+  budget.setModel(selected.modelId);
+  for (const [candidateId, raw] of selected.value.verdicts) {
+    const candidate = byId.get(candidateId);
+    if (!candidate) continue;
+    budget.moderated += 1;
+    const findings = decideVisionModeration({ raw, provider: account.provider, model: selected.modelId, operation: "image_moderation", evidenceRefs: selected.value.evidenceRefs });
+    byId.set(candidateId, applyVisionFindings(candidate, findings));
   }
   return pool.map((c) => byId.get(c.candidateId) ?? c);
 }

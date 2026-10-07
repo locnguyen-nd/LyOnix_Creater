@@ -14,7 +14,7 @@
  * derivative cut (`decideStripAudio`, VE2E-37).
  *
  * No FFmpeg here; results/runs are bounded (<=20 items, 120 s, 1 retry) inside the adapter. A per
- * (project, platform) single-flight guard and a 15-minute result cache avoid paying twice for the same query.
+ * (project, platform) single-flight guard and a result cache (24 h search-only, 15 min with download links) avoid paying twice for the same query.
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -23,10 +23,13 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
   APIFY_HOST_ALLOWLIST,
+  APIFY_MAX_BATCH_POSTS,
   ProviderError,
   addApifyUsage,
   emptyApifyUsage,
+  fetchApifyConcurrencyLimit,
   fetchApifyTikTokPost,
+  fetchApifyTikTokPosts,
   hostMatchesSuffix,
   isLiveContentKind,
   isApifyPlatform,
@@ -52,6 +55,7 @@ import {
   type SceneBrief,
 } from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality, MediaPlanReframeCheck } from "@lyonix/contracts";
+import { getSharedProviderLimiter, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
@@ -71,14 +75,34 @@ export type ApifyOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCo
 const IMPORT_REF_TTL_MS = 30 * 60 * 1000;
 /** VE2E-51: TTL of the shared search cache (memory + file, so the API process (Studio) and the worker process (Auto) share it). Env `APIFY_CACHE_TTL_MS`. */
 const DEFAULT_RESULT_CACHE_TTL_MS = 15 * 60 * 1000;
-const resultCacheTtlMs = () => {
-  const value = Number(process.env.APIFY_CACHE_TTL_MS);
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_RESULT_CACHE_TTL_MS;
+/** VE2E-132 (CR-MEDIA-SLA 3.2): search-only results (candidate metadata, no files) are reusable across jobs of the same topic for 24 h. */
+const DEFAULT_SEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** `APIFY_CACHE_TTL_MS`, when set, applies to both kinds; otherwise search-only = 24 h and a result carrying download links = 15 min (links expire). */
+const resultCacheTtlMs = (kind: "search" | "download" = "download") => {
+  const raw = process.env.APIFY_CACHE_TTL_MS;
+  const value = raw === undefined || raw.trim() === "" ? NaN : Number(raw);
+  if (Number.isFinite(value) && value >= 0) return value;
+  return kind === "search" ? DEFAULT_SEARCH_CACHE_TTL_MS : DEFAULT_RESULT_CACHE_TTL_MS;
 };
-/** VE2E-51: Actor runs allowed at once per (project, platform); segment sourcing runs at most 3 in parallel. */
-export const APIFY_MAX_CONCURRENT_RUNS = 3;
-/** VE2E-51: phase-1 result count and how many filtered candidates go on to vision moderation/ranking. */
-export const APIFY_SEARCH_LIMIT = 10;
+/**
+ * VE2E-132: download the chosen posts of a job in ONE Actor run (env `APIFY_BATCH_DOWNLOAD`). Default OFF until the owner-approved probe
+ * confirms `clockworks/tiktok-scraper` takes several `postURLs` (and the field name, `APIFY_TIKTOK_POST_URL_FIELD`). OFF = one run per clip.
+ */
+export const apifyBatchDownloadEnabled = () => flagOn(process.env.APIFY_BATCH_DOWNLOAD, false);
+/** Batch window (ms) after the first registered post before the single run starts (env `APIFY_BATCH_WINDOW_MS`, default 1500) and size threshold (`APIFY_BATCH_MAX`, default 8, <= adapter max). */
+const apifyBatchWindowMs = () => { const v = Number(process.env.APIFY_BATCH_WINDOW_MS); return Number.isFinite(v) && v >= 0 ? v : 1500; };
+const apifyBatchMax = () => { const v = Math.floor(Number(process.env.APIFY_BATCH_MAX)); return Number.isFinite(v) && v >= 1 ? Math.min(v, APIFY_MAX_BATCH_POSTS) : 8; };
+/**
+ * VE2E-131: Actor runs allowed at once per (project, platform) (env `APIFY_MAX_CONCURRENT_RUNS`, default 10). More searches WAIT in a FIFO
+ * queue (up to `APIFY_QUEUE_WAIT_TIMEOUT_MS`, default 15 min) instead of failing with PROVIDER_RATE_LIMITED.
+ */
+export const apifyMaxConcurrentRuns = () => resolveConcurrencyConfig().apifyMaxConcurrentRuns;
+const apifyQueueWaitTimeoutMs = () => resolveConcurrencyConfig().apifyQueueWaitTimeoutMs;
+/** VE2E-51/131: phase-1 result count (20 = the adapter ceiling) and how many filtered candidates go on to vision moderation/ranking. */
+export const APIFY_SEARCH_LIMIT = 20;
+/** VE2E-131: phase 2 failing moves on to the next shortlisted candidate, at most this many candidates per segment (no single-phase re-search). */
+export const APIFY_MAX_PHASE2_CANDIDATES = 2;
+const PLAN_LIMIT_TTL_MS = 10 * 60_000;
 const MAX_FILTERED_POOL = 8;
 const flagOn = (value: string | undefined, fallback: boolean) => (value === undefined || value.trim() === "" ? fallback : !/^(0|false|off|no)$/i.test(value.trim()));
 /**
@@ -86,13 +110,14 @@ const flagOn = (value: string | undefined, fallback: boolean) => (value === unde
  * `clockworks/tiktok-scraper`: search ~12 s + one targeted download ~24 s, vs 2-4 min for the download search): `0` = classic single-phase.
  */
 export const apifyTwoPhaseEnabled = () => flagOn(process.env.APIFY_TWO_PHASE, true);
-/** `APIFY_TWO_PHASE_FALLBACK` (default on): when phase 2 fails, fall back to the single-phase download search. */
-export const apifyTwoPhaseFallbackEnabled = () => flagOn(process.env.APIFY_TWO_PHASE_FALLBACK, true);
 
 /**
  * VE2E-51: state of ONE sourcing job (Auto run or Studio media plan): accumulated Apify spend and the identical
  * (platform, keyword) searches already made, so segments with the same keyword share one Actor run.
  */
+type PostBatchEntry = { chosen: ApifyCandidateResult; waiters: Array<(r: { ok: true; result: ApifyCandidateResult } | { ok: false; code: string }) => void> };
+type PostBatch = { entries: Map<string, PostBatchEntry>; timer: ReturnType<typeof setTimeout> | null };
+
 export class ApifyJobContext {
   readonly usage: ApifyUsage & { searchesReused: number; libraryReuses: number } = { ...emptyApifyUsage(), searchesReused: 0, libraryReuses: 0 };
   readonly searches = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
@@ -100,6 +125,8 @@ export class ApifyJobContext {
   readonly vision: VisionBudget;
   /** Clip ids whose download/import failed in this job: never picked again (a retry then moves on to the next ranked candidate). */
   readonly failedIds = new Set<string>();
+  /** VE2E-132: posts waiting for the shared download run, per (account, lang). */
+  readonly postBatches = new Map<string, PostBatch>();
   constructor(opts: { visionMaxCalls?: number } = {}) {
     this.vision = new VisionBudget(opts.visionMaxCalls ? { maxCalls: opts.visionMaxCalls } : {});
   }
@@ -107,7 +134,15 @@ export class ApifyJobContext {
    * VE2E-67: what a plan-time `overlay_unavoidable` verdict does. `swap` (Auto): the candidate fails and the existing fallback (next
    * platform, then Pexels) supplies another source. `flag` (Studio, default): the candidate is kept and the flag is shown to the user.
    */
-  overlayPolicy: "swap" | "flag" = "flag";
+  private policy: "swap" | "flag" = "flag";
+  get overlayPolicy(): "swap" | "flag" {
+    return this.policy;
+  }
+  /** `swap` = Auto (unattended): also tells the vision budget, so Auto drops the verified-signal gate when vision cannot run (VE2E-131). */
+  set overlayPolicy(value: "swap" | "flag") {
+    this.policy = value;
+    this.vision.unattended = value === "swap";
+  }
   addRun(usage: ApifyUsage) {
     addApifyUsage(this.usage, usage);
   }
@@ -158,8 +193,10 @@ export class ApifyService {
   private readonly cache = new Map<string, { at: number; outcome: ApifySearchOutcome }>();
   /** Identical searches already running (any job/Studio call) share one promise instead of paying twice. */
   private readonly pending = new Map<string, Promise<ApifyOutcome<ApifySearchOutcome>>>();
-  /** Running Actor searches per `project:platform` (bounded by {@link APIFY_MAX_CONCURRENT_RUNS}). */
+  /** Running Actor searches per `project:platform` (bounded by {@link apifyMaxConcurrentRuns}); extra searches wait in `waiting` (FIFO). */
   private readonly running = new Map<string, number>();
+  private readonly waiting = new Map<string, Array<() => void>>();
+  private readonly planLimitCheckedAt = new Map<string, number>();
   /** Test seam: stubbed Apify API. Production leaves this undefined (global fetch). */
   apifyDeps: ApifyDeps | undefined;
 
@@ -229,16 +266,69 @@ export class ApifyService {
       // Best-effort prune of expired entries (working files are short-lived, never kept for days).
       for (const name of await readdir(dir)) {
         const info = await stat(join(dir, name)).catch(() => null);
-        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, 60_000)) await unlink(join(dir, name)).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs >= Math.max(ttl, resultCacheTtlMs("search"), 60_000)) await unlink(join(dir, name)).catch(() => undefined);
       }
     } catch {
       // The cache is an optimisation only.
     }
   }
 
+  /** Takes a per-(project, platform) run slot, waiting FIFO; resolves false when the (large, env) wait timeout passes. */
+  private async acquireRunSlot(flightKey: string): Promise<boolean> {
+    if ((this.running.get(flightKey) ?? 0) < apifyMaxConcurrentRuns() && (this.waiting.get(flightKey)?.length ?? 0) === 0) {
+      this.running.set(flightKey, (this.running.get(flightKey) ?? 0) + 1);
+      return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      const queue = this.waiting.get(flightKey) ?? [];
+      this.waiting.set(flightKey, queue);
+      const grant = () => { clearTimeout(timer); resolve(true); }; // the releasing run hands its slot over (running count unchanged)
+      const timer = setTimeout(() => {
+        const index = queue.indexOf(grant);
+        if (index >= 0) queue.splice(index, 1);
+        resolve(false);
+      }, apifyQueueWaitTimeoutMs());
+      queue.push(grant);
+    });
+  }
+
+  private releaseRunSlot(flightKey: string): void {
+    const queue = this.waiting.get(flightKey);
+    const next = queue && queue.length > 0 && (this.running.get(flightKey) ?? 0) <= apifyMaxConcurrentRuns() ? queue.shift() : undefined;
+    if (next) {
+      next();
+      return;
+    }
+    this.running.set(flightKey, Math.max(0, (this.running.get(flightKey) ?? 1) - 1));
+  }
+
+  /**
+   * VE2E-131: the shared "apify" limiter wraps ONE Actor call (a search or a post download) only - never a whole segment flow, so vision,
+   * file download and reframe run outside the slot. Waiting for a slot is a queue, not an error (timeout: APIFY_QUEUE_WAIT_TIMEOUT_MS).
+   */
+  private actorCall<T>(fn: () => Promise<T>): Promise<T> {
+    return getSharedProviderLimiter().run("apify", fn);
+  }
+
+  /**
+   * VE2E-131: lowers the live "apify" cap to the plan's real `maxConcurrentActorJobs` (GET /v2/users/me/limits, read-only, best effort,
+   * re-checked every 10 min per account). The env value stays the ceiling. Skipped under NODE_ENV=test and `APIFY_PLAN_LIMIT_PROBE=0`.
+   */
+  async syncPlanConcurrency(account: { id: string; encryptedSecret: string }): Promise<number | null> {
+    const last = this.planLimitCheckedAt.get(account.id) ?? 0;
+    if (Date.now() - last < PLAN_LIMIT_TTL_MS) return null;
+    this.planLimitCheckedAt.set(account.id, Date.now());
+    const plan = await fetchApifyConcurrencyLimit(decryptSecret(account.encryptedSecret), this.apifyDeps).catch(() => null);
+    if (plan === null) return null;
+    const ceiling = resolveConcurrencyConfig().providerLimits.apify;
+    const effective = Math.max(1, Math.min(ceiling, plan));
+    getSharedProviderLimiter().setLimit("apify", effective);
+    return effective;
+  }
+
   /**
    * VE2E-51 shared search: TTL cache (memory + file, shared by Studio and Auto), identical (platform, keyword) searches of one
-   * job reused, identical in-flight searches share one run, up to {@link APIFY_MAX_CONCURRENT_RUNS} distinct runs per
+   * job reused, identical in-flight searches share one run, up to {@link apifyMaxConcurrentRuns} distinct runs (the rest queue) per
    * (project, platform). A search-only request is also answered from a cached full-download result (superset).
    */
   private async searchShared(
@@ -250,10 +340,11 @@ export class ApifyService {
     const limit = Math.min(Math.max(Math.floor(input.limit ?? 10), 1), 20);
     const keyword = input.keyword.trim().replace(/\s+/g, " ");
     const download = input.download !== false;
-    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
+    const keyFor = (dl: boolean) => createHash("sha256").update([account.id, input.platform, input.lang, limit, keyword.normalize("NFKC").toLowerCase(), dl ? "download" : "search"].join("\u0000")).digest("hex");
     const key = keyFor(download);
     const altKey = download ? null : keyFor(true);
-    const ttl = resultCacheTtlMs();
+    const ttlFor = (dl: boolean) => resultCacheTtlMs(dl ? "download" : "search");
+    const ttl = ttlFor(download);
 
     const memo = job?.searches.get(key);
     if (memo) {
@@ -261,14 +352,17 @@ export class ApifyService {
       return { outcome: await memo, reused: true };
     }
     const work = (async (): Promise<{ outcome: ApifyOutcome<ApifySearchOutcome>; reused: boolean }> => {
-      if (ttl > 0) {
+      {
         const now = Date.now();
         for (const candidate of altKey ? [key, altKey] : [key]) {
           const hit = this.cache.get(candidate);
-          if (hit && now - hit.at < ttl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
+          const candidateTtl = ttlFor(candidate === altKey ? true : download);
+          if (hit && candidateTtl > 0 && now - hit.at < candidateTtl) return { outcome: { ok: true, data: hit.outcome }, reused: true };
         }
         for (const candidate of altKey ? [key, altKey] : [key]) {
-          const hit = await this.readFileCache(candidate, ttl);
+          const candidateTtl = ttlFor(candidate === altKey ? true : download);
+          if (candidateTtl <= 0) continue;
+          const hit = await this.readFileCache(candidate, candidateTtl);
           if (hit) {
             this.cache.set(candidate, { at: now, outcome: hit });
             return { outcome: { ok: true, data: hit }, reused: true };
@@ -278,22 +372,23 @@ export class ApifyService {
       const inFlight = this.pending.get(key);
       if (inFlight) return { outcome: await inFlight, reused: true };
       const flightKey = `${projectId}:${input.platform}`;
-      if ((this.running.get(flightKey) ?? 0) >= APIFY_MAX_CONCURRENT_RUNS) {
-        return { outcome: { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Đang có quá nhiều lượt tìm Apify cho nền tảng này, thử lại sau.", status: 429, retryable: true }, reused: false };
-      }
-      this.running.set(flightKey, (this.running.get(flightKey) ?? 0) + 1);
       const usage = emptyApifyUsage();
+      // Registered in `pending` synchronously (no await since the check above), so identical searches share this run even while it queues.
       const run = (async (): Promise<ApifyOutcome<ApifySearchOutcome>> => {
+        if (!(await this.acquireRunSlot(flightKey))) {
+          return { ok: false, code: "PROVIDER_RATE_LIMITED", message: "Hàng đợi Apify quá lâu, thử lại sau.", status: 429, retryable: true };
+        }
         try {
-          const outcome = await searchApify(
+          if (process.env.NODE_ENV !== "test" && process.env.APIFY_PLAN_LIMIT_PROBE !== "0") await this.syncPlanConcurrency(account);
+          const outcome = await this.actorCall(() => searchApify(
             decryptSecret(account.encryptedSecret),
             { platform: input.platform, keyword, lang: input.lang, limit, providerAccountId: account.id, download, usageSink: usage, ...(input.runTimeoutSecs ? { runTimeoutSecs: input.runTimeoutSecs } : {}) },
             this.apifyDeps,
-          );
+          ));
           if (ttl > 0) {
             const now = Date.now();
             this.cache.set(key, { at: now, outcome });
-            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= ttl) this.cache.delete(k);
+            if (this.cache.size > 200) for (const [k, value] of this.cache) if (now - value.at >= Math.max(ttl, resultCacheTtlMs("search"))) this.cache.delete(k);
             await this.writeFileCache(key, outcome, ttl);
           }
           return { ok: true, data: outcome };
@@ -301,7 +396,7 @@ export class ApifyService {
           return { ok: false, ...providerFailure(error) };
         } finally {
           job?.addRun(usage);
-          this.running.set(flightKey, Math.max(0, (this.running.get(flightKey) ?? 1) - 1));
+          this.releaseRunSlot(flightKey);
         }
       })();
       this.pending.set(key, run);
@@ -546,27 +641,89 @@ export class ApifyService {
     }
   }
 
-  /** Phase 2: run the primary TikTok Actor for ONE chosen post with download on; the result is import-ready. Usage goes to the job. */
-  private async fetchChosenPost(
-    account: { id: string; encryptedSecret: string },
-    chosen: ApifyCandidateResult,
-    job: ApifyJobContext,
-  ): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+  /**
+   * VE2E-132: segments sourced in parallel register their chosen post here; the first registration opens a short window
+   * (`APIFY_BATCH_WINDOW_MS`), reaching `APIFY_BATCH_MAX` posts flushes at once, then ONE Actor run downloads them all and every segment
+   * receives its own result (matched by video id). A clip missing from the result fails only its own segment (-> next candidate).
+   */
+  private joinPostBatch(account: { id: string; encryptedSecret: string }, chosen: ApifyCandidateResult, job: ApifyJobContext, lang: ApifyLang): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    const batchKey = `${account.id}:${lang}`;
+    let batch = job.postBatches.get(batchKey);
+    if (!batch) {
+      batch = { entries: new Map(), timer: null };
+      job.postBatches.set(batchKey, batch);
+    }
+    const open = batch;
+    return new Promise((resolve) => {
+      const id = chosen.candidate.externalId;
+      const entry = open.entries.get(id) ?? { chosen, waiters: [] };
+      entry.waiters.push(resolve);
+      open.entries.set(id, entry);
+      const flush = () => {
+        if (open.timer) clearTimeout(open.timer);
+        open.timer = null;
+        if (job.postBatches.get(batchKey) === open) job.postBatches.delete(batchKey);
+        void this.runPostBatch(account, open, job, lang);
+      };
+      if (open.entries.size >= apifyBatchMax()) flush();
+      else if (!open.timer) open.timer = setTimeout(flush, apifyBatchWindowMs());
+    });
+  }
+
+  private async runPostBatch(account: { id: string; encryptedSecret: string }, batch: PostBatch, job: ApifyJobContext, lang: ApifyLang): Promise<void> {
+    const entries = [...batch.entries.entries()];
     const usage = emptyApifyUsage();
+    const settle = (id: string, value: { ok: true; result: ApifyCandidateResult } | { ok: false; code: string }) => {
+      for (const waiter of batch.entries.get(id)!.waiters) waiter(value);
+    };
     try {
-      const outcome = await fetchApifyTikTokPost(
+      const outcome = await this.actorCall(() => fetchApifyTikTokPosts(
         decryptSecret(account.encryptedSecret),
         {
-          postUrl: chosen.deferredPostUrl ?? "",
-          expectedVideoId: chosen.candidate.externalId,
-          lang: "ja",
+          posts: entries.map(([id, e]) => ({ postUrl: e.chosen.deferredPostUrl ?? "", expectedVideoId: id })),
+          lang,
           providerAccountId: account.id,
           runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
           usageSink: usage,
           ...(process.env.APIFY_TIKTOK_POST_URL_FIELD ? { postUrlField: process.env.APIFY_TIKTOK_POST_URL_FIELD } : {}),
         },
         this.apifyDeps,
-      );
+      ));
+      for (const [id] of entries) {
+        const found = outcome.byVideoId.get(id);
+        settle(id, found?.ok ? { ok: true, result: found.result } : { ok: false, code: found && !found.ok ? found.code : "PROVIDER_SCHEMA_INVALID" });
+      }
+    } catch (error) {
+      const code = error instanceof ProviderError ? error.code : "PROVIDER_UNAVAILABLE";
+      for (const [id] of entries) settle(id, { ok: false, code });
+    } finally {
+      job.addRun(usage); // the whole batch is ONE run: counted once
+    }
+  }
+
+  /** Phase 2: run the primary TikTok Actor for ONE chosen post with download on; the result is import-ready. Usage goes to the job. */
+  private async fetchChosenPost(
+    account: { id: string; encryptedSecret: string },
+    chosen: ApifyCandidateResult,
+    job: ApifyJobContext,
+    lang: ApifyLang = "ja",
+  ): Promise<{ ok: true; result: ApifyCandidateResult } | { ok: false; code: string }> {
+    if (apifyBatchDownloadEnabled() && chosen.deferredPostUrl) return this.joinPostBatch(account, chosen, job, lang);
+    const usage = emptyApifyUsage();
+    try {
+      const outcome = await this.actorCall(() => fetchApifyTikTokPost(
+        decryptSecret(account.encryptedSecret),
+        {
+          postUrl: chosen.deferredPostUrl ?? "",
+          expectedVideoId: chosen.candidate.externalId,
+          lang,
+          providerAccountId: account.id,
+          runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS,
+          usageSink: usage,
+          ...(process.env.APIFY_TIKTOK_POST_URL_FIELD ? { postUrlField: process.env.APIFY_TIKTOK_POST_URL_FIELD } : {}),
+        },
+        this.apifyDeps,
+      ));
       const result = outcome.results[0];
       return result ? { ok: true, result } : { ok: false, code: "PROVIDER_SCHEMA_INVALID" };
     } catch (error) {
@@ -614,17 +771,22 @@ export class ApifyService {
       keepOverlayFlagged?: boolean;
       /** Best-effort fill: skip the strict social filter and the relevance threshold; vision rejections still apply. */
       lenient?: boolean;
+      /** VE2E-131 search tier/language (default `ja`, as before). `en` = English keyword + loosened social filter (en/un captions, outside Japan, landscape). */
+      lang?: ApifyLang;
+      /** VE2E-131: proper names/aliases of the video subject; a caption/hashtag hit raises the candidate's filter score. */
+      subjectAliases?: readonly string[];
     },
   ): Promise<AutoImportOutcome> {
     if (input.platform === "google_video") return { ok: false, reason: "platform_not_importable" };
     const job = input.job ?? new ApifyJobContext();
+    const lang: ApifyLang = input.lang === "en" ? "en" : "ja";
     const twoPhase = input.platform === "tiktok" && apifyTwoPhaseEnabled();
     const quality = emptyQuality(twoPhase);
     const fail = (reason: string): AutoImportOutcome => ({ ok: false, reason, quality });
-    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
+    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang, limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
     quality.searchReused = searched.reused;
     if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
-    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds };
+    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}) };
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
@@ -654,61 +816,54 @@ export class ApifyService {
     } catch {
       // Moderation is best-effort evidence; a failing vision call must not abort sourcing (candidates stay metadata-only).
     }
-    const decision = decideMediaSelection(rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds }), { requireVerifiedSemanticSignal: !input.allowUnverified && !input.lenient, ...(input.lenient ? { relevanceThreshold: 0 } : {}) });
-    if (decision.decision === "needs_input") return fail(`apify_abstained:${decision.reason}`);
-    const chosen = byCandidateId.get(decision.chosen.candidateId);
-    if (!chosen) return fail("apify_no_usable_candidate");
-    const externalId = decision.chosen.externalId;
-    // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
-    input.usedExternalIds.add(externalId);
-    const release = () => input.usedExternalIds.delete(externalId);
-    const done = (asset: AutoImportedAsset, candidate: MediaCandidate): AutoImportOutcome => ({
-      ok: true,
-      data: { asset, externalId, ledgerId: `${decision.chosen.source}:${externalId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
-    });
-
-    const library = await this.findLibraryAsset(projectId, input.platform, externalId);
-    if (library) {
-      quality.reusedLibraryAsset = true;
-      job.usage.libraryReuses += 1;
-      quality.frameCheck = await this.verifyVideoFrames(library, decision.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
-      if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
-      if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
-      return done(library, decision.chosen);
-    }
-
-    let toImport: ApifyCandidateResult | null = chosen.download ? chosen : null;
-    if (!toImport) {
-      const phase2 = await this.fetchChosenPost(account, chosen, job);
+    // VE2E-131: Auto (unattended job) no longer demands a verified semantic signal when vision produced no verdict at all
+    // (quota / timeout / no vision account): the metadata ranking decides. Studio and the `lenient` fill keep their previous rules.
+    const visionRan = pool.some((candidate) => candidate.moderationDecision !== null);
+    const requireVerified = !input.allowUnverified && !input.lenient && !(job.vision.unattended && !visionRan);
+    let ranked = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds });
+    let phase2Failure = "";
+    let decision: Extract<ReturnType<typeof decideMediaSelection>, { decision: "auto_select" }> | null = null;
+    let toImport: ApifyCandidateResult | null = null;
+    let externalId = "";
+    // VE2E-131: a phase-2 failure moves on to the next shortlisted candidate (max APIFY_MAX_PHASE2_CANDIDATES); the single-phase search is gone.
+    for (let attempt = 0; attempt < APIFY_MAX_PHASE2_CANDIDATES; attempt += 1) {
+      const next = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: requireVerified, ...(input.lenient ? { relevanceThreshold: 0 } : {}) });
+      if (next.decision === "needs_input") return fail(attempt === 0 ? `apify_abstained:${next.reason}` : phase2Failure);
+      const chosen = byCandidateId.get(next.chosen.candidateId);
+      if (!chosen) return fail("apify_no_usable_candidate");
+      const id = next.chosen.externalId;
+      // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
+      input.usedExternalIds.add(id);
+      const library = await this.findLibraryAsset(projectId, input.platform, id);
+      if (library) {
+        quality.reusedLibraryAsset = true;
+        job.usage.libraryReuses += 1;
+        quality.frameCheck = await this.verifyVideoFrames(library, next.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+        if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
+        if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
+        return { ok: true, data: { asset: library, externalId: id, ledgerId: `${next.chosen.source}:${id}`, provenance: next.chosen.provenance.apify ?? null, platform: input.platform, quality } };
+      }
+      if (chosen.download) {
+        decision = next;
+        toImport = chosen;
+        externalId = id;
+        break;
+      }
+      const phase2 = await this.fetchChosenPost(account, chosen, job, lang);
       if (phase2.ok) {
         quality.phase2 = "ok";
+        decision = next;
         toImport = phase2.result;
-      } else if (!apifyTwoPhaseFallbackEnabled()) {
-        quality.phase2 = "failed";
-        release();
-        return fail(`apify_phase2_failed:${phase2.code}`);
-      } else {
-        // Classic single-phase flow: search WITH download (240 s), then take the same clip, else the best filtered one.
-        quality.phase2 = "fallback_single_phase";
-        const full = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang: "ja", limit: APIFY_SEARCH_LIMIT, download: true, runTimeoutSecs: APIFY_DOWNLOAD_RUN_TIMEOUT_SECS }, job);
-        if (!full.outcome.ok) {
-          release();
-          return fail(`apify_phase2_failed:${full.outcome.code}`);
-        }
-        const withFile = full.outcome.data.results.filter((r) => r.download !== null);
-        toImport = withFile.find((r) => r.candidate.externalId === externalId) ?? null;
-        if (!toImport) {
-          input.usedExternalIds.delete(externalId);
-          const alternative = shortlist(withFile)[0] ?? null;
-          if (alternative) input.usedExternalIds.add(alternative.candidate.externalId);
-          toImport = alternative;
-        }
-        if (!toImport) {
-          release();
-          return fail("apify_phase2_failed:no_stored_file");
-        }
+        externalId = id;
+        break;
       }
+      quality.phase2 = "failed";
+      phase2Failure = `apify_phase2_failed:${phase2.code}`;
+      input.usedExternalIds.delete(id);
+      ranked = ranked.filter((entry) => entry.candidate.candidateId !== next.chosen.candidateId);
     }
+    if (!decision || !toImport) return fail(phase2Failure || "apify_no_usable_candidate");
+    const release = () => input.usedExternalIds.delete(externalId);
     const importedId = toImport.candidate.externalId;
     const candidate: MediaCandidate = { ...toImport.candidate, provenance: { ...toImport.candidate.provenance, query: input.keyword } };
     const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });

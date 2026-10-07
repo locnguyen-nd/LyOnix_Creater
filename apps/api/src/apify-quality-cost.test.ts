@@ -6,6 +6,7 @@ import type { MediaAssetVersionSummary } from "@lyonix/contracts";
 import type { ApifyDeps } from "@lyonix/providers";
 import { deriveSceneBrief } from "@lyonix/domain";
 import { ApifyJobContext, ApifyService } from "./apify.service.js";
+import { createProviderLimiter, resolveConcurrencyConfig, setSharedProviderLimiter } from "./concurrency-config.js";
 import type { MediaService } from "./media.service.js";
 import { encryptSecret } from "./secret-crypto.js";
 import * as safeBinaryFetch from "./safe-binary-fetch.js";
@@ -189,22 +190,104 @@ describe("ApifyService quality/cost - VE2E-51", () => {
       expect(media.registerAsset).toHaveBeenCalledTimes(1);
     });
 
-    it("phase 2 failure falls back to the single-phase download search and still imports", async () => {
-      const stub = apifyStub({ "東京 夜景": [item("1")] }, () => null);
+    it("VE2E-131: phase 2 failure moves to the next shortlisted candidate (no single-phase re-search) and imports it", async () => {
+      let posts = 0;
+      const stub = apifyStub({ "東京 夜景": [item("1"), item("2")] }, (url) => (posts++ === 0 ? null : [stored(item(url.split("/").pop()!))]));
       service.apifyDeps = stub;
-      const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto());
-      expect(outcome).toMatchObject({ ok: true, data: { externalId: "1", quality: { phase2: "fallback_single_phase" } } });
-      expect(stub.runs.map((r) => Boolean(r.body.postURLs))).toEqual([false, true, false]);
-      expect(stub.runs[2]!.body.shouldDownloadVideos).toBe(true);
+      const used = new Set<string>();
+      const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ usedExternalIds: used }));
+      expect(outcome).toMatchObject({ ok: true, data: { quality: { phase2: "ok" } } });
+      expect(stub.runs.map((r) => Boolean(r.body.postURLs))).toEqual([false, true, true]); // search, failed post, second post - never a download search
+      expect(stub.runs.some((r) => r.body.shouldDownloadVideos === true && !r.body.postURLs)).toBe(false);
+      expect(used.size).toBe(1);
     });
 
-    it("with APIFY_TWO_PHASE_FALLBACK=0 a phase-2 failure is a Pexels-fallback reason and releases the reservation", async () => {
-      process.env.APIFY_TWO_PHASE_FALLBACK = "0";
-      service.apifyDeps = apifyStub({ "東京 夜景": [item("1")] }, () => null);
+    it("VE2E-131: with every shortlisted candidate failing phase 2 (max 2) the reason is a Pexels-fallback reason and nothing stays reserved", async () => {
+      const stub = apifyStub({ "東京 夜景": [item("1"), item("2"), item("3")] }, () => null);
+      service.apifyDeps = stub;
       const used = new Set<string>();
       const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ usedExternalIds: used }));
       expect(outcome).toMatchObject({ ok: false, reason: "apify_phase2_failed:PROVIDER_SCHEMA_INVALID", quality: { phase2: "failed" } });
+      expect(stub.runs.map((r) => Boolean(r.body.postURLs))).toEqual([false, true, true]);
       expect(used.size).toBe(0);
+    });
+
+    it("VE2E-131: the single-phase fallback env switch is gone (phase 2 failure with one candidate just fails)", async () => {
+      process.env.APIFY_TWO_PHASE_FALLBACK = "1";
+      service.apifyDeps = apifyStub({ "東京 夜景": [item("1")] }, () => null);
+      const outcome = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+      expect(outcome).toMatchObject({ ok: false, reason: "apify_phase2_failed:PROVIDER_SCHEMA_INVALID" });
+    });
+  });
+
+  describe("VE2E-131 tiers, shared limiter, queue", () => {
+    it("lang en searches with the en proxy and the en tier accepts an English, non-JP, landscape clip that the ja tier rejects", async () => {
+      const foreign = item("5", { text: "tokyo night walk", textLanguage: "en", locationMeta: { countryCode: "6252001" }, videoMeta: { duration: 30, width: 1280, height: 720, originalCoverUrl: "https://p16-common-sign.tiktokcdn.com/fake.jpeg?x-signature=fake" } });
+      const stubJa = apifyStub({ "tokyo night": [foreign] });
+      service.apifyDeps = stubJa;
+      const ja = await service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ keyword: "tokyo night" }));
+      expect(ja).toMatchObject({ ok: false, reason: "apify_no_usable_candidate" });
+      const other = makeService();
+      const stubEn = apifyStub({ "tokyo night": [foreign] });
+      other.apifyDeps = stubEn;
+      const en = await other.autoImportForSegment(projectId, "u1", "staff", account(), auto({ keyword: "tokyo night", lang: "en", brief: deriveSceneBrief({ language: "en", scenes: [{ sceneId: "s1", narration: "", screenText: "", visualQuery: "tokyo night walk", durationHintMs: 5000 }] }, 0) }));
+      expect(stubEn.runs[0]!.body.proxyCountryCode).toBe("US");
+      expect(en).toMatchObject({ ok: true, data: { externalId: "5" } });
+    });
+
+    it("a clip covering 60% of the segment is accepted (too_short threshold), a shorter one is not", async () => {
+      service.apifyDeps = apifyStub({ "東京 夜景": [item("1", { videoMeta: { duration: 6, width: 720, height: 1280, originalCoverUrl: "https://p16-common-sign.tiktokcdn.com/fake.jpeg?x-signature=fake" } })] });
+      expect(await service.autoImportForSegment(projectId, "u1", "staff", account(), auto())).toMatchObject({ ok: true });
+      const other = makeService();
+      other.apifyDeps = apifyStub({ "東京 夜景 短い": [item("2", { videoMeta: { duration: 5, width: 720, height: 1280, originalCoverUrl: "https://p16-common-sign.tiktokcdn.com/fake.jpeg?x-signature=fake" } })] });
+      expect(await other.autoImportForSegment(projectId, "u1", "staff", account(), auto({ keyword: "東京 夜景 短い" }))).toMatchObject({ ok: false, quality: { rejected: { too_short: 1 } } });
+    });
+
+    it("searches 20 results per run (APIFY_SEARCH_LIMIT)", async () => {
+      const stub = apifyStub({ "東京 夜景": [item("1")] });
+      service.apifyDeps = stub;
+      await service.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+      expect(stub.runs[0]!.body.resultsPerPage).toBe(20);
+    });
+
+    it("the shared apify limiter wraps each Actor call (cap 1 serialises two searches) and an outer wrap cannot deadlock it", async () => {
+      const limiter = createProviderLimiter(resolveConcurrencyConfig({ PROVIDER_CONCURRENCY_APIFY: "1" }));
+      setSharedProviderLimiter(limiter);
+      try {
+        let live = 0;
+        let peak = 0;
+        const stub = apifyStub({ "東京 夜景": [item("1")], "大阪": [item("2")], "名古屋": [item("3")], "福岡": [item("4")] });
+        const inner = stub.fetch!;
+        stub.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const isStart = (init?.method ?? "GET") === "POST";
+          if (isStart) { live += 1; peak = Math.max(peak, live); }
+          try { return await inner(input, init); } finally { if (isStart) { await new Promise((r) => setTimeout(r, 5)); live -= 1; } }
+        }) as typeof fetch;
+        service.apifyDeps = stub;
+        const outer = (keyword: string, id: string) => limiter.run("apify", () => service.autoImportForSegment(projectId, "u1", "staff", account(), auto({ keyword, sceneId: id, brief: deriveSceneBrief({ language: "ja", scenes: [{ sceneId: id, narration: "", screenText: "", visualQuery: keyword, durationHintMs: 5000 }] }, 0) })));
+        const results = await Promise.all([outer("東京 夜景", "s1"), outer("大阪", "s2")]);
+        expect(results.every((r) => r.ok)).toBe(true);
+        expect(peak).toBe(1);
+        expect(limiter.snapshot("apify")).toMatchObject({ inFlight: 0, queued: 0 });
+        // Direct (unwrapped) callers also hold the slot only during the Actor call.
+        const direct = await Promise.all([service.searchRaw(projectId, account(), { platform: "tiktok", keyword: "名古屋", lang: "ja" }), service.searchRaw(projectId, account(), { platform: "tiktok", keyword: "福岡", lang: "ja" })]);
+        expect(direct.every((r) => r.ok)).toBe(true);
+        expect(peak).toBe(1);
+      } finally {
+        setSharedProviderLimiter(null);
+      }
+    });
+
+    it("syncPlanConcurrency lowers the live apify cap to the plan's maxConcurrentActorJobs (stubbed limits endpoint, not a live probe)", async () => {
+      const limiter = createProviderLimiter(resolveConcurrencyConfig({ PROVIDER_CONCURRENCY_APIFY: "20" }));
+      setSharedProviderLimiter(limiter);
+      try {
+        service.apifyDeps = { fetch: (async () => json({ data: { limits: { maxConcurrentActorJobs: 8 } } })) as unknown as typeof fetch };
+        expect(await service.syncPlanConcurrency(account())).toBe(8);
+        expect(limiter.limitFor("apify")).toBe(8);
+      } finally {
+        setSharedProviderLimiter(null);
+      }
     });
   });
 
