@@ -45,7 +45,8 @@ describe("VE2E-96 URL intake (one response for every source)", () => {
   it("TikTok goes to the TikTok intake; its error comes back as is", async () => {
     const { intake, tiktok, extract } = setup();
     expect(await intake.analyze("u1", "staff", { url: "https://www.tiktok.com/@a/video/7412345678901234567" })).toMatchObject({ ok: false, sourceType: "tiktok", error: { code: "transcript_provider_not_configured" } });
-    expect(tiktok.read).toHaveBeenCalledWith("https://www.tiktok.com/@a/video/7412345678901234567", { languageHint: null });
+    // who asks (their Provider Settings accounts are used) travels with the URL
+    expect(tiktok.read).toHaveBeenCalledWith("https://www.tiktok.com/@a/video/7412345678901234567", { context: { userId: "u1", role: "staff" }, languageHint: null });
     expect(extract).not.toHaveBeenCalled();
   });
 

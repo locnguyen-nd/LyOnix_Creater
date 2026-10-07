@@ -75,6 +75,7 @@ import { IntakeController } from "./intake.controller.js";
 import { IntakeService } from "./intake.service.js";
 import { TikTokIntakeService } from "./tiktok-intake.service.js";
 import { IntakeRewriteService } from "./intake-rewrite.service.js";
+import { TranscriptProviderResolver } from "./transcript-config.js";
 
 @Module({
   imports: [ScheduleModule.forRoot()],
@@ -160,6 +161,8 @@ import { IntakeRewriteService } from "./intake-rewrite.service.js";
     IntakeService,
     TikTokIntakeService,
     IntakeRewriteService,
+    // VE2E-96: TikTok transcript providers from Provider Settings (Apify / ElevenLabs), env as fallback.
+    TranscriptProviderResolver,
   ],
 })
 export class AppModule {}

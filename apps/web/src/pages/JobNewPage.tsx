@@ -30,10 +30,11 @@ import { studioCaptionEngine } from "../studio/text-style/caption-style-model";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, NewsItemResponse, UiLocale, UrlIntakeRewrite, UrlIntakeSource, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, NewsItemResponse, UiLocale, UrlIntakeRewrite, UrlIntakeSource, UrlIntakeStage, VideoProductionSourceInput } from "@lyonix/contracts";
 // Browser-safe subpaths (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { parseSelectedNews } from "@lyonix/domain/news";
+import { classifyIntakeUrl } from "@lyonix/domain/url-intake";
 import {
   AUTO_SOURCE_TYPES,
   BACKGROUND_SEGMENT_CHOICES,
@@ -56,7 +57,7 @@ import { SelectedNewsCard } from "../job-new/SelectedNewsCard";
 import { newsPick, newsUnpick } from "../job-new/news-pick";
 import { NewsDrawer } from "../news/NewsDrawer";
 import { ContentSourceBar } from "../job-new/ContentSourceBar";
-import { analyzeIntakeUrl, rewriteIntakeSource } from "../job-new/intake-api";
+import { analyzeIntakeUrlStream, rewriteIntakeSource } from "../job-new/intake-api";
 import { intakeApply, type IntakeApplied, type IntakeState, type IntakeTarget } from "../job-new/url-intake";
 
 const toBackgroundSegmentsSetting = (choice: string): BackgroundSegmentsSetting => (choice === "auto" ? { mode: "auto" } : { mode: "fixed", count: Number(choice) });
@@ -360,11 +361,22 @@ export function JobNewPage() {
 
   /** VE2E-96: "Phân tích" - reads the URL (TikTok transcript / article), shows it, then writes the script. The form is not changed here. */
   const analyzeUrl = async (url: string) => {
-    setIntake({ kind: "loading", stage: "reading" });
+    const classified = classifyIntakeUrl(url);
+    const sourceType = classified.ok && classified.kind === "tiktok" ? "tiktok" as const : "article" as const;
+    let stage: UrlIntakeStage = "reading";
+    setIntake({ kind: "loading", stage, sourceType });
     try {
-      const result = await analyzeIntakeUrl({ url, language: formRef.current.language });
+      const values = formRef.current;
+      // the form's media (Apify) / voice (ElevenLabs) accounts are tried first for a TikTok transcript; the server streams its stages
+      const result = await analyzeIntakeUrlStream(
+        { url, language: values.language, ...(values.mediaAccountId ? { mediaAccountId: values.mediaAccountId } : {}), ...(values.voiceAccountId ? { voiceAccountId: values.voiceAccountId } : {}) },
+        (next) => {
+          stage = next;
+          setIntake({ kind: "loading", stage: next, sourceType });
+        },
+      );
       if (!result.ok) {
-        setIntake({ kind: "error", code: result.error.code, message: result.error.message });
+        setIntake({ kind: "error", code: result.error.code, message: result.error.message, stage, sourceType: result.sourceType ?? sourceType });
         return;
       }
       setIntake({ kind: "ready", source: result.source, rewrite: { status: "pending" }, applied: null });

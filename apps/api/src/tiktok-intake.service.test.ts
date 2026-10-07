@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { TranscriptError, type SpeechToTextProvider, type TikTokVideoInfo, type VideoTranscriptSource } from "@lyonix/providers";
 import { TikTokIntakeService, resolveTikTokShortLink, type TikTokIntakeOptions } from "./tiktok-intake.service.js";
 import type { fetchBinarySafely } from "./safe-binary-fetch.js";
+import type { TranscriptContext } from "./transcript-config.js";
+
+const CONTEXT: TranscriptContext = { userId: "u1", role: "staff", mediaAccountId: "apify-1", voiceAccountId: "el-1" };
 
 const ID = "7412345678901234567";
 const URL_VIDEO = `https://www.tiktok.com/@osaka.news/video/${ID}`;
@@ -30,8 +33,12 @@ const setup = (opts: { source?: Partial<VideoTranscriptSource> | null; stt?: Par
     return body === null || body === undefined ? { ok: false, reason: "fetch_failed" } : { ok: true, buffer: Buffer.from(body), mimeType: url.endsWith(".mp4") ? "video/mp4" : "text/vtt", finalUrl: url };
   });
   const shortLinkFetch = vi.fn(async (url: string) => ({ status: opts.redirects?.[url] ? 301 : 200, headers: { get: (name: string) => (name === "location" ? opts.redirects?.[url] ?? null : null) } }));
-  const options: TikTokIntakeOptions = { providers: () => ({ video: source, stt }), download, shortLinkFetch, sleep: async () => undefined };
-  return { service: new TikTokIntakeService(options), resolveTikTok, transcribeAudio, download, shortLinkFetch };
+  const options: TikTokIntakeOptions = { download, shortLinkFetch, sleep: async () => undefined };
+  const resolver = { video: vi.fn(async (_context: TranscriptContext) => source), stt: vi.fn(async (_context: TranscriptContext) => stt) };
+  const real = new TikTokIntakeService(resolver, options);
+  const stages: string[] = [];
+  const service = { read: (url: string) => real.read(url, { context: CONTEXT, onStage: (stage) => stages.push(stage) }) };
+  return { service, resolver, stages, resolveTikTok, transcribeAudio, download, shortLinkFetch };
 };
 
 describe("VE2E-96 TikTok URL -> transcript", () => {
@@ -111,5 +118,36 @@ describe("VE2E-96 TikTok URL -> transcript", () => {
     await service.read(URL_VIDEO);
     await service.read(`${URL_VIDEO}?is_from_webapp=1`);
     expect(resolveTikTok).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TikTok intake with Provider Settings accounts", () => {
+  it("a video with subtitles never looks up nor calls speech-to-text; stages: reading > subtitles", async () => {
+    const { service, resolver, stages, transcribeAudio } = setup();
+    expect(await service.read(URL_VIDEO)).toMatchObject({ ok: true, source: { method: "subtitle" } });
+    expect(resolver.video).toHaveBeenCalledWith(CONTEXT);
+    expect(resolver.stt).not.toHaveBeenCalled();
+    expect(transcribeAudio).not.toHaveBeenCalled();
+    expect(stages).toEqual(["reading", "subtitles"]);
+  });
+
+  it("no subtitle: the speech-to-text account is looked up only then; stages: reading > subtitles > speech", async () => {
+    const { service, resolver, stages } = setup({ source: { resolveTikTok: async () => info({ subtitles: [] }) } });
+    expect(await service.read(URL_VIDEO)).toMatchObject({ ok: true, source: { method: "speech_to_text" } });
+    expect(resolver.stt).toHaveBeenCalledWith(CONTEXT);
+    expect(stages).toEqual(["reading", "subtitles", "speech"]);
+  });
+
+  it("says exactly what is missing", async () => {
+    expect(await setup({ source: null }).service.read(URL_VIDEO)).toEqual({ ok: false, code: "transcript_provider_not_configured", message: "Chưa cấu hình Apify. Vào Cài đặt > Provider để thêm tài khoản." });
+    const noStt = setup({ stt: null, source: { resolveTikTok: async () => info({ subtitles: [] }) } });
+    expect(await noStt.service.read(URL_VIDEO)).toEqual({ ok: false, code: "stt_provider_not_configured", message: "Video không có phụ đề và chưa cấu hình Speech-to-Text." });
+  });
+
+  it("a cached video needs no provider at all", async () => {
+    const { service, resolver } = setup();
+    await service.read(URL_VIDEO);
+    await service.read(URL_VIDEO);
+    expect(resolver.video).toHaveBeenCalledTimes(1);
   });
 });

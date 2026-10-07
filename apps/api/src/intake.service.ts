@@ -7,7 +7,8 @@
  */
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import { classifyIntakeUrl, countWords, detectTextLanguage, type NewsItem } from "@lyonix/domain";
-import type { UrlIntakeErrorCode, UrlIntakeRequest, UrlIntakeResponse, UrlIntakeRewrite, UrlIntakeSource } from "@lyonix/contracts";
+import type { UrlIntakeErrorCode, UrlIntakeRequest, UrlIntakeResponse, UrlIntakeRewrite, UrlIntakeSource, UrlIntakeStage } from "@lyonix/contracts";
+import type { TranscriptContext } from "./transcript-config.js";
 import { NewsService } from "./news.service.js";
 import { TikTokIntakeService } from "./tiktok-intake.service.js";
 import { IntakeRewriteService } from "./intake-rewrite.service.js";
@@ -41,8 +42,9 @@ export class IntakeService {
   }
 
   /** null = not a web URL (the controller answers VALIDATION_FAILED). */
-  async analyze(userId: string, role: "admin" | "staff", request: UrlIntakeRequest): Promise<UrlIntakeResponse | null> {
-    const outcome = await this.read(request.url, request.language ?? null);
+  async analyze(userId: string, role: "admin" | "staff", request: UrlIntakeRequest, onStage?: (stage: UrlIntakeStage) => void): Promise<UrlIntakeResponse | null> {
+    const context: TranscriptContext = { userId, role, ...(request.mediaAccountId ? { mediaAccountId: request.mediaAccountId } : {}), ...(request.voiceAccountId ? { voiceAccountId: request.voiceAccountId } : {}) };
+    const outcome = await this.read(request.url, { context, languageHint: request.language ?? null, ...(onStage ? { onStage } : {}) });
     if (!outcome) return null;
     if (!outcome.ok) return { ok: false, sourceType: outcome.sourceType, sourceUrl: outcome.sourceUrl, error: { code: outcome.code, message: outcome.message } };
     const rewrite: UrlIntakeRewrite = request.rewrite
@@ -57,14 +59,15 @@ export class IntakeService {
   }
 
   /** The source text of a URL, without rewriting. null = not a web URL. */
-  async read(raw: string, languageHint: string | null = null): Promise<SourceOutcome | null> {
+  async read(raw: string, options: { context: TranscriptContext; languageHint?: string | null; onStage?: (stage: UrlIntakeStage) => void }): Promise<SourceOutcome | null> {
     const classified = classifyIntakeUrl(raw);
     if (!classified.ok) return null;
     const { kind, url } = classified;
     if (kind === "tiktok") {
-      const read = await this.tiktok.read(url, { languageHint });
+      const read = await this.tiktok.read(url, options);
       return read.ok ? read : { ok: false, sourceType: "tiktok", sourceUrl: url, code: read.code, message: read.message };
     }
+    options.onStage?.("reading");
     if (kind === "yahoo_news") return this.newsArticle(url);
 
     const article = await this.extract(url);

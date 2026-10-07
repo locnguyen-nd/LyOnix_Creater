@@ -1,4 +1,4 @@
-import type { UrlIntakeRewrite, UrlIntakeSource } from "@lyonix/contracts";
+import type { UrlIntakeRewrite, UrlIntakeSource, UrlIntakeStage } from "@lyonix/contracts";
 import type { JobNewFormValues } from "@lyonix/domain/creation-form";
 import { composeNewsTopic, serializeSelectedNews } from "@lyonix/domain/news";
 import { composeSourceTopic } from "@lyonix/domain/transcript";
@@ -8,8 +8,8 @@ type IntakeForm = Pick<JobNewFormValues, "topic" | "entryMode" | "autoRawScript"
 /** What the "Nguồn nội dung" panel shows: nothing yet, a step running, an error, or the analysed source with its rewrite. */
 export type IntakeState =
   | { kind: "idle" }
-  | { kind: "loading"; stage: "reading" }
-  | { kind: "error"; code: string; message: string }
+  | { kind: "loading"; stage: UrlIntakeStage; sourceType: "tiktok" | "article" }
+  | { kind: "error"; code: string; message: string; stage?: UrlIntakeStage; sourceType?: "tiktok" | "article" }
   | { kind: "ready"; source: UrlIntakeSource; rewrite: UrlIntakeRewrite | { status: "pending" }; applied: IntakeTarget | null };
 
 export type IntakeTarget = "topic" | "script";
@@ -49,4 +49,34 @@ export function intakeApply(form: IntakeForm, source: UrlIntakeSource, rewrite: 
   }
   const topic = form.topic.trim() ? null : composeSourceTopic({ text: source.title || rewrite.hook || script, sourceName: source.sourceName, sourceUrl: source.sourceUrl });
   return { patch: { mode: "revise", existingScript: script, selectedNews, ...(topic ? { topic } : {}) }, needsConfirm: needsConfirm(form.existingScript, script, lastApplied.script), written: script };
+}
+
+export type IntakeStepId = "reading" | "subtitles" | "speech" | "rewriting" | "done";
+export type IntakeStepStatus = "done" | "current" | "pending" | "failed" | "skipped";
+export type IntakeStep = { id: IntakeStepId; status: IntakeStepStatus };
+
+/**
+ * The progress line under "Nguồn nội dung": TikTok = reading > subtitles > (speech, only when there was no subtitle) > rewriting > done;
+ * an article = reading > rewriting > done. Built from what really happened (stream stages, the result's method, the rewrite status).
+ */
+export function intakeProgress(state: IntakeState): IntakeStep[] {
+  if (state.kind === "idle") return [];
+  const tiktok = (state.kind === "ready" ? state.source.sourceType : state.sourceType) === "tiktok";
+  const reached = (stage: UrlIntakeStage): IntakeStepId[] => (tiktok ? (stage === "speech" ? ["reading", "subtitles", "speech"] : stage === "subtitles" ? ["reading", "subtitles"] : ["reading"]) : ["reading"]);
+  const tail = (ids: IntakeStepId[]): IntakeStepId[] => [...ids, ...((tiktok ? ["subtitles"] : []) as IntakeStepId[]).filter((id) => !ids.includes(id)), "rewriting", "done"];
+  if (state.kind === "loading" || state.kind === "error") {
+    const ids = reached(state.stage ?? "reading");
+    const current = ids.at(-1)!;
+    return tail(ids).map((id) => ({ id, status: id === current ? (state.kind === "error" ? "failed" : "current") : ids.includes(id) ? "done" : "pending" }));
+  }
+  const spoken = state.source.method === "speech_to_text";
+  const read: IntakeStep[] = tiktok
+    ? [{ id: "reading", status: "done" }, { id: "subtitles", status: spoken ? "skipped" : "done" }, ...(spoken ? [{ id: "speech" as const, status: "done" as const }] : [])]
+    : [{ id: "reading", status: "done" }];
+  const rewrite = state.rewrite.status;
+  return [
+    ...read,
+    { id: "rewriting", status: rewrite === "pending" ? "current" : rewrite === "done" ? "done" : rewrite === "failed" ? "failed" : "skipped" },
+    { id: "done", status: rewrite === "pending" ? "pending" : rewrite === "failed" ? "pending" : "done" },
+  ];
 }

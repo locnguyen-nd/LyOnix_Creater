@@ -11,7 +11,7 @@ vi.mock("../api", () => ({ api: network.calls, csrfHeaders: network.calls, ApiEr
 
 const { ContentSourceBar } = await import("./ContentSourceBar");
 const { NewsDrawer } = await import("../news/NewsDrawer");
-const { intakeApply, intakeTopic } = await import("./url-intake");
+const { intakeApply, intakeProgress, intakeTopic } = await import("./url-intake");
 const { locales } = await import("../i18n/locales");
 type IntakeState = import("./url-intake").IntakeState;
 
@@ -54,18 +54,24 @@ describe("VE2E-96 'Nguồn nội dung' states", () => {
     expect(html).not.toContain('data-testid="intake-preview"');
   });
 
-  it("loading: says what is happening and blocks a second analyse", async () => {
-    const html = await bar({ kind: "loading", stage: "reading" });
-    expect(html).toContain('data-testid="intake-loading"');
-    expect(html).toContain("Đang lấy nội dung nguồn");
+  it("loading: the progress line shows the step running and blocks a second analyse", async () => {
+    const html = await bar({ kind: "loading", stage: "subtitles", sourceType: "tiktok" });
+    expect(html).toContain('data-testid="intake-progress"');
+    expect(html).toMatch(/data-step="reading" data-status="done"[\s\S]*?Đang đọc TikTok/);
+    expect(html).toMatch(/data-step="subtitles" data-status="current"[\s\S]*?aria-current="step"[\s\S]*?Đang lấy phụ đề/);
+    expect(html).toMatch(/data-step="rewriting" data-status="pending"[\s\S]*?Đang viết lại kịch bản/);
+    expect(html).toMatch(/data-step="done" data-status="pending"[\s\S]*?Hoàn tất/);
     expect(html).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Đang phân tích…<\/button>/);
   });
 
-  it("error: the translated reason - 'Transcript provider chưa được cấu hình' - and no preview", async () => {
-    const html = await bar({ kind: "error", code: "transcript_provider_not_configured", message: "x" });
-    expect(html).toContain('data-testid="intake-error"');
-    expect(html).toContain("Transcript provider chưa được cấu hình.");
-    expect(html).not.toContain('data-testid="intake-preview"');
+  it("missing providers say exactly what to do", async () => {
+    const noApify = await bar({ kind: "error", code: "transcript_provider_not_configured", message: "x", stage: "reading", sourceType: "tiktok" });
+    expect(noApify).toContain('data-testid="intake-error"');
+    expect(noApify).toContain("Chưa cấu hình Apify. Vào Cài đặt &gt; Provider để thêm tài khoản.");
+    expect(noApify).toMatch(/data-step="reading" data-status="failed"/);
+    expect(noApify).not.toContain('data-testid="intake-preview"');
+    const noStt = await bar({ kind: "error", code: "stt_provider_not_configured", message: "x", stage: "subtitles", sourceType: "tiktok" });
+    expect(noStt).toContain("Video không có phụ đề và chưa cấu hình Speech-to-Text.");
     expect(await bar({ kind: "error", code: "something_new", message: "boom" })).toContain("Không phân tích được URL: boom");
   });
 
@@ -152,5 +158,26 @@ describe("VE2E-96 'Đưa vào chủ đề' / 'Đưa vào kịch bản'", () => {
     const item: NewsItemResponse = { id: "yahoo_jp:articles:a1", sourceId: "yahoo_jp", source: "Yahoo!ニュース", publisher: "架空", title: "見出し", excerpt: "概要", thumbnailUrl: null, sourceUrl: "https://news.yahoo.co.jp/articles/a1", publishedAt: null, category: "sports" };
     const news: UrlIntakeSource = { ...tiktok, sourceType: "article", method: "news_feed", newsItem: item, sourceUrl: item.sourceUrl };
     expect(intakeApply(auto, news, { status: "skipped", reason: "no_content_account" }, "topic", {})!.patch).toMatchObject({ selectedNews: serializeSelectedNews(item), topic: expect.stringContaining("見出し") });
+  });
+});
+
+describe("intake progress (what really happened)", () => {
+  const steps = (state: IntakeState) => intakeProgress(state).map((step) => `${step.id}:${step.status}`).join(" > ");
+  it("TikTok while running: reading > subtitles > (speech only once reached) > rewriting > done", () => {
+    expect(steps({ kind: "loading", stage: "reading", sourceType: "tiktok" })).toBe("reading:current > subtitles:pending > rewriting:pending > done:pending");
+    expect(steps({ kind: "loading", stage: "speech", sourceType: "tiktok" })).toBe("reading:done > subtitles:done > speech:current > rewriting:pending > done:pending");
+    expect(steps({ kind: "error", code: "stt_provider_not_configured", message: "x", stage: "subtitles", sourceType: "tiktok" })).toBe("reading:done > subtitles:failed > rewriting:pending > done:pending");
+  });
+
+  it("TikTok result: subtitles used, or no subtitles -> speech; then the rewrite", () => {
+    expect(steps({ kind: "ready", source: tiktok, rewrite: { status: "pending" }, applied: null })).toBe("reading:done > subtitles:done > rewriting:current > done:pending");
+    expect(steps({ kind: "ready", source: { ...tiktok, method: "speech_to_text" }, rewrite: done, applied: null })).toBe("reading:done > subtitles:skipped > speech:done > rewriting:done > done:done");
+    expect(steps({ kind: "ready", source: tiktok, rewrite: { status: "failed", code: "PROVIDER_TIMEOUT", message: "x" }, applied: null })).toBe("reading:done > subtitles:done > rewriting:failed > done:pending");
+  });
+
+  it("an article: reading > rewriting > done; nothing before analysing", () => {
+    expect(steps({ kind: "loading", stage: "reading", sourceType: "article" })).toBe("reading:current > rewriting:pending > done:pending");
+    expect(steps({ kind: "ready", source: { ...tiktok, sourceType: "article", method: "article_extractor" }, rewrite: done, applied: null })).toBe("reading:done > rewriting:done > done:done");
+    expect(intakeProgress({ kind: "idle" })).toEqual([]);
   });
 });

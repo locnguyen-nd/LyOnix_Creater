@@ -13,7 +13,7 @@ export const MOCK_TIKTOK_SUBTITLES = `WEBVTT
 [MOCK] This is a sample transcript from the development provider.
 
 00:00:06.000 --> 00:00:09.000
-No real TikTok video was read: configure TIKTOK_SOURCE_PROVIDER=apify to read real subtitles.
+No real TikTok video was read: remove TIKTOK_SOURCE_PROVIDER=mock to use the Apify account from Provider Settings.
 `;
 
 export class MockVideoTranscriptSource implements VideoTranscriptSource {

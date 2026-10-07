@@ -1452,7 +1452,19 @@ export type UrlIntakeRequest = {
   language?: UiLocale;
   /** Narration length to aim for, in seconds. */
   durationSec?: number;
+  /** The form's media (Apify) / voice (ElevenLabs) accounts: tried first for a TikTok transcript (else the user's other accounts). */
+  mediaAccountId?: string;
+  voiceAccountId?: string;
 };
+
+/** Progress of `POST /intake/url/stream`: reading the source, getting subtitles, speech-to-text (only when there is no subtitle). */
+export type UrlIntakeStage = "reading" | "subtitles" | "speech";
+
+/** One line (NDJSON) of `POST /intake/url/stream`: stages as they start, then the result (or an unexpected error). */
+export type UrlIntakeStreamEvent =
+  | { type: "stage"; stage: UrlIntakeStage }
+  | { type: "result"; data: UrlIntakeResponse }
+  | { type: "error"; error: { code: string; message: string } };
 
 /** How the text was obtained. */
 export type UrlIntakeMethod = "subtitle" | "speech_to_text" | "article_extractor" | "news_feed";

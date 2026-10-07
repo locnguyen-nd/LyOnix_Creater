@@ -11,9 +11,9 @@
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { TIKTOK_VIDEO_HOSTS, cleanTranscript, countWords, detectTextLanguage, parseSubtitleDocument, parseTikTokUrl } from "@lyonix/domain";
 import { TranscriptError, withTranscriptRetry, type TikTokVideoInfo, type TranscriptDownload } from "@lyonix/providers";
-import type { UrlIntakeErrorCode, UrlIntakeSource } from "@lyonix/contracts";
+import type { UrlIntakeErrorCode, UrlIntakeSource, UrlIntakeStage } from "@lyonix/contracts";
 import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
-import { transcriptProvidersFromEnv, type TranscriptProviders } from "./transcript-config.js";
+import { TranscriptProviderResolver, type TranscriptContext, type TranscriptResolver } from "./transcript-config.js";
 
 export const TIKTOK_INTAKE_LIMITS = {
   sourceRunTimeoutSecs: 120,
@@ -31,7 +31,6 @@ type ShortLinkFetch = (url: string, init: { method: "GET"; redirect: "manual"; s
 
 export const TIKTOK_INTAKE_OPTIONS = "TIKTOK_INTAKE_OPTIONS";
 export type TikTokIntakeOptions = {
-  providers?: () => TranscriptProviders;
   download?: typeof fetchBinarySafely;
   shortLinkFetch?: ShortLinkFetch;
   now?: () => number;
@@ -84,25 +83,24 @@ const twoLetter = (code: string | null | undefined): string | null => {
 export class TikTokIntakeService {
   private readonly logger = new Logger("TikTokIntake");
   private readonly cache = new Map<string, { at: number; source: UrlIntakeSource }>();
-  private readonly providers: () => TranscriptProviders;
   private readonly download: typeof fetchBinarySafely;
   private readonly shortLinkFetch: ShortLinkFetch;
   private readonly now: () => number;
   private readonly sleep: ((ms: number) => Promise<void>) | undefined;
 
-  constructor(@Optional() @Inject(TIKTOK_INTAKE_OPTIONS) options?: TikTokIntakeOptions) {
-    this.providers = options?.providers ?? (() => transcriptProvidersFromEnv());
+  constructor(@Inject(TranscriptProviderResolver) private readonly resolver: TranscriptResolver, @Optional() @Inject(TIKTOK_INTAKE_OPTIONS) options?: TikTokIntakeOptions) {
     this.download = options?.download ?? fetchBinarySafely;
     this.shortLinkFetch = options?.shortLinkFetch ?? ((url, init) => fetch(url, init));
     this.now = options?.now ?? Date.now;
     this.sleep = options?.sleep;
   }
 
-  async read(rawUrl: string, options: { languageHint?: string | null } = {}): Promise<TikTokIntakeOutcome> {
+  /** `context`: whose Provider Settings accounts are used; `onStage`: progress (reading the video, subtitles, speech-to-text). */
+  async read(rawUrl: string, options: { context: TranscriptContext; languageHint?: string | null; onStage?: (stage: UrlIntakeStage) => void }): Promise<TikTokIntakeOutcome> {
+    const stage = (value: UrlIntakeStage) => options.onStage?.(value);
     const parsed = parseTikTokUrl(rawUrl);
     if (!parsed) return { ok: false, code: "invalid_tiktok_url", message: "Không phải link video TikTok (cần dạng tiktok.com/@user/video/..., vm.tiktok.com/..., vt.tiktok.com/...)" };
-    const { video: source, stt } = this.providers();
-    if (!source) return { ok: false, code: "transcript_provider_not_configured", message: "Transcript provider chưa được cấu hình (TIKTOK_SOURCE_PROVIDER)" };
+    stage("reading");
 
     const url = parsed.kind === "video" ? parsed.url : await resolveTikTokShortLink(parsed.url, this.shortLinkFetch);
     if (!url) return { ok: false, code: "tiktok_resolve_failed", message: "Không mở được link rút gọn TikTok thành link video" };
@@ -110,6 +108,8 @@ export class TikTokIntakeService {
     const cacheKey = videoId?.[1] ?? videoId?.[2] ?? url;
     const cached = this.cache.get(cacheKey);
     if (cached && this.now() - cached.at < TIKTOK_INTAKE_LIMITS.cacheMs) return { ok: true, source: cached.source };
+    const source = await this.resolver.video(options.context);
+    if (!source) return { ok: false, code: "transcript_provider_not_configured", message: "Chưa cấu hình Apify. Vào Cài đặt > Provider để thêm tài khoản." };
 
     const started = this.now();
     let info: TikTokVideoInfo;
@@ -120,6 +120,7 @@ export class TikTokIntakeService {
     }
 
     // 1) subtitles: the video's own language first
+    stage("subtitles");
     const tracks = [...info.subtitles].sort((a, b) => Number(twoLetter(b.language) === info.language) - Number(twoLetter(a.language) === info.language)).slice(0, 3);
     for (const track of tracks) {
       const document = track.text ?? (track.download ? await this.fetchText(track.download) : null);
@@ -132,7 +133,10 @@ export class TikTokIntakeService {
     }
 
     // 2) speech-to-text on the video file
-    if (!stt) return { ok: false, code: "stt_provider_not_configured", message: "Video không có phụ đề lấy được và Speech-to-Text provider chưa được cấu hình (STT_PROVIDER)" };
+    // only now is a speech-to-text account looked up: a video with subtitles never reaches it
+    const stt = await this.resolver.stt(options.context);
+    if (!stt) return { ok: false, code: "stt_provider_not_configured", message: "Video không có phụ đề và chưa cấu hình Speech-to-Text." };
+    stage("speech");
     if (!info.media) return { ok: false, code: "media_unavailable", message: "Video không có phụ đề và không lấy được file video để chuyển giọng nói thành chữ" };
     const media = await this.download(info.media.url, this.downloadOptions(info.media, TIKTOK_INTAKE_LIMITS.mediaMaxBytes, ["video/", "audio/", "application/octet-stream", "binary/octet-stream"]));
     if (!media.ok) return this.downloadFailure(media, info.videoId);

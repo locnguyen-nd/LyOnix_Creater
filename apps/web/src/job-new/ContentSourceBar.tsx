@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, CheckCircle2, ExternalLink, FileText, Link2, Loader2, Search, Video } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ExternalLink, FileText, Link2, Loader2, Minus, Search, Video, X } from "lucide-react";
 import { Button } from "../components/ui";
-import type { IntakeState, IntakeTarget } from "./url-intake";
+import { intakeProgress, type IntakeState, type IntakeStep, type IntakeTarget } from "./url-intake";
 
 /**
  * VE2E-96: "Nguồn nội dung" above the create-video form - a URL to analyse (TikTok transcript / article, then an original script) and a
@@ -41,11 +41,7 @@ export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRe
         <Button type="submit" variant="secondary" className="sm:w-[132px]">{t("intake.search")}</Button>
       </form>
 
-      {state.kind === "loading" ? (
-        <p role="status" className="flex items-center gap-2 text-[12.5px] text-lyx-fg-muted" data-testid="intake-loading">
-          <Loader2 size={14} className="animate-spin" aria-hidden /> {t("intake.stageReading")}
-        </p>
-      ) : null}
+      {state.kind === "loading" || state.kind === "ready" || (state.kind === "error" && state.stage) ? <IntakeProgress state={state} /> : null}
 
       {state.kind === "error" ? (
         <p role="alert" className="flex items-start gap-2 rounded-[var(--lyx-radius)] border border-lyx-danger/60 px-3 py-2 text-[12.5px] text-lyx-danger" data-testid="intake-error" data-code={state.code}>
@@ -100,5 +96,40 @@ export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRe
         </article>
       ) : null}
     </section>
+  );
+}
+
+const STEP_LOOK: Record<IntakeStep["status"], string> = {
+  done: "border-lyx-ok/40 bg-lyx-ok-bg text-lyx-ok",
+  current: "border-lyx-fg/40 bg-lyx-muted text-lyx-fg",
+  pending: "border-lyx-border text-lyx-fg-subtle",
+  failed: "border-lyx-danger/50 bg-lyx-danger-bg text-lyx-danger",
+  skipped: "border-lyx-border text-lyx-fg-subtle line-through decoration-1",
+};
+
+/** Đang đọc TikTok > Đang lấy phụ đề > Đang nhận dạng giọng nói (khi cần) > Đang viết lại kịch bản > Hoàn tất - what really happens. */
+function IntakeProgress({ state }: { state: IntakeState }) {
+  const { t } = useTranslation();
+  const steps = intakeProgress(state);
+  const tiktok = (state.kind === "ready" ? state.source.sourceType : state.kind === "idle" ? null : state.sourceType) === "tiktok";
+  const label = (step: IntakeStep) =>
+    step.id === "reading" ? t(tiktok ? "intake.progress.readingTiktok" : "intake.progress.readingArticle")
+      : step.id === "subtitles" && step.status === "skipped" ? t("intake.progress.noSubtitles")
+      : t(`intake.progress.${step.id}`);
+  return (
+    <ol className="flex flex-wrap items-center gap-1.5" aria-label={t("intake.progress.title")} data-testid="intake-progress">
+      {steps.map((step, index) => (
+        <li key={step.id} className="flex items-center gap-1.5" data-step={step.id} data-status={step.status}>
+          {index > 0 ? <span className={`h-px w-3 ${step.status === "pending" ? "bg-lyx-border" : "bg-lyx-fg-subtle"}`} aria-hidden /> : null}
+          <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px] transition-colors duration-200 ${STEP_LOOK[step.status]}`} {...(step.status === "current" ? { "aria-current": "step" as const } : {})}>
+            {step.status === "current" ? <Loader2 size={12} className="animate-spin" aria-hidden />
+              : step.status === "done" ? <Check size={12} strokeWidth={3} className="lyx-anim-pop" aria-hidden />
+              : step.status === "failed" ? <X size={12} strokeWidth={3} aria-hidden />
+              : step.status === "skipped" ? <Minus size={12} aria-hidden /> : null}
+            {label(step)}
+          </span>
+        </li>
+      ))}
+    </ol>
   );
 }
