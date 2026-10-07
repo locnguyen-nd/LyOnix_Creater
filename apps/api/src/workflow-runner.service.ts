@@ -11,10 +11,13 @@
  * execution — the durable per-step trail + shared `correlationId` the spec's §3 asks
  * for ("mọi step có input/output version refs và correlation ID").
  *
- * Bounded retry / cost ceiling (known, documented scope limits — see VE2E-06 handoff
- * for the full reasoning, not repeated here): a transient provider failure re-queues
- * the ENTIRE run (status back to `draft`, `attempts` incremented) rather than resuming
- * from the failed step, bounded by `AutomationProfileVersion.retryPolicy.maxAttempts`
+ * VE2E-133: media sourcing runs in PARALLEL with TTS (planned with `durationHintMs`; real voice durations only cut the ranges, and a
+ * changed plan re-searches only new/uncovered segments, see `workflow-media-resume.ts`). A retried run is still re-queued as a whole
+ * (status back to `draft`, `attempts` incremented) but resumes cheaply: approved script, `current` AudioVersions and project-library
+ * media found by the earlier attempt are reused, and `resume_diagnostics` records which steps were resumed.
+ *
+ * Bounded retry / cost ceiling (known, documented scope limits): a transient provider failure re-queues
+ * the run, bounded by `AutomationProfileVersion.retryPolicy.maxAttempts`
  * (default 2). `costCeiling` is persisted/exposed on the profile but not enforced
  * against real spend in this pass: no adapter in this codebase currently returns
  * actual per-call cost/usage (`packages/providers`' `UsageRecord`/`CostEstimate`
@@ -27,6 +30,7 @@ import { Prisma } from "@lyonix/db";
 import type { WorkflowRun as WorkflowRunRow } from "@lyonix/db";
 import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, OrshotRenderOptions } from "@lyonix/contracts";
 import { sanitizeOrshotOptions } from "./orshot-render.js";
+import { orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -144,6 +148,16 @@ export type RunUsageEntry = {
   /** VE2E-57: number of provider requests this entry stands for (vision moderation batches all of a job's calls into one entry). */
   calls?: number;
   at: string;
+};
+
+/** VE2E-133: the early (parallel) and the post-TTS sourcing passes are one job: their Apify spend adds up. */
+const mergeApifyUsage = (a: MediaPlanApifyUsage | null, b: MediaPlanApifyUsage | null): MediaPlanApifyUsage | null => {
+  if (!a || !b) return a ?? b;
+  return { runs: a.runs + b.runs, seconds: a.seconds + b.seconds, usd: a.usd === null && b.usd === null ? null : (a.usd ?? 0) + (b.usd ?? 0), searchesReused: a.searchesReused + b.searchesReused, libraryReuses: a.libraryReuses + b.libraryReuses };
+};
+const mergeVisionUsage = (a: MediaPlanVisionUsage | null, b: MediaPlanVisionUsage | null): MediaPlanVisionUsage | null => {
+  if (!a || !b) return a ?? b;
+  return { calls: a.calls + b.calls, moderated: a.moderated + b.moderated, skippedSegments: a.skippedSegments + b.skippedSegments, maxCalls: a.maxCalls + b.maxCalls, modelId: a.modelId ?? b.modelId };
 };
 
 @Injectable()
@@ -307,12 +321,50 @@ export class WorkflowRunnerService {
    * including the bounded corrections, is countable in one place. Best-effort.
    */
   private async appendRunUsage(run: WorkflowRunRow, entry: RunUsageEntry): Promise<void> {
+    // VE2E-133: voice and media sourcing run in parallel and BOTH append to the same `run_usage` row (read-modify-write): serialize per run so no entry is lost.
+    const previous = this.usageChains.get(run.id) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      try {
+        const existing = await this.prisma.stepRun.findUnique({ where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "run_usage", attempt: run.attempts } } });
+        const entries = (existing?.outputRef as { entries?: RunUsageEntry[] } | null)?.entries;
+        await this.saveStepDiagnostics(run, "run_usage", { entries: [...(Array.isArray(entries) ? entries : []), entry] });
+      } catch {
+        // Best-effort.
+      }
+    });
+    this.usageChains.set(run.id, next);
+    await next;
+    if (this.usageChains.get(run.id) === next) this.usageChains.delete(run.id);
+  }
+
+  /** VE2E-133: per-run append chains for `run_usage` (the only class-level mutable state; keyed by run id, so concurrent runs never share an entry). */
+  private readonly usageChains = new Map<string, Promise<void>>();
+
+  /** Never rejects: lets two parallel branches both finish before the first failure is rethrown (no orphaned promise, no unobserved rejection). */
+  private settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+    return promise.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  }
+
+  /**
+   * VE2E-133: which steps a retried run (attempt > 1) did NOT redo, and where the previous attempt stopped. Persisted as the
+   * `resume_diagnostics` StepRun outputRef (best-effort). The reuse itself comes from the existing idempotent steps: approved script,
+   * `current` AudioVersion per scene, project-library asset per segment (`findReusableSource`), extracted source.
+   */
+  private async saveResumeDiagnostics(run: WorkflowRunRow, reuse: { reusedScript: boolean; reusedAudioScenes: number; totalScenes: number; reusedMediaSegments: number; totalMediaSegments: number }): Promise<void> {
     try {
-      const existing = await this.prisma.stepRun.findUnique({ where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey: "run_usage", attempt: run.attempts } } });
-      const previous = (existing?.outputRef as { entries?: RunUsageEntry[] } | null)?.entries;
-      await this.saveStepDiagnostics(run, "run_usage", { entries: [...(Array.isArray(previous) ? previous : []), entry] });
+      let previousAttempt: { failedStep: string | null; succeededSteps: string[] } | null = null;
+      if (run.attempts > 1) {
+        try {
+          const rows = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, attempt: run.attempts - 1 }, select: { stepKey: true, status: true, startedAt: true }, orderBy: { startedAt: "asc" } });
+          const failed = rows.find((row) => row.status === "failed");
+          previousAttempt = { failedStep: failed?.stepKey ?? null, succeededSteps: rows.filter((row) => row.status === "succeeded").map((row) => row.stepKey) };
+        } catch {
+          previousAttempt = null;
+        }
+      }
+      await this.saveStepDiagnostics(run, "resume_diagnostics", { attempt: run.attempts, resumed: run.attempts > 1, ...reuse, previousAttempt });
     } catch {
-      // Best-effort.
+      // Diagnostics must never fail the pipeline.
     }
   }
 
@@ -565,58 +617,146 @@ ${correction.direction}`,
       throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot chỉ có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Rút xuống tối đa ${orshotPages} cảnh hoặc chọn template nhiều page hơn.`);
     }
 
-    // --- 4. voice generation + alignment/subtitle per scene — reused on retry ---
+    // --- 4+5. VE2E-133: voice (TTS) and media sourcing run IN PARALLEL ---
+    // Sourcing starts right after the approved script, planned with `durationHintMs` (or the real duration of an audio reused on
+    // a retry); only the range cut (`buildBindings`) needs the real voice duration. When the real durations change the segment
+    // plan or a source can no longer cover its scenes, `reconcileSourcedSegments` keeps every source already found and only the
+    // new/split segments are searched. Neither branch is ever abandoned: both settle before the first failure is rethrown, so a
+    // failing branch never leaves the other one running unobserved (and TTS is never paid twice: finished audio stays `current`).
+    const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+    // Template-aware sourcing: a template can mix image and video scene slots. Each scene is sourced as the kind its slot expects
+    // (images from Pinterest, videos from TikTok), so a segment never mixes kinds. A video-only template stays video-only.
+    const kindSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
+    const kindSlots = (Array.isArray(kindSnapshot?.modifications) ? kindSnapshot.modifications : []) as unknown as Array<{ kind?: string }>;
+    const kindByScene = deriveSceneVisualKinds(kindSlots.map((slot) => String(slot.kind ?? "")), orderedScenes.map((scene) => scene.sceneId));
+    // Fail fast (before any paid work) when the chosen media account is not usable.
+    const mediaCheck = await this.mediaPlans.checkMediaSourcesEnabled(userId, role, mediaConfig.providerAccountId);
+    if (!mediaCheck.ok) throw new WorkflowStepFailure(mediaCheck.code, mediaCheck.message);
+
     await this.setStatus(run.id, "voice_generating");
     const audioByScene = new Map<string, { audioVersionId: string; mediaAssetVersionId: string; subtitleVersionId: string | null; durationMs: number | null }>();
-    // VE2E-61: scenes are voiced with bounded parallelism (WORKFLOW_VOICE_PARALLELISM) AND the shared per-provider limiter
-    // (elevenlabs), so many runs together never exceed the provider's concurrent-request ceiling. Each scene's work is
-    // independent: a scene that already has a `current` AudioVersion is reused (no second ElevenLabs charge), and the
-    // per-scene StepRun key stays `generate_audio_<sceneId>`.
-    const voiced = await mapBounded(approved.scenes, this.voiceParallelism, async (scene) => {
-      // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion
-      // already tied to this exact SceneDraftVersion id reflects a real, already-paid-for prior
-      // success, safe to reuse without a real ElevenLabs call.
-      const existingAudio = await this.prisma.audioVersion.findFirst({
+    // Scene ids are stable across a retry (see step 2's own reasoning) - a `current` AudioVersion already tied to this exact
+    // SceneDraftVersion id reflects a real, already-paid-for prior success, safe to reuse without a real ElevenLabs call.
+    type ExistingAudio = { id: string; mediaAssetVersionId: string; durationMs: number | null; subtitleVersions?: Array<{ id: string }> };
+    const existingAudioByScene = new Map<string, ExistingAudio>();
+    await Promise.all(approved.scenes.map(async (scene) => {
+      const row = await this.prisma.audioVersion.findFirst({
         where: { sceneDraftVersionId: scene.id, status: "current" },
         orderBy: { version: "desc" },
         include: { subtitleVersions: { where: { status: "current" }, orderBy: { version: "desc" }, take: 1 } },
       });
-      if (existingAudio) {
+      if (row) existingAudioByScene.set(scene.id, row as unknown as ExistingAudio);
+    }));
+    const buildPlanScript = (voiceMsOf: (sceneId: string) => number | null): MediaPlanScript => ({
+      language: approved.language,
+      scenes: orderedScenes.map((scene) => ({
+        sceneId: scene.sceneId,
+        narration: scene.narration,
+        screenText: scene.screenText,
+        visualQuery: scene.visualQuery,
+        durationHintMs: scene.durationHintMs,
+        voiceDurationMs: voiceMsOf(scene.sceneId),
+      })),
+      visualPlan: approved.visualPlan ?? null,
+    });
+    const planFor = (script: MediaPlanScript): PlannedSegment[] => {
+      let segments = this.mediaPlans.planSegments(script, backgroundSegmentRange);
+      if (kindByScene) {
+        const durations = new Map(script.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
+        segments = splitSegmentsByVisualKind(segments, kindByScene, durations);
+      }
+      return segments;
+    };
+    const earlyVoiceMs = new Map(orderedScenes.flatMap((scene) => {
+      const ms = existingAudioByScene.get(scene.id)?.durationMs;
+      return typeof ms === "number" ? [[scene.sceneId, ms] as const] : [];
+    }));
+    const earlyScript = buildPlanScript((sceneId) => earlyVoiceMs.get(sceneId) ?? null);
+    const earlyPlan = planFor(earlyScript);
+    const ledger = new SegmentSourceLedger();
+    // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
+    const runSourcing = (script: MediaPlanScript, segments: PlannedSegment[]) =>
+      this.mediaPlans.sourceSegments(run.projectId, userId, role, {
+        providerAccountId: mediaConfig.providerAccountId,
+        script,
+        segments,
+        ledger,
+        // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
+        guaranteeSource: true,
+        // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
+        beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script, title: approved.title, segments: pending }),
+        runImport: (segment, task) =>
+          this.recordStep(
+            run,
+            `import_media_${segment.segmentId}`,
+            { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
+            async () => {
+              const outcome = await task();
+              if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+              return outcome;
+            },
+          ),
+      });
+
+    const branchMs: { voice?: number; media?: number } = {};
+    const phaseStartedAt = Date.now();
+    // VE2E-61: scenes are voiced with bounded parallelism (WORKFLOW_VOICE_PARALLELISM) AND the shared per-provider limiter
+    // (elevenlabs), so many runs together never exceed the provider's concurrent-request ceiling. Each scene's work is
+    // independent; the per-scene StepRun key stays `generate_audio_<sceneId>`.
+    const runVoice = async () => {
+      const voiced = await mapBounded(approved!.scenes, this.voiceParallelism, async (scene) => {
+        const existingAudio = existingAudioByScene.get(scene.id);
+        if (existingAudio) {
+          return {
+            sceneId: scene.sceneId,
+            value: {
+              audioVersionId: existingAudio.id,
+              mediaAssetVersionId: existingAudio.mediaAssetVersionId,
+              subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
+              durationMs: typeof existingAudio.durationMs === "number" ? existingAudio.durationMs : null,
+            },
+          };
+        }
+        const audio = await this.recordStep(
+          run,
+          `generate_audio_${scene.sceneId}`,
+          { role: "tts", operation: "generate_voice", providerAccountId: voiceConfig.providerAccountId },
+          () => this.limited("elevenlabs", async () => {
+            const outcome = await this.audioVersions.generateForWorkflowRun(scene.id, userId, role, {
+              providerAccountId: voiceConfig.providerAccountId,
+              voiceId: voiceConfig.voiceId!,
+              ...(voiceConfig.modelId ? { modelId: voiceConfig.modelId } : {}),
+            });
+            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+            return outcome.data;
+          }),
+        );
         return {
           sceneId: scene.sceneId,
           value: {
-            audioVersionId: existingAudio.id,
-            mediaAssetVersionId: existingAudio.mediaAssetVersionId,
-            subtitleVersionId: existingAudio.subtitleVersions?.[0]?.id ?? null,
-            durationMs: typeof existingAudio.durationMs === "number" ? existingAudio.durationMs : null,
+            audioVersionId: audio.id,
+            mediaAssetVersionId: audio.mediaAssetVersionId,
+            subtitleVersionId: audio.subtitleVersion?.id ?? null,
+            durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
           },
         };
-      }
-      const audio = await this.recordStep(
-        run,
-        `generate_audio_${scene.sceneId}`,
-        { role: "tts", operation: "generate_voice", providerAccountId: voiceConfig.providerAccountId },
-        () => this.limited("elevenlabs", async () => {
-          const outcome = await this.audioVersions.generateForWorkflowRun(scene.id, userId, role, {
-            providerAccountId: voiceConfig.providerAccountId,
-            voiceId: voiceConfig.voiceId!,
-            ...(voiceConfig.modelId ? { modelId: voiceConfig.modelId } : {}),
-          });
-          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-          return outcome.data;
-        }),
-      );
-      return {
-        sceneId: scene.sceneId,
-        value: {
-          audioVersionId: audio.id,
-          mediaAssetVersionId: audio.mediaAssetVersionId,
-          subtitleVersionId: audio.subtitleVersion?.id ?? null,
-          durationMs: typeof audio.durationMs === "number" ? audio.durationMs : null,
-        },
-      };
-    });
-    for (const entry of voiced) audioByScene.set(entry.sceneId, entry.value);
+      });
+      for (const entry of voiced) audioByScene.set(entry.sceneId, entry.value);
+      branchMs.voice = Date.now() - phaseStartedAt;
+    };
+    // Both branches get their own wall-clock StepRun (`voice_generation`, `media_sourcing`) next to the per-scene/per-segment ones,
+    // so `report:failures` (VE2E-84) sees the two parallel durations (their max is the real critical path, not their sum).
+    const sourcingBranch = this.settle(this.recordStep(run, "media_sourcing", null, async () => {
+      const result = await runSourcing(earlyScript, earlyPlan);
+      branchMs.media = Date.now() - phaseStartedAt;
+      return result;
+    }));
+    const voiceBranch = this.settle(this.recordStep(run, "voice_generation", null, runVoice));
+    const [voiceResult, sourcingResult] = await Promise.all([voiceBranch, sourcingBranch]);
+    if (!voiceResult.ok) throw voiceResult.error;
+    if (!sourcingResult.ok) throw sourcingResult.error;
+    const earlySourcing = sourcingResult.value;
+
     // VE2E-54: real total of all scene voice durations vs the intake target (+-10 s). No correction loop yet:
     // outside the band the run continues but is flagged `duration_out_of_band` with the real total (never silent).
     const knownDurations = approved.scenes.map((scene) => audioByScene.get(scene.sceneId)?.durationMs).filter((ms): ms is number => typeof ms === "number");
@@ -631,66 +771,44 @@ ${correction.direction}`,
     });
     // Subtitle is auto-derived synchronously from real alignment inside generateForWorkflowRun (VE2E-03) — no separate "aligning" work, kept as a status marker for progress readability only.
     await this.setStatus(run.id, "aligning");
-
-    // --- 5. media: VE2E-31 one-shot background plan (MediaPlanService, shared with Studio) ---
-    // Consecutive scenes are grouped into background segments (script visualPlan or deterministic
-    // fallback, count from the run's VE2E-40 setting); each segment gets ONE source (reused from the
-    // project library on retry, else searched by keywords.en through the Pexels rank/moderation/
-    // rights gate) and a new segment never reuses an earlier segment's source. Replaces the old
-    // per-scene `usedExternalIds` hard block. Unattended Auto never stops here (VE2E-130): an unsourceable
-    // segment degrades down the ladder (other clip window / stock image + Ken Burns / brand background).
     await this.setStatus(run.id, "media_preparing");
-    const orderedScenes = [...approved.scenes].sort((a, b) => a.orderIndex - b.orderIndex);
-    const planScript: MediaPlanScript = {
-      language: approved.language,
-      scenes: orderedScenes.map((scene) => ({
-        sceneId: scene.sceneId,
-        narration: scene.narration,
-        screenText: scene.screenText,
-        visualQuery: scene.visualQuery,
-        durationHintMs: scene.durationHintMs,
-        voiceDurationMs: audioByScene.get(scene.sceneId)?.durationMs ?? null,
-      })),
-      visualPlan: approved.visualPlan ?? null,
-    };
-    // Template-aware sourcing: a template can mix image and video scene slots. Each scene is sourced as the kind its slot expects
-    // (images from Pinterest, videos from TikTok), so a segment never mixes kinds. A video-only template stays video-only.
-    const kindSnapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: renderConfig.templateSnapshotId }, select: { modifications: true } });
-    const kindSlots = (Array.isArray(kindSnapshot?.modifications) ? kindSnapshot.modifications : []) as unknown as Array<{ kind?: string }>;
-    const kindByScene = deriveSceneVisualKinds(kindSlots.map((slot) => String(slot.kind ?? "")), orderedScenes.map((scene) => scene.sceneId));
-    let plannedSegments = this.mediaPlans.planSegments(planScript, backgroundSegmentRange);
-    if (kindByScene) {
-      const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
-      plannedSegments = splitSegmentsByVisualKind(plannedSegments, kindByScene, durationByScene);
-    }
-    const mediaCheck = await this.mediaPlans.checkMediaSourcesEnabled(userId, role, mediaConfig.providerAccountId);
-    if (!mediaCheck.ok) throw new WorkflowStepFailure(mediaCheck.code, mediaCheck.message);
-    const ledger = new SegmentSourceLedger();
-    // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
-    const sourcing = await this.mediaPlans.sourceSegments(run.projectId, userId, role, {
-      providerAccountId: mediaConfig.providerAccountId,
-      script: planScript,
-      segments: plannedSegments,
-      ledger,
-      // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
-      guaranteeSource: true,
-      // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
-      beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script: planScript, title: approved.title, segments: pending }),
-      runImport: (segment, task) =>
-        this.recordStep(
-          run,
-          `import_media_${segment.segmentId}`,
-          { role: "visual", operation: "media_search", providerAccountId: mediaConfig.providerAccountId },
-          async () => {
-            const outcome = await task();
-            if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
-            return outcome;
-          },
-        ),
-    });
-    const sourced: SourcedSegment[] = sourcing.sourced;
-    if (sourcing.failure) {
+
+    // Real durations -> final segment plan. Everything already sourced is kept; only new/split/uncovered segments are searched.
+    const planScript = buildPlanScript((sceneId) => audioByScene.get(sceneId)?.durationMs ?? null);
+    const plannedSegments = planFor(planScript);
+    if (earlySourcing.failure) {
       // VE2E-48: keep the per-segment sourcing decisions made before the failing segment visible on the run.
+      await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(earlyScript, earlySourcing.sourced).diagnostics, earlySourcing.apifyUsage, earlySourcing.visionUsage);
+      throw earlySourcing.failure.error;
+    }
+    const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
+    const reconciled = reconcileSourcedSegments({ finalSegments: plannedSegments, early: earlySourcing.sourced, durationOf: (sceneId) => durationByScene.get(sceneId) ?? 1 });
+    let secondPass: Awaited<ReturnType<typeof runSourcing>> | null = null;
+    if (reconciled.toSource.length > 0) secondPass = await runSourcing(planScript, reconciled.toSource);
+    const sourced: SourcedSegment[] = orderByScript([...reconciled.reused, ...(secondPass?.sourced ?? [])], orderedScenes.map((scene) => scene.sceneId));
+    const sourcing = {
+      sourced,
+      failure: secondPass?.failure ?? null,
+      apifyUsage: mergeApifyUsage(earlySourcing.apifyUsage, secondPass?.apifyUsage ?? null),
+      visionUsage: mergeVisionUsage(earlySourcing.visionUsage, secondPass?.visionUsage ?? null),
+    };
+    await this.saveStepDiagnostics(run, "parallel_pipeline_diagnostics", {
+      earlySegments: earlyPlan.length,
+      finalSegments: plannedSegments.length,
+      structureChanged: !sameSegmentStructure(earlyPlan, plannedSegments),
+      reconcile: reconciled.stats,
+      researchedSegmentIds: reconciled.toSource.map((segment) => segment.segmentId),
+      branchMs,
+      earlyUsedRealVoiceMs: earlyVoiceMs.size,
+    });
+    await this.saveResumeDiagnostics(run, {
+      reusedScript: existingApproved !== null && approved === existingApproved,
+      reusedAudioScenes: existingAudioByScene.size,
+      totalScenes: approved.scenes.length,
+      reusedMediaSegments: sourced.filter((piece) => piece.source?.sourcing === "reused").length,
+      totalMediaSegments: sourced.length,
+    });
+    if (sourcing.failure) {
       await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
       throw sourcing.failure.error;
     }

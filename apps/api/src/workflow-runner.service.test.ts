@@ -428,7 +428,8 @@ describe("WorkflowRunnerService", () => {
       expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
       const call = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls[0]![3];
       expect(call.sceneBrief.phrases[0]).toBe("soccer star dribbling");
-      expect(call.sceneBrief.targetDurationSeconds).toBeCloseTo(7.3);
+      // VE2E-133: the search starts before TTS finishes, so its target length is the script hint (2 x 5 s); the REAL voice durations (7.3 s) only cut the ranges below.
+      expect(call.sceneBrief.targetDurationSeconds).toBeCloseTo(10);
       expect(call.usedExternalIds).toEqual([]);
       const persisted = persistedTimeline();
       expect(persisted.scenes.map((s: any) => [s.mediaAssetVersionId, s.segmentId, s.sourceStartMs, s.sourceDurationMs])).toEqual([
@@ -601,6 +602,176 @@ describe("WorkflowRunnerService", () => {
     it("returns false from processNext when there is nothing to claim or reconcile", async () => {
       runs = [];
       expect(await service.processNext()).toBe(false);
+    });
+  });
+
+  describe("VE2E-133 critical path: media sourcing parallel to TTS, resume, no orphaned branch", () => {
+    const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const settleTicks = async (n = 15) => { for (let i = 0; i < n; i += 1) await tick(); };
+    const voiceResult = (id: string, durationMs: number) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs, subtitleVersion: { id: `subtitle-${id}` } } as any });
+    const withDuration = (durationMs: number) =>
+      vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs } as any, externalId: `ext-${input.sceneId}` } }));
+    const step = (key: string) => stepRuns.find((s) => s.stepKey === key);
+    const oneSegmentPlan = { segments: [{ segmentId: "g1", sceneIds: ["scene-1", "scene-2"], subject: "Messi", priority: 1, keywords: { ja: "メッシ", en: "soccer star dribbling" }, styleHints: { setting: "stadium", timeOfDay: "night", lighting: "floodlights", palette: "green" } }] };
+    const diag = (key: string) => step(key)?.outputRef;
+    beforeEach(() => {
+      prisma.stepRun.findMany = vi.fn(async ({ where }: any) => stepRuns.filter((s) => s.workflowRunId === where.workflowRunId && s.attempt === where.attempt));
+    });
+
+    it("starts finding media while TTS is still running, cuts ranges only after the real voice duration, and records both branches' timings", async () => {
+      const gates: Array<() => void> = [];
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => {
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return voiceResult(id, 4000);
+      });
+      pexels.autoImportForScene = withDuration(20_000);
+      const started = await service.startNextDraft();
+      await settleTicks();
+      // TTS is still blocked, yet both segments' media were already searched/imported (critical path = max, not sum).
+      expect(gates.length).toBeGreaterThan(0);
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      expect(step("media_sourcing")).toMatchObject({ status: "succeeded" });
+      expect(step("voice_generation")).toMatchObject({ status: "running" });
+      while (gates.length) gates.shift()!();
+      await settleTicks();
+      await (started as { done: Promise<void> }).done;
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      // both branch StepRuns carry real, overlapping start/end timestamps (what report:failures p95 reads)
+      const voice = step("voice_generation");
+      const media = step("media_sourcing");
+      for (const row of [voice, media]) {
+        expect(row.status).toBe("succeeded");
+        expect(row.startedAt).toBeInstanceOf(Date);
+        expect(row.endedAt.getTime()).toBeGreaterThanOrEqual(row.startedAt.getTime());
+      }
+      expect(media.startedAt.getTime()).toBeLessThanOrEqual(voice.endedAt.getTime());
+      expect(voice.startedAt.getTime()).toBeLessThanOrEqual(media.endedAt.getTime() + 1);
+      // the timeline (ranges) is only persisted after BOTH branches are done
+      expect(step("persist_timeline_version").startedAt.getTime()).toBeGreaterThanOrEqual(Math.max(voice.endedAt.getTime(), media.endedAt.getTime()));
+      expect(diag("parallel_pipeline_diagnostics")).toMatchObject({ structureChanged: false, reconcile: { exact: 2, resourced: 0 }, researchedSegmentIds: [] });
+    });
+
+    it("real voice duration close to the hint: ranges use the real voice, no media is searched twice", async () => {
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan: oneSegmentPlan } });
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => voiceResult(id, id === "scene-db-1" ? 4200 : 3100));
+      pexels.autoImportForScene = withDuration(20_000);
+      runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 1 } })];
+      await service.processNext();
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
+      expect(persistedTimeline().scenes.map((s: any) => [s.segmentId, s.sourceStartMs, s.sourceDurationMs])).toEqual([["g1", 0, 4200], ["g1", 4200, 3100]]);
+    });
+
+    it("a voice much longer than the hint that the early clip cannot cover: keeps the found source, searches ONLY the uncovered scene", async () => {
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: { ...approvedScript, visualPlan: oneSegmentPlan } });
+      // hint 10 s fits a 12 s clip; the real voice (4.2 s + 9 s = 13.2 s) does not.
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => voiceResult(id, id === "scene-db-1" ? 4200 : 9000));
+      pexels.autoImportForScene = withDuration(12_000);
+      runs = [draftRun({ backgroundSegments: { mode: "fixed", count: 1 } })];
+      await service.processNext();
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      const sceneIdsSearched = (pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[3].sceneId);
+      expect(sceneIdsSearched).toEqual(["scene-1", "scene-2"]);
+      const persisted = persistedTimeline();
+      expect(persisted.segments.map((segment: any) => [segment.segmentId, segment.sceneIds, segment.mediaAssetVersionId])).toEqual([["g1", ["scene-1"], "pexels-scene-1"], ["g1-b", ["scene-2"], "pexels-scene-2"]]);
+      expect(persisted.scenes.map((s: any) => [s.sceneId, s.mediaAssetVersionId, s.sourceStartMs, s.sourceDurationMs])).toEqual([["scene-1", "pexels-scene-1", 0, 4200], ["scene-2", "pexels-scene-2", 0, 9000]]);
+      expect(diag("parallel_pipeline_diagnostics")).toMatchObject({ reconcile: { exact: 1, resourced: 1 }, researchedSegmentIds: ["g1-b"] });
+    });
+
+    it("a voice failure while media is still being found: the media branch is awaited (not orphaned) and its assets stay for the retry", async () => {
+      let releaseMedia!: () => void;
+      const mediaGate = new Promise<void>((resolve) => { releaseMedia = resolve; });
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => {
+        await mediaGate;
+        return { ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 20_000 } as any, externalId: `ext-${input.sceneId}` } };
+      });
+      audioVersions.generateForWorkflowRun = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "429" }));
+      const started = await service.startNextDraft();
+      await settleTicks();
+      // TTS already failed, media is still in flight: the failure is NOT applied yet (that would let the retry race the live branch).
+      expect(runs[0].status).not.toBe("draft");
+      expect(step("voice_generation")).toMatchObject({ status: "failed" });
+      releaseMedia();
+      await (started as { done: Promise<void> }).done;
+      expect(step("media_sourcing")).toMatchObject({ status: "succeeded" });
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED", retryable: true } });
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+    });
+
+    it("a media-branch failure while TTS is running: TTS finishes and is kept, the retry does not pay TTS again (idempotent)", async () => {
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const real = mediaPlans.sourceSegments.bind(mediaPlans);
+      let fail = true;
+      vi.spyOn(mediaPlans, "sourceSegments").mockImplementation(async (...args: Parameters<MediaPlanService["sourceSegments"]>) => {
+        if (fail) throw new Error("db hiccup");
+        return real(...args);
+      });
+      const audioRows = new Map<string, any>();
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => {
+        await tick();
+        await tick();
+        const data = { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 4000, subtitleVersion: { id: `subtitle-${id}` } };
+        audioRows.set(id, { ...data, sceneDraftVersionId: id, status: "current", subtitleVersions: [{ id: `subtitle-${id}` }] });
+        return { ok: true as const, data: data as any };
+      });
+      prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) => audioRows.get(where.sceneDraftVersionId) ?? null);
+      await service.processNext();
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2);
+      expect(step("voice_generation")).toMatchObject({ status: "succeeded" });
+      expect(runs[0]).toMatchObject({ status: "draft", attempts: 2 });
+      fail = false;
+      await service.processNext();
+      expect(audioVersions.generateForWorkflowRun).toHaveBeenCalledTimes(2); // not charged again
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      const resume = stepRuns.find((s) => s.stepKey === "resume_diagnostics" && s.attempt === 2)!.outputRef;
+      expect(resume).toMatchObject({ attempt: 2, resumed: true, reusedAudioScenes: 2, totalScenes: 2, previousAttempt: { failedStep: "media_sourcing" } });
+    });
+
+    it("retry resumes: reuses script, audio and media already found, and reports exactly which steps were resumed", async () => {
+      runs = [draftRun({ attempts: 2 })];
+      stepRuns.push(
+        { id: "old-1", workflowRunId: "run-1", stepKey: "generate_audio_scene-1", attempt: 1, status: "succeeded", startedAt: new Date(1000), endedAt: new Date(2000) },
+        { id: "old-2", workflowRunId: "run-1", stepKey: "submit_render", attempt: 1, status: "failed", startedAt: new Date(3000), endedAt: new Date(3500) },
+      );
+      (scriptVersions.getApprovedForSource as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, data: approvedScript });
+      prisma.audioVersion.findFirst = vi.fn(async ({ where }: any) => ({ id: `audio-old-${where.sceneDraftVersionId}`, sceneDraftVersionId: where.sceneDraftVersionId, status: "current", mediaAssetVersionId: `m-${where.sceneDraftVersionId}`, durationMs: 4000, subtitleVersions: [{ id: `sub-${where.sceneDraftVersionId}` }] }));
+      mediaAssets.push({ projectId, sceneId: "scene-1", id: "lib-1", kind: "video", durationMs: 20_000, originalFileName: "pexels-1.mp4", createdAt: new Date() }, { projectId, sceneId: "scene-2", id: "lib-2", kind: "video", durationMs: 20_000, originalFileName: "pexels-2.mp4", createdAt: new Date() });
+      await service.processNext();
+      expect(scriptGeneration.generate).not.toHaveBeenCalled();
+      expect(audioVersions.generateForWorkflowRun).not.toHaveBeenCalled();
+      expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+      expect(runs[0]).toMatchObject({ status: "render_queued", lastError: null });
+      expect(stepRuns.find((s) => s.stepKey === "resume_diagnostics" && s.attempt === 2)!.outputRef).toMatchObject({
+        resumed: true,
+        reusedScript: true,
+        reusedAudioScenes: 2,
+        reusedMediaSegments: 2,
+        totalMediaSegments: 2,
+        previousAttempt: { failedStep: "submit_render", succeededSteps: ["generate_audio_scene-1"] },
+      });
+    });
+
+    it("concurrent run_usage appends from the two branches never lose an entry (and runs never share one)", async () => {
+      const append = (run: any, label: string) => (service as any).appendRunUsage(run, { step: label, kind: "content", provider: null, modelId: null, inputTokens: null, outputTokens: null, costAmount: null, costCurrency: null, at: "t" });
+      const runA = draftRun({ id: "run-a" });
+      const runB = draftRun({ id: "run-b" });
+      await Promise.all([...[1, 2, 3, 4, 5].map((n) => append(runA, `a${n}`)), ...[1, 2, 3].map((n) => append(runB, `b${n}`))]);
+      const entries = (id: string) => stepRuns.find((s) => s.workflowRunId === id && s.stepKey === "run_usage")!.outputRef.entries.map((e: any) => e.step).sort();
+      expect(entries("run-a")).toEqual(["a1", "a2", "a3", "a4", "a5"]);
+      expect(entries("run-b")).toEqual(["b1", "b2", "b3"]);
+    });
+
+    it("two runs in parallel keep separate ledgers: each run's own segments are sourced once and both reach render_queued", async () => {
+      runs = [draftRun({ id: "run-1", createdAt: new Date(1) }), draftRun({ id: "run-2", requestFingerprint: "fp-2", correlationId: "corr-2", createdAt: new Date(2) })];
+      pexels.autoImportForScene = withDuration(20_000);
+      const inflight = new Set<Promise<void>>();
+      await service.fillSlots(inflight, 2);
+      while (inflight.size > 0) await Promise.race([...inflight]);
+      expect(runs.map((r) => r.status)).toEqual(["render_queued", "render_queued"]);
+      expect((pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(4);
+      for (const id of ["run-1", "run-2"]) {
+        expect(stepRuns.filter((s) => s.workflowRunId === id && s.stepKey.startsWith("import_media_"))).toHaveLength(2);
+      }
     });
   });
 
