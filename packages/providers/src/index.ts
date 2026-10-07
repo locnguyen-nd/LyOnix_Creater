@@ -154,6 +154,9 @@ export {
   normalizeScriptVisualPlanV2,
   diagnoseScriptVisualPlanV2,
   sanitizeVisualPlanJaKeywords,
+  sanitizeVisualPlanKeywords,
+  searchTiersForKeywords,
+  type SanitizedVisualPlan,
   isValidJaSearchKeyword,
   isValidEnSearchKeyword,
   containsJapaneseChars,
@@ -177,6 +180,17 @@ export {
   type ExtractedSegmentKeywords,
   type ExtractSegmentKeywordsResult,
 } from "./segment-keywords.js";
+export {
+  parseVideoSubject,
+  phraseMatchesSubject,
+  phraseHitsExclusion,
+  filterPhrasesBySubject,
+  subjectAnchorTerms,
+  subjectKeywordRuleLines,
+  normalizeSubjectText,
+  KEYWORD_TIER_MAX_PHRASES,
+  type VideoSubjectV2,
+} from "./subject-keywords.js";
 export {
   SCRIPT_DRAFT_SCHEMA_VERSION,
   SCRIPT_DRAFT_V1_JSON_SCHEMA,

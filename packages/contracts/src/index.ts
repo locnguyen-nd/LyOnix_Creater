@@ -133,11 +133,15 @@ export type ScriptVisualSegmentResponse = {
   sceneIds: string[];
   subject: string;
   priority: number;
-  keywords: { ja: string; en: string };
+  /** VE2E-88: `ja`/`en` = first phrase (unchanged); the rest is additive and optional. `moodEn` = generic backdrop for L5/L6 only, never for finding the main clip. */
+  keywords: { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string };
   styleHints: { setting: string; timeOfDay: string; lighting: string; palette: string };
 };
 
-export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[] };
+/** VE2E-88 (additive): the video's main subject + aliases + anchor/exclude terms; absent for plans stored before VE2E-88. */
+export type ScriptVisualSubjectResponse = { main: string; aliases: string[]; mustInclude: string[]; mustExclude: string[] };
+
+export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[]; videoSubject?: ScriptVisualSubjectResponse };
 
 export type ScriptDraftV2Response = {
   schemaVersion: "script-draft.v2";
@@ -157,7 +161,7 @@ export type ScriptDraftV2GenerationResponse = {
   draft: ScriptDraftV2Response;
   /** VE2E-50 (optional, additive): why the visualPlan is missing/invalid and whether the strict schema was rejected; consumed by the Auto runner diagnostics only. */
   diagnostics?: {
-    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[] };
+    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[]; /** VE2E-88: neither ja nor en usable (needs extract_keywords). */ unusableSegmentIds?: string[] };
     schemaRejection: string | null;
     repaired: boolean;
   };

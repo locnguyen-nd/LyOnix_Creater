@@ -215,6 +215,14 @@ export {
 export { deriveSceneVisualKinds, splitSegmentsByVisualKind, computeWindowRangesWithLoopFallback, type VisualKind, type WindowRangePlan } from "./media-plan-kinds.js";
 export {
   planBackgroundSegments,
+  allocateSubjectShare,
+  mainSubjectShare,
+  subjectShareTargetFromEnv,
+  DEFAULT_SUBJECT_SHARE_TARGET,
+  SUBJECT_SHARE_TARGET_MAX,
+  type SegmentKeywords,
+  type MediaPlanVideoSubject,
+  type PlanBackgroundOptions,
   fitSegmentsToRange,
   chooseFallbackSegmentCount,
   groupScenesByDuration,

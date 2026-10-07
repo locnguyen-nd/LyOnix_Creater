@@ -10,7 +10,15 @@
  * that consumes the plan is VE2E-31, not here. Pure logic, no I/O.
  */
 
-export type ScriptVisualKeywordsV2 = { ja: string; en: string };
+import { KEYWORD_TIER_MAX_PHRASES, SUBJECT_MAX_TERMS, filterPhrasesBySubject, parseVideoSubject, type VideoSubjectV2 } from "./subject-keywords.js";
+
+/**
+ * VE2E-88: `ja`/`en` stay plain strings (the first phrase) for every pre-88 consumer; the multi-tier
+ * data is additive. `jaAll`/`enAll` (1-2 phrases), `broadEn` (wider topic still tied to the video
+ * subject) are search tiers; `moodEn` is a generic backdrop for the L5/L6 tiers ONLY - never used to
+ * find the main clip.
+ */
+export type ScriptVisualKeywordsV2 = { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string };
 
 export type ScriptVisualStyleHintsV2 = {
   setting: string;
@@ -30,7 +38,8 @@ export type ScriptVisualSegmentV2 = {
   styleHints: ScriptVisualStyleHintsV2;
 };
 
-export type ScriptVisualPlanV2 = { segments: ScriptVisualSegmentV2[] };
+/** `videoSubject` (VE2E-88, optional): the video's main subject + aliases + mustInclude/mustExclude; absent in plans stored before VE2E-88. */
+export type ScriptVisualPlanV2 = { segments: ScriptVisualSegmentV2[]; videoSubject?: VideoSubjectV2 };
 
 export const VISUAL_PLAN_MAX_SEGMENTS = 10;
 export const VISUAL_PLAN_PRIORITY_MIN = 1;
@@ -49,8 +58,19 @@ export const SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA = {
     {
       type: "object",
       additionalProperties: false,
-      required: ["segments"],
+      required: ["videoSubject", "segments"],
       properties: {
+        videoSubject: {
+          type: "object",
+          additionalProperties: false,
+          required: ["main", "aliases", "mustInclude", "mustExclude"],
+          properties: {
+            main: { type: "string", description: "The video's MAIN subject as a proper name (the player, team, person, place or story the whole video is about)" },
+            aliases: { type: "array", items: { type: "string" }, description: "Other names/spellings/nicknames of the main subject (ja/en/native script), 0-6" },
+            mustInclude: { type: "array", items: { type: "string" }, description: "Anchor terms tied to the subject: team, match, event, 0-6" },
+            mustExclude: { type: "array", items: { type: "string" }, description: "Terms that would make a clip off-subject (rival story, unrelated person), 0-6" },
+          },
+        },
         segments: {
           type: "array",
           minItems: 1,
@@ -67,10 +87,12 @@ export const SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA = {
               keywords: {
                 type: "object",
                 additionalProperties: false,
-                required: ["ja", "en"],
+                required: ["ja", "en", "broad_en", "mood_en"],
                 properties: {
-                  ja: { type: "string", description: "2-4 word real Japanese search phrase (kana/kanji) naming the topic entity, place or event; never a camera direction or an English sentence" },
-                  en: { type: "string", description: "2-4 word English stock-footage search phrase for the same entity, place or event" },
+                  ja: { type: "array", items: { type: "string" }, description: "1-2 real Japanese search phrases (kana/kanji, 2-4 words) naming the MAIN SUBJECT's entity/place/event, each containing the subject's name or alias; never a camera direction or an English sentence" },
+                  en: { type: "array", items: { type: "string" }, description: "1-2 English search phrases (2-4 words) for the same entity/event, each containing the subject's name or alias" },
+                  broad_en: { type: "array", items: { type: "string" }, description: "1-2 WIDER English topic phrases that still contain the subject's name or alias (example: '<subject> match highlights')" },
+                  mood_en: { type: "string", description: "Generic background mood for a last-resort backdrop only (example: 'city night timelapse'); never used to find the main clip" },
                 },
               },
               styleHints: {
@@ -96,6 +118,24 @@ const boundedText = (value: unknown, max: number): string | null => {
   const trimmed = value.trim();
   return trimmed.length <= max ? trimmed : null;
 };
+
+/**
+ * Reads one keyword tier. Accepts the old string form and the VE2E-88 array form (`primary` wins when
+ * it is an array - the persisted shape keeps `jaAll` next to the scalar `ja`). Returns `null` when a
+ * value has the wrong type or an over-long phrase (a garbage value invalidates the plan, never truncated).
+ */
+function readPhraseTier(primary: unknown, fallback: unknown): { list: string[]; isArray: boolean } | null {
+  const source = Array.isArray(primary) ? primary : fallback;
+  if (source === undefined || source === null) return { list: [], isArray: false };
+  const items = Array.isArray(source) ? source : [source];
+  const list: string[] = [];
+  for (const item of items) {
+    const phrase = boundedText(item, MAX_KEYWORD);
+    if (phrase === null) return null;
+    if (phrase && !list.some((existing) => existing.toLowerCase() === phrase.toLowerCase())) list.push(phrase);
+  }
+  return { list: list.slice(0, SUBJECT_MAX_TERMS), isArray: Array.isArray(source) };
+}
 
 /** VE2E-50: why a raw `visualPlan` was dropped (logged in the run diagnostics instead of a silent null). */
 export type VisualPlanRejectionReason =
@@ -173,18 +213,31 @@ export function diagnoseScriptVisualPlanV2(
     const priority = row.priority;
     if (typeof priority !== "number" || !Number.isInteger(priority) || priority < VISUAL_PLAN_PRIORITY_MIN || priority > VISUAL_PLAN_PRIORITY_MAX) return reject("priority_invalid", segmentId);
     const keywordsRow = asRecord(row.keywords);
-    const ja = keywordsRow ? boundedText(keywordsRow.ja, MAX_KEYWORD) : null;
-    const en = keywordsRow ? boundedText(keywordsRow.en, MAX_KEYWORD) : null;
-    if (ja === null || en === null || (!ja && !en)) return reject("keywords_invalid", segmentId);
+    if (!keywordsRow) return reject("keywords_invalid", segmentId);
+    const jaTier = readPhraseTier(keywordsRow.jaAll, keywordsRow.ja);
+    const enTier = readPhraseTier(keywordsRow.enAll, keywordsRow.en);
+    const broadTier = readPhraseTier(keywordsRow.broad_en, keywordsRow.broadEn);
+    if (!jaTier || !enTier || !broadTier || (!jaTier.list[0] && !enTier.list[0])) return reject("keywords_invalid", segmentId);
+    const moodRaw = keywordsRow.mood_en ?? keywordsRow.moodEn;
+    const moodEn = typeof moodRaw === "string" && moodRaw.trim().length <= MAX_KEYWORD ? moodRaw.trim() : "";
+    const keywords: ScriptVisualKeywordsV2 = {
+      ja: jaTier.list[0] ?? "",
+      en: enTier.list[0] ?? "",
+      ...(jaTier.isArray ? { jaAll: jaTier.list } : {}),
+      ...(enTier.isArray ? { enAll: enTier.list } : {}),
+      ...(broadTier.list.length ? { broadEn: broadTier.list } : {}),
+      ...(moodEn ? { moodEn } : {}),
+    };
     const hintsRow = asRecord(row.styleHints);
     if (!hintsRow) return reject("style_hints_invalid", segmentId);
     const hints = styleHintKeys.map((key) => boundedText(hintsRow[key], MAX_HINT));
     if (hints.some((value) => value === null)) return reject("style_hints_invalid", segmentId);
     const [setting, timeOfDay, lighting, palette] = hints as string[];
-    segments.push({ segmentId, sceneIds, subject, priority, keywords: { ja, en }, styleHints: { setting: setting!, timeOfDay: timeOfDay!, lighting: lighting!, palette: palette! } });
+    segments.push({ segmentId, sceneIds, subject, priority, keywords, styleHints: { setting: setting!, timeOfDay: timeOfDay!, lighting: lighting!, palette: palette! } });
   }
   if (expectedNextIndex !== finalSceneIds.length) return reject("scenes_not_fully_covered", `${expectedNextIndex}/${finalSceneIds.length}`);
-  return { plan: { segments }, reason: null };
+  const videoSubject = parseVideoSubject(root.videoSubject);
+  return { plan: { segments, ...(videoSubject ? { videoSubject } : {}) }, reason: null };
 }
 
 export function normalizeScriptVisualPlanV2(
@@ -227,19 +280,65 @@ export const isValidEnSearchKeyword = (value: unknown): value is string => {
   return trimmed.split(/\s+/).filter(Boolean).length <= 6;
 };
 
+export type SanitizedVisualPlan = {
+  plan: ScriptVisualPlanV2;
+  /** Segments with no valid ja phrase left (blanked). Kept for pre-88 consumers: they used to need extraction. */
+  invalidJaSegmentIds: string[];
+  /** Segments with NO usable ja AND NO usable en phrase left - these truly need the extract_keywords call (en alone is valid for Apify). */
+  unusableSegmentIds: string[];
+};
+
 /**
- * Blanks every `keywords.ja` that fails {@link isValidJaSearchKeyword} (keeps `en`) and returns the
- * ids of the segments whose ja keyword is missing/invalid afterwards (those need the dedicated
- * keyword extraction).
+ * Validates every keyword tier of every segment: ja must pass {@link isValidJaSearchKeyword}, en and
+ * broad_en {@link isValidEnSearchKeyword} (invalid phrases are dropped, at most 2 per tier). When the
+ * plan knows its `videoSubject`, phrases that do not contain the subject/an alias/a mustInclude term or
+ * that hit mustExclude are dropped too (CR section 7 subject rule); `moodEn` is exempt (backdrop only).
  */
-export function sanitizeVisualPlanJaKeywords(plan: ScriptVisualPlanV2): { plan: ScriptVisualPlanV2; invalidJaSegmentIds: string[] } {
+export function sanitizeVisualPlanKeywords(plan: ScriptVisualPlanV2): SanitizedVisualPlan {
   const invalidJaSegmentIds: string[] = [];
+  const unusableSegmentIds: string[] = [];
+  const subject = plan.videoSubject ?? null;
   const segments = plan.segments.map((segment) => {
-    if (isValidJaSearchKeyword(segment.keywords.ja)) return segment;
-    invalidJaSegmentIds.push(segment.segmentId);
-    return { ...segment, keywords: { ...segment.keywords, ja: "" } };
+    const keywords = segment.keywords;
+    const pick = (phrases: readonly string[], isValid: (value: unknown) => boolean) =>
+      filterPhrasesBySubject(phrases.filter((phrase) => isValid(phrase)), subject).slice(0, KEYWORD_TIER_MAX_PHRASES);
+    const jaList = pick(keywords.jaAll ?? [keywords.ja], isValidJaSearchKeyword);
+    const enList = pick(keywords.enAll ?? [keywords.en], isValidEnSearchKeyword);
+    const broadList = pick(keywords.broadEn ?? [], isValidEnSearchKeyword);
+    if (!jaList[0]) invalidJaSegmentIds.push(segment.segmentId);
+    if (!jaList[0] && !enList[0]) unusableSegmentIds.push(segment.segmentId);
+    const next: ScriptVisualKeywordsV2 = {
+      ja: jaList[0] ?? "",
+      en: enList[0] ?? "",
+      ...(keywords.jaAll ? { jaAll: jaList } : {}),
+      ...(keywords.enAll ? { enAll: enList } : {}),
+      ...(broadList.length ? { broadEn: broadList } : {}),
+      ...(keywords.moodEn ? { moodEn: keywords.moodEn } : {}),
+    };
+    return { ...segment, keywords: next };
   });
-  return { plan: { segments }, invalidJaSegmentIds };
+  return { plan: { ...plan, segments }, invalidJaSegmentIds, unusableSegmentIds };
+}
+
+/** Pre-VE2E-88 name/shape of {@link sanitizeVisualPlanKeywords} (kept for existing callers). */
+export function sanitizeVisualPlanJaKeywords(plan: ScriptVisualPlanV2): { plan: ScriptVisualPlanV2; invalidJaSegmentIds: string[] } {
+  const { plan: sanitized, invalidJaSegmentIds } = sanitizeVisualPlanKeywords(plan);
+  return { plan: sanitized, invalidJaSegmentIds };
+}
+
+/**
+ * Ordered search phrases for the MAIN clip of a segment: ja, then en, then broad_en (CR section 7 Q1).
+ * `moodEn` is deliberately absent - it is only for the photo/brand-background tiers (L5/L6).
+ */
+export function searchTiersForKeywords(keywords: ScriptVisualKeywordsV2): Array<{ tier: "ja" | "en" | "broad"; phrase: string }> {
+  const out: Array<{ tier: "ja" | "en" | "broad"; phrase: string }> = [];
+  const add = (tier: "ja" | "en" | "broad", phrases: readonly string[]) => {
+    for (const phrase of phrases) if (phrase.trim() && !out.some((entry) => entry.phrase === phrase.trim())) out.push({ tier, phrase: phrase.trim() });
+  };
+  add("ja", keywords.jaAll ?? [keywords.ja]);
+  add("en", keywords.enAll ?? [keywords.en]);
+  add("broad", keywords.broadEn ?? []);
+  return out;
 }
 
 /** The segment a scene belongs to, if any. */
@@ -255,7 +354,8 @@ export function mediaSearchQueryForScene(
   scene: { sceneId: string; visualQuery: string; narration: string },
   plan: ScriptVisualPlanV2 | null | undefined,
 ): string {
-  const english = findVisualSegmentForScene(plan, scene.sceneId)?.keywords.en.trim();
+  const keywords = findVisualSegmentForScene(plan, scene.sceneId)?.keywords;
+  const english = keywords?.en.trim() || keywords?.broadEn?.[0]?.trim();
   if (english) return english;
   return scene.visualQuery.trim() || scene.narration;
 }
