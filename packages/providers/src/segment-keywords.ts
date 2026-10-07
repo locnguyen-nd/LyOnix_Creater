@@ -8,8 +8,9 @@ import { ProviderError, type UsageRecord } from "./index.js";
 import { generateContentStructuredV2, type LiveContentKind } from "./live-content.js";
 import { normalizeModelId } from "./content-models.js";
 import { isValidEnSearchKeyword, isValidJaSearchKeyword } from "./script-visual-plan.js";
+import { KEYWORD_TIER_MAX_PHRASES, filterPhrasesBySubject, parseVideoSubject, subjectKeywordRuleLines, type VideoSubjectV2 } from "./subject-keywords.js";
 
-export const SEGMENT_KEYWORDS_PROMPT_VERSION = "segment-keywords.v1" as const;
+export const SEGMENT_KEYWORDS_PROMPT_VERSION = "segment-keywords.v2" as const;
 /** Narration sent per segment is clipped so the call stays cheap. */
 export const SEGMENT_KEYWORDS_NARRATION_MAX_CHARS = 400;
 export const SEGMENT_KEYWORDS_MAX_SEGMENTS = 10;
@@ -24,11 +25,13 @@ export const SEGMENT_KEYWORDS_JSON_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["segmentId", "ja", "en"],
+        required: ["segmentId", "ja", "en", "broad_en", "mood_en"],
         properties: {
           segmentId: { type: "string" },
-          ja: { type: "string", description: "2-4 word Japanese search phrase in kana/kanji about the entity, place or event" },
-          en: { type: "string", description: "2-4 word English search phrase for the same entity, place or event" },
+          ja: { type: "array", items: { type: "string" }, description: "1-2 Japanese search phrases (kana/kanji, 2-4 words) about the MAIN SUBJECT's entity, place or event, each containing the subject's name or alias" },
+          en: { type: "array", items: { type: "string" }, description: "1-2 English search phrases (2-4 words) for the same, each containing the subject's name or alias" },
+          broad_en: { type: "array", items: { type: "string" }, description: "1-2 wider English topic phrases that still contain the subject's name or alias" },
+          mood_en: { type: "string", description: "One generic background mood phrase; last-resort backdrop only, never used to find the main clip" },
         },
       },
     },
@@ -38,44 +41,72 @@ export const SEGMENT_KEYWORDS_JSON_SCHEMA = {
 export type SegmentKeywordsInput = {
   language: string;
   title?: string;
+  /** VE2E-88: the video's main subject (from the script's visualPlan.videoSubject, or just a name). Keeps every keyword on-subject. */
+  subject?: VideoSubjectV2 | string | null;
   segments: Array<{ segmentId: string; narration: string }>;
 };
 
-export type ExtractedSegmentKeywords = { ja: string; en: string };
+/** `ja`/`en` stay the first phrase as plain strings (pre-VE2E-88 shape); the tier arrays are additive. */
+export type ExtractedSegmentKeywords = { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string };
 
 export function buildSegmentKeywordsPrompt(input: SegmentKeywordsInput): string {
   const clip = (value: string) => {
     const trimmed = value.replace(/\s+/g, " ").trim();
     return trimmed.length <= SEGMENT_KEYWORDS_NARRATION_MAX_CHARS ? trimmed : `${trimmed.slice(0, SEGMENT_KEYWORDS_NARRATION_MAX_CHARS)}...`;
   };
+  const subject = parseVideoSubject(input.subject);
   const lines = input.segments.slice(0, SEGMENT_KEYWORDS_MAX_SEGMENTS).map((segment) => `- ${segment.segmentId}: ${clip(segment.narration)}`);
   return `You are LyOnix. Prompt template: ${SEGMENT_KEYWORDS_PROMPT_VERSION}
 For each background segment of a short vertical video (script language: ${input.language}${input.title ? `, title: ${clip(input.title)}` : ""}), return search keywords a person would type to find real footage of what that segment talks about.
-Return one JSON object {"segments":[{"segmentId","ja","en"}]} with exactly one entry per segmentId below, in the same order.
-- ja: 2-4 words in Japanese (kana/kanji), separated by spaces, about the real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点", "新宿 ラーメン"). Never a sentence, camera direction, mood or English text.
-- en: 2-4 English words for the same entity, place or event (example: "tokyo night skyline").
+Return one JSON object {"segments":[{"segmentId","ja","en","broad_en","mood_en"}]} with exactly one entry per segmentId below, in the same order.
+- ja: array of 1-2 phrases, each 2-4 words in Japanese (kana/kanji), separated by spaces, about the real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点"). Never a sentence, camera direction, mood or English text.
+- en: array of 1-2 English phrases (2-4 words) with the same meaning (example: "tokyo night skyline").
+- broad_en: array of 1-2 wider English topic phrases (still about the subject).
+- mood_en: ONE generic background mood phrase (example: "city night timelapse").
+${subjectKeywordRuleLines(subject).join("\n")}
 Segments (narration):
 ${lines.join("\n")}
 Do not wrap JSON in markdown.`;
 }
 
+const phraseList = (value: unknown): string[] => (typeof value === "string" ? [value] : Array.isArray(value) ? value : []).filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
+
 /**
- * Keeps only entries for known segment ids whose `ja` is a valid Japanese search phrase; `en` is kept
- * only when it is a valid short English phrase (otherwise ""). Never throws.
+ * Keeps only entries for known segment ids with at least one usable phrase: a valid Japanese phrase
+ * (kana/kanji) OR a valid English phrase (en alone is accepted - Apify can search by en, VE2E-88).
+ * Accepts the old string form `{ja,en}` and the array form. With a `subject`, phrases not anchored on
+ * it (or hitting mustExclude) are dropped from ja/en/broad_en; `mood_en` is exempt. Never throws.
  */
-export function parseSegmentKeywords(output: unknown, segmentIds: readonly string[]): { keywords: Record<string, ExtractedSegmentKeywords>; rejectedSegmentIds: string[] } {
+export function parseSegmentKeywords(
+  output: unknown,
+  segmentIds: readonly string[],
+  subjectInput?: VideoSubjectV2 | string | null,
+): { keywords: Record<string, ExtractedSegmentKeywords>; rejectedSegmentIds: string[] } {
   const known = new Set(segmentIds);
+  const subject = parseVideoSubject(subjectInput);
   const keywords: Record<string, ExtractedSegmentKeywords> = {};
   const list = output && typeof output === "object" && Array.isArray((output as { segments?: unknown }).segments) ? (output as { segments: unknown[] }).segments : [];
+  const pick = (value: unknown, isValid: (phrase: unknown) => boolean) =>
+    filterPhrasesBySubject(phraseList(value).filter((phrase) => isValid(phrase)), subject).slice(0, KEYWORD_TIER_MAX_PHRASES);
   for (const item of list) {
     if (!item || typeof item !== "object") continue;
     const row = item as Record<string, unknown>;
     const id = typeof row.segmentId === "string" ? row.segmentId.trim() : "";
     if (!known.has(id) || keywords[id]) continue;
-    const ja = typeof row.ja === "string" ? row.ja.trim() : "";
-    if (!isValidJaSearchKeyword(ja)) continue;
-    const en = typeof row.en === "string" && isValidEnSearchKeyword(row.en) ? row.en.trim() : "";
-    keywords[id] = { ja, en };
+    const ja = pick(row.ja, isValidJaSearchKeyword);
+    const en = pick(row.en, isValidEnSearchKeyword);
+    if (!ja[0] && !en[0]) continue;
+    const broad = pick(row.broad_en ?? row.broadEn, isValidEnSearchKeyword);
+    const moodRaw = row.mood_en ?? row.moodEn;
+    const mood = typeof moodRaw === "string" && isValidEnSearchKeyword(moodRaw) ? moodRaw.trim() : "";
+    keywords[id] = {
+      ja: ja[0] ?? "",
+      en: en[0] ?? "",
+      ...(Array.isArray(row.ja) ? { jaAll: ja } : {}),
+      ...(Array.isArray(row.en) ? { enAll: en } : {}),
+      ...(broad.length ? { broadEn: broad } : {}),
+      ...(mood ? { moodEn: mood } : {}),
+    };
   }
   return { keywords, rejectedSegmentIds: segmentIds.filter((id) => !keywords[id]) };
 }
@@ -94,6 +125,6 @@ export async function extractSegmentKeywords(kind: LiveContentKind, apiKey: stri
   const segments = input.segments.slice(0, SEGMENT_KEYWORDS_MAX_SEGMENTS);
   if (segments.length === 0) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "No segments to extract keywords for", false);
   const reply = await generateContentStructuredV2<unknown>(kind, apiKey, resolvedModelId, buildSegmentKeywordsPrompt({ ...input, segments }), SEGMENT_KEYWORDS_JSON_SCHEMA);
-  const parsed = parseSegmentKeywords(reply.output, segments.map((segment) => segment.segmentId));
+  const parsed = parseSegmentKeywords(reply.output, segments.map((segment) => segment.segmentId), input.subject);
   return { ...parsed, usage: reply.usage, modelId: resolvedModelId, promptTemplateVersion: SEGMENT_KEYWORDS_PROMPT_VERSION };
 }

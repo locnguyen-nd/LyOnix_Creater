@@ -8,14 +8,15 @@ import { buildDurationBudgetPromptLines, resolveBackgroundSegmentRange, splitInt
 import {
   SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA,
   diagnoseScriptVisualPlanV2,
-  sanitizeVisualPlanJaKeywords,
+  sanitizeVisualPlanKeywords,
   type ScriptVisualPlanV2,
   type VisualPlanRejectionReason,
 } from "./script-visual-plan.js";
+import { subjectKeywordRuleLines } from "./subject-keywords.js";
 
 export const SCRIPT_DRAFT_V2_SCHEMA_VERSION = "script-draft.v2" as const;
-/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. v2.2 (VE2E-50): short real 2-4 word ja/en search phrases. */
-export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.2" as const;
+/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. v2.2 (VE2E-50): short real 2-4 word ja/en search phrases. v2.3 (VE2E-88): multi-tier subject-anchored keywords {ja[], en[], broad_en[], mood_en} + videoSubject. */
+export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.3" as const;
 
 export const contentLanguagesV2 = ["vi", "en", "ja", "ko"] as const;
 export type ContentLanguageV2 = (typeof contentLanguagesV2)[number];
@@ -185,6 +186,8 @@ export type VisualPlanParseDiagnostics = {
   detail?: string;
   /** Segments whose `keywords.ja` was blank/invalid (no kana/kanji, too long, sentence) and was blanked; they need the keyword extraction. */
   invalidJaSegmentIds: string[];
+  /** VE2E-88: segments with neither a usable ja nor a usable en phrase (these need the extract_keywords call; en alone is enough for Apify). Optional for older diagnostics. */
+  unusableSegmentIds?: string[];
 };
 
 export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2): ScriptDraftV2 | null {
@@ -242,9 +245,9 @@ export function parseScriptDraftV2WithDiagnostics(value: unknown, language: Cont
       },
     );
     if (diagnosis.plan) {
-      const sanitized = sanitizeVisualPlanJaKeywords(diagnosis.plan);
+      const sanitized = sanitizeVisualPlanKeywords(diagnosis.plan);
       visualPlan = sanitized.plan;
-      planDiagnostics = { status: "ok", reason: null, invalidJaSegmentIds: sanitized.invalidJaSegmentIds };
+      planDiagnostics = { status: "ok", reason: null, invalidJaSegmentIds: sanitized.invalidJaSegmentIds, unusableSegmentIds: sanitized.unusableSegmentIds };
     } else {
       planDiagnostics = {
         status: diagnosis.reason === "absent" || diagnosis.reason === "null" ? "missing" : "rejected",
@@ -366,7 +369,9 @@ visualPlan (whole-video background plan, decided after writing all scenes): spli
 - segments: in script order, covering every sceneId exactly once, each segment a run of consecutive sceneIds.
 - Keep all scenes about the same subject (person, place or event) in the same segment - never split one subject across segments; the segment showing the video's main subject gets priority 1 and the most scenes; other segments priority 2+.
 - subject: short label of what that segment shows.
-- keywords.ja: a SHORT real Japanese search phrase (2-4 words, written in Japanese kana/kanji, separated by spaces) that a Japanese TikTok user would type to find footage of the topic's real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点", "新宿 ラーメン"). NEVER a camera direction, mood, shot description, sentence or English text, and never a copy of a scene visualQuery. keywords.en: a 2-4 word English search phrase for the same entity/place/event (example: "tokyo night skyline"). Both are required for every segment, even when the script language is not Japanese.
+- videoSubject: the ONE main subject of the whole video as a proper name (main), its aliases/other spellings (aliases), related anchor terms such as team/match/event (mustInclude) and terms that would make footage off-subject (mustExclude).
+- keywords is a multi-tier object {ja, en, broad_en, mood_en}: ja = 1-2 SHORT real Japanese search phrases (2-4 words, kana/kanji, separated by spaces) a Japanese TikTok user would type to find footage of the video's real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点"); en = 1-2 English phrases (2-4 words) with the same meaning; broad_en = 1-2 wider English topic phrases; mood_en = ONE generic background mood phrase (example: "city night timelapse"). NEVER a camera direction, shot description, sentence or a copy of a scene visualQuery. ja and en are required for every segment, even when the script language is not Japanese.
+${subjectKeywordRuleLines().join("\n")}
 - Always return a visualPlan object (not null) unless the script truly has no consistent subject.
 - styleHints (setting, timeOfDay, lighting, palette): short phrases; keep them consistent across segments unless the story really changes place or time.
 If you cannot produce a valid plan, set visualPlan to null.
