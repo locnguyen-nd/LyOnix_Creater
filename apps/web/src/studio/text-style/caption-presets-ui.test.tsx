@@ -46,12 +46,22 @@ const studioOptionsOf = (html: string) => [...html.matchAll(/data-testid="captio
 const disabledStudioOptions = (html: string) => [...html.matchAll(/<button[^>]*disabled=""[^>]*data-testid="caption-preset-option" data-preset="([^"]+)"/g)].map((m) => m[1]);
 
 describe("VE2E-94 caption presets in Auto (create video)", () => {
-  it("(5, 16) shows the template default + every preset with a local preview, name, description and compatibility", async () => {
+  it("(5, 16) VE2E-96 compact: the template default + every preset as a chip (swatch, name, description), ONE local preview", async () => {
     const html = await picker("lyonix");
     expect(cardsOf(html)).toEqual(["template", ...CAPTION_PRESETS.map((item) => item.id)]);
-    expect((html.match(/data-testid="scene-caption-preview"/g) ?? []).length).toBe(7); // the VE2E-93 caption preview, nothing else
-    for (const item of CAPTION_PRESETS) expect(html).toContain(locales.vi.captionPresets.items[item.id as keyof typeof locales.vi.captionPresets.items].name);
-    expect((html.match(/data-testid="caption-preset-compat"/g) ?? []).length).toBe(6);
+    // one VE2E-93 caption preview for the style being looked at - not one large card per preset
+    expect((html.match(/data-testid="scene-caption-preview"/g) ?? []).length).toBe(1);
+    expect(html).toMatch(/data-testid="caption-preset-preview" data-preset="template"/);
+    expect((html.match(/data-testid="caption-preset-swatch"/g) ?? []).length).toBe(7);
+    const strings = locales.vi.captionPresets.items;
+    for (const item of CAPTION_PRESETS) {
+      expect(html).toContain(strings[item.id as keyof typeof strings].name);
+      expect(html).toContain(`title="${strings[item.id as keyof typeof strings].description}"`);
+    }
+    expect(html).not.toContain('data-testid="caption-preset-compat"'); // the template default has no compatibility chips
+    const chosen = await picker("lyonix", "news-bold");
+    expect(chosen).toMatch(/data-testid="caption-preset-preview" data-preset="news-bold"/);
+    expect((chosen.match(/data-testid="caption-preset-compat"/g) ?? []).length).toBe(1);
     expect(network.calls).not.toHaveBeenCalled();
   });
 

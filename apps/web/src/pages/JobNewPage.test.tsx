@@ -60,3 +60,26 @@ describe("JobNewPage first paint (VE2E-124)", () => {
     expect(out).toMatch(/<option value="8-12" selected="">8-12<\/option>/);
   });
 });
+
+describe("JobNewPage content source (VE2E-96)", () => {
+  it("keeps the create-video form as the page (old layout: form + the 320 px summary column), no permanent news feed", () => {
+    const out = html();
+    expect(out).toContain("lg:grid-cols-[1fr_320px]");
+    expect(out).toContain(locales.vi.jobs.summary);
+    expect(out).not.toContain('data-testid="news-feed"');
+    expect(out).not.toContain('data-testid="news-drawer"');
+    expect(out).not.toContain("create-video-panel");
+  });
+
+  it("'Nguồn nội dung' sits above the form: a URL box with [Phân tích] and a news search with [Tìm kiếm]", () => {
+    const out = html();
+    const sourceAt = out.indexOf('data-testid="content-source"');
+    expect(sourceAt).toBeGreaterThan(-1);
+    expect(sourceAt).toBeLessThan(out.indexOf('data-testid="draft-bar"'));
+    expect(out).toContain(`placeholder="${locales.vi.intake.urlPlaceholder}"`);
+    expect(out).toMatch(/<button type="submit"[^>]*disabled=""[^>]*>Phân tích<\/button>/); // nothing to analyse yet
+    expect(out).toContain(`placeholder="${locales.vi.intake.newsPlaceholder}"`);
+    expect(out).toMatch(/<button type="submit"[^>]*>Tìm kiếm<\/button>/);
+    expect(calls.api).not.toHaveBeenCalled();
+  });
+});

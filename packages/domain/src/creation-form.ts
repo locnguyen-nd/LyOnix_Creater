@@ -53,6 +53,8 @@ export type JobNewFormValues = {
   orshotFormat: (typeof ORSHOT_FORMAT_CHOICES)[number];
   orshotSize: string;
   captionPresetId: string;
+  /** VE2E-96: the news item the topic was made from (`serializeSelectedNews`); "" = none. Content: draft only, never a default. */
+  selectedNews: string;
 };
 
 export type JobNewFieldKey = keyof JobNewFormValues;
@@ -81,10 +83,11 @@ export const SYSTEM_CREATION_DEFAULTS: JobNewFormValues = {
   orshotFormat: "",
   orshotSize: "",
   captionPresetId: "",
+  selectedNews: "",
 };
 
 /** Job content: in a draft, never in defaults. */
-export const CREATION_CONTENT_KEYS = ["topic", "promptSpec", "existingScript", "autoRawScript", "autoArticleUrl"] as const satisfies readonly JobNewFieldKey[];
+export const CREATION_CONTENT_KEYS = ["topic", "promptSpec", "existingScript", "autoRawScript", "autoArticleUrl", "selectedNews"] as const satisfies readonly JobNewFieldKey[];
 /** Options a user may save as their defaults. */
 export const CREATION_PREFERENCE_KEYS = [
   "entryMode",

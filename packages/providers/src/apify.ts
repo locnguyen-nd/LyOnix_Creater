@@ -288,6 +288,12 @@ async function runActorWithRetry(token: string, pin: ApifyActorPin, input: Recor
   }
 }
 
+/** VE2E-96: runs one allow-listed Actor with a caller-built input (start -> poll -> dataset, one retry) - used by the TikTok transcript source. */
+export async function runApifyActor(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, options: { timeoutSecs: number; usage?: ApifyUsage }, deps?: ApifyDeps): Promise<{ runId: string; items: unknown[] }> {
+  const run = await runActorWithRetry(token, pin, input, limit, deps, { timeoutSecs: options.timeoutSecs, usage: options.usage ?? emptyApifyUsage() });
+  return { runId: run.runId, items: run.items };
+}
+
 // --- untrusted-output parsing helpers ----------------------------------------------------------------
 
 type Json = Record<string, unknown>;

@@ -3,14 +3,13 @@ import { useTranslation } from "react-i18next";
 import { CAPTION_PRESETS, captionPresetById, captionPresetSupport, type CaptionPreset } from "@lyonix/domain/caption-presets";
 import type { CaptionStyleEngine } from "@lyonix/domain/caption-style-capabilities";
 import type { CaptionTemplateDefaults } from "@lyonix/domain/caption-style";
-import { CAPTION_REASON_KEY, CaptionPresetCompatibility, CaptionStyleSample, captionPresetStyle } from "../studio/text-style/CaptionPresetViews";
-import { Button } from "./ui";
-import { Modal } from "./Modal";
+import { CAPTION_REASON_KEY, CaptionPresetCompatibility, CaptionPresetSwatch, CaptionStyleSample, captionPresetStyle } from "../studio/text-style/CaptionPresetViews";
 
 /**
- * VE2E-94: "Caption style" of the Auto create-video form - the template's own style or one of the shared caption presets. Previews are
- * drawn locally by the VE2E-93 caption preview (no render, provider, AI or TTS call). A preset the chosen template's engine cannot draw is
- * disabled with the reason; with no template chosen yet every preset can be picked and is checked again before the run starts.
+ * VE2E-94 / VE2E-96: "Caption style" of the create-video panel - the template's own style or one of the shared caption presets, as a
+ * compact chip grid next to ONE 9:16 preview. Hover / focus previews a style, click chooses it. Previews are drawn locally by the VE2E-93
+ * caption preview (no render, provider, AI or TTS call). A preset the chosen template's engine cannot draw is disabled with the reason;
+ * with no template chosen yet every preset can be picked and is checked again before the run starts.
  */
 export function CaptionPresetPicker({
   selectedId,
@@ -27,78 +26,61 @@ export function CaptionPresetPicker({
   onChoose: (presetId: string) => void;
 }) {
   const { t } = useTranslation();
-  const [previewId, setPreviewId] = useState<string | null>(null);
-  const previewItem = previewId === "" ? null : captionPresetById(previewId);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const shownId = hoverId ?? selectedId;
+  const shown = shownId ? captionPresetById(shownId) : null;
   const reasonFor = (item: CaptionPreset | null): string | null => {
     if (!item || !engine) return null;
     const support = captionPresetSupport(engine, item);
     return support.ok ? null : t(CAPTION_REASON_KEY[support.reason]);
   };
+  const nameOf = (item: CaptionPreset | null) => (item ? t(item.nameKey) : t("captionPresets.templateDefault"));
+  const descriptionOf = (item: CaptionPreset | null) => (item ? t(item.descriptionKey) : t("captionPresets.templateDefaultDescription"));
   const options: Array<CaptionPreset | null> = [null, ...CAPTION_PRESETS];
+  const shownReason = reasonFor(shown);
 
   return (
     <div className="flex flex-col gap-2" data-testid="caption-preset-picker">
-      <p className="text-[12px] text-lyx-fg-muted">{engine ? t("captionPresets.hint") : t("captionPresets.pickTemplateFirst")}</p>
-      <div role="radiogroup" aria-label={t("captionPresets.title")} className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
-        {options.map((item) => {
-          const id = item?.id ?? "";
-          const selected = selectedId === id;
-          const reason = reasonFor(item);
-          const name = item ? t(item.nameKey) : t("captionPresets.templateDefault");
-          return (
-            <div
-              key={id || "template"}
-              role="radio"
-              aria-checked={selected}
-              aria-disabled={Boolean(reason)}
-              className={`flex min-w-0 flex-col gap-1.5 rounded-[var(--lyx-radius)] border p-1.5 ${selected ? "border-lyx-fg ring-1 ring-lyx-fg" : "border-lyx-border"} ${reason ? "opacity-60" : ""}`}
-              data-testid="caption-preset-card"
-              data-preset={id || "template"}
-            >
-              <CaptionStyleSample style={captionPresetStyle(item, engine, defaults)} engine={engine} />
-              <p className="truncate text-[12px] font-semibold">{name}</p>
-              <p className="line-clamp-2 min-h-[2.5em] text-[10.5px] leading-[1.25em] text-lyx-fg-muted">{item ? t(item.descriptionKey) : t("captionPresets.templateDefaultDescription")}</p>
-              {item ? <CaptionPresetCompatibility item={item} /> : null}
-              {reason ? <p className="text-[10px] leading-4 text-lyx-fg-subtle">{reason}</p> : null}
-              <div className="mt-auto flex gap-1">
-                <Button variant="ghost" className="h-7 flex-1 px-1 text-[11px]" onClick={() => setPreviewId(id)}>{t("captionPresets.preview")}</Button>
-                <Button
-                  variant={selected ? "secondary" : "primary"}
-                  className="h-7 flex-1 px-1 text-[11px]"
-                  disabled={selected || Boolean(reason)}
-                  title={reason ?? undefined}
-                  onClick={() => onChoose(id)}
-                >
-                  {selected ? t("captionPresets.selected") : t("captionPresets.choose")}
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {previewId !== null ? (
-        <Modal title={previewItem ? t(previewItem.nameKey) : t("captionPresets.templateDefault")} onClose={() => setPreviewId(null)}>
-          <div className="flex flex-col items-center gap-3" data-testid="caption-preset-modal">
-            <CaptionStyleSample style={captionPresetStyle(previewItem, engine, defaults)} engine={engine} className="w-[220px] max-w-full" />
-            <p className="text-center text-[12.5px] text-lyx-fg-muted">{previewItem ? t(previewItem.descriptionKey) : t("captionPresets.templateDefaultDescription")}</p>
-            {previewItem ? <CaptionPresetCompatibility item={previewItem} /> : null}
-            {reasonFor(previewItem) ? <p className="text-center text-[11px] text-lyx-fg-subtle">{reasonFor(previewItem)}</p> : null}
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={() => setPreviewId(null)}>{t("captionPresets.close")}</Button>
-              <Button
-                disabled={selectedId === previewId || Boolean(reasonFor(previewItem))}
-                onClick={() => {
-                  onChoose(previewId);
-                  setPreviewId(null);
-                }}
+      <p className="text-[11.5px] text-lyx-fg-muted">{engine ? t("captionPresets.previewHint") : t("captionPresets.pickTemplateFirst")}</p>
+      <div className="flex gap-2.5">
+        <div className="w-[78px] flex-none" data-testid="caption-preset-preview" data-preset={shownId || "template"}>
+          <CaptionStyleSample style={captionPresetStyle(shown, engine, defaults)} engine={engine} />
+        </div>
+        <div role="radiogroup" aria-label={t("captionPresets.title")} className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fill,minmax(150px,1fr))] content-start gap-1.5" onMouseLeave={() => setHoverId(null)}>
+          {options.map((item) => {
+            const id = item?.id ?? "";
+            const selected = selectedId === id;
+            const reason = reasonFor(item);
+            const name = nameOf(item);
+            return (
+              <button
+                key={id || "template"}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                aria-disabled={Boolean(reason)}
+                title={reason ? `${name}: ${reason}` : descriptionOf(item)}
+                className={`flex min-w-0 items-center gap-1.5 rounded-[6px] border p-1 text-left transition-colors ${selected ? "border-lyx-fg ring-1 ring-lyx-fg" : "border-lyx-border hover:border-lyx-fg-subtle"} ${reason ? "cursor-not-allowed opacity-50" : ""}`}
+                data-testid="caption-preset-card"
+                data-preset={id || "template"}
+                onMouseEnter={() => setHoverId(id)}
+                onFocus={() => setHoverId(id)}
+                onBlur={() => setHoverId(null)}
+                onClick={() => { if (!reason) onChoose(id); }}
               >
-                {selectedId === previewId ? t("captionPresets.selected") : t("captionPresets.choose")}
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      ) : null}
+                <span className="w-[40px] flex-none"><CaptionPresetSwatch style={captionPresetStyle(item, engine, defaults)} /></span>
+                <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{name}</span>
+                {reason ? <span className="sr-only">{reason}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="flex min-h-[3.25em] flex-col gap-1 text-[11px] leading-4 text-lyx-fg-muted" aria-live="polite" data-testid="caption-preset-details">
+        <p><span className="font-semibold text-lyx-fg">{nameOf(shown)}</span> · {descriptionOf(shown)}</p>
+        {shown ? <CaptionPresetCompatibility item={shown} /> : null}
+        {shownReason ? <p className="text-lyx-fg-subtle">{shownReason}</p> : null}
+      </div>
     </div>
   );
 }

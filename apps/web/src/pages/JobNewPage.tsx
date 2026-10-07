@@ -30,9 +30,10 @@ import { studioCaptionEngine } from "../studio/text-style/caption-style-model";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
 import type { PublicChannel } from "../channel-api";
-import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, UiLocale, VideoProductionSourceInput } from "@lyonix/contracts";
+import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVoiceSummaryResponse, NewsItemResponse, UiLocale, UrlIntakeRewrite, UrlIntakeSource, VideoProductionSourceInput } from "@lyonix/contracts";
 // Browser-safe subpaths (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
+import { parseSelectedNews } from "@lyonix/domain/news";
 import {
   AUTO_SOURCE_TYPES,
   BACKGROUND_SEGMENT_CHOICES,
@@ -50,6 +51,12 @@ import { setupAutoProfile, submitVideoProduction } from "../video-productions-ap
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
 import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, mediaAccountsOf, usableAccounts, type CreationLists } from "../job-new/form-state";
+import { SelectedNewsCard } from "../job-new/SelectedNewsCard";
+import { newsPick, newsUnpick } from "../job-new/news-pick";
+import { NewsDrawer } from "../news/NewsDrawer";
+import { ContentSourceBar } from "../job-new/ContentSourceBar";
+import { analyzeIntakeUrl, rewriteIntakeSource } from "../job-new/intake-api";
+import { intakeApply, type IntakeApplied, type IntakeState, type IntakeTarget } from "../job-new/url-intake";
 
 const toBackgroundSegmentsSetting = (choice: string): BackgroundSegmentsSetting => (choice === "auto" ? { mode: "auto" } : { mode: "fixed", count: Number(choice) });
 
@@ -113,6 +120,10 @@ export function JobNewPage() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  // VE2E-96: "Nguồn nội dung" - the news drawer (opened by a search) and the result of the last analysed URL.
+  const [newsDrawer, setNewsDrawer] = useState<{ query: string } | null>(null);
+  const [intake, setIntake] = useState<IntakeState>({ kind: "idle" });
+  const intakeAppliedRef = useRef<IntakeApplied>({});
   const autosaver = useMemo(
     () => new DraftAutosaver<JobNewFormValues>({ save: saveJobNewDraft, onStatus: setDraftStatus, isConflict: (err) => err instanceof ApiError && err.code === "VERSION_CONFLICT" }),
     [],
@@ -152,6 +163,8 @@ export function JobNewPage() {
   const preflightReady = preflight.every((row) => row.ok);
   const selected = contentAccounts.find((item) => item.id === form.contentAccountId);
   const selectedChannel = channels.find((item) => item.id === form.channelId);
+  // VE2E-96: the news item the topic came from (stored with the draft, like the topic itself).
+  const selectedNews = useMemo(() => parseSelectedNews(form.selectedNews), [form.selectedNews]);
   const generatingLabel = selected
     ? t("jobs.generating", { provider: selected.provider, model: selected.model })
     : t("common.loading");
@@ -321,6 +334,56 @@ export function JobNewPage() {
     update(choice.accountId === form.renderAccountId ? { templateId: template.externalTemplateId } : { templateId: template.externalTemplateId, renderAccountId: choice.accountId });
   };
 
+  /** VE2E-96: "Dùng tin này" (see `newsPick`) closes the news drawer; a topic the user typed is only replaced once they confirm. */
+  const pickNewsItem = async (item: NewsItemResponse) => {
+    const pick = newsPick(formRef.current, item);
+    if (pick.kind === "apply") {
+      if (pick.needsConfirm && !(await confirm({ title: t("news.replaceTitle"), message: t("news.replaceMessage"), confirmLabel: t("news.replaceConfirm"), tone: "warn" }))) return;
+      update(pick.patch);
+    }
+    setNewsDrawer(null);
+  };
+
+  /** VE2E-96: the rewrite of an analysed source, with the form's content account / language / length. Never touches the form. */
+  const rewriteIntake = async (source: UrlIntakeSource) => {
+    const values = formRef.current;
+    setIntake((prev) => (prev.kind === "ready" && prev.source === source ? { ...prev, rewrite: { status: "pending" } } : prev));
+    let rewrite: UrlIntakeRewrite;
+    try {
+      rewrite = await rewriteIntakeSource({ source, ...(values.contentAccountId ? { contentAccountId: values.contentAccountId } : {}), language: values.language, durationSec: midpoint(values.durationTarget) });
+    } catch (err) {
+      rewrite = { status: "failed", code: err instanceof ApiError ? err.code : "PROVIDER_UNAVAILABLE", message: err instanceof ApiError ? err.message : t("common.error") };
+    }
+    setIntake((prev) => (prev.kind === "ready" && prev.source === source ? { ...prev, rewrite } : prev));
+  };
+
+  /** VE2E-96: "Phân tích" - reads the URL (TikTok transcript / article), shows it, then writes the script. The form is not changed here. */
+  const analyzeUrl = async (url: string) => {
+    setIntake({ kind: "loading", stage: "reading" });
+    try {
+      const result = await analyzeIntakeUrl({ url, language: formRef.current.language });
+      if (!result.ok) {
+        setIntake({ kind: "error", code: result.error.code, message: result.error.message });
+        return;
+      }
+      setIntake({ kind: "ready", source: result.source, rewrite: { status: "pending" }, applied: null });
+      await rewriteIntake(result.source);
+    } catch (err) {
+      setIntake({ kind: "error", code: err instanceof ApiError && err.code === "VALIDATION_FAILED" ? "invalid_url" : "request_failed", message: err instanceof ApiError ? err.message : t("common.error") });
+    }
+  };
+
+  /** VE2E-96: "Đưa vào chủ đề" / "Đưa vào kịch bản" (see `intakeApply`); text the user typed there is only replaced once they confirm. */
+  const applyIntake = async (target: IntakeTarget) => {
+    if (intake.kind !== "ready") return;
+    const outcome = intakeApply(formRef.current, intake.source, intake.rewrite, target, intakeAppliedRef.current);
+    if (!outcome) return;
+    if (outcome.needsConfirm && !(await confirm({ title: t("intake.replaceTitle"), message: t(target === "topic" ? "intake.replaceTopic" : "intake.replaceScript"), confirmLabel: t("intake.replaceConfirm"), tone: "warn" }))) return;
+    update(outcome.patch);
+    intakeAppliedRef.current = { ...intakeAppliedRef.current, [target]: outcome.written };
+    setIntake((prev) => (prev.kind === "ready" ? { ...prev, applied: target } : prev));
+  };
+
   /** After a successful submit: the draft is done - stop autosave and delete it, so the next new job starts from the defaults. */
   const closeDraft = async () => {
     closedRef.current = true;
@@ -458,9 +521,21 @@ export function JobNewPage() {
         onCancel={() => setDiscardOpen(false)}
       />
 
+      {/* VE2E-96: two ways to fill the form's source, above the form - the form itself keeps the page. */}
+      <ContentSourceBar
+        state={intake}
+        onAnalyze={(url) => void analyzeUrl(url)}
+        onSearchNews={(query) => setNewsDrawer({ query })}
+        onApply={(target) => void applyIntake(target)}
+        onRetryRewrite={() => { if (intake.kind === "ready") void rewriteIntake(intake.source); }}
+      />
+      {newsDrawer ? (
+        <NewsDrawer initialQuery={newsDrawer.query} selectedId={selectedNews?.id ?? null} onUse={(item) => void pickNewsItem(item)} onClose={() => setNewsDrawer(null)} />
+      ) : null}
+
       <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
         <form
-          className="flex flex-col gap-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-5"
+          className="flex min-w-0 flex-col gap-5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-5"
           onSubmit={(event) => {
             event.preventDefault();
             const values = formRef.current;
@@ -549,7 +624,7 @@ export function JobNewPage() {
             })();
           }}
         >
-          <div className="inline-flex w-fit gap-0.5 rounded-[8px] bg-lyx-muted p-1">
+          <div className="inline-flex w-fit max-w-full flex-wrap gap-0.5 rounded-[8px] bg-lyx-muted p-1">
             <button type="button" onClick={() => update({ entryMode: "auto" })} className={`rounded-[6px] px-4 py-1.5 text-[12.5px] font-semibold ${form.entryMode === "auto" ? "bg-lyx-bg text-lyx-fg shadow-sm" : "text-lyx-fg-muted"}`}>
               {t("jobs.autoModeLabel")}
             </button>
@@ -559,7 +634,7 @@ export function JobNewPage() {
           </div>
 
           {form.entryMode === "manual" ? (
-            <div className="inline-flex w-fit gap-0.5 rounded-[8px] bg-lyx-muted p-1">
+            <div className="inline-flex w-fit max-w-full flex-wrap gap-0.5 rounded-[8px] bg-lyx-muted p-1">
               <button type="button" onClick={() => update({ mode: "topic" })} className={`rounded-[6px] px-4 py-1.5 text-[12.5px] font-semibold ${form.mode === "topic" ? "bg-lyx-bg text-lyx-fg shadow-sm" : "text-lyx-fg-muted"}`}>
                 {t("jobs.topicMode")}
               </button>
@@ -568,7 +643,7 @@ export function JobNewPage() {
               </button>
             </div>
           ) : (
-            <div className="inline-flex w-fit gap-0.5 rounded-[8px] bg-lyx-muted p-1">
+            <div className="inline-flex w-fit max-w-full flex-wrap gap-0.5 rounded-[8px] bg-lyx-muted p-1">
               {AUTO_SOURCE_TYPES.map((type) => (
                 <button key={type} type="button" onClick={() => update({ autoSourceType: type })} className={`rounded-[6px] px-4 py-1.5 text-[12.5px] font-semibold ${form.autoSourceType === type ? "bg-lyx-bg text-lyx-fg shadow-sm" : "text-lyx-fg-muted"}`}>
                   {t(`jobs.autoSource.${type}`)}
@@ -593,6 +668,9 @@ export function JobNewPage() {
               </Field>
             </div>
           </div>
+
+          {/* VE2E-96: the news item the topic was made from (picked in the news drawer or from a pasted URL). */}
+          {selectedNews ? <SelectedNewsCard item={selectedNews} onClear={() => update(newsUnpick(formRef.current))} /> : null}
 
           {form.entryMode === "manual" ? (
             <>
@@ -771,15 +849,15 @@ export function JobNewPage() {
             <Button type="button" variant="ghost" className="ml-auto" disabled={!hydrated || busy} onClick={() => setDiscardOpen(true)}>{t("jobs.draftDiscard")}</Button>
           </div>
 
-          <div className="flex items-center justify-between gap-3 border-t border-lyx-border pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-lyx-border pt-4">
             <p className="text-[11.5px] text-lyx-fg-muted">{form.entryMode === "auto" ? t("jobs.autoSubmitHint") : t("jobs.submitHint")}</p>
-            <Button type="submit" disabled={!hydrated || busy || !form.contentAccountId || (form.entryMode === "auto" && !preflightReady)}>
+            <Button type="submit" className="shrink-0" disabled={!hydrated || busy || !form.contentAccountId || (form.entryMode === "auto" && !preflightReady)}>
               {busy ? generatingLabel : form.entryMode === "auto" ? t("jobs.autoSubmit") : t("jobs.submit")}
             </Button>
           </div>
         </form>
 
-        <div className="flex flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-4">
           <div className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4">
             <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("jobs.summary")}</p>
             <dl className="flex flex-col">

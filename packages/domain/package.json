@@ -21,7 +21,10 @@
     "./caption-fonts": "./src/caption-fonts.ts",
     "./caption-style-capabilities": "./src/caption-style-capabilities.ts",
     "./caption-style": "./src/caption-style.ts",
-    "./caption-presets": "./src/caption-presets.ts"
+    "./caption-presets": "./src/caption-presets.ts",
+    "./news": "./src/news.ts",
+    "./url-intake": "./src/url-intake.ts",
+    "./transcript": "./src/transcript.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

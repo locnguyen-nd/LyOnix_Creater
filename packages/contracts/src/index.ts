@@ -1357,6 +1357,10 @@ export type JobNewFormValues = {
   templateId: string;
   orshotFormat: "" | "mp4" | "webm" | "mov" | "gif";
   orshotSize: string;
+  /** VE2E-94: "" = the template's own caption style, else a caption preset id. */
+  captionPresetId: string;
+  /** VE2E-96: the picked news item (JSON of a NewsItemResponse), "" = none. Draft only, never a default. */
+  selectedNews: string;
 };
 
 /** `GET|PUT /me/drafts/:flowType`: the signed-in user's own in-progress form (never another user's). */
@@ -1380,6 +1384,7 @@ export type CreationPreferenceOptions = Partial<
     JobNewFormValues,
     | "entryMode" | "mode" | "autoSourceType" | "channelId" | "language" | "contentAccountId" | "durationTarget" | "sceneCountTarget"
     | "backgroundSegmentsChoice" | "voiceAccountId" | "voiceId" | "mediaAccountId" | "renderAccountId" | "templateId" | "orshotFormat" | "orshotSize"
+    | "captionPresetId"
   >
 >;
 
@@ -1391,3 +1396,123 @@ export type CreationPreferencesResponse = {
 };
 
 export type SaveCreationPreferencesRequest = { options: CreationPreferenceOptions };
+
+// --- VE2E-96: news feed of the create-video page ---------------------------------------------------------------------------------
+// Structurally identical to `NewsItem` in `@lyonix/domain/news` (domain never imports contracts).
+
+export type NewsCategory = "japan" | "sports" | "entertainment" | "trending";
+export type NewsSourceId = "yahoo_jp";
+/** Filter chips: everything, one source, or one category. */
+export type NewsFeedFilter = "all" | NewsSourceId | NewsCategory;
+
+/** One headline as its source's public feed published it (the article is never fetched). */
+export type NewsItemResponse = {
+  id: string;
+  sourceId: NewsSourceId;
+  source: string;
+  publisher: string | null;
+  title: string;
+  excerpt: string | null;
+  thumbnailUrl: string | null;
+  sourceUrl: string;
+  publishedAt: string | null;
+  category: NewsCategory;
+};
+
+/** `disabled` = not enabled on this server (`NEWS_SOURCES`); `partial` = some of its feeds failed; `error` = none could be read. */
+export type NewsSourceStatusResponse = {
+  id: NewsSourceId;
+  label: string;
+  status: "ok" | "partial" | "error" | "disabled";
+  termsUrl: string;
+  message: string | null;
+};
+
+/** `GET /news?filter=&q=`: newest first, one item per story. */
+export type NewsFeedResponse = {
+  filter: NewsFeedFilter;
+  query: string;
+  items: NewsItemResponse[];
+  sources: NewsSourceStatusResponse[];
+  fetchedAt: string;
+};
+
+// --- VE2E-96: URL intake ("Nguồn nội dung" of the create-video page) ----------------------------------------------------------
+
+/**
+ * `POST /intake/url`: reads a TikTok video (subtitles, else speech-to-text) or an article (SSRF-safe extractor) into clean text and,
+ * with `rewrite`, writes an ORIGINAL short-video script from it with the given content account. Nothing is created or stored.
+ */
+export type UrlIntakeRequest = {
+  url: string;
+  rewrite?: boolean;
+  /** Content account for the rewrite (the form's); omitted = the user's first usable one. */
+  contentAccountId?: string;
+  /** Script language (the form's). */
+  language?: UiLocale;
+  /** Narration length to aim for, in seconds. */
+  durationSec?: number;
+};
+
+/** How the text was obtained. */
+export type UrlIntakeMethod = "subtitle" | "speech_to_text" | "article_extractor" | "news_feed";
+
+export type UrlIntakeSource = {
+  sourceType: "tiktok" | "article";
+  sourceUrl: string;
+  title: string | null;
+  /** "TikTok · @author", the site's name, or the news source. */
+  sourceName: string | null;
+  publishedAt: string | null;
+  /** Subtitle cues / speech-to-text output / page text, before cleaning (capped). */
+  rawText: string;
+  cleanedText: string;
+  language: string | null;
+  characterCount: number;
+  wordCount: number;
+  method: UrlIntakeMethod;
+  /** e.g. "apify", "apify+elevenlabs_scribe", "article_extractor", "yahoo_jp_feed", "mock". */
+  providerUsed: string;
+  /** The text was longer than the intake keeps. */
+  truncated: boolean;
+  /** A Yahoo! JAPAN News article found in its feed (its page is never fetched). */
+  newsItem: NewsItemResponse | null;
+};
+
+export type UrlIntakeRewrite =
+  | { status: "done"; script: string; hook: string; language: string | null; characterCount: number; providerUsed: string; overlapRatio: number; overlapHigh: boolean }
+  | { status: "skipped"; reason: "not_requested" | "no_content_account" }
+  | { status: "failed"; code: string; message: string };
+
+export type UrlIntakeErrorCode =
+  | "invalid_tiktok_url"
+  | "tiktok_resolve_failed"
+  | "transcript_provider_not_configured"
+  | "stt_provider_not_configured"
+  | "tiktok_not_found"
+  | "transcript_empty"
+  | "transcript_timeout"
+  | "transcript_rate_limited"
+  | "transcript_auth_invalid"
+  | "transcript_failed"
+  | "media_unavailable"
+  | "ssrf_blocked"
+  | "fetch_failed"
+  | "too_large"
+  | "unsupported_content_type"
+  | "empty"
+  | "too_many_redirects"
+  | "news_source_disabled"
+  | "news_not_in_feed";
+
+export type UrlIntakeResponse =
+  | { ok: true; source: UrlIntakeSource; rewrite: UrlIntakeRewrite }
+  | { ok: false; sourceType: "tiktok" | "article" | null; sourceUrl: string; error: { code: UrlIntakeErrorCode; message: string } };
+
+/** `POST /intake/rewrite`: (re)writes the script from an already analysed source (no second download / transcription). */
+export type UrlIntakeRewriteRequest = {
+  source: Pick<UrlIntakeSource, "sourceType" | "sourceUrl" | "title" | "sourceName" | "cleanedText">;
+  contentAccountId?: string;
+  language?: UiLocale;
+  durationSec?: number;
+};

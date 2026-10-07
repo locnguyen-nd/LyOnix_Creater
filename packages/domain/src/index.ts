@@ -287,3 +287,6 @@ export * from "./caption-fonts.js";
 export * from "./caption-style-capabilities.js";
 export * from "./caption-style.js";
 export * from "./caption-presets.js";
+export * from "./news.js";
+export * from "./url-intake.js";
+export * from "./transcript.js";
