@@ -25,6 +25,15 @@ import {
   MEDIA_PLAN_POLICY_VERSION,
   canWriteProjectResource,
   computeSegmentSourceRanges,
+  findFreeWindow,
+  kenBurnsFor,
+  parseSegmentKeywords,
+  mediaSegmentDeadlineMs,
+  raceByPriority,
+  segmentTierKeywords,
+  type ClipWindow,
+  type DegradedTier,
+  type KenBurnsPlan,
   computeSocialWindowRanges,
   computeWindowRangesWithLoopFallback,
   socialWindowOptionsFromEnv,
@@ -49,14 +58,17 @@ import type {
 import { ProviderError, isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { BRAND_BACKGROUND_HEIGHT, BRAND_BACKGROUND_WIDTH, brandBackgroundColorFromEnv, buildBrandBackgroundPng } from "./brand-background.js";
+import { MediaService } from "./media.service.js";
+import { writeQuarantineFile } from "./quarantine.js";
 import { ScriptGenerationService } from "./script-generation.service.js";
 import { ApifyJobContext, ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { PrismaService } from "./prisma.service.js";
 
-export type MediaPlanOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number };
+export type MediaPlanOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; /** VE2E-130: per-tier reasons the primary sourcing found nothing (feeds the degraded ladder). */ reasons?: string };
 
 export type MediaPlanScriptScene = {
   sceneId: string;
@@ -91,19 +103,21 @@ export type SegmentSource = {
   apifyQuality?: MediaPlanApifyQuality | null;
   /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
+  /** VE2E-130: search tier that produced this (non-degraded) source. */
+  tier?: "ja" | "en" | "broad" | "pexels";
+  /** VE2E-130: ladder level L4-L6 (flagged `quality_degraded`); absent = a normal source. */
+  degraded?: DegradedTier;
+  /** VE2E-130 (L4): the window of the (shared) clip this segment uses; ranges are laid out inside it. */
+  window?: { startMs: number; durationMs: number };
+  /** VE2E-130 (L5): pan/zoom for a still image; consumed by render/media-worker. */
+  kenBurns?: KenBurnsPlan;
+  /** VE2E-130 (L6): generated flat brand background, not footage. */
+  placeholder?: boolean;
+  /** VE2E-130: why the primary tiers found nothing (only set on degraded sources). */
+  degradeReason?: string | null;
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
-
-/** Serialises async sections (used for the Pexels fallback so concurrent segments never pick the same stock clip). */
-class Mutex {
-  private tail: Promise<unknown> = Promise.resolve();
-  run<T>(task: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(task, task);
-    this.tail = result.catch(() => undefined);
-    return result;
-  }
-}
 
 const plainExternalId = (id: string) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id);
 
@@ -116,13 +130,21 @@ export class SegmentSourceLedger {
    * which reserves the chosen id in it before any await so concurrently sourced segments cannot pick the same clip.
    */
   readonly apifyPlainIds = new Set<string>();
-  readonly pexelsLock = new Mutex();
+  /** VE2E-130 (L4): video clips already chosen in this job, by asset id, with the windows other segments occupy. */
+  kenBurnsCount = 0;
+  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | undefined; windows: ClipWindow[] }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
     if (source.externalId) {
       this.externalIds.add(source.externalId);
       this.apifyPlainIds.add(plainExternalId(source.externalId));
     }
+  }
+  /** Releases a live reservation (Apify/Pexels id picked by a tier that lost the race) unless a segment really committed it. */
+  release(plainId: string | null | undefined) {
+    if (!plainId) return;
+    const committed = [...this.externalIds].some((id) => plainExternalId(id) === plainId);
+    if (!committed) this.apifyPlainIds.delete(plainId);
   }
 }
 
@@ -181,8 +203,7 @@ export const segmentVisualKind = (segment: PlannedSegment): "video" | "image" =>
  * global template/greenscreen TikToks). No valid keyword -> `null` -> Pexels with reason `no_ja_keywords`.
  */
 export const apifyKeywordForSegment = (segment: PlannedSegment): string | null => {
-  const planned = segment.keywords?.ja.trim();
-  return planned && isValidJaSearchKeyword(planned) ? planned : null;
+  return parseSegmentKeywords(segment.keywords).ja.find((candidate) => isValidJaSearchKeyword(candidate)) ?? null;
 };
 
 /** Segments that would be sent to Apify without a valid ja keyword (plan missing or the ja keyword failed validation): input of the dedicated keyword extraction. */
@@ -197,8 +218,27 @@ export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extr
   for (const segment of segments) {
     const found = extracted[segment.segmentId];
     if (!found || !isValidJaSearchKeyword(found.ja)) continue;
-    segment.keywords = { ja: found.ja.trim(), en: segment.keywords?.en.trim() || found.en.trim() };
+    // `en` from the plan wins (legacy string or VE2E-88 list); other tier fields of the new format are kept.
+    segment.keywords = { ...(segment.keywords as object | null), ja: found.ja.trim(), en: parseSegmentKeywords(segment.keywords).en[0] || found.en.trim() };
   }
+};
+
+/** L4 bookkeeping: remember a chosen video clip and the window of it this segment occupies, so another segment can use a different one. */
+const registerClipWindow = (ledger: SegmentSourceLedger, source: SegmentSource, segment: PlannedSegment, scenes: MediaPlanScene[]) => {
+  if (source.kind !== "video" || source.degraded || !source.durationMs || source.durationMs <= 0) return;
+  const plan = computeWindowRangesWithLoopFallback(scenes, source.durationMs, windowOptionsFor(source.provider));
+  const starts = plan?.ranges.map((range) => range.sourceStartMs) ?? [];
+  const ends = plan?.ranges.map((range) => range.sourceStartMs + range.sourceDurationMs) ?? [];
+  const window = plan && starts.length > 0 ? { startMs: Math.min(...starts), endMs: Math.max(...ends) } : { startMs: 0, endMs: Math.min(segment.durationMs, source.durationMs) };
+  const clip = ledger.clips.get(source.mediaAssetVersionId) ?? { durationMs: source.durationMs, provider: source.provider, windows: [] as ClipWindow[] };
+  clip.windows.push(window);
+  ledger.clips.set(source.mediaAssetVersionId, clip);
+};
+
+/** L5 stock-photo queries: subject-bound keywords first (en, broad, subject), the generic `mood` only as the last resort; at most 2 tries (Pexels is fast but metered). */
+const stockImageQueries = (segment: PlannedSegment): string[] => {
+  const keywords = parseSegmentKeywords(segment.keywords);
+  return [...new Set([keywords.en[0], keywords.broad[0], segment.subject?.trim(), keywords.mood].filter((value): value is string => Boolean(value)))].slice(0, 2);
 };
 
 const sceneDuration = (scene: MediaPlanScriptScene) => Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs));
@@ -213,6 +253,8 @@ export class MediaPlanService {
     @Optional() @Inject(ApifyService) private readonly apify?: ApifyService,
     /** VE2E-55: keyword extraction for Studio plans. Absent = no extraction (segments without a ja keyword go to Pexels). */
     @Optional() @Inject(ScriptGenerationService) private readonly scriptGeneration?: ScriptGenerationService,
+    /** VE2E-130: registers the L6 brand-background placeholder asset. Absent = L6 unavailable (L4/L5 still apply). */
+    @Optional() @Inject(MediaService) private readonly media?: MediaService,
   ) {}
 
   /**
@@ -224,6 +266,7 @@ export class MediaPlanService {
     if (selected?.provider === "pexels" && selected.enabled !== false) return { ok: true };
     if (selected?.provider === "apify" && selected.enabled !== false) return { ok: true };
     if (this.apify && (await this.apify.findAccountForUser(userId, role))) return { ok: true };
+    if (await this.resolvePexelsAccountId(userId, role, mediaAccountId).then((id) => id !== null && id !== mediaAccountId)) return { ok: true };
     return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Các nguồn media (Pexels/Apify) đều đang tắt hoặc chưa sẵn sàng; bật ít nhất một nguồn trong cấu hình provider." };
   }
 
@@ -311,166 +354,311 @@ export class MediaPlanService {
   segmentBrief(script: MediaPlanScript, segment: PlannedSegment): SceneBrief {
     const firstIndex = Math.max(0, script.scenes.findIndex((scene) => scene.sceneId === segment.sceneIds[0]));
     const brief = deriveSceneBrief({ language: script.language, scenes: script.scenes.map((scene) => ({ ...scene, durationHintMs: sceneDuration(scene) })) }, firstIndex);
-    const english = segment.keywords?.en.trim();
+    const english = parseSegmentKeywords(segment.keywords).en[0];
     const phrases = english ? [english, ...brief.phrases.filter((phrase) => phrase.trim().toLowerCase() !== english.toLowerCase())].slice(0, MAX_QUERY_VARIANTS) : brief.phrases;
     return { ...brief, phrases, targetDurationSeconds: segment.durationMs / 1000 };
   }
 
-  /** True when the chosen media account is an enabled, verified Pexels account (a usable fallback). Unknown/mock environments count as usable. */
-  private async pexelsFallbackUsable(mediaAccountId: string): Promise<boolean> {
+  /**
+   * VE2E-130 (CR-MEDIA-SLA §2.5): the Pexels account to use as the stock source. The job's chosen media account when it is an enabled,
+   * verified Pexels account; otherwise ANY verified Pexels account the user can see (the profile's media account is often Apify, which
+   * used to leave the segment without a stock fallback). Unknown/mock environments count the chosen id as usable. `null` = none.
+   */
+  async resolvePexelsAccountId(userId: string, role: "admin" | "staff", preferredId: string): Promise<string | null> {
     try {
-      const row = await this.prisma.providerAccount.findFirst({ where: { id: mediaAccountId, deletedAt: null }, select: { provider: true, enabled: true, status: true, isFake: true } });
-      if (!row) return true;
-      return row.provider === "pexels" && row.enabled !== false && (row.isFake ? process.env.NODE_ENV === "test" : row.status === "verified");
+      const row = await this.prisma.providerAccount.findFirst({ where: { id: preferredId, deletedAt: null }, select: { provider: true, enabled: true, status: true, isFake: true } });
+      if (!row) return preferredId;
+      if (row.provider === "pexels" && row.enabled !== false && (row.isFake ? process.env.NODE_ENV === "test" : row.status === "verified")) return preferredId;
     } catch {
-      return true;
+      return preferredId;
+    }
+    try {
+      const rows = await this.prisma.providerAccount.findMany({
+        where: {
+          provider: "pexels",
+          deletedAt: null,
+          enabled: true,
+          ...(process.env.NODE_ENV === "test" ? {} : { status: "verified", isFake: false }),
+          ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true },
+        take: 1,
+      });
+      return rows[0]?.id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async findApifyAccount(userId: string, role: "admin" | "staff"): Promise<{ id: string; encryptedSecret: string } | null> {
+    if (!this.apify) return null;
+    try {
+      return await this.apify.findAccountForUser(userId, role);
+    } catch {
+      return null;
     }
   }
 
   /**
-   * VE2E-46: Apify first. Runs only when the segment has `keywords.ja` AND the user can see a verified Apify account; a single
-   * Apify search (ja) is ranked + moderated once by `ApifyService.autoImportForSegment`. Returns the source, or the reason to
-   * fall back to Pexels (recorded in diagnostics). Never throws.
+   * One Apify search tier (VE2E-130): exactly ONE `autoImportForSegment` call (search + at most one download) on the first configured
+   * platform, with this tier's keyword. `ja` is the strict pass; `en`/`broad` use the relaxed filter. The apify limiter is applied
+   * INSIDE ApifyService around each Actor call (VE2E-131: this task depends on it), no longer around the whole segment here. Never throws.
    */
-  private async tryApify(
+  private async apifyTier(
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified?: boolean; lenient?: boolean },
-  ): Promise<{ source: SegmentSource } | { reason: string | null; quality?: MediaPlanApifyQuality | null }> {
-    if (!this.apify) return { reason: null };
-    const keyword = apifyKeywordForSegment(input.segment);
-    if (!keyword) return { reason: "no_ja_keywords" };
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; allowUnverified: boolean; tier: "ja" | "en" | "broad"; keyword: string; account: { id: string; encryptedSecret: string } },
+  ): Promise<{ source: SegmentSource } | { reason: string; quality: MediaPlanApifyQuality | null }> {
     try {
-      const account = await this.apify.findAccountForUser(userId, role);
-      if (!account) return { reason: "no_apify_account" };
       const brief = this.segmentBrief(input.script, input.segment);
-      // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments sourced in parallel never share a clip.
-      const usedExternalIds = input.ledger.apifyPlainIds;
-      if (input.lenient) {
-        // Reservations of clips that were looked at but never committed (overlay/frame rejections of the strict pass) may be reconsidered now;
-        // a clip another segment really uses stays excluded (and a duplicate asset is rejected below anyway).
-        const committed = new Set([...input.ledger.externalIds].map((id) => plainExternalId(id)));
-        for (const id of [...usedExternalIds]) if (!committed.has(id)) usedExternalIds.delete(id);
-      }
-      let outcome: Awaited<ReturnType<ApifyService["autoImportForSegment"]>> | null = null;
-      let firstFailure: { reason: string; quality: MediaPlanApifyQuality | null } | null = null;
-      // Ordered multi-platform sourcing: the next platform is only searched when the previous one yielded no usable/relevant clip.
       const visualKind = segmentVisualKind(input.segment);
-      const platformList = visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv();
-      // Strict pass: the segment's Japanese keyword. Best-effort pass: also its English keyword and its subject (Pinterest/X index them better,
-      // and segments split from one plan segment would otherwise exhaust the same 10 results).
-      const keywords = input.lenient ? [...new Set([keyword, input.segment.keywords?.en.trim() ?? "", input.segment.subject?.trim() ?? ""].filter(Boolean))] : [keyword];
-      // A failed download / frame check / unavoidable overlay only rejects THAT clip: the next ranked candidate gets up to 3 tries per platform.
-      const retryable = (reason: string) => reason.startsWith("apify_import_failed") || reason.startsWith("apify_frames_rejected") || reason.startsWith("apify_overlay_unavoidable");
-      search: for (const searchKeyword of keywords) {
-        for (const [platformIndex, platform] of platformList.entries()) {
-          for (let tries = 0; tries < 3; tries += 1) {
-            // VE2E-61: every Apify call goes through the shared per-provider limiter (FIFO wait + timeout), also for the 2nd/3rd platform.
-            const attempt = await getSharedProviderLimiter().run("apify", () => this.apify!.autoImportForSegment(projectId, userId, role, account, {
-              platform,
-              mediaType: visualKind,
-              keyword: searchKeyword,
-              brief: { ...brief, phrases: [searchKeyword, ...brief.phrases.filter((phrase) => phrase !== searchKeyword)].slice(0, MAX_QUERY_VARIANTS) },
-              sceneId: input.segment.sceneIds[0]!,
-              usedExternalIds,
-              scriptLanguage: input.script.language,
-              segmentDurationSeconds: input.segment.durationMs / 1000,
-              ...(input.allowUnverified ? { allowUnverified: true } : {}),
-              // Last platform and no other source to fall back to: keep a clip whose overlay cannot be avoided (flagged) instead of failing the video.
-              ...((input.allowUnverified && platformIndex === platformList.length - 1) || input.lenient ? { keepOverlayFlagged: true } : {}),
-              // Best-effort fill: the best candidate not rejected by vision is taken even below the relevance threshold / without the strict social filter.
-              ...(input.lenient ? { lenient: true } : {}),
-              ...(input.job ? { job: input.job } : {}),
-            }));
-            if (attempt.ok) { outcome = attempt; break search; }
-            firstFailure ??= { reason: attempt.reason, quality: attempt.quality ?? null };
-            if (!retryable(attempt.reason)) break;
-          }
-        }
-      }
-      if (!outcome) return { reason: firstFailure?.reason ?? "apify_no_platform", quality: firstFailure?.quality ?? null };
-      const asset = outcome.data.asset;
-      if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(outcome.data.ledgerId)) {
+      const platform = (visualKind === "image" ? apifyImagePlatformsFromEnv() : apifyAutoPlatformsFromEnv())[0] ?? "tiktok";
+      // Live set (VE2E-51): ApifyService reserves the chosen video id in it so segments/tiers run in parallel never share a clip.
+      const usedExternalIds = input.ledger.apifyPlainIds;
+      const attempt = await this.apify!.autoImportForSegment(projectId, userId, role, input.account, {
+        platform,
+        mediaType: visualKind,
+        keyword: input.keyword,
+        brief: { ...brief, phrases: [input.keyword, ...brief.phrases.filter((phrase) => phrase !== input.keyword)].slice(0, MAX_QUERY_VARIANTS) },
+        sceneId: input.segment.sceneIds[0]!,
+        usedExternalIds,
+        scriptLanguage: input.script.language,
+        segmentDurationSeconds: input.segment.durationMs / 1000,
+        ...(input.allowUnverified ? { allowUnverified: true } : {}),
+        // The degraded ladder (L4-L6) now guarantees a source, so only the relaxed tiers accept a flagged overlay / below-threshold clip.
+        ...(input.tier !== "ja" ? { keepOverlayFlagged: true, lenient: true } : {}),
+        ...(input.job ? { job: input.job } : {}),
+      });
+      if (!attempt.ok) return { reason: attempt.reason, quality: attempt.quality ?? null };
+      const asset = attempt.data.asset;
+      if ((asset.kind !== "video" && asset.kind !== "image") || input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(attempt.data.ledgerId)) {
         // Release the reservation made by ApifyService (the ledger itself never held this clip).
-        if (!input.ledger.externalIds.has(outcome.data.ledgerId)) usedExternalIds.delete(outcome.data.externalId);
-        return { reason: "apify_duplicate_or_unsupported_source", quality: outcome.data.quality };
+        if (!input.ledger.externalIds.has(attempt.data.ledgerId)) usedExternalIds.delete(attempt.data.externalId);
+        return { reason: "apify_duplicate_or_unsupported_source", quality: attempt.data.quality };
       }
-      const provenance = outcome.data.provenance;
+      const provenance = attempt.data.provenance;
       return {
         source: {
           mediaAssetVersionId: asset.id,
           kind: asset.kind,
           durationMs: asset.durationMs,
-          externalId: outcome.data.ledgerId,
+          externalId: attempt.data.ledgerId,
           sourcing: "imported",
           provider: "apify",
+          tier: input.tier,
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
-          apifyQuality: outcome.data.quality,
+          apifyQuality: attempt.data.quality,
         },
       };
     } catch (error) {
-      // VE2E-61: a limiter wait timeout is a queueing problem, not an Apify failure; the segment still falls back to Pexels.
-      if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") return { reason: "apify_queue_timeout" };
-      return { reason: "apify_error:unexpected" };
+      if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") return { reason: "apify_queue_timeout", quality: null };
+      return { reason: "apify_error:unexpected", quality: null };
     }
   }
 
-  /** Searches/ranks/moderates/imports one new source for the segment: Apify first (VE2E-46), then the existing Pexels gate, excluding every source an earlier segment used. */
+  /**
+   * The Pexels stock tier. No per-plan mutex (VE2E-130): the chosen id is claimed in the live ledger set in the same tick it is known
+   * (no await between the check and the claim), and a clash with a segment that claimed it first retries once with that id excluded.
+   */
+  private async pexelsTier(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; pexelsAccountId: string; mediaType?: "video" | "image"; queries?: string[] },
+  ): Promise<MediaPlanOutcome<SegmentSource>> {
+    const brief = this.segmentBrief(input.script, input.segment);
+    const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
+    const excluded = new Set<string>();
+    const queries = input.queries && input.queries.length > 0 ? input.queries : [brief.phrases[0] ?? firstScene?.visualQuery ?? ""];
+    const mediaType = input.mediaType ?? input.segment.visualKind;
+    let last: MediaPlanOutcome<SegmentSource> = { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Pexels không có nguồn phù hợp.", status: 422 };
+    for (const query of queries) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const sceneBrief = input.queries ? { ...brief, phrases: [query, ...brief.phrases.filter((phrase) => phrase !== query)].slice(0, MAX_QUERY_VARIANTS) } : brief;
+        const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
+          providerAccountId: input.pexelsAccountId,
+          sceneId: input.segment.sceneIds[0]!,
+          query,
+          sceneBrief,
+          usedExternalIds: [...new Set([...input.ledger.externalIds, ...input.ledger.apifyPlainIds, ...excluded])],
+          // Template-aware sourcing: an image slot gets a photo, a video slot a video (no cross-kind fallback). Unknown kind = legacy.
+          ...(mediaType ? { mediaType } : {}),
+          ...(input.job ? { visionBudget: input.job.vision } : {}),
+        }));
+        if (!outcome.ok) { last = outcome; break; }
+        const asset = outcome.data.asset;
+        if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
+        const externalId = outcome.data.externalId;
+        if (input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(externalId) || input.ledger.apifyPlainIds.has(externalId)) {
+          // Same bytes/id as a source another segment already holds (or claimed a moment ago): exclude it and ask once more.
+          excluded.add(externalId);
+          last = { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment khác; cần chọn thủ công trong Studio.", status: 422 };
+          continue;
+        }
+        input.ledger.apifyPlainIds.add(externalId); // claim (live set), same tick as the check above
+        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels" } };
+      }
+    }
+    return last;
+  }
+
+  /**
+   * Primary sourcing of one segment (VE2E-130, ladder L1-L3): the ja / en / broad Apify searches and the Pexels search start
+   * CONCURRENTLY under one deadline (`MEDIA_SEGMENT_DEADLINE_MS`, default 75 s); the winner is picked by priority ja > en > broad > Pexels
+   * (as soon as every higher tier finished, or at the deadline). At most 3 searches + 1 download per segment, no repeated lenient pass.
+   * `ok: false` is NOT a failed job: Auto continues down the degraded ladder (`resolveDegradedSource`, L4-L6).
+   */
   async importSegmentSource(
     projectId: string,
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; bestEffort?: boolean },
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
-    const pexelsUsable = await this.pexelsFallbackUsable(input.providerAccountId);
-    const apifyAttempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: !pexelsUsable });
-    if ("source" in apifyAttempt) return { ok: true, data: apifyAttempt.source };
-    const fallbackReason = apifyAttempt.reason;
-    // Last resort (Auto): rather than leaving the timeline with a hole, take the best-fitting candidate vision does not reject.
-    let lenientReason: string | null = null;
-    const lenientApify = async (): Promise<SegmentSource | null> => {
-      if (!input.bestEffort) return null;
-      const attempt = await this.tryApify(projectId, userId, role, { ...input, allowUnverified: true, lenient: true });
-      if ("source" in attempt) return { ...attempt.source, fallbackReason: "best_effort_fill" };
-      lenientReason = attempt.reason ?? "không rõ lý do";
-      return null;
-    };
-    if (!pexelsUsable) {
-      const filled = await lenientApify();
-      if (filled) return { ok: true, data: filled };
-      // Pexels is off / not the chosen account: say WHY Apify found nothing instead of a misleading "Pexels unavailable".
-      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: `Apify không có nguồn phù hợp cho đoạn ${input.segment.segmentId} (${fallbackReason ?? "không rõ lý do"}${lenientReason ? `; lấp đầy tối đa: ${lenientReason}` : ""}). Pexels không dùng được làm dự phòng; chọn nguồn thủ công trong Studio hoặc thử lại.`, status: 422 };
-    }
-    const apifyQuality = apifyAttempt.quality ?? null;
-    const brief = this.segmentBrief(input.script, input.segment);
-    const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
-    // Serialised per plan: the ledger snapshot handed to Pexels must include every earlier fallback's clip (segments run concurrently).
-    const pexelsResult = await input.ledger.pexelsLock.run(async (): Promise<MediaPlanOutcome<SegmentSource>> => {
-      const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
-        providerAccountId: input.providerAccountId,
-        sceneId: input.segment.sceneIds[0]!,
-        query: brief.phrases[0] ?? firstScene?.visualQuery ?? "",
-        sceneBrief: brief,
-        usedExternalIds: [...input.ledger.externalIds],
-        // Template-aware sourcing: an image slot gets a photo, a video slot a video (no cross-kind fallback). Unknown kind = legacy.
-        ...(input.segment.visualKind ? { mediaType: input.segment.visualKind } : {}),
-        ...(input.job ? { visionBudget: input.job.vision } : {}),
-      }));
-      if (!outcome.ok) return outcome;
-      const asset = outcome.data.asset;
-      if (asset.kind !== "video" && asset.kind !== "image") return { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: `Asset Pexels vừa import có kind không hỗ trợ: ${asset.kind}` };
-      if (input.ledger.assetIds.has(asset.id)) {
-        // Same bytes as an earlier segment's source (checksum dedupe in MediaService) - a new segment must use a different source.
-        return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Nguồn tìm được trùng với nguồn của segment trước; cần chọn thủ công trong Studio.", status: 422 };
+    const tierKeywords = this.apify ? segmentTierKeywords(input.segment.keywords, input.segment.subject, isValidJaSearchKeyword) : [];
+    // The Apify account is only looked up when at least one tier has a keyword to search.
+    const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
+    const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels", string>> = {};
+    const qualities: Partial<Record<"ja" | "en" | "broad", MediaPlanApifyQuality | null>> = {};
+    const settled = new Set<string>();
+    const tiers: Array<{ name: "ja" | "en" | "broad" | "pexels"; run: () => Promise<SegmentSource | null> }> = [];
+    const holder: { pexelsFailure: MediaPlanOutcome<SegmentSource> | null } = { pexelsFailure: null };
+    if (this.apify) {
+      if (!tierKeywords.some((entry) => entry.tier === "ja")) reasons.ja = "no_ja_keywords";
+      if (tierKeywords.length > 0 && !account) reasons.ja = "no_apify_account";
+      else if (account) {
+        for (const { tier, keyword } of tierKeywords) {
+          tiers.push({
+            name: tier,
+            run: async () => {
+              const attempt = await this.apifyTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), allowUnverified: !pexelsAccountId, tier, keyword, account });
+              if ("source" in attempt) return attempt.source;
+              reasons[tier] = attempt.reason;
+              qualities[tier] = attempt.quality;
+              return null;
+            },
+          });
+        }
       }
-      const source: SegmentSource = { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId: outcome.data.externalId, sourcing: "imported", provider: "pexels", fallbackReason, ...(apifyQuality ? { apifyQuality } : {}) };
-      input.ledger.add(source);
-      return { ok: true, data: source };
-    });
-    if (pexelsResult.ok) return pexelsResult;
-    const filled = await lenientApify();
-    return filled ? { ok: true, data: filled } : pexelsResult;
+    }
+    if (pexelsAccountId) {
+      tiers.push({
+        name: "pexels",
+        run: async () => {
+          const outcome = await this.pexelsTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), pexelsAccountId });
+          if (outcome.ok) return outcome.data;
+          holder.pexelsFailure = outcome;
+          reasons.pexels = outcome.code;
+          return null;
+        },
+      });
+    }
+    const winner = await raceByPriority(
+      tiers.map((tier) => async () => {
+        try {
+          return await tier.run();
+        } finally {
+          settled.add(tier.name);
+        }
+      }),
+      mediaSegmentDeadlineMs(),
+      (_index, source) => input.ledger.release(source.externalId ? plainExternalId(source.externalId) : null),
+    );
+    for (const tier of tiers) if (!settled.has(tier.name)) reasons[tier.name] = "segment_deadline";
+    const reasonText = (["ja", "en", "broad", "pexels"] as const).filter((name) => reasons[name]).map((name) => `${name}:${reasons[name]}`).join("; ");
+    if (winner) {
+      const source = winner.value;
+      if (source.provider !== "pexels") return { ok: true, data: source };
+      const apifyQuality = qualities.ja ?? qualities.en ?? qualities.broad ?? null;
+      return { ok: true, data: { ...source, fallbackReason: reasons.ja ?? reasons.en ?? reasons.broad ?? null, ...(apifyQuality ? { apifyQuality } : {}) } };
+    }
+    if (holder.pexelsFailure && !holder.pexelsFailure.ok && tiers.length === 1) return { ...holder.pexelsFailure, reasons: reasonText };
+    return {
+      ok: false,
+      code: "MEDIA_RELEVANCE_BELOW_THRESHOLD",
+      message: `Không tìm được nguồn phù hợp cho đoạn ${input.segment.segmentId} (${reasonText || "không rõ lý do"})${pexelsAccountId ? "" : "; Pexels không dùng được làm dự phòng"}; chọn nguồn thủ công trong Studio hoặc thử lại.`,
+      status: 422,
+      reasons: reasonText,
+    };
+  }
+
+  /**
+   * VE2E-130 (CR-MEDIA-SLA §3.1) degraded ladder, tried in order when the primary tiers found nothing; every result is flagged
+   * `quality_degraded` (diagnostics) and the job still renders:
+   *  L4 `reuse_window`: a window of a clip other segments of this job already chose that no segment uses (claimed synchronously).
+   *  L5 `stock_image`: a Pexels photo (+ Ken Burns info for the render/media-worker; no FFmpeg here).
+   *  L6 `brand_background`: a flat brand-colour PNG generated in-process and registered as a `generated` placeholder asset.
+   * `null` only when even L6 could not be registered (no MediaService / storage error).
+   */
+  async resolveDegradedSource(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; reason?: string | null },
+  ): Promise<SegmentSource | null> {
+    const { ledger, segment } = input;
+    const reason = input.reason ?? null;
+    // L4 - no await between the search and the window claim.
+    const pick = findFreeWindow(
+      [...ledger.clips].map(([id, clip]) => ({ id, durationMs: clip.durationMs, usedWindows: clip.windows, ...windowOptionsFor(clip.provider) })),
+      segment.durationMs,
+    );
+    if (pick) {
+      const clip = ledger.clips.get(pick.clipId)!;
+      clip.windows.push({ startMs: pick.startMs, endMs: pick.startMs + pick.durationMs });
+      return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), degraded: "reuse_window", window: { startMs: pick.startMs, durationMs: pick.durationMs }, degradeReason: reason };
+    }
+    // L5
+    const pexelsAccountId = await this.resolvePexelsAccountId(userId, role, input.providerAccountId);
+    if (pexelsAccountId) {
+      const image = await raceByPriority(
+        [
+          async () => {
+            try {
+              const outcome = await this.pexelsTier(projectId, userId, role, { script: input.script, segment, ledger, ...(input.job ? { job: input.job } : {}), pexelsAccountId, mediaType: "image", queries: stockImageQueries(segment) });
+              return outcome.ok ? outcome.data : null;
+            } catch {
+              return null; // a stock-image error just moves on to L6
+            }
+          },
+        ],
+        mediaSegmentDeadlineMs(),
+        (_index, source) => ledger.release(source.externalId),
+      );
+      if (image) return { ...image.value, degraded: "stock_image", kenBurns: kenBurnsFor(ledger.kenBurnsCount++, segment.durationMs), degradeReason: reason };
+    }
+    // L6
+    const background = await this.brandBackgroundSource(projectId, userId, role);
+    return background ? { ...background, degradeReason: reason } : null;
+  }
+
+  private async brandBackgroundSource(projectId: string, userId: string, role: "admin" | "staff"): Promise<SegmentSource | null> {
+    if (!this.media) return null;
+    try {
+      const color = brandBackgroundColorFromEnv();
+      const png = buildBrandBackgroundPng(color);
+      const quarantined = await writeQuarantineFile(png);
+      const registered = await this.media.registerAsset(projectId, userId, role, {
+        quarantineToken: quarantined.quarantineToken,
+        kind: "image",
+        originalFileName: `lyonix-brand-background-${color.slice(1).toLowerCase()}.png`,
+        mimeType: "image/png",
+        checksumSha256: createHash("sha256").update(png).digest("hex"),
+        bytes: png.byteLength,
+        widthPx: BRAND_BACKGROUND_WIDTH,
+        heightPx: BRAND_BACKGROUND_HEIGHT,
+        durationMs: null,
+        origin: "generated",
+        license: "LyOnix placeholder (flat brand background, not stock footage)",
+        reusable: true,
+        serverProvenance: { placeholder: "brand_background", qualityDegraded: true, color },
+      });
+      if (typeof registered === "string") return null;
+      return { mediaAssetVersionId: registered.id, kind: "image", durationMs: null, externalId: null, sourcing: "imported", degraded: "brand_background", placeholder: true };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -493,6 +681,12 @@ export class MediaPlanService {
       concurrency?: number;
       stopOnFailure?: boolean;
       /**
+       * VE2E-130 (Auto): the media step never fails the job. A segment the primary tiers (ja/en/broad/Pexels) cannot source - including
+       * one whose `runImport` threw - falls down the degraded ladder L4 (other window of a clip of this job) -> L5 (stock image + Ken
+       * Burns) -> L6 (brand background), flagged `quality_degraded`. Replaces `stopOnFailure` for Auto; implies swap-overlay policy.
+       */
+      guaranteeSource?: boolean;
+      /**
        * VE2E-50/55 x VE2E-51: called ONCE, before the concurrent sourcing starts, with the segments that need a NEW source
        * (not reusable from the project library). Runs the single keyword-extraction call for all of them and may mutate the
        * planned segments' keywords in place. A returned string is the reason recorded on segments that still fall back to
@@ -511,7 +705,8 @@ export class MediaPlanService {
     // The vision budget scales with the number of segments (default 6 calls/job starved later segments of any verification); VISION_MAX_CALLS_PER_JOB still overrides.
     const job = new ApifyJobContext(process.env.VISION_MAX_CALLS_PER_JOB ? {} : { visionMaxCalls: Math.max(6, input.segments.length * 2) });
     // VE2E-67 (CR-SUBJECT-REFRAME Q5): Auto (`stopOnFailure`) swaps a candidate whose overlay cannot be avoided; Studio only flags it.
-    job.overlayPolicy = input.stopOnFailure ? "swap" : "flag";
+    job.overlayPolicy = input.stopOnFailure || input.guaranteeSource ? "swap" : "flag";
+    const degradeReasons = new Map<string, string>();
     const results: Array<SourcedSegment[] | undefined> = new Array(input.segments.length).fill(undefined);
     let failure: { index: number; error: unknown } | null = null;
     let next = 0;
@@ -553,29 +748,45 @@ export class MediaPlanService {
       let source = await this.findReusableSource(projectId, segment, input.ledger);
       let errorCode: string | null = null;
       if (!source) {
-        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job, ...(input.stopOnFailure ? { bestEffort: true } : {}) });
+        const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
         const imported = await (input.runImport ? input.runImport(segment, task) : task());
         if (imported.ok) {
           source = imported.data;
           // Refine the generic reason with why extraction did not help this segment.
           if (extractionReason && source.provider === "pexels" && source.fallbackReason === "no_ja_keywords") source = { ...source, fallbackReason: extractionReason };
-        } else errorCode = imported.code;
+        } else {
+          errorCode = imported.code;
+          degradeReasons.set(segment.segmentId, imported.reasons ?? imported.message);
+        }
       }
       const visionSkip = job.vision.skipReasonFor(segment.sceneIds[0] ?? "");
       if (source && visionSkip) source = { ...source, visionSkipped: visionSkip };
-      if (source) input.ledger.add(source);
+      if (source) {
+        input.ledger.add(source);
+        registerClipWindow(input.ledger, source, segment, segmentSceneDurations(segment));
+      }
       return { segment, source, errorCode };
     };
+    const segmentSceneDurations = (segment: PlannedSegment): MediaPlanScene[] =>
+      segment.sceneIds.map((sceneId) => {
+        const scene = input.script.scenes.find((item) => item.sceneId === sceneId);
+        return { sceneId, durationMs: scene ? sceneDuration(scene) : 1 };
+      });
     const worker = async () => {
       for (;;) {
-        if (input.stopOnFailure && failure) return;
+        if (input.stopOnFailure && !input.guaranteeSource && failure) return;
         const index = next++;
         if (index >= input.segments.length) return;
         const segment = input.segments[index]!;
         try {
           results[index] = await sourceOne(segment, 0);
         } catch (error) {
-          if (input.stopOnFailure) {
+          if (input.guaranteeSource) {
+            // The step threw (e.g. runImport's StepRun failure): a missing source, not a failed job - the ladder takes over below.
+            degradeReasons.set(segment.segmentId, error instanceof Error ? error.message : "unexpected_error");
+            const code = (error as { code?: unknown } | null)?.code;
+            results[index] = [{ segment, source: null, errorCode: typeof code === "string" ? code : "PROVIDER_UNAVAILABLE" }];
+          } else if (input.stopOnFailure) {
             if (!failure || index < failure.index) failure = { index, error };
           } else {
             results[index] = [{ segment, source: null, errorCode: "PROVIDER_UNAVAILABLE" }];
@@ -585,6 +796,28 @@ export class MediaPlanService {
     };
     const width = Math.max(1, Math.min(input.concurrency ?? MEDIA_PLAN_SOURCING_CONCURRENCY, input.segments.length || 1));
     await Promise.all(Array.from({ length: width }, () => worker()));
+    if (input.guaranteeSource) {
+      // Second phase: only now do all primary results exist, so L4 sees every clip/window of the job.
+      const missing = results.flatMap((entry, index) => (entry && entry.length === 1 && !entry[0]!.source ? [index] : []));
+      let nextMissing = 0;
+      const degradeWorker = async () => {
+        for (;;) {
+          const slot = nextMissing++;
+          if (slot >= missing.length) return;
+          const index = missing[slot]!;
+          const { segment } = results[index]![0]!;
+          let source: SegmentSource | null = null;
+          try {
+            source = await this.resolveDegradedSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job, reason: degradeReasons.get(segment.segmentId) ?? null });
+          } catch {
+            source = null;
+          }
+          if (source) input.ledger.add(source);
+          results[index] = [{ segment, source, errorCode: source ? null : "MEDIA_PLACEHOLDER_UNAVAILABLE" }];
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, Math.min(width, missing.length)) }, () => degradeWorker()));
+    }
     const u = job.usage;
     const touched = u.runs > 0 || u.searchesReused > 0 || u.libraryReuses > 0;
     const failed = failure as { index: number; error: unknown } | null;
@@ -614,7 +847,13 @@ export class MediaPlanService {
           return { sceneId, durationMs: scene ? sceneDuration(scene) : 1 };
         });
         ranges = null;
-        if (source.kind === "video") {
+        if (source.kind === "video" && source.window) {
+          // VE2E-130 L4: another window of a clip other segments already use; ranges are laid out inside that window (no guards).
+          const offset = source.window.startMs;
+          const inside = computeWindowRangesWithLoopFallback(sceneDurations, source.window.durationMs, { startGuardMs: 0, endGuardMs: 0 });
+          ranges = (inside?.ranges ?? computeSegmentSourceRanges(sceneDurations, source.window.durationMs) ?? []).map((range) => ({ ...range, sourceStartMs: range.sourceStartMs + offset }));
+          if (inside) socialWindow = { needsSecondSource: inside.needsSecondSource, coveredMs: inside.coveredMs };
+        } else if (source.kind === "video") {
           // Non-looping, contiguous window for EVERY video source (social clips keep their intro/outro guards, stock clips none): a
           // clip that cannot cover all scenes is flagged for a second source (see withSecondSource) instead of silently replaying
           // its opening seconds in a later scene. Only an unknown duration falls back to the legacy looping layout.
@@ -643,6 +882,17 @@ export class MediaPlanService {
         ...(source?.apifyProvenance ? { apifyProvenance: source.apifyProvenance } : {}),
         ...(source?.apifyQuality ? { apifyQuality: source.apifyQuality } : {}),
         ...(source?.visionSkipped ? { visionSkipped: source.visionSkipped } : {}),
+        ...(source?.tier ? { sourceTier: source.tier } : {}),
+        ...(source?.degraded
+          ? {
+              qualityDegraded: true,
+              degradedTier: source.degraded,
+              ...(source.placeholder ? { placeholder: true } : {}),
+              ...(source.kenBurns ? { kenBurns: source.kenBurns } : {}),
+              ...(source.window ? { reusedWindow: source.window } : {}),
+              ...(source.degradeReason ? { degradeReason: source.degradeReason } : {}),
+            }
+          : {}),
       });
     }
     return {

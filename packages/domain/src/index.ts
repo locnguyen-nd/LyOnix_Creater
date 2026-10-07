@@ -290,3 +290,20 @@ export { mergeScenesToCap } from "./script-scene-cap.js";
 export * from "./caption-fonts.js";
 export * from "./caption-style-capabilities.js";
 export * from "./caption-style.js";
+export {
+  MEDIA_SEGMENT_DEADLINE_DEFAULT_MS,
+  mediaSegmentDeadlineMs,
+  parseSegmentKeywords,
+  segmentTierKeywords,
+  raceByPriority,
+  findFreeWindow,
+  kenBurnsFor,
+  type ParsedSegmentKeywords,
+  type KeywordTier,
+  type RaceResult,
+  type ClipWindow,
+  type FreeWindowClip,
+  type FreeWindowPick,
+  type KenBurnsPlan,
+  type DegradedTier,
+} from "./media-ladder.js";

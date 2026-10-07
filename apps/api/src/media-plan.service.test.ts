@@ -92,8 +92,29 @@ describe("MediaPlanService", () => {
       const ledger = new SegmentSourceLedger();
       ledger.add({ mediaAssetVersionId: "asset-1", kind: "video", durationMs: 1, externalId: "ext-x", sourcing: "imported" });
       const [segment] = service.planSegments(script(), { min: 1, max: 1 });
+      // The stock API keeps handing back the same bytes (asset-1, different external ids): after one retry the tier gives up.
+      let n = 0;
+      pexels.autoImportForScene = vi.fn(async () => ({ ok: true as const, data: { asset: { id: "asset-1", kind: "video", durationMs: 30_000 } as any, externalId: `dup-${++n}` } }));
       const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: script(), segment: segment!, ledger });
       expect(outcome).toMatchObject({ ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD" });
+      expect(pexels.autoImportForScene).toHaveBeenCalledTimes(2);
+    });
+
+    it("a clash with an id another segment claimed a moment ago retries once with that id excluded (no Pexels mutex)", async () => {
+      const ledger = new SegmentSourceLedger();
+      const [segment] = service.planSegments(script(), { min: 1, max: 1 });
+      const seen: string[][] = [];
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => {
+        seen.push([...input.usedExternalIds]);
+        ledger.apifyPlainIds.add("clash"); // another segment claims it while this call is in flight
+        return seen.length === 1
+          ? { ok: true as const, data: { asset: { id: "a-clash", kind: "video", durationMs: 30_000 } as any, externalId: "clash" } }
+          : { ok: true as const, data: { asset: { id: "a-free", kind: "video", durationMs: 30_000 } as any, externalId: "free" } };
+      });
+      const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: script(), segment: segment!, ledger });
+      expect(outcome).toMatchObject({ ok: true, data: { externalId: "free", provider: "pexels", tier: "pexels" } });
+      expect(seen[1]).toContain("clash");
+      expect(ledger.apifyPlainIds.has("free")).toBe(true);
     });
   });
 
@@ -165,7 +186,6 @@ describe("MediaPlanService", () => {
           diagnostics: [{ segmentId: "seg-1", sourcing: "imported" }, { segmentId: "seg-2", sourcing: "failed", errorCode: "MEDIA_RELEVANCE_BELOW_THRESHOLD" }],
         },
       });
-      expect((pexels.autoImportForScene as ReturnType<typeof vi.fn>).mock.calls[1]![3].usedExternalIds).toEqual(["x1"]);
     });
 
     describe("VE2E-55: keyword extraction for Studio plans", () => {
@@ -194,7 +214,6 @@ describe("MediaPlanService", () => {
         expect(scriptGeneration.extractSegmentKeywords).toHaveBeenCalledTimes(1);
         expect(scriptGeneration.extractSegmentKeywords.mock.calls[0]![2].providerAccountId).toBe("content-acc");
         expect(apify.autoImportForSegment.mock.calls[0]![4].keyword).toBe("新宿 夜景");
-        expect(pexels.autoImportForScene).not.toHaveBeenCalled();
         expect(operations).toEqual([expect.objectContaining({ role: "content", operation: "extract_keywords", status: "succeeded", providerAccountId: "content-acc", externalRequestId: "req-1" })]);
         expect(outcome).toMatchObject({ ok: true, data: { diagnostics: [{ sourceProvider: "apify" }] } });
       });
