@@ -70,6 +70,8 @@ export type PreparedClipDerivatives = {
 /** A reused derivative must stay on disk well past the render's delivery-token window (1h). */
 const MIN_REMAINING_TTL_MS = 2 * 60 * 60 * 1000;
 const PREPARE_CONCURRENCY = 3;
+/** VE2E-134: a derivative cut for an estimated range is reused when start AND duration are within this distance of the final range (CR-MEDIA-SLA §3.4). */
+export const CLIP_RANGE_TOLERANCE_MS = 300;
 
 /**
  * Audio policy: social (`apify`) parents are always stripped (DEC-2026-09-29 §1). Other B-roll is
@@ -86,6 +88,16 @@ const cropMatches = (transform: MediaAssetTransformValue | null, cropPlanSha256:
 
 export const derivativeMatches = (transform: MediaAssetTransformValue | null, range: { startMs: number; durationMs: number }, stripAudio: boolean, cropPlanSha256: string | null = null): boolean =>
   Boolean(transform?.range && transform.range.startMs === range.startMs && transform.range.durationMs === range.durationMs && transform.stripAudio === stripAudio) && cropMatches(transform, cropPlanSha256);
+
+/** VE2E-134: like {@link derivativeMatches} but start/duration may differ by up to `toleranceMs`; crop is not compared (the caller decides). */
+export const derivativeMatchesWithin = (transform: MediaAssetTransformValue | null, range: { startMs: number; durationMs: number }, stripAudio: boolean, toleranceMs: number): boolean =>
+  Boolean(
+    transform?.range &&
+      transform.stripAudio === stripAudio &&
+      transform.profileVersion === CLIP_PREPARE_PROFILE_VERSION &&
+      Math.abs(transform.range.startMs - range.startMs) <= toleranceMs &&
+      Math.abs(transform.range.durationMs - range.durationMs) <= toleranceMs,
+  );
 
 /** VE2E-67: a still-image crop derivative has no range and is identified by its crop plan only. */
 export const imageDerivativeMatches = (transform: MediaAssetTransformValue | null, cropPlanSha256: string): boolean =>
@@ -127,11 +139,75 @@ export class ClipDerivativesService {
     @Optional() @Inject(ReframeService) private readonly reframe?: ReframeService,
   ) {}
 
+  /** VE2E-134: early cuts still running; a later `prepare` of a matching range waits for them instead of cutting again. */
+  private readonly earlyInflight = new Set<{ parentId: string; startMs: number; durationMs: number; done: Promise<unknown> }>();
+
   /** Overridable in tests (not DI-injected). */
   now: () => Date = () => new Date();
   log: (message: string) => void = (message) => console.info(message);
 
+  /**
+   * VE2E-134 (CR-MEDIA-SLA §3.4): cut clips as soon as a segment has a chosen source, using the ESTIMATED range (TTS duration hint), instead
+   * of waiting for the render step. Same pipeline as `prepare` (reframe plan -> `clip.prepare` job -> registered derivative with lineage), so
+   * the later `prepare` call with the final range finds the derivative in the registry when start/duration are within
+   * {@link CLIP_RANGE_TOLERANCE_MS} (or waits for it while still running); a larger drift is simply cut again. Never throws and never fails
+   * the caller: the outcome is returned (and logged) only so the runner can record diagnostics; a failed early cut just means the render
+   * step cuts it normally. FFmpeg still runs only in `apps/media-worker` (this method only enqueues).
+   */
+  prepareEarly(projectId: string, userId: string, requests: readonly ClipDerivativeRequest[]): Promise<RenderOutcome<PreparedClipDerivatives>> {
+    const videoRequests = requests.filter((r) => r.mediaKind !== "image" && r.durationMs > 0);
+    if (videoRequests.length === 0) return Promise.resolve({ ok: true, data: { derivativeBySceneId: new Map(), items: [], totals: { parentBytes: 0, derivativeBytes: 0 } } });
+    const work = this.prepareInternal(projectId, userId, videoRequests, undefined, undefined, true).catch(
+      (error): RenderOutcome<PreparedClipDerivatives> => ({ ok: false, code: "MEDIA_PREPARE_FAILED", message: error instanceof Error ? error.message : "early clip prepare failed", status: 503, retryable: true }),
+    );
+    const tokens = videoRequests.map((request) => ({ parentId: request.parentMediaAssetVersionId, startMs: request.startMs, durationMs: request.durationMs, done: work }));
+    for (const token of tokens) this.earlyInflight.add(token);
+    return work.then((outcome) => {
+      for (const token of tokens) this.earlyInflight.delete(token);
+      if (!outcome.ok) this.log(`[clip-derivatives] early prepare project=${projectId} failed (${outcome.code}): ${outcome.message} - the render step will cut again`);
+      return outcome;
+    });
+  }
+
+  private async waitForEarly(entry: { parent: ParentRow; startMs: number; durationMs: number }): Promise<void> {
+    const waiting = [...this.earlyInflight].filter(
+      (t) => t.parentId === entry.parent.id && Math.abs(t.startMs - entry.startMs) <= CLIP_RANGE_TOLERANCE_MS && Math.abs(t.durationMs - entry.durationMs) <= CLIP_RANGE_TOLERANCE_MS,
+    );
+    if (waiting.length > 0) await Promise.allSettled(waiting.map((t) => t.done));
+  }
+
+  /** VE2E-134: nearest registered derivative within the tolerance that can be used WITHOUT a new reframe analysis (see call site). */
+  private async findNearReusable(projectId: string, entry: { parent: ParentRow; startMs: number; durationMs: number; stripAudio: boolean }) {
+    const candidates = await this.prisma.mediaAssetVersion.findMany({ where: { projectId, parentMediaAssetVersionId: entry.parent.id, deletedAt: null }, orderBy: { createdAt: "desc" } });
+    const minExpiry = this.now().getTime() + MIN_REMAINING_TTL_MS;
+    const reframeOn = Boolean(this.reframe?.enabledFor(entry.parent.origin));
+    const ranked = candidates
+      .map((candidate) => ({ candidate, transform: parseMediaAssetTransform(candidate.transform) }))
+      .filter(({ transform }) => derivativeMatchesWithin(transform, entry, entry.stripAudio, CLIP_RANGE_TOLERANCE_MS))
+      // reframe on: only a derivative that already carries a crop plan is reusable here (no crop = a legacy/centre cut that a fresh plan would replace)
+      .filter(({ transform }) => !reframeOn || transform?.crop !== undefined)
+      .sort((a, b) => Math.abs(a.transform!.range!.startMs - entry.startMs) + Math.abs(a.transform!.range!.durationMs - entry.durationMs) - (Math.abs(b.transform!.range!.startMs - entry.startMs) + Math.abs(b.transform!.range!.durationMs - entry.durationMs)));
+    for (const { candidate, transform } of ranked) {
+      if (candidate.expiresAt && candidate.expiresAt.getTime() <= minExpiry) continue;
+      if (!isSafeRelativePath(candidate.relativePath)) continue;
+      const onDisk = await stat(join(mediaRoot(), candidate.relativePath)).then((info) => info.isFile() && info.size === candidate.bytes).catch(() => false);
+      if (onDisk) return { row: candidate, transform: transform! };
+    }
+    return null;
+  }
+
+  private reframeFromTransform(transform: MediaAssetTransformValue): PreparedReframe {
+    const crop = transform.crop;
+    if (!crop) return { status: "skipped", overlayUnavoidable: false, residualOverlayPct: 0, subjectCoveragePct: 100, zoomPermille: null, confidenceLevel: null };
+    return { status: "planned", overlayUnavoidable: crop.overlayUnavoidable, residualOverlayPct: crop.residualOverlayPct, subjectCoveragePct: crop.subjectCoveragePct, zoomPermille: crop.zoomPermille, confidenceLevel: null };
+  }
+
   async prepare(projectId: string, userId: string, requests: readonly ClipDerivativeRequest[], onReady?: (ready: number) => Promise<void>, onFailure?: (sceneId: string, code: string, message: string) => Promise<void>): Promise<RenderOutcome<PreparedClipDerivatives>> {
+    return this.prepareInternal(projectId, userId, requests, onReady, onFailure, false);
+  }
+
+  /** `early` calls never wait for other early cuts (two overlapping early batches must not wait on each other). */
+  private async prepareInternal(projectId: string, userId: string, requests: readonly ClipDerivativeRequest[], onReady: ((ready: number) => Promise<void>) | undefined, onFailure: ((sceneId: string, code: string, message: string) => Promise<void>) | undefined, early: boolean): Promise<RenderOutcome<PreparedClipDerivatives>> {
     const result: PreparedClipDerivatives = { derivativeBySceneId: new Map(), items: [], totals: { parentBytes: 0, derivativeBytes: 0 } };
     if (requests.length === 0) return { ok: true, data: result };
 
@@ -165,6 +241,15 @@ export class ClipDerivativesService {
     try {
       prepared = await mapWithConcurrency([...unique.values()], PREPARE_CONCURRENCY, async (entry): Promise<PreparedEntry> => {
         try {
+          if (entry.kind === "video") {
+            // VE2E-134: an early cut (or any derivative whose range is within 300 ms) is reused as-is; waits for a still-running early cut first.
+            if (!early) await this.waitForEarly(entry);
+            const near = await this.findNearReusable(projectId, entry);
+            if (near) {
+              if (onReady) await onReady(++ready);
+              return { entry, derivativeId: near.row.id, source: "registry" as const, mode: null, bytes: near.row.bytes, reframe: this.reframeFromTransform(near.transform) };
+            }
+          }
           const decision = await this.decideReframe(entry);
           if (decision.status === "failed") {
             throw new PrepareFailure({ ok: false, code: "MEDIA_PREPARE_FAILED", message: `Không phân tích được khung cắt (${decision.code}): ${decision.message} - REFRAME_LEGACY_FALLBACK đang tắt`, status: 503, retryable: decision.retryable });
