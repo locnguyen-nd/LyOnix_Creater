@@ -795,6 +795,15 @@ export type MediaPlanRequest = {
   backgroundSegments?: BackgroundSegmentsSetting;
 };
 
+/** VE2E-85: pre-render quality gate result stored as the `quality_gate` StepRun outputRef. */
+export type QualityGateDiagnostics = {
+  checks: Array<{ name: string; status: "ok" | "fixed" | "warning" | "failed"; detail?: string }>;
+  fixes: Array<Record<string, unknown>>;
+  warnings: Array<{ code: string; sceneId?: string; detail: string }>;
+  degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
+  failure: { code: string; sceneId: string; reason: string } | null;
+};
+
 /** VE2E-54: total-duration check stored as the `duration_budget` StepRun outputRef. */
 export type DurationBudgetDiagnostics = {
   targetSec: number;
@@ -960,6 +969,8 @@ export type VideoProductionResponse = {
   visionUsage?: MediaPlanVisionUsage | null;
   /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
   durationBudget: DurationBudgetDiagnostics | null;
+  /** VE2E-85: pre-render quality gate result (`quality_gate` StepRun outputRef); `null` before the gate ran or when QUALITY_GATE is off. */
+  qualityGate?: QualityGateDiagnostics | null;
   /** VE2E-62: workflow queue state (`queuePosition` is set only while the run is `draft`, i.e. waiting for a worker slot). */
   queue: QueueStateFields;
   createdAt: string;

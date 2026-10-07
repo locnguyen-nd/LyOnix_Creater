@@ -363,6 +363,76 @@ describe("WorkflowRunnerService", () => {
     expect(diag.outputRef).toMatchObject({ totalSec: 30, inBand: true, flag: null });
   });
 
+  describe("VE2E-85: pre-render quality gate", () => {
+    afterEach(() => { delete process.env.QUALITY_GATE; });
+    const stepOrder = () => stepRuns.map((s) => s.stepKey);
+    /** Rewrites what the media plan hands to the gate (two scenes sharing one clip, overlapping windows). */
+    const overlapPlan = (secondStart = 0) => {
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const real = mediaPlans.buildBindings.bind(mediaPlans);
+      vi.spyOn(mediaPlans, "buildBindings").mockImplementation((script: any, sourced: any) => {
+        const plan = real(script, sourced);
+        plan.scenes.forEach((scene, i) => {
+          scene.mediaAssetVersionId = plan.scenes[0]!.mediaAssetVersionId;
+          scene.mediaKind = "video";
+          scene.sourceStartMs = i === 0 ? 0 : secondStart;
+          scene.sourceDurationMs = 5_000;
+        });
+        return plan;
+      });
+    };
+
+    it("runs before submit_render, records checks, and does not block on warnings only (duration out of band)", async () => {
+      audioVersions.generateForWorkflowRun = vi.fn(async (id: string) => ({ ok: true as const, data: { id: `audio-${id}`, mediaAssetVersionId: `audio-asset-${id}`, durationMs: 3000, subtitleVersion: null } as any }));
+      await service.processNext();
+      const gate = stepRuns.find((s) => s.stepKey === "quality_gate");
+      expect(gate.status).toBe("succeeded");
+      expect(stepOrder().indexOf("quality_gate")).toBeLessThan(stepOrder().indexOf("submit_render"));
+      expect(gate.outputRef.checks.map((c: any) => c.name)).toEqual(expect.arrayContaining(["repeat_scenes", "duration_band", "subtitle_lines", "min_resolution", "source_degraded"]));
+      expect(gate.outputRef.warnings.map((w: any) => w.code)).toContain("duration_out_of_band");
+      expect(gate.outputRef.failure).toBeNull();
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+      expect(renderJobs.enqueueTimelineRender).toHaveBeenCalledOnce();
+    });
+
+    it("QUALITY_GATE=0 skips the gate", async () => {
+      process.env.QUALITY_GATE = "0";
+      await service.processNext();
+      expect(stepRuns.some((s) => s.stepKey === "quality_gate")).toBe(false);
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+
+    it("an invalid video range fails early with a clear reason, before the timeline is persisted and before any render", async () => {
+      overlapPlan();
+      const mediaPlans = (service as any).mediaPlans as MediaPlanService;
+      const spied = mediaPlans.buildBindings as unknown as ReturnType<typeof vi.fn>;
+      const wrapped = spied.getMockImplementation()!;
+      spied.mockImplementation((script: any, srcd: any) => {
+        const plan = wrapped(script, srcd);
+        plan.scenes[0]!.sourceDurationMs = -1;
+        return plan;
+      });
+      await service.processNext();
+      expect(runs[0].status).toBe("needs_input");
+      expect(runs[0].lastError).toMatchObject({ code: "VALIDATION_FAILED", message: expect.stringContaining("Cổng chất lượng") });
+      expect(timelines.persistApprovedForWorkflowRun).not.toHaveBeenCalled();
+      expect(renderJobs.enqueueTimelineRender).not.toHaveBeenCalled();
+      expect(stepRuns.find((s) => s.stepKey === "quality_gate").outputRef.failure).toMatchObject({ code: "invalid_range", sceneId: "scene-1" });
+    });
+
+    it("auto-fixes an overlapping window of the same clip in the persisted timeline", async () => {
+      overlapPlan(2_000);
+      prisma.mediaAssetVersion.findMany = vi.fn(async () => []);
+      // A 30 s video per segment, so the (rewritten) shared clip has a free window after the first scene's 0-5 s.
+      pexels.autoImportForScene = vi.fn(async (_p: string, _u: string, _r: string, input: any) => ({ ok: true as const, data: { asset: { id: `pexels-${input.sceneId}`, kind: "video", durationMs: 30_000 } as any, externalId: `ext-${input.sceneId}` } }));
+      await service.processNext();
+      const gate = stepRuns.find((s) => s.stepKey === "quality_gate");
+      expect(gate.outputRef.fixes).toEqual([expect.objectContaining({ type: "window_changed", sceneId: "scene-2", fromStartMs: 2_000, toStartMs: 5_000, reason: "repeat" })]);
+      expect(persistedTimeline().scenes[1]).toMatchObject({ sourceStartMs: 5_000, sourceDurationMs: 5_000 });
+      expect(runs[0]).toMatchObject({ status: "render_queued" });
+    });
+  });
+
   it("VE2E-42: title/caption fill leftover template text slots through the timeline optionValues, same as the old raw-assignment path", async () => {
     const slotsWithTitle = [...templateSlots, { key: "Title.text", kind: "text", label: "Title.text", required: true }, { key: "Caption.text", kind: "text", label: "Caption.text", required: false }];
     prisma.templateSnapshot.findUnique = vi.fn(async () => ({ id: templateSnapshotId, providerAccountId: "render-acc", modifications: slotsWithTitle }));
