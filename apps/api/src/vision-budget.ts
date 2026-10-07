@@ -44,6 +44,8 @@ export class VisionBudget {
   /** Provider requests spent by vision (a capability probe counts as one, the moderation request as one). */
   calls = 0;
   moderated = 0;
+  /** VE2E-131: Auto (unattended) job. When vision could not run, the metadata ranking decides instead of abstaining. Set by the job context. */
+  unattended = false;
   /** scopeKey (scene id) -> why vision was skipped for it. */
   readonly skips = new Map<string, VisionSkipReason>();
   private readonly capability = new Map<string, string>();

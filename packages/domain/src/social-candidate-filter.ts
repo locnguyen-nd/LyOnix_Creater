@@ -47,7 +47,30 @@ export type SocialFilterContext = {
   minDurationSeconds: number;
   /** Platform video ids already used by earlier segments of the plan (live set is fine). */
   usedVideoIds: ReadonlySet<string>;
+  /**
+   * VE2E-131 search tier. `ja` (default) keeps the strict Japanese rules (ja/JP only, vertical only). `en` accepts en/un/ja captions,
+   * clips located anywhere and landscape clips (they get cropped); templates, ads and used ids are still rejected.
+   */
+  tier?: SocialFilterTier;
+  /** VE2E-131: proper names/aliases of the video's main subject; a caption/hashtag hit adds {@link SUBJECT_ALIAS_BONUS} to the score. */
+  subjectAliases?: readonly string[];
 };
+
+export type SocialFilterTier = "ja" | "en";
+/** Share of the segment duration a source must cover (the rest is filled by a second source / the ladder; never looped). */
+export const MIN_DURATION_SHARE = 0.6;
+export const SUBJECT_ALIAS_BONUS = 0.3;
+
+const compact = (value: string) => value.toLowerCase().replace(/[\s#_\-]+/g, "");
+
+/** True when any alias (>= 2 chars) appears in the caption or a hashtag (whitespace/#/_/- insensitive). */
+export function matchesSubjectAlias(aliases: readonly string[], text: string, hashtags: readonly string[]): boolean {
+  const haystack = compact(`${text} ${hashtags.join(" ")}`);
+  return aliases.some((alias) => {
+    const needle = compact(alias);
+    return needle.length >= 2 && haystack.includes(needle);
+  });
+}
 
 export type SocialEvaluation = { ok: true; score: number; overlap: number } | { ok: false; reasons: SocialRejectReason[] };
 
@@ -93,10 +116,13 @@ export function evaluateSocialCandidate(signals: SocialCandidateSignals, ctx: So
   const tags = signals.hashtags.map((tag) => tag.replace(/^#/, "").trim().toLowerCase());
   if (TEMPLATE_TEXT.test(signals.text) || tags.some((tag) => TEMPLATE_HASHTAGS.has(tag) || TEMPLATE_TEXT.test(tag))) reasons.push("template_or_greenscreen");
 
-  const ja = isJapaneseScript(ctx.scriptLanguage);
+  const enTier = ctx.tier === "en";
+  const ja = !enTier && isJapaneseScript(ctx.scriptLanguage);
   const lang = normLang(signals.textLanguage);
   const jp = isJapanCountry(signals.countryCode);
-  if (ja) {
+  if (enTier) {
+    if (!(lang === "en" || lang === "ja" || UNKNOWN_LANGUAGES.has(lang))) reasons.push("language_mismatch");
+  } else if (ja) {
     if (lang === "ja") {
       // affirmative Japanese caption; a known non-Japan location still disqualifies (owner: JP content only)
     } else if (UNKNOWN_LANGUAGES.has(lang)) {
@@ -107,9 +133,9 @@ export function evaluateSocialCandidate(signals: SocialCandidateSignals, ctx: So
     if (signals.countryCode && !jp) reasons.push("location_not_jp");
   }
 
-  if (signals.widthPx !== null && signals.heightPx !== null && signals.heightPx <= signals.widthPx) reasons.push("not_vertical");
+  if (!enTier && signals.widthPx !== null && signals.heightPx !== null && signals.heightPx <= signals.widthPx) reasons.push("not_vertical");
   if (signals.durationSeconds === null || signals.durationSeconds <= 0) reasons.push("duration_unknown");
-  else if (signals.durationSeconds + 0.05 < ctx.minDurationSeconds) reasons.push("too_short");
+  else if (signals.durationSeconds + 0.05 < ctx.minDurationSeconds * MIN_DURATION_SHARE) reasons.push("too_short");
 
   if (reasons.length > 0) return { ok: false, reasons };
 
@@ -117,7 +143,8 @@ export function evaluateSocialCandidate(signals: SocialCandidateSignals, ctx: So
   const duration = signals.durationSeconds!;
   // Prefer a source comfortably longer than the segment (room for a clean window), not an endless one.
   const fit = ctx.minDurationSeconds > 0 ? Math.min(1, duration / (ctx.minDurationSeconds * 1.5)) : 1;
-  const score = overlap * 0.5 + (lang === "ja" ? 0.2 : 0) + (jp ? 0.15 : 0) + fit * 0.15;
+  const alias = ctx.subjectAliases?.length && matchesSubjectAlias(ctx.subjectAliases, signals.text, signals.hashtags) ? SUBJECT_ALIAS_BONUS : 0;
+  const score = overlap * 0.5 + (lang === "ja" ? 0.2 : 0) + (jp ? 0.15 : 0) + fit * 0.15 + alias;
   return { ok: true, score: Math.round(score * 1000) / 1000, overlap };
 }
 
