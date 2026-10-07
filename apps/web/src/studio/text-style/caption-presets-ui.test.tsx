@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CAPTION_PRESETS, captionPresetById } from "@lyonix/domain/caption-presets";
 import { captionDefaultsFromRecipeCaptions } from "@lyonix/domain/caption-style";
 import { NEWS_RECAP_BROADCAST_TELOP_JP_V1 } from "@lyonix/render-recipes";
+import { CAPTION_PRESET_SAMPLES } from "./caption-preset-theme";
 
 // Choosing / previewing a preset is local: no render job, no provider, no AI/TTS - any network module touched would be recorded here.
 const network = vi.hoisted(() => ({ calls: vi.fn() }));
@@ -46,22 +47,39 @@ const studioOptionsOf = (html: string) => [...html.matchAll(/data-testid="captio
 const disabledStudioOptions = (html: string) => [...html.matchAll(/<button[^>]*disabled=""[^>]*data-testid="caption-preset-option" data-preset="([^"]+)"/g)].map((m) => m[1]);
 
 describe("VE2E-94 caption presets in Auto (create video)", () => {
-  it("(5, 16) VE2E-96 compact: the template default + every preset as a chip (swatch, name, description), ONE local preview", async () => {
+  it("(5, 16) preset gallery: a live stage + one card per style (own preview, name, description, font, colours, position, engines)", async () => {
     const html = await picker("lyonix");
     expect(cardsOf(html)).toEqual(["template", ...CAPTION_PRESETS.map((item) => item.id)]);
-    // one VE2E-93 caption preview for the style being looked at - not one large card per preset
-    expect((html.match(/data-testid="scene-caption-preview"/g) ?? []).length).toBe(1);
+    // every preview is the VE2E-93 caption preview: the stage (style being looked at, in motion) + each card's own 9:16 sample
+    expect(html).toContain('data-testid="caption-motion-preview"');
+    expect((html.match(/data-testid="scene-caption-preview"/g) ?? []).length).toBe(1 + 7);
     expect(html).toMatch(/data-testid="caption-preset-preview" data-preset="template"/);
-    expect((html.match(/data-testid="caption-preset-swatch"/g) ?? []).length).toBe(7);
     const strings = locales.vi.captionPresets.items;
     for (const item of CAPTION_PRESETS) {
       expect(html).toContain(strings[item.id as keyof typeof strings].name);
       expect(html).toContain(`title="${strings[item.id as keyof typeof strings].description}"`);
     }
-    expect(html).not.toContain('data-testid="caption-preset-compat"'); // the template default has no compatibility chips
+    // sample captions are Japanese (like the videos), a different line for each preset - never the UI's Vietnamese sample sentence
+    expect(html).not.toContain(locales.vi.captionPresets.sampleText);
+    const firstLines = ["template", ...CAPTION_PRESETS.map((item) => item.id)].map((id) => CAPTION_PRESET_SAMPLES[id]![0]!);
+    expect(new Set(firstLines).size).toBe(firstLines.length);
+    for (const line of firstLines) expect(html, line).toContain([...line].slice(0, 4).join(""));
+    expect(html).toContain("Noto Sans JP · 76px"); // news-bold: font + size
+    expect(html).toContain('aria-label="Màu chữ #FFE600"'); // sports-punch fill colour
+    expect(html).toContain('aria-label="Màu viền #E00000"'); // breaking-red outline colour
+    expect(html).toContain("Giữa · 1 dòng"); // sports-punch: middle, one line
+    expect(html).toMatch(/data-preset="karaoke-highlight"[\s\S]*?Tô sáng từng chữ/);
+    // engine badges on each preset card (the template default follows the template's own engine)
+    expect((html.match(/data-testid="caption-preset-compat"/g) ?? []).length).toBe(6);
+    expect(html).toContain('data-testid="caption-preset-enlarge"');
+    // nothing chosen = the template's own style is the selected card
+    expect(html).toMatch(/data-preset="template" data-selected="true"/);
+    expect((html.match(/data-testid="caption-preset-check"/g) ?? []).length).toBe(1);
     const chosen = await picker("lyonix", "news-bold");
     expect(chosen).toMatch(/data-testid="caption-preset-preview" data-preset="news-bold"/);
-    expect((chosen.match(/data-testid="caption-preset-compat"/g) ?? []).length).toBe(1);
+    expect(chosen).toMatch(/data-preset="news-bold" data-selected="true"/);
+    expect((chosen.match(/data-testid="caption-preset-check"/g) ?? []).length).toBe(1);
+    expect((chosen.match(/data-testid="caption-preset-compat"/g) ?? []).length).toBe(6 + 1); // + the stage's
     expect(network.calls).not.toHaveBeenCalled();
   });
 

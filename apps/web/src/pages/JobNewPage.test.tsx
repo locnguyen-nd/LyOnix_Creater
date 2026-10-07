@@ -45,7 +45,8 @@ describe("JobNewPage first paint (VE2E-124)", () => {
 
   it("before the draft/defaults are restored nothing can be saved or submitted, so the restore can never be overwritten", () => {
     const out = html();
-    const disabledButtons = out.match(/<button[^>]*disabled=""[^>]*>[^<]*<\/button>/g) ?? [];
+    // a button may hold an icon next to its label
+    const disabledButtons = out.match(/<button[^>]*disabled=""[^>]*>[\s\S]*?<\/button>/g) ?? [];
     for (const label of ["Lưu bản nháp", "Xoá bản nháp", "Lưu các lựa chọn này làm mặc định", "Đặt lại mặc định", "Tạo video"]) {
       expect(disabledButtons.some((button) => button.includes(label)), label).toBe(true);
     }

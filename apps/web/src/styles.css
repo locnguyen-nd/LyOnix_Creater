@@ -189,3 +189,62 @@ html.dark .lyx-btn-danger-solid {
   background: #dc2626;
   border-color: #dc2626;
 }
+
+/* Caption style gallery + draft save feedback (create-video page). Reduced motion is honoured globally (tokens.css). */
+@keyframes lyx-scene-pan {
+  0% { background-position: 0% 0%; }
+  50% { background-position: 100% 60%; }
+  100% { background-position: 0% 0%; }
+}
+
+@keyframes lyx-cue-in {
+  from { opacity: 0; transform: translateY(3%); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes lyx-pop-in {
+  0% { opacity: 0; transform: scale(0.4); }
+  60% { opacity: 1; transform: scale(1.18); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes lyx-success-ring {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--lyx-ok) 55%, transparent); }
+  80% { box-shadow: 0 0 0 10px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@keyframes lyx-fade-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes lyx-soft-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+.lyx-anim-scene-pan {
+  background-size: 220% 220%;
+  animation: lyx-scene-pan 14s ease-in-out infinite;
+}
+
+.lyx-anim-cue {
+  animation: lyx-cue-in 260ms ease-out both;
+}
+
+.lyx-anim-pop {
+  animation: lyx-pop-in 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.lyx-anim-success {
+  animation: lyx-success-ring 900ms ease-out 1;
+}
+
+.lyx-anim-fade-up {
+  animation: lyx-fade-up 220ms ease-out both;
+}
+
+.lyx-anim-soft-pulse {
+  animation: lyx-soft-pulse 1.6s ease-in-out infinite;
+}

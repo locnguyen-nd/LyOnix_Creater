@@ -20,11 +20,11 @@ export const captionPresetStyle = (item: CaptionPreset | null, engine: CaptionSt
   resolveCaptionTextStyle({ engine: engine === "creatomate" ? "creatomate" : "lyonix", defaults, global: item?.style ?? null });
 
 /** A 9:16 preview of a caption style with a sample text, laid out exactly like the engine (VE2E-93 `SceneCaptionPreview`). */
-export function CaptionStyleSample({ style, engine, className = "" }: { style: CaptionTextStyle; engine: CaptionStyleEngine | null; className?: string }) {
+export function CaptionStyleSample({ style, engine, className = "", background, text }: { style: CaptionTextStyle; engine: CaptionStyleEngine | null; className?: string; /** Backdrop standing for the video (CSS background); default a neutral dusk gradient. */ background?: string; /** Sample caption; default the localized sample sentence. */ text?: string }) {
   const { t } = useTranslation();
   return (
-    <div className={`relative overflow-hidden rounded-[8px] bg-[linear-gradient(160deg,#3a4a5c,#1b2430_55%,#0e1218)] ${className}`} style={{ aspectRatio: "9 / 16", containerType: "inline-size" }} data-testid="caption-style-sample">
-      <SceneCaptionPreview text={t("captionPresets.sampleText")} style={style} engine={engine === "creatomate" ? "creatomate" : "lyonix"} sceneIndex={0} durationMs={4000} />
+    <div className={`relative overflow-hidden rounded-[8px] ${background ? "" : "bg-[linear-gradient(160deg,#3a4a5c,#1b2430_55%,#0e1218)]"} ${className}`} style={{ aspectRatio: "9 / 16", containerType: "inline-size", ...(background ? { background } : {}) }} data-testid="caption-style-sample">
+      <SceneCaptionPreview text={text ?? t("captionPresets.sampleText")} style={style} engine={engine === "creatomate" ? "creatomate" : "lyonix"} sceneIndex={0} durationMs={4000} />
     </div>
   );
 }

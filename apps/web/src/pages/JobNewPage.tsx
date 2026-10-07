@@ -50,6 +50,7 @@ import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/or
 import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
+import { DraftSaveControl } from "../job-new/DraftSaveControl";
 import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, mediaAccountsOf, usableAccounts, type CreationLists } from "../job-new/form-state";
 import { SelectedNewsCard } from "../job-new/SelectedNewsCard";
 import { newsPick, newsUnpick } from "../job-new/news-pick";
@@ -827,25 +828,15 @@ export function JobNewPage() {
 
           {/* VE2E-124: the user's own draft - saved here only, no job/workflow, no AI/TTS/render call, no cost. */}
           <div className="flex flex-wrap items-center gap-2 border-t border-lyx-border pt-4 text-[12px]" data-testid="draft-bar">
-            <Button type="button" variant="secondary" disabled={!hydrated || busy} onClick={saveDraftNow}>{t("jobs.draftSave")}</Button>
-            <span role="status" className="text-lyx-fg-muted">
-              {draftStatus.kind === "saving" ? t("jobs.draftSaving")
-                : draftStatus.kind === "saved" ? t("jobs.draftSavedAt", { time: formatTime(draftStatus.at) })
-                : draftStatus.kind === "pending" ? t("jobs.draftPending")
-                : null}
-            </span>
-            {draftStatus.kind === "error" ? (
-              <span role="alert" className="flex items-center gap-2 text-lyx-danger">
-                {t("jobs.draftSaveFailed")}
-                <Button type="button" variant="ghost" onClick={() => void autosaver.retry()}>{t("jobs.draftRetry")}</Button>
-              </span>
-            ) : null}
-            {draftStatus.kind === "conflict" ? (
-              <span role="alert" className="flex items-center gap-2 text-amber-500">
-                {t("jobs.draftConflict")}
-                <Button type="button" variant="ghost" onClick={() => void overwriteDraft()}>{t("jobs.draftOverwrite")}</Button>
-              </span>
-            ) : null}
+            {/* the draft's save button with its saving / saved / failed feedback (saving itself: DraftAutosaver, unchanged) */}
+            <DraftSaveControl
+              status={draftStatus}
+              disabled={!hydrated || busy}
+              onSave={saveDraftNow}
+              onRetry={() => void autosaver.retry()}
+              onOverwrite={() => void overwriteDraft()}
+              formatTime={formatTime}
+            />
             <Button type="button" variant="ghost" className="ml-auto" disabled={!hydrated || busy} onClick={() => setDiscardOpen(true)}>{t("jobs.draftDiscard")}</Button>
           </div>
 
