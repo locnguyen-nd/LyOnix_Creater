@@ -32,6 +32,7 @@ const withTimeout = async <T>(promise: Promise<T>, ms: number, label: string): P
 
 const main = async () => {
   const since = new Date(Date.now() - days * 86_400_000);
+  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set (create .env from .env.example); nothing was queried");
   const prisma = new PrismaClient();
   try {
     await withTimeout(prisma.$connect(), CONNECT_TIMEOUT_MS, "database connection");
