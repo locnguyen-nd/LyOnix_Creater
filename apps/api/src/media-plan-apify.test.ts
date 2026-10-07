@@ -47,11 +47,10 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
 
   afterEach(() => { delete process.env.APIFY_AUTO_PLATFORM; delete process.env.APIFY_AUTO_PLATFORMS; delete process.env.APIFY_VIDEO_PLATFORMS; delete process.env.APIFY_IMAGE_PLATFORMS; });
 
-  it("sources the segment from Apify with keywords.ja and never touches Pexels on success", async () => {
+  it("sources the segment from Apify with keywords.ja; the Pexels result of the race is discarded (ja has priority)", async () => {
     const s = script();
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
     expect(outcome).toMatchObject({ ok: true, data: { mediaAssetVersionId: "apify-asset-1", provider: "apify", sourcing: "imported", externalId: "apify:tiktok:7001" } });
-    expect(pexels.autoImportForScene).not.toHaveBeenCalled();
     const call = apify.autoImportForSegment.mock.calls[0]!;
     expect(call[4]).toMatchObject({ platform: "tiktok", keyword: "東京 夜景", sceneId: "s1" });
     expect(call[4].brief.phrases[0]).toBe("東京 夜景");
@@ -70,22 +69,24 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
   });
 
   it("falls back to Pexels (keywords.en) when Apify has no usable candidate, recording the reason", async () => {
-    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_no_usable_candidate" });
+    apify.autoImportForSegment.mockResolvedValue({ ok: false, reason: "apify_no_usable_candidate" });
     const s = script();
     const segment = firstSegment(service, s);
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment, ledger: new SegmentSourceLedger() });
     expect(outcome).toMatchObject({ ok: true, data: { mediaAssetVersionId: "pexels-asset-1", provider: "pexels", fallbackReason: "apify_no_usable_candidate" } });
+    // at most 3 searches per segment (ja, en, broad), one call each
+    expect(apify.autoImportForSegment).toHaveBeenCalledTimes(3);
     expect(pexels.autoImportForScene.mock.calls[0]![3].sceneBrief.phrases[0]).toBe("tokyo night");
     if (!outcome.ok) return;
     expect(service.buildBindings(s, [{ segment, source: outcome.data, errorCode: null }]).diagnostics[0]).toMatchObject({ sourceProvider: "pexels", fallbackReason: "apify_no_usable_candidate" });
   });
 
   it("falls back to Pexels when the Apify call throws or errors", async () => {
-    apify.autoImportForSegment.mockRejectedValueOnce(new Error("boom"));
+    apify.autoImportForSegment.mockRejectedValue(new Error("boom"));
     const s = script();
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_error:unexpected" } });
-    apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_error:PROVIDER_TIMEOUT" });
+    apify.autoImportForSegment.mockResolvedValue({ ok: false, reason: "apify_error:PROVIDER_TIMEOUT" });
     const again = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
     expect(again).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "apify_error:PROVIDER_TIMEOUT" } });
   });
@@ -121,13 +122,14 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     expect(apify.findAccountForUser).not.toHaveBeenCalled();
   });
 
-  it("a ja keyword without kana/kanji (English) is rejected and not sent to Apify", async () => {
+  it("a ja keyword without kana/kanji (English) is rejected and not sent to Apify (the en/broad tiers still search)", async () => {
+    apify.autoImportForSegment.mockResolvedValue({ ok: false, reason: "apify_no_usable_candidate" });
     const s = englishShotDescriptions({ ...script("Flashy news intro breaking news") });
     const segment = firstSegment(service, s);
     expect(apifyKeywordForSegment(segment)).toBeNull();
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment, ledger: new SegmentSourceLedger() });
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "no_ja_keywords" } });
-    expect(apify.autoImportForSegment).not.toHaveBeenCalled();
+    expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => c[4].keyword)).toEqual(["tokyo night", "夜の東京"]);
   });
 
   it("keywords extracted from the narration (applyExtractedKeywords) are what Apify receives; English visualQuery still never is", async () => {
@@ -167,12 +169,12 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     expect(apify.autoImportForSegment).not.toHaveBeenCalled();
   });
 
-  it("no ja keywords: Pexels, with the reason recorded and no Apify account lookup", async () => {
+  it("no ja keyword but an en keyword: the en tier searches (never an empty keyword), Pexels wins when it finds nothing, reason recorded", async () => {
+    apify.autoImportForSegment.mockResolvedValue({ ok: false, reason: "apify_no_usable_candidate" });
     const s = { ...script(""), language: "vi" };
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: firstSegment(service, s), ledger: new SegmentSourceLedger() });
     expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", fallbackReason: "no_ja_keywords" } });
-    expect(apify.findAccountForUser).not.toHaveBeenCalled();
-    expect(apify.autoImportForSegment).not.toHaveBeenCalled();
+    expect(apify.autoImportForSegment.mock.calls.every((c: any[]) => c[4].keyword !== "")).toBe(true);
   });
 
   it("is unchanged when the service is built without an ApifyService (3-argument construction)", async () => {
@@ -202,15 +204,20 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
         { sceneId: "s2", narration: "二つ目。", screenText: "two", visualQuery: "b", durationHintMs: 6000, voiceDurationMs: 6000 },
       ],
     };
-    apify.autoImportForSegment
-      .mockResolvedValueOnce({ ...apifyOk, data: { ...apifyOk.data, asset: { id: "short-clip", kind: "video", durationMs: 5000 }, externalId: "1", ledgerId: "apify:tiktok:1" } })
-      .mockResolvedValueOnce({ ...apifyOk, data: { ...apifyOk.data, asset: { id: "long-clip", kind: "video", durationMs: 20_000 }, externalId: "2", ledgerId: "apify:tiktok:2" } });
+    let jaCalls = 0;
+    apify.autoImportForSegment.mockImplementation(async (...args: any[]) => {
+      if (args[4].keyword !== "東京 夜景") return { ok: false as const, reason: "apify_no_usable_candidate" };
+      jaCalls += 1;
+      return jaCalls === 1
+        ? { ...apifyOk, data: { ...apifyOk.data, asset: { id: "short-clip", kind: "video", durationMs: 5000 }, externalId: "1", ledgerId: "apify:tiktok:1" } }
+        : { ...apifyOk, data: { ...apifyOk.data, asset: { id: "long-clip", kind: "video", durationMs: 20_000 }, externalId: "2", ledgerId: "apify:tiktok:2" } };
+    });
     const result = await service.sourceSegments(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segments: service.planSegments(s, { min: 1, max: 1 }), ledger: new SegmentSourceLedger() });
     expect(result.sourced.map((piece) => [piece.segment.segmentId, piece.segment.sceneIds, piece.source?.mediaAssetVersionId])).toEqual([
       ["g1", ["s1"], "short-clip"],
       ["g1-b", ["s2"], "long-clip"],
     ]);
-    expect(apify.autoImportForSegment).toHaveBeenCalledTimes(2);
+    expect(jaCalls).toBe(2);
   });
 
   it("VE2E-53: keeps the single short clip when no second source can be found", async () => {
@@ -230,14 +237,13 @@ describe("MediaPlanService - Apify first (VE2E-46)", () => {
     expect(result.sourced[0]).toMatchObject({ segment: { segmentId: "g1", sceneIds: ["s1", "s2"] }, source: { mediaAssetVersionId: "short-clip" } });
   });
 
-  it("a VIDEO slot tries the next video platform (never an image platform), then Pexels", async () => {
+  it("a VIDEO slot only ever searches a video platform (first configured; never an image platform), one call per tier", async () => {
     process.env.APIFY_VIDEO_PLATFORMS = "tiktok,x,pinterest";
     apify.autoImportForSegment.mockResolvedValueOnce({ ok: false, reason: "apify_abstained:low_relevance" });
     const s = script();
     const outcome = await service.importSegmentSource(projectId, userId, "staff", { providerAccountId: "pexels-acc", script: s, segment: { ...firstSegment(service, s), visualKind: "video" }, ledger: new SegmentSourceLedger() });
-    expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => [c[4].platform, c[4].mediaType])).toEqual([["tiktok", "video"], ["x", "video"]]);
-    expect(outcome).toMatchObject({ ok: true, data: { provider: "apify" } });
-    expect(pexels.autoImportForScene).not.toHaveBeenCalled();
+    expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => [c[4].platform, c[4].mediaType])).toEqual([["tiktok", "video"], ["tiktok", "video"], ["tiktok", "video"]]);
+    expect(outcome).toMatchObject({ ok: true, data: { provider: "apify", tier: "en" } });
   });
 
   it("an IMAGE slot is sourced from Pinterest as a photo, and its Pexels fallback is photos only", async () => {
