@@ -17,7 +17,7 @@ import { makePlan, testRecipe } from "./test-fixtures.js";
 describe("loadComposeConfig", () => {
   it("has safe defaults for a laptop-class machine", () => {
     const cfg = loadComposeConfig({}, "/repo", 8);
-    expect(cfg).toMatchObject({ queue: "lyonix.render", prefetch: 1, x264Preset: "faster", x264Threads: 0, fontsDir: null, timeoutMs: 15 * 60_000 });
+    expect(cfg).toMatchObject({ queue: "lyonix.render", prefetch: 1, x264Preset: "faster", x264Threads: 0, x264Crf: 21, x264MaxrateKbps: 8000, fontsDir: null, timeoutMs: 15 * 60_000 });
   });
   it("reads env, resolves the fonts dir against the repo root and never exceeds the CPU count for prefetch", () => {
     const cfg = loadComposeConfig({ MEDIA_WORKER_RENDER_PREFETCH: "4", RENDER_X264_PRESET: "veryfast", RENDER_X264_THREADS: "6", RENDER_FONTS_DIR: "data/fonts", MEDIA_WORKER_RENDER_QUEUE: "r.q" }, "/repo", 2);
