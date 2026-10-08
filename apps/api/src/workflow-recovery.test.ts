@@ -7,7 +7,7 @@ const recover = (stale: Array<{ id: string; attempts: number }>) => {
     stepRun: { updateMany: vi.fn(async () => ({ count: 1 })) },
     providerOperation: { updateMany: vi.fn(async () => ({ count: 1 })) },
   };
-  const service = Object.create(WorkflowRunnerService.prototype) as WorkflowRunnerService & { prisma: typeof prisma };
+  const service = Object.create(WorkflowRunnerService.prototype) as WorkflowRunnerService;
   (service as unknown as { prisma: typeof prisma }).prisma = prisma;
   return { prisma, run: () => service.recoverStaleRuns(new Date("2026-10-08T00:00:00Z")) };
 };
