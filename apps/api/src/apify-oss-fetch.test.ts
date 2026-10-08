@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,8 @@ import type { SocialFetchOutcome, SocialFetchService } from "./social-fetch.serv
 
 // VE2E-146 - TikTok phase 2 through yt-dlp (media worker) with Apify as the fallback. Apify is a local fetch stub, the worker a fake: NO live call.
 const projectId = "project-1";
+/** Quarantine token of the fake download (generated: a literal UUID trips secret scanners). */
+const TOKEN = randomUUID();
 const fakeAsset = { id: "asset-1", kind: "video", durationMs: 30_000 } as unknown as MediaAssetVersionSummary;
 const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(16)]);
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -59,7 +62,7 @@ describe("ApifyService TikTok phase 2 via yt-dlp - VE2E-146", () => {
   const fakeFetch = (behaviour: { bytes?: Buffer; code?: string }) => {
     const fetchPost = vi.fn(async (): Promise<SocialFetchOutcome> => {
       if (behaviour.code) return { ok: false, code: behaviour.code as any, message: "blocked", steps: [{ via: "plain", cookiesAccountId: null, code: behaviour.code as any, runs: [] }], elapsedMs: 900 };
-      const token = "123e4567-e89b-12d3-a456-426614174000";
+      const token = TOKEN;
       await mkdir(join(root, "_quarantine"), { recursive: true });
       await writeFile(join(root, "_quarantine", token), behaviour.bytes!);
       return {
@@ -110,7 +113,7 @@ describe("ApifyService TikTok phase 2 via yt-dlp - VE2E-146", () => {
     expect(postRuns(stub)).toHaveLength(0); // only the search ran
     expect(social.fetchPost).toHaveBeenCalledWith(expect.objectContaining({ platform: "tiktok", tool: "yt-dlp", url: "https://www.tiktok.com/@fake/video/7" }));
     const registered = media.registerAsset.mock.calls[0]![3];
-    expect(registered).toMatchObject({ origin: "apify", originalFileName: "apify-tiktok-7.mp4", widthPx: 1080, heightPx: 1920, durationMs: 30_000, quarantineToken: "123e4567-e89b-12d3-a456-426614174000" });
+    expect(registered).toMatchObject({ origin: "apify", originalFileName: "apify-tiktok-7.mp4", widthPx: 1080, heightPx: 1920, durationMs: 30_000, quarantineToken: TOKEN });
     expect(registered.serverProvenance.downloader).toMatchObject({ tool: "yt-dlp", version: "2026.08.19" });
     expect(registered.serverProvenance.audioPolicy).toBe("strip_audio");
   });
@@ -134,7 +137,7 @@ describe("ApifyService TikTok phase 2 via yt-dlp - VE2E-146", () => {
     expect(outcome.ok).toBe(true);
     expect(postRuns(stub)).toHaveLength(1);
     expect(outcome.ok && outcome.data.quality.ossFetchCode).toBe("register_failed:UNSUPPORTED_MEDIA");
-    expect(await readdir(join(root, "_quarantine")).then((names) => names.filter((n) => n.startsWith("123e4567")))).toEqual([]);
+    expect(await readdir(join(root, "_quarantine")).then((names) => names.filter((n) => n === TOKEN))).toEqual([]);
   });
 
   it("MEDIA_FETCH_YTDLP off (default): yt-dlp is never asked, behaviour unchanged", async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { MediaJobClientError, type MediaFetchJobInput, type MediaFetchResult, type MediaSearchJobInput, type MediaSearchResult } from "@lyonix/media-jobs";
 import type { SocialFetcher } from "./media-jobs.gateway.js";
@@ -8,7 +9,7 @@ import { SocialFetchService } from "./social-fetch.service.js";
 // VE2E-146: the API-side ladder (plain -> cookies rotation -> proxy) and the per-platform breaker. The worker is a fake gateway.
 
 const ok = (jobKey: string): MediaFetchResult => ({
-  schemaVersion: "media-job.v1", type: "media.fetch.result", ok: true, jobKey, quarantineToken: "123e4567-e89b-12d3-a456-426614174000", bytes: 1, sha256: "a".repeat(64), probe: null, info: {} as any,
+  schemaVersion: "media-job.v1", type: "media.fetch.result", ok: true, jobKey, quarantineToken: randomUUID(), bytes: 1, sha256: "a".repeat(64), probe: null, info: {} as any,
   attempts: [{ step: "plain", code: null, elapsedMs: 1 }], tool: { name: "yt-dlp", version: "v", profileVersion: "media-fetch.v1" }, elapsedMs: 1, completedAt: "",
 });
 const fail = (jobKey: string, code: string): MediaFetchResult => ({ schemaVersion: "media-job.v1", type: "media.fetch.result", ok: false, jobKey, error: { code: code as any, message: code, retryable: true, attempts: 1 }, attempts: [{ step: "plain", code: code as any, elapsedMs: 1 }], completedAt: "" });

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   buildMediaFetchJob,
@@ -63,7 +64,7 @@ describe("media.fetch contract (VE2E-144)", () => {
   });
 
   it("parses results and rejects malformed ones", () => {
-    const ok = { schemaVersion: MEDIA_JOB_SCHEMA_VERSION, type: MEDIA_FETCH_RESULT_TYPE, ok: true, jobKey: "k", quarantineToken: "123e4567-e89b-12d3-a456-426614174000", bytes: 10, sha256: "a".repeat(64), info: {}, attempts: [] };
+    const ok = { schemaVersion: MEDIA_JOB_SCHEMA_VERSION, type: MEDIA_FETCH_RESULT_TYPE, ok: true, jobKey: "k", quarantineToken: randomUUID(), bytes: 10, sha256: "a".repeat(64), info: {}, attempts: [] };
     expect(parseMediaFetchResult(ok)).not.toBeNull();
     expect(parseMediaFetchResult({ ...ok, quarantineToken: "../x" })).toBeNull();
     expect(parseMediaFetchResult({ schemaVersion: MEDIA_JOB_SCHEMA_VERSION, type: MEDIA_FETCH_RESULT_TYPE, ok: false, jobKey: "k", error: { code: "FETCH_FORBIDDEN", message: "", retryable: true, attempts: 2 } })).not.toBeNull();

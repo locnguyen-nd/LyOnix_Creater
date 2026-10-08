@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,13 +36,12 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-let tokenN = 0;
 const fakeSocialFetch = (items: SocialSearchItem[], download: (url: string) => Buffer | string) => {
   const search = vi.fn(async (): Promise<SocialSearchOutcome> => ({ ok: true, items, steps: [], elapsedMs: 5 }));
   const fetchPost = vi.fn(async (input: { url: string }): Promise<SocialFetchOutcome> => {
     const r = download(input.url);
     if (typeof r === "string") return { ok: false, code: r as any, message: r, steps: [], elapsedMs: 7 };
-    const token = `123e4567-e89b-12d3-a456-4266141740${String(tokenN++).padStart(2, "0")}`;
+    const token = randomUUID();
     await mkdir(join(root, "_quarantine"), { recursive: true });
     await writeFile(join(root, "_quarantine", token), r);
     return {
