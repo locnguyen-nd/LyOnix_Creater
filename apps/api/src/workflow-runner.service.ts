@@ -167,6 +167,16 @@ const mergeVisionUsage = (a: MediaPlanVisionUsage | null, b: MediaPlanVisionUsag
   return { calls: a.calls + b.calls, moderated: a.moderated + b.moderated, skippedSegments: a.skippedSegments + b.skippedSegments, maxCalls: a.maxCalls + b.maxCalls, modelId: a.modelId ?? b.modelId };
 };
 
+const envMs = (name: string, fallback: number, min: number) => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= min ? value : fallback;
+};
+/** VE2E-139: how often a worker touches the runs it owns. */
+export const workflowHeartbeatMs = () => envMs("WORKFLOW_HEARTBEAT_MS", 30_000, 1_000);
+/** VE2E-139: a run untouched for this long is considered orphaned. */
+export const workflowStaleMs = () => envMs("WORKFLOW_STALE_MS", 180_000, 5_000);
+const workflowRecoveryMaxAttempts = () => Math.floor(envMs("WORKFLOW_RECOVERY_MAX_ATTEMPTS", 3, 1));
+
 @Injectable()
 export class WorkflowRunnerService {
   constructor(
@@ -206,6 +216,11 @@ export class WorkflowRunnerService {
     const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
     if (claimed.count !== 1) return "lost_race";
     const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
+    // VE2E-139: heartbeat while this process owns the run, so `recoverStaleRuns` can tell a live run from one whose worker died.
+    const heartbeat = setInterval(() => {
+      void this.prisma.workflowRun.update({ where: { id: run.id }, data: { updatedAt: new Date() } }).catch(() => undefined);
+    }, workflowHeartbeatMs());
+    heartbeat.unref?.();
     const done = (async () => {
       try {
         await this.runPipeline(run);
@@ -215,9 +230,40 @@ export class WorkflowRunnerService {
         } catch (failure) {
           console.error("Workflow run failure handling failed", run.id, failure instanceof Error ? failure.message : "unknown error");
         }
+      } finally {
+        clearInterval(heartbeat);
       }
     })();
     return { done };
+  }
+
+  /**
+   * VE2E-139: re-queues Auto runs whose worker died mid-pipeline. A run in an active pre-render status that has not been touched
+   * (heartbeat / status change) for `WORKFLOW_STALE_MS` (default 3 min, 6 missed heartbeats) goes back to `draft` with its attempt
+   * counter bumped; steps left `running` become `failed` (WORKER_LOST) so the resume logic redoes only them. After
+   * `WORKFLOW_RECOVERY_MAX_ATTEMPTS` (default 3) the run fails visibly instead of looping. Returns how many runs were recovered.
+   */
+  async recoverStaleRuns(now: Date = new Date()): Promise<number> {
+    const cutoff = new Date(now.getTime() - workflowStaleMs());
+    const stale = await this.prisma.workflowRun.findMany({
+      where: { mode: "auto", deletedAt: null, status: { in: ["source_ready", "scripting", "voice_generating", "aligning", "media_preparing", "editing", "ready_to_render"] }, updatedAt: { lt: cutoff } },
+      select: { id: true, attempts: true },
+      take: 20,
+    });
+    let recovered = 0;
+    for (const run of stale) {
+      const lost = { code: "WORKER_LOST", message: "Worker dừng giữa chừng; run được xếp lại hàng đợi", retryable: true };
+      const exhausted = run.attempts >= workflowRecoveryMaxAttempts();
+      const claimed = await this.prisma.workflowRun.updateMany({
+        where: { id: run.id, updatedAt: { lt: cutoff } },
+        data: exhausted ? { status: "failed", lastError: { ...lost, retryable: false, message: "Worker dừng giữa chừng nhiều lần liên tiếp" } } : { status: "draft", attempts: { increment: 1 }, lastError: lost },
+      });
+      if (claimed.count !== 1) continue;
+      await this.prisma.stepRun.updateMany({ where: { workflowRunId: run.id, status: "running" }, data: { status: "failed", error: lost, endedAt: now } }).catch(() => undefined);
+      await this.prisma.providerOperation.updateMany({ where: { workflowRunId: run.id, status: "in_progress" }, data: { status: "failed", errorCode: "WORKER_LOST" } }).catch(() => undefined);
+      recovered += 1;
+    }
+    return recovered;
   }
 
   /** Claims up to `limit - inflight.size` draft runs and tracks them in `inflight` (frees a slot when a run ends). Returns how many started. */

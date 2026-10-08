@@ -39,6 +39,7 @@ const bootstrap = async () => {
   while (!stopping) {
     try {
       const prepared = await renders.processNextPreparation();
+      await runner.recoverStaleRuns().catch((error) => console.error("Stale run recovery failed", error instanceof Error ? error.message : "unknown"));
       const started = await runner.fillSlots(inflight, concurrency.workflow);
       await runner.reconcile();
       // Nothing new was started: wait for a running run to finish, or 1s (poll queue + parked renders), instead of spinning.
