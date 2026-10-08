@@ -1,12 +1,16 @@
 import { Film, Play, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { browserApiUrl } from "../studio/media-url";
 
-export function VideoThumbnail({ snapshotUrl, resultUrl, className = "" }: {
+export function VideoThumbnail({ snapshotUrl: rawSnapshotUrl, resultUrl: rawResultUrl, className = "" }: {
   snapshotUrl?: string | null | undefined;
   resultUrl?: string | null | undefined;
   className?: string;
 }) {
+  // An internal render's file is served by our API: load it from the API origin, not the provider-facing PUBLIC_BASE_URL.
+  const snapshotUrl = browserApiUrl(rawSnapshotUrl);
+  const resultUrl = browserApiUrl(rawResultUrl);
   const target = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   // An expired snapshot URL would show the browser's broken-image glyph: drop it and keep the placeholder.
@@ -36,13 +40,14 @@ export function VideoThumbnail({ snapshotUrl, resultUrl, className = "" }: {
   );
 }
 
-export function VideoPlayerDialog({ title, caption, url, onClose }: {
+export function VideoPlayerDialog({ title, caption, url: rawUrl, onClose }: {
   title: string;
   caption?: string | null;
   url: string;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const url = browserApiUrl(rawUrl);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };

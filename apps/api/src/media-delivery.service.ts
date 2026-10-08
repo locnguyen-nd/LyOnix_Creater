@@ -16,6 +16,16 @@ const hashToken = (raw: string) => createHash("sha256").update(raw).digest("hex"
 
 export type ResolvedDelivery = { absolutePath: string; mimeType: string; originalFileName: string; bytes: number };
 
+/**
+ * Who fetches the delivery URL:
+ * - "provider" (Creatomate, ...) is outside our network and needs the public absolute URL, so it requires PUBLIC_BASE_URL;
+ * - "browser" (Studio thumbnails / players) reaches the API directly and only needs `path`, resolved against the API origin
+ *   it already talks to. A stale or missing PUBLIC_BASE_URL (e.g. an expired dev tunnel) must not blank every thumbnail.
+ */
+export type DeliveryAudience = "provider" | "browser";
+
+export const deliveryPath = (rawToken: string) => `/api/v1/media-delivery/${rawToken}`;
+
 @Injectable()
 export class MediaDeliveryService {
   constructor(
@@ -24,8 +34,8 @@ export class MediaDeliveryService {
   ) {}
 
   /** Issue a short-lived, single-scope signed capability URL for exactly one media asset version. */
-  async issueToken(mediaAssetVersionId: string, userId: string, role: "admin" | "staff", ttlSeconds = DEFAULT_TTL_SEC) {
-    if (!publicBaseUrlConfigured()) return "not_configured" as const;
+  async issueToken(mediaAssetVersionId: string, userId: string, role: "admin" | "staff", ttlSeconds = DEFAULT_TTL_SEC, audience: DeliveryAudience = "provider") {
+    if (audience === "provider" && !publicBaseUrlConfigured()) return "not_configured" as const;
     const asset = await this.prisma.mediaAssetVersion.findFirst({ where: { id: mediaAssetVersionId, deletedAt: null } });
     if (!asset) return null;
     const grants = await this.grants.forUser(userId, role);
@@ -42,8 +52,9 @@ export class MediaDeliveryService {
         createdByUserId: userId,
       },
     });
-    const base = process.env.PUBLIC_BASE_URL!.replace(/\/$/, "");
-    return { token: raw, url: `${base}/api/v1/media-delivery/${raw}`, expiresAt: expiresAt.toISOString() };
+    const path = deliveryPath(raw);
+    const base = (process.env.PUBLIC_BASE_URL ?? "").trim().replace(/\/$/, "");
+    return { token: raw, url: base ? `${base}${path}` : path, path, expiresAt: expiresAt.toISOString() };
   }
 
   /** Resolve a raw delivery token to a server-controlled absolute path. Never trusts client-supplied paths. */

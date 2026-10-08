@@ -1,12 +1,12 @@
 import { useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, Image as ImageIcon, Images, Scissors, Search, Sparkles, UploadCloud, Video } from "lucide-react";
+import { Check, Image as ImageIcon, ImageOff, Images, RefreshCw, Scissors, Search, Sparkles, TriangleAlert, UploadCloud, Video } from "lucide-react";
 import type { MediaAssetVersionSummary, PexelsSearchResponse, ScriptVisualPlanResponse } from "@lyonix/contracts";
 import { ApiError } from "../api";
 import { Button } from "../components/ui";
 import { LazyThumb } from "../components/LazyThumb";
 import { ApifyMediaTab } from "./ApifyMediaTab";
-import { applyShortsPlanPreview, filterLibrary, formatClock, LIBRARY_FILTERS, type LibraryFilter } from "./media-picker-utils";
+import { applyShortsPlanPreview, filterLibrary, formatClock, LIBRARY_FILTERS, libraryView, type LibraryFilter, type LibraryStatus } from "./media-picker-utils";
 import { planShortsFromSource, type ShortsPlan } from "./auto-shorts";
 import { readLocalMediaMeta, uploadMediaFile } from "./upload-api";
 
@@ -15,7 +15,13 @@ type SourceTab = "library" | "pexels" | "apify" | "upload";
 export type MediaPickerProps = {
   projectId: string;
   library: MediaAssetVersionSummary[];
+  /** The project library request: a failed one shows an error with Retry instead of an empty grid. */
+  libraryStatus: LibraryStatus;
+  onRetryLibrary: () => void;
   thumbCache: Record<string, string>;
+  /** Assets whose preview could not be fetched or decoded (asset id -> error code): their tile shows a fallback, not a blank. */
+  thumbErrors: Record<string, string>;
+  onThumbError: (assetId: string) => void;
   selectedAssetId: string | null;
   selectedSceneLabel: string | null;
   onAssign: (asset: { id: string; label: string }) => void;
@@ -47,10 +53,10 @@ export type MediaPickerProps = {
 };
 
 const TAB_ICONS: Record<SourceTab, ReactNode> = {
-  library: <Images size={14} strokeWidth={1.9} />,
-  pexels: <Search size={14} strokeWidth={1.9} />,
-  apify: <Sparkles size={14} strokeWidth={1.9} />,
-  upload: <UploadCloud size={14} strokeWidth={1.9} />,
+  library: <Images size={15} strokeWidth={1.9} />,
+  pexels: <Search size={15} strokeWidth={1.9} />,
+  apify: <Sparkles size={15} strokeWidth={1.9} />,
+  upload: <UploadCloud size={15} strokeWidth={1.9} />,
 };
 
 const LIBRARY_PAGE = 12;
@@ -84,13 +90,83 @@ function SectionMessage({ children }: { children: ReactNode }) {
   return <p className="rounded-lg border border-dashed border-lyx-border px-3 py-6 text-center text-[11.5px] leading-5 text-lyx-fg-muted">{children}</p>;
 }
 
-function LibraryTab({ props, onCut }: { props: MediaPickerProps; onCut: (asset: MediaAssetVersionSummary) => void }) {
+/** Empty / error block of a tab: an icon, a title, one line of help and up to two actions - never a blank area. */
+export function PickerState({ tone = "neutral", icon, title, hint, actions, testId }: { tone?: "neutral" | "danger"; icon: ReactNode; title: string; hint?: string; actions?: ReactNode; testId?: string }) {
+  return (
+    <div role={tone === "danger" ? "alert" : "status"} data-testid={testId} className={`lyx-fade flex flex-col items-center gap-2 rounded-xl border border-dashed px-4 py-6 text-center ${tone === "danger" ? "border-lyx-danger/50 bg-lyx-danger-bg" : "border-lyx-border bg-lyx-muted"}`}>
+      <span className={`flex h-10 w-10 items-center justify-center rounded-xl bg-lyx-bg ${tone === "danger" ? "text-lyx-danger" : "text-lyx-fg-muted"}`} aria-hidden="true">{icon}</span>
+      <p className="text-[12.5px] font-semibold text-lyx-fg">{title}</p>
+      {hint ? <p className="max-w-[260px] text-[11px] leading-[17px] text-lyx-fg-muted">{hint}</p> : null}
+      {actions ? <div className="mt-1 flex flex-wrap justify-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
+/** Tile body while its preview is unavailable: a placeholder for "still loading", or a clear "no preview" for a failed file. */
+function ThumbPlaceholder({ kind, failed }: { kind: MediaAssetVersionSummary["kind"]; failed?: boolean }) {
   const { t } = useTranslation();
-  const { library, thumbCache, selectedAssetId, onAssign } = props;
+  if (failed) {
+    return (
+      <span className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-lyx-muted px-2 text-center text-lyx-fg-subtle">
+        <ImageOff size={20} strokeWidth={1.8} aria-hidden="true" />
+        <span className="text-[10px] leading-[14px]">{t("mediaPicker.thumbFailed")}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="lyx-skeleton flex h-full w-full items-center justify-center text-lyx-fg-subtle" role="img" aria-label={t("mediaPicker.thumbLoading")}>
+      {kind === "video" ? <Video size={22} strokeWidth={1.8} /> : <ImageIcon size={22} strokeWidth={1.8} />}
+    </span>
+  );
+}
+
+function LibraryTab({ props, onCut, onSwitchTab }: { props: MediaPickerProps; onCut: (asset: MediaAssetVersionSummary) => void; onSwitchTab: (tab: SourceTab) => void }) {
+  const { t } = useTranslation();
+  const { library, thumbCache, thumbErrors, selectedAssetId, onAssign } = props;
   const [filter, setFilter] = useState<LibraryFilter>("all");
   const [shown, setShown] = useState(LIBRARY_PAGE);
   const counts = useMemo(() => Object.fromEntries(LIBRARY_FILTERS.map((item) => [item, filterLibrary(library, item).length])) as Record<LibraryFilter, number>, [library]);
   const visible = filterLibrary(library, filter);
+  const view = libraryView(props.libraryStatus, counts.all, visible.length);
+  if (view === "loading") {
+    return (
+      <div className="flex flex-col gap-2" role="status" aria-label={t("mediaPicker.libraryLoading")} data-testid="library-loading">
+        <p className="text-[11px] text-lyx-fg-muted">{t("mediaPicker.libraryLoading")}</p>
+        <div className="grid grid-cols-2 gap-2">
+          {[0, 1, 2, 3].map((index) => <span key={index} className="lyx-skeleton aspect-[9/16] w-full rounded-lg" />)}
+        </div>
+      </div>
+    );
+  }
+  if (view === "failed") {
+    return (
+      <PickerState
+        tone="danger"
+        testId="library-failed"
+        icon={<TriangleAlert size={20} strokeWidth={1.9} />}
+        title={t("mediaPicker.libraryFailedTitle")}
+        hint={t("mediaPicker.libraryFailedHint")}
+        actions={<Button variant="secondary" onClick={props.onRetryLibrary}><RefreshCw size={13} strokeWidth={2} />{t("mediaPicker.retry")}</Button>}
+      />
+    );
+  }
+  if (view === "empty") {
+    return (
+      <PickerState
+        testId="library-empty"
+        icon={<Images size={20} strokeWidth={1.9} />}
+        title={t("mediaPicker.libraryEmptyTitle")}
+        hint={t("mediaPicker.libraryEmpty")}
+        actions={(
+          <>
+            <Button variant="secondary" onClick={() => onSwitchTab("pexels")}><Search size={13} strokeWidth={2} />{t("mediaPicker.findOnPexels")}</Button>
+            <Button variant="secondary" onClick={() => onSwitchTab("upload")}><UploadCloud size={13} strokeWidth={2} />{t("mediaPicker.upload.choose")}</Button>
+          </>
+        )}
+      />
+    );
+  }
+  const failedCount = visible.filter((asset) => thumbErrors[asset.id]).length;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("mediaPicker.tabs.library")}>
@@ -101,10 +177,19 @@ function LibraryTab({ props, onCut }: { props: MediaPickerProps; onCut: (asset: 
           </button>
         ))}
       </div>
-      {visible.length === 0 ? <SectionMessage>{t("mediaPicker.libraryEmpty")}</SectionMessage> : (
-        <div className="grid grid-cols-2 gap-2">
+      {failedCount > 0 ? (
+        <div role="alert" className="flex items-center justify-between gap-2 rounded-lg border border-lyx-warn/40 bg-lyx-warn-bg px-2.5 py-2 text-[11px] text-lyx-fg">
+          <span className="flex min-w-0 items-center gap-1.5"><TriangleAlert size={13} strokeWidth={2} className="shrink-0 text-lyx-warn" aria-hidden="true" />{t("mediaPicker.thumbFailedSome", { count: failedCount })}</span>
+          <button type="button" className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 font-semibold hover:bg-lyx-bg" onClick={props.onRetryLibrary}>
+            <RefreshCw size={12} strokeWidth={2} aria-hidden="true" />{t("mediaPicker.retry")}
+          </button>
+        </div>
+      ) : null}
+      {view === "no-match" ? <SectionMessage>{t("mediaPicker.libraryNoMatch")}</SectionMessage> : (
+        <div className="lyx-list grid grid-cols-2 gap-2">
           {visible.slice(0, shown).map((asset) => {
             const url = thumbCache[asset.id];
+            const failed = Boolean(thumbErrors[asset.id]);
             return (
               <MediaTile
                 key={asset.id}
@@ -118,7 +203,9 @@ function LibraryTab({ props, onCut }: { props: MediaPickerProps; onCut: (asset: 
                     <Scissors size={11} strokeWidth={2} />{t("mediaPicker.cutShorts")}
                   </button>
                 ) : null}
-                thumb={url && (asset.kind === "image" || asset.kind === "video") ? <LazyThumb kind={asset.kind} url={url} className="h-full w-full" /> : <span className="flex h-full w-full items-center justify-center text-lyx-fg-subtle">{asset.kind === "video" ? <Video size={22} /> : <ImageIcon size={22} />}</span>}
+                thumb={url && !failed && (asset.kind === "image" || asset.kind === "video")
+                  ? <LazyThumb kind={asset.kind} url={url} className="h-full w-full" fallback={<ThumbPlaceholder kind={asset.kind} failed />} onError={() => props.onThumbError(asset.id)} />
+                  : <ThumbPlaceholder kind={asset.kind} failed={failed} />}
               />
             );
           })}
@@ -301,13 +388,13 @@ export function MediaPicker(props: MediaPickerProps) {
       <div role="tablist" aria-label={t("mediaPicker.title")} className="grid grid-cols-4 gap-1 rounded-xl bg-lyx-neutral-bg p-1">
         {tabs.map((item) => (
           <button key={item} type="button" role="tab" aria-selected={tab === item} onClick={() => setTab(item)}
-            className={`flex flex-col items-center gap-0.5 rounded-lg px-1 py-1.5 text-[10.5px] transition-colors ${tab === item ? "bg-lyx-bg font-semibold shadow-sm" : "text-lyx-fg-muted hover:text-lyx-fg"}`}>
+            className={`flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors ${tab === item ? "bg-lyx-bg font-semibold text-lyx-fg shadow-sm" : "text-lyx-fg-muted hover:text-lyx-fg"}`}>
             {TAB_ICONS[item]}
             {t(`mediaPicker.tabs.${item}`)}
           </button>
         ))}
       </div>
-      {tab === "library" ? <LibraryTab props={props} onCut={(asset) => { setWorkAsset(asset); setTab("upload"); }} /> : null}
+      {tab === "library" ? <LibraryTab props={props} onCut={(asset) => { setWorkAsset(asset); setTab("upload"); }} onSwitchTab={setTab} /> : null}
       {tab === "pexels" ? <PexelsTab props={props} /> : null}
       {tab === "apify" ? (
         <ApifyMediaTab projectId={props.projectId} accountId={props.apify.accountId} visualPlan={props.apify.visualPlan} selectedSceneId={props.apify.selectedSceneId} fallbackKeyword={props.apify.fallbackKeyword} onImported={props.apify.onImported} />
