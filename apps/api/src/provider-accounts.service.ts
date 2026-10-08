@@ -20,13 +20,22 @@ import {
   findModelSnapshotEntry,
   type ContentModelSnapshotEntry,
 } from "@lyonix/providers";
+import { isSocialCookiePlatform, parseSocialCookies, type ParsedSocialCookies } from "@lyonix/domain";
 import { PrismaService } from "./prisma.service.js";
 import { encryptSecret, decryptSecret } from "./secret-crypto.js";
 
 /** `elevenlabs`/`tts` is the only supported non-content provider account today (VE2E-02). Omni remains B08-blocked. */
 const isSupportedTtsAccount = (provider: string, role: ProviderRole) => provider === "elevenlabs" && role === "tts";
 /** `pexels`/`youtube`/`pinterest` under `visual` (VE2E-04/VE2E-15b) — media search provider accounts. YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`); Pinterest is a manual-review-only candidate source with no reliable rights signal (see `packages/providers/src/pinterest.ts`). Google is still evaluated but not implemented (VE2E-15b) and stays unsupported here. */
-const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest" || provider === "apify");
+const isSupportedVisualAccount = (provider: string, role: ProviderRole) => role === "visual" && (provider === "pexels" || provider === "youtube" || provider === "pinterest" || provider === "apify" || provider === SOCIAL_COOKIES_PROVIDER);
+
+/**
+ * VE2E-145: a cookies.txt for yt-dlp / gallery-dl (CR-MEDIA-OSS-FETCH §3.3). `model` holds the platform (tiktok|youtube|pinterest|x|instagram),
+ * `encryptedSecret` the filtered Netscape file. Verify never calls the platform: it re-parses the file (format, domain, expiry); the
+ * live check is the fetch itself, whose COOKIES_INVALID / bot-check outcomes mark the account failed / cooling down.
+ */
+export const SOCIAL_COOKIES_PROVIDER = "social_cookies";
+export type CookieValidationFailure = { invalidCookies: Exclude<ParsedSocialCookies, { ok: true }>["reason"] | "bad_platform" };
 /** `creatomate`/`orshot` under `render` (VE2E-05) — render provider account (Orshot = cost-optimised second option). */
 /** Orshot stores its Embed ID (public, goes into the iframe URL — not a secret) in `model`; "n/a" = not configured. Strict charset keeps it safe to place in a URL path. */
 export const isValidOrshotModel = (model: string) => model === "n/a" || /^[A-Za-z0-9_-]{4,64}$/.test(model);
@@ -59,6 +68,8 @@ export type PublicProviderAccount = {
   isFake: boolean;
   /** On/off switch (meaningful for media sources pexels/apify; always true elsewhere). Off accounts are skipped by jobs and refused by Studio. */
   enabled: boolean;
+  /** VE2E-145: social_cookies only - earliest expiry of the stored session cookies (null = session-only cookies or other providers). */
+  secretExpiresAt?: string | null;
   version: number;
 };
 
@@ -70,7 +81,25 @@ const toPublicSnapshot = (raw: unknown): PublicModelSnapshotEntry[] => {
 };
 
 /** Providers that can be switched on/off (media sources). */
-export const SWITCHABLE_PROVIDERS: ReadonlySet<string> = new Set(["pexels", "apify"]);
+export const SWITCHABLE_PROVIDERS: ReadonlySet<string> = new Set(["pexels", "apify", "social_cookies"]);
+
+/** Validates + filters a cookies.txt for the platform; the account then stores only the platform's lines. */
+const prepareCookieSecret = (platform: string, secret: string): { ok: true; text: string } | { ok: false; failure: CookieValidationFailure } => {
+  if (!isSocialCookiePlatform(platform)) return { ok: false, failure: { invalidCookies: "bad_platform" } };
+  const parsed = parseSocialCookies(secret, platform);
+  return parsed.ok ? { ok: true, text: parsed.text } : { ok: false, failure: { invalidCookies: parsed.reason } };
+};
+
+/** Earliest expiry of a stored cookies account, read without exposing any value. */
+const cookieExpiry = (row: { provider: string; model: string; encryptedSecret: string }): string | null => {
+  if (row.provider !== SOCIAL_COOKIES_PROVIDER || !isSocialCookiePlatform(row.model)) return null;
+  try {
+    const parsed = parseSocialCookies(decryptSecret(row.encryptedSecret), row.model);
+    return parsed.ok ? parsed.earliestExpiresAt : null;
+  } catch {
+    return null;
+  }
+};
 
 const publicAccount = (row: { id: string; name: string; provider: string; role: string; scope: ProviderScope; ownerUserId: string | null; status: string; model: string; visionModel?: string | null; availableModels?: string[]; preferredModels?: string[]; modelSnapshot?: unknown; isFake: boolean; enabled?: boolean; version: number }): PublicProviderAccount => ({
   id: row.id,
@@ -112,7 +141,7 @@ export class ProviderAccountsService {
       where: { providerAccountId: { in: ids }, cooldownUntil: { gt: new Date() } },
       select: { providerAccountId: true, modelId: true, cooldownUntil: true },
     }) : [];
-    return rows.map((row) => ({ ...publicAccount(row), modelCooldowns: cooldowns.filter((item) => item.providerAccountId === row.id).map((item) => ({ modelId: item.modelId, cooldownUntil: item.cooldownUntil.toISOString() })) }));
+    return rows.map((row) => ({ ...publicAccount(row), ...(row.provider === SOCIAL_COOKIES_PROVIDER ? { secretExpiresAt: cookieExpiry(row) } : {}), modelCooldowns: cooldowns.filter((item) => item.providerAccountId === row.id).map((item) => ({ modelId: item.modelId, cooldownUntil: item.cooldownUntil.toISOString() })) }));
   }
 
   /** Candidates use the same account visibility rules as GET /provider-accounts; one org is the current tenant boundary. */
@@ -212,6 +241,11 @@ export class ProviderAccountsService {
     if (input.scope === "organization" && actorRole !== "admin") return null;
     if (!isSupportedAccount(input.provider, input.role)) return "unsupported" as const;
     if (input.provider === "orshot" && !isValidOrshotModel(input.model)) return "invalid" as const;
+    if (input.provider === SOCIAL_COOKIES_PROVIDER) {
+      const prepared = prepareCookieSecret(input.model, input.secret);
+      if (!prepared.ok) return prepared.failure;
+      input = { ...input, secret: prepared.text };
+    }
     const row = await this.prisma.providerAccount.create({
       data: {
         name: input.name,
@@ -247,6 +281,7 @@ export class ProviderAccountsService {
     if (!row || row === "forbidden") return row;
     if (isSupportedTtsAccount(row.provider, row.role as ProviderRole)) return this.verifyElevenLabs(row);
     if (isSupportedVisualAccount(row.provider, row.role as ProviderRole)) {
+      if (row.provider === SOCIAL_COOKIES_PROVIDER) return this.verifyCookies(row);
       if (row.provider === "youtube") return this.verifyYouTube(row);
       if (row.provider === "pinterest") return this.verifyPinterest(row);
       if (row.provider === "apify") return this.verifyApify(row);
@@ -401,6 +436,16 @@ export class ProviderAccountsService {
     }
   }
 
+  /** VE2E-145: cookies accounts are verified offline (format + platform domain + not expired); no request reaches the platform. */
+  private async verifyCookies(row: { id: string; model: string; encryptedSecret: string }) {
+    const prepared = isSocialCookiePlatform(row.model) ? parseSocialCookies(decryptSecret(row.encryptedSecret), row.model) : null;
+    if (prepared?.ok) {
+      return { ...publicAccount(await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "verified", cooldownUntil: null, version: { increment: 1 } } })), secretExpiresAt: prepared.earliestExpiresAt };
+    }
+    const failed = await this.prisma.providerAccount.update({ where: { id: row.id }, data: { status: "failed", version: { increment: 1 } } });
+    return { account: publicAccount(failed), code: "VALIDATION_FAILED" as const, message: `Cookies không dùng được (${prepared ? prepared.reason : "bad_platform"})` };
+  }
+
   /** Apify account preflight (VE2E-45): read-only `GET /v2/users/me`; never starts an Actor run. */
   private async verifyApify(row: { id: string; model: string; encryptedSecret: string }) {
     try {
@@ -468,12 +513,19 @@ export class ProviderAccountsService {
     if (!name || !model) return "invalid" as const;
     if (input.enabled !== undefined && (typeof input.enabled !== "boolean" || !SWITCHABLE_PROVIDERS.has(row.provider))) return "invalid" as const;
     if (row.provider === "orshot" && !isValidOrshotModel(model)) return "invalid" as const;
+    if (row.provider === SOCIAL_COOKIES_PROVIDER && input.model !== undefined && model !== row.model) return "invalid" as const;
+    let cookieSecret: string | null = null;
+    if (row.provider === SOCIAL_COOKIES_PROVIDER && input.secret?.trim()) {
+      const prepared = prepareCookieSecret(row.model, input.secret);
+      if (!prepared.ok) return prepared.failure;
+      cookieSecret = prepared.text;
+    }
     if (input.model !== undefined && row.availableModels.length > 0 && !row.availableModels.includes(model)) return "model_unavailable" as const;
     const visionModel = input.visionModel === undefined ? row.visionModel : input.visionModel?.trim() || null;
     if (visionModel && (!isLiveContentKind(row.provider) || !row.availableModels.includes(visionModel))) return "model_unavailable" as const;
     const preferredModels = input.preferredModels === undefined ? (row.preferredModels ?? []) : [...new Set(input.preferredModels.map((item) => item.trim()))];
     if (preferredModels.some((item) => !item || !row.availableModels.includes(item))) return "model_unavailable" as const;
-    const secret = input.secret?.trim();
+    const secret = cookieSecret ?? input.secret?.trim();
     let modelSnapshotUpdate: ContentModelSnapshotEntry[] | undefined;
     // V00-10: a content model switch is an explicit user action - reject unknown/retired/unsupported
     // outright (handled by the availableModels check above), and re-verify against the real generate

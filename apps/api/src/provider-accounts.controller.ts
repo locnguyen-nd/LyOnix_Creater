@@ -6,6 +6,16 @@ import { normalizedError, success } from "./envelopes.js";
 import { CURATED_CONTENT_MODELS, CURATED_ELEVENLABS_MODELS } from "@lyonix/providers";
 import { ProviderAccountsService, type ProviderRole, type ProviderScope } from "./provider-accounts.service.js";
 
+/** VE2E-145: why a cookies.txt was refused (never echoes any cookie content). */
+const COOKIE_MESSAGES: Record<string, string> = {
+  bad_platform: "Nền tảng cookies không hợp lệ (tiktok, youtube, pinterest, x, instagram)",
+  not_netscape: "Cookies phải ở định dạng Netscape cookies.txt (xuất bằng tiện ích trình duyệt)",
+  no_platform_cookies: "File không có cookie nào của nền tảng đã chọn",
+  all_expired: "Mọi cookie của nền tảng đã hết hạn; đăng nhập lại và xuất lại",
+  too_large: "File cookies quá lớn (tối đa 256 KB)",
+};
+const cookieMessage = (reason: string): string => COOKIE_MESSAGES[reason] ?? "Cookies không hợp lệ";
+
 type CreateBody = { name?: string; provider?: string; role?: ProviderRole; scope?: ProviderScope; model?: string; secret?: string };
 type UpdateBody = { name?: string; model?: string; visionModel?: string | null; preferredModels?: string[]; secret?: string; enabled?: boolean };
 
@@ -58,8 +68,9 @@ export class ProviderAccountsController {
     }
     try {
       const account = await this.accounts.create({ name: body.name.trim(), provider: body.provider, role: body.role!, scope: body.scope!, model: body.model.trim(), secret: body.secret }, user.id, user.role);
-      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify (visual) hoặc Creatomate/Orshot (render)", requestId(response));
+      if (account === "unsupported") throw normalizedError("VALIDATION_FAILED", "Chỉ hỗ trợ OpenAI, Gemini, xAI (content), ElevenLabs (tts), Pexels/YouTube/Pinterest/Apify/cookies (visual) hoặc Creatomate/Orshot (render)", requestId(response));
       if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Orshot Embed ID không hợp lệ (chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
+      if (account && "invalidCookies" in account) throw normalizedError("VALIDATION_FAILED", cookieMessage(account.invalidCookies), requestId(response));
       if (!account) throw normalizedError("FORBIDDEN", "Không có quyền tạo tài khoản tổ chức", requestId(response), 403);
       return success(account, requestId(response));
     } catch (error) {
@@ -97,6 +108,7 @@ export class ProviderAccountsController {
     if (account === "forbidden") throw normalizedError("FORBIDDEN", "Không có quyền sửa tài khoản provider này", requestId(response), 403);
     if (account === "conflict") throw normalizedError("VERSION_CONFLICT", "Tài khoản đã được cập nhật ở nơi khác. Hãy tải lại.", requestId(response), 409);
     if (account === "invalid") throw normalizedError("VALIDATION_FAILED", "Tên/model không hợp lệ, hoặc chỉ Pexels/Apify mới bật/tắt được (Orshot Embed ID: chỉ chữ, số, _ và -, 4-64 ký tự)", requestId(response));
+    if (typeof account === "object" && "invalidCookies" in account) throw normalizedError("VALIDATION_FAILED", cookieMessage(account.invalidCookies), requestId(response));
     if (account === "model_unavailable") throw normalizedError("PROVIDER_CAPABILITY_UNAVAILABLE", "Model không nằm trong capability đã xác thực", requestId(response));
     response.setHeader("ETag", `"${account.version}"`);
     return success(account, requestId(response));
