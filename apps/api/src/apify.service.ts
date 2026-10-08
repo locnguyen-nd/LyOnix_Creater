@@ -49,6 +49,7 @@ import {
   canWriteProjectResource,
   decideMediaSelection,
   rankMediaCandidates,
+  candidateSubjectMatch,
   selectSocialCandidates,
   socialWindowOptionsFromEnv,
   type MediaCandidate,
@@ -823,6 +824,14 @@ export class ApifyService {
     // (quota / timeout / no vision account): the metadata ranking decides. Studio and the `lenient` fill keep their previous rules.
     const visionRan = pool.some((candidate) => candidate.moderationDecision !== null);
     const requireVerified = !input.allowUnverified && !input.lenient && !(job.vision.unattended && !visionRan);
+    // VE2E-142: with no vision verdict to vouch for the clips, a video that never names the main subject (caption/hashtags/author) is off-topic
+    // (Messi video -> church service). Gate on the subject's aliases; no on-subject candidate = this tier yields nothing and the next tier / ladder runs.
+    if (job.vision.unattended && !visionRan && input.brief.subjectAliases?.length && !/^(0|false|off)$/i.test(process.env.APIFY_SUBJECT_GATE ?? "")) {
+      const onSubject = pool.filter((candidate) => candidateSubjectMatch(candidate, input.brief) > 0);
+      quality.rejected = { ...quality.rejected, off_subject: pool.length - onSubject.length };
+      if (onSubject.length === 0) return fail("apify_no_on_subject_candidate");
+      pool = onSubject;
+    }
     let ranked = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds });
     let phase2Failure = "";
     let decision: Extract<ReturnType<typeof decideMediaSelection>, { decision: "auto_select" }> | null = null;

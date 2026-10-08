@@ -160,7 +160,7 @@ describe("MediaPlanService", () => {
       ],
     };
 
-    it("plans with real voice durations and reports a failed segment instead of failing the whole plan", async () => {
+    it("plans with real voice durations and (VE2E-140) takes another window of the 30 s clip for a segment without its own source (never unbound)", async () => {
       prisma.scriptDraftVersion.findUnique = vi.fn(async () => scriptRow);
       prisma.audioVersion.findMany = vi.fn(async () => [{ sceneDraftVersionId: "sd-1", durationMs: 6000 }, { sceneDraftVersionId: "sd-2", durationMs: 7000 }]);
       let call = 0;
@@ -180,10 +180,10 @@ describe("MediaPlanService", () => {
           range: { min: 2, max: 3 },
           scenes: [
             { sceneId: "s1", mediaAssetVersionId: "a1", segmentId: "seg-1", sourceStartMs: 0, sourceDurationMs: 6000 },
-            { sceneId: "s2", mediaAssetVersionId: null, segmentId: null, sourceStartMs: null, sourceDurationMs: null },
+            { sceneId: "s2", mediaAssetVersionId: "a1", segmentId: "seg-2", sourceStartMs: 6000, sourceDurationMs: 7000 },
           ],
-          segments: [{ segmentId: "seg-1", sceneIds: ["s1"], mediaAssetVersionId: "a1" }],
-          diagnostics: [{ segmentId: "seg-1", sourcing: "imported" }, { segmentId: "seg-2", sourcing: "failed", errorCode: "MEDIA_RELEVANCE_BELOW_THRESHOLD" }],
+          segments: [{ segmentId: "seg-1", sceneIds: ["s1"], mediaAssetVersionId: "a1" }, { segmentId: "seg-2", sceneIds: ["s2"], mediaAssetVersionId: "a1" }],
+          diagnostics: [{ segmentId: "seg-1", sourcing: "imported" }, { segmentId: "seg-2", sourcing: "reused", errorCode: null }],
         },
       });
     });

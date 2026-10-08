@@ -19,8 +19,8 @@ export const ENTRY_MODES = ["manual", "auto"] as const;
 export const MANUAL_MODES = ["topic", "revise"] as const;
 export const AUTO_SOURCE_TYPES = ["topic", "raw_script", "article_url"] as const;
 export const CONTENT_LANGUAGES = ["vi", "en", "ja", "ko"] as const;
-export const DURATION_TARGETS = ["30-45s", "45-65s", "65-90s"] as const;
-export const SCENE_COUNT_TARGETS = ["6-8", "8-12", "12-16"] as const;
+export const DURATION_TARGETS = ["10-20s", "30-45s", "45-65s", "65-90s"] as const;
+export const SCENE_COUNT_TARGETS = ["3-5", "6-8", "8-12", "12-16"] as const;
 /** VE2E-94: "" = the template's own caption style, else a caption preset id (an id no longer in the catalog is dropped on restore). */
 export const CAPTION_PRESET_CHOICES: readonly string[] = ["", ...CAPTION_PRESETS.map((item) => item.id)];
 export const ORSHOT_FORMAT_CHOICES = ["", "mp4", "webm", "mov", "gif"] as const;

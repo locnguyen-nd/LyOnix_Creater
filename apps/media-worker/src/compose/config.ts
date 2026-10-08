@@ -14,6 +14,10 @@ export type ComposeConfig = {
   x264Preset: X264Preset;
   /** x264/filter threads per render; 0 = FFmpeg decides (all cores). */
   x264Threads: number;
+  /** VE2E-143: x264 CRF of the final video (default 21; 18 produced 9 Mbps outliers for a social short). Optional so older callers keep working. */
+  x264Crf?: number;
+  /** VE2E-143: VBV maxrate in kbit/s (default 8000, 0 = uncapped); bounds the file size of busy footage. */
+  x264MaxrateKbps?: number;
   /** Extra font directory handed to libass (`fontsdir`); null = system fonts only. */
   fontsDir: string | null;
 };
@@ -38,6 +42,7 @@ const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
  * - MEDIA_WORKER_RENDER_QUEUE (default `lyonix.render`)
  * - MEDIA_WORKER_RENDER_PREFETCH (default 1, 1..4, never above the CPU count)
  * - RENDER_X264_PRESET (default `faster`), RENDER_X264_THREADS (default 0 = auto, 0..64)
+ * - RENDER_X264_CRF (default 21, 14..30), RENDER_X264_MAXRATE_KBPS (default 8000, 0 = uncapped)
  * - RENDER_JOB_TIMEOUT_MS (default 15 min, 10 s..2 h)
  * - RENDER_FONTS_DIR (extra fonts directory for libass; relative paths resolve against the repo root)
  */
@@ -51,6 +56,8 @@ export const loadComposeConfig = (env: NodeJS.ProcessEnv, repoRoot: string, cpuC
     timeoutMs: readInt(env, "RENDER_JOB_TIMEOUT_MS", 15 * 60_000, 10_000, 2 * 60 * 60_000),
     x264Preset: preset,
     x264Threads: readInt(env, "RENDER_X264_THREADS", 0, 0, 64),
+    x264Crf: readInt(env, "RENDER_X264_CRF", 21, 14, 30),
+    x264MaxrateKbps: readInt(env, "RENDER_X264_MAXRATE_KBPS", 8000, 0, 100_000),
     fontsDir: fontsRaw ? (isAbsolute(fontsRaw) ? fontsRaw : resolve(repoRoot, fontsRaw)) : null,
   };
 };

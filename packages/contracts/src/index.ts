@@ -1401,8 +1401,8 @@ export type JobNewFormValues = {
   autoRawScript: string;
   autoArticleUrl: string;
   contentAccountId: string;
-  durationTarget: "30-45s" | "45-65s" | "65-90s";
-  sceneCountTarget: "6-8" | "8-12" | "12-16";
+  durationTarget: "10-20s" | "30-45s" | "45-65s" | "65-90s";
+  sceneCountTarget: "3-5" | "6-8" | "8-12" | "12-16";
   backgroundSegmentsChoice: string;
   voiceAccountId: string;
   voiceId: string;

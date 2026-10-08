@@ -239,15 +239,38 @@ export const applyExtractedKeywords = (segments: readonly PlannedSegment[], extr
   }
 };
 
+const normalizeSubjectKey = (subject: string | null | undefined): string => (subject ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+
+/** Env `CLIP_WINDOW_REUSE` (default on): a segment whose subject already has a clip in this job takes another free window of it before any new search. */
+const clipWindowReuseEnabled = () => !/^(0|false|off|no)$/i.test(process.env.CLIP_WINDOW_REUSE ?? "");
+
+/**
+ * Same-subject window reuse: one downloaded clip often holds far more footage than the segment that chose it used. A later segment
+ * about the same subject claims a free, long-enough window of that clip (synchronously, so parallel segments never share one) instead
+ * of paying for another search + download. Not a degraded source: the clip already passed the relevance filters for this subject.
+ */
+export function claimSameSubjectWindow(ledger: SegmentSourceLedger, segment: PlannedSegment): SegmentSource | null {
+  const subject = normalizeSubjectKey(segment.subject);
+  if (!subject || !clipWindowReuseEnabled()) return null;
+  const candidates = [...ledger.clips].filter(([, clip]) => clip.subjects.has(subject));
+  const pick = findFreeWindow(candidates.map(([id, clip]) => ({ id, durationMs: clip.durationMs, usedWindows: clip.windows, ...windowOptionsFor(clip.provider) })), segment.durationMs, { minPartialRatio: 1 });
+  if (!pick || !pick.full) return null;
+  const clip = ledger.clips.get(pick.clipId)!;
+  clip.windows.push({ startMs: pick.startMs, endMs: pick.startMs + pick.durationMs });
+  return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), tier: "clip", window: { startMs: pick.startMs, durationMs: pick.durationMs } };
+}
+
 /** L4 bookkeeping: remember a chosen video clip and the window of it this segment occupies, so another segment can use a different one. */
 const registerClipWindow = (ledger: SegmentSourceLedger, source: SegmentSource, segment: PlannedSegment, scenes: MediaPlanScene[]) => {
-  if (source.kind !== "video" || source.degraded || !source.durationMs || source.durationMs <= 0) return;
+  if (source.kind !== "video" || source.degraded || source.window || !source.durationMs || source.durationMs <= 0) return;
   const plan = computeWindowRangesWithLoopFallback(scenes, source.durationMs, windowOptionsFor(source.provider));
   const starts = plan?.ranges.map((range) => range.sourceStartMs) ?? [];
   const ends = plan?.ranges.map((range) => range.sourceStartMs + range.sourceDurationMs) ?? [];
   const window = plan && starts.length > 0 ? { startMs: Math.min(...starts), endMs: Math.max(...ends) } : { startMs: 0, endMs: Math.min(segment.durationMs, source.durationMs) };
-  const clip = ledger.clips.get(source.mediaAssetVersionId) ?? { durationMs: source.durationMs, provider: source.provider, windows: [] as ClipWindow[] };
+  const clip = ledger.clips.get(source.mediaAssetVersionId) ?? { durationMs: source.durationMs, provider: source.provider, windows: [] as ClipWindow[], subjects: new Set<string>() };
   clip.windows.push(window);
+  const subject = normalizeSubjectKey(segment.subject);
+  if (subject) clip.subjects.add(subject);
   ledger.clips.set(source.mediaAssetVersionId, clip);
 };
 
@@ -819,6 +842,8 @@ export class MediaPlanService {
        * pay for needless extra sources; the post-TTS reconcile pass searches the uncovered tail with the real durations.
        */
       allowSecondSource?: boolean;
+      /** Segment ids already used by pieces sourced elsewhere in the same run (e.g. reused early pieces): a second-source tail id must not collide with them. */
+      reservedSegmentIds?: readonly string[];
       /**
        * VE2E-130 (Auto): the media step never fails the job. A segment the primary tiers (ja/en/broad/Pexels) cannot source - including
        * one whose `runImport` threw - falls down the degraded ladder L4 (other window of a clip of this job) -> L5 (stock image + Ken
@@ -856,7 +881,7 @@ export class MediaPlanService {
      * sourced as their own segment (`<id>-b`), up to {@link MAX_SECOND_SOURCE_SPLITS} times. If the extra source cannot be found the
      * original single-source behaviour is kept, so a run never fails because of this refinement.
      */
-    const takenIds = new Set(input.segments.map((item) => item.segmentId));
+    const takenIds = new Set([...input.segments.map((item) => item.segmentId), ...(input.reservedSegmentIds ?? [])]);
     const uniqueSegmentId = (base: string): string => {
       let candidate = base;
       for (let n = 2; takenIds.has(candidate); n += 1) candidate = `${base}${n}`;
@@ -886,6 +911,7 @@ export class MediaPlanService {
     const one = async (segment: PlannedSegment): Promise<SourcedSegment> => {
       let source = await this.findReusableSource(projectId, segment, input.ledger);
       let errorCode: string | null = null;
+      if (!source) source = claimSameSubjectWindow(input.ledger, segment);
       if (!source) {
         const task = () => this.importSegmentSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, job });
         const imported = await (input.runImport ? input.runImport(segment, task) : task());
@@ -1089,7 +1115,11 @@ export class MediaPlanService {
     const totalSeconds = planScript.scenes.reduce((total, scene) => total + sceneDuration(scene), 0) / 1000;
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
-    const { sourced, apifyUsage, visionUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger, beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
+    const { sourced, apifyUsage, visionUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger,
+      // VE2E-140: Studio auto-fill uses the same never-fails ladder as Auto (L4 other window / L5 stock photo / L6 brand background, flagged degraded),
+      // so one click binds every scene instead of leaving some unbound and blocking the render (it used to need 3 clicks).
+      guaranteeSource: true,
+      beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
     const built = this.buildBindings(planScript, sourced);
     return {
       ok: true,

@@ -32,6 +32,17 @@ describe("buildAutoRenderAssignments", () => {
     ] });
     expect(buildAutoTimelineOptionValues(slots, scenes, { title: "Title", caption: "Caption" })).toEqual({});
   });
+  it("fills `@badge` text slots and ignores required slots of pages beyond the scene count", () => {
+    const slots: AutoTemplateSlot[] = ["1", "2", "3"].flatMap((n) => [
+      { key: `page${n}@media`, kind: "video" as const, required: true },
+      { key: `page${n}@subtitle`, kind: "text" as const, required: true },
+      { key: `page${n}@badge`, kind: "text" as const, required: true },
+    ]);
+    const scenes = [1, 2].map((n) => scene({ sceneId: String(n), orderIndex: n, visualKind: "video", visualMediaAssetVersionId: `v${n}`, displayText: `Lời ${n}`, tagText: `Nhãn ${n}` }));
+    const result = buildAutoRenderAssignments(slots, scenes);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.assignments).toContainEqual({ modificationKey: "page2@badge", kind: "text", text: "Nhãn 2" });
+  });
   it("fails fast on zero scenes", () => {
     expect(buildAutoRenderAssignments([], [])).toEqual({ ok: false, reason: "no_scenes" });
   });

@@ -22,6 +22,8 @@ const fail = (status: number, retryAfter: string | null, body: unknown): never =
   const record = (body ?? {}) as Record<string, unknown>;
   const message = typeof record.error === "string" ? record.error : typeof record.message === "string" ? record.message : "";
   const suffix = message ? `: ${redact(message)}` : "";
+  // 403 with a plan message ("Video generation is available on supported plans") means the key is valid but the plan cannot do this: not an auth failure.
+  if (status === 403 && /plan|upgrade|subscription|credit/i.test(message)) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Orshot plan does not allow this${suffix}`, false);
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Orshot authentication failed${suffix}`, false);
   if (status === 404) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Orshot template or render not found${suffix}`, false);
   if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Orshot credits exhausted${suffix}`, false);
@@ -192,4 +194,21 @@ export async function submitOrshotRender(apiKey: string, input: SubmitOrshotRend
 export async function getOrshotRender(apiKey: string, externalJobId: string): Promise<CreatomateRenderResult> {
   const body = (await call(`/studio/render-jobs/${encodeURIComponent(externalJobId)}`, apiKey, { method: "GET" })) as Record<string, unknown>;
   return toRenderResult(body);
+}
+
+export type OrshotPlan = { planType: string | null; planTitle: string | null; videoRender: boolean };
+
+/**
+ * VE2E-141: the account's plan (`GET /v1/me`, read-only, no credit). Video rendering is not available on the Free plan
+ * (`POST /studio/render` answers 403 "Video generation is available on supported plans"), so Auto/Studio can refuse BEFORE spending
+ * LLM, TTS and media credits on a render that cannot happen. Unknown plan shape = allowed (the render's own 403 stays the source of truth).
+ */
+export async function getOrshotPlan(apiKey: string): Promise<OrshotPlan> {
+  const body = (await call("/me", apiKey, { method: "GET" })) as Record<string, unknown>;
+  const data = (body.data && typeof body.data === "object" ? body.data : body) as Record<string, unknown>;
+  const plan = (data.plan && typeof data.plan === "object" ? data.plan : {}) as Record<string, unknown>;
+  const planType = typeof plan.type === "string" ? plan.type : null;
+  const features = (plan.features && typeof plan.features === "object" ? plan.features : null) as Record<string, unknown> | null;
+  const explicit = features && typeof features.video_rendering === "boolean" ? features.video_rendering : features && typeof features.videoRendering === "boolean" ? features.videoRendering : null;
+  return { planType, planTitle: typeof plan.title === "string" ? plan.title : null, videoRender: explicit ?? planType?.toLowerCase() !== "free" };
 }

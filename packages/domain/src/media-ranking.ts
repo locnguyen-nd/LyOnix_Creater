@@ -317,6 +317,12 @@ const candidateAuthor = (candidate: MediaCandidate): string | null => candidate.
 const computeSubjectMatch = (candidate: MediaCandidate, brief: SceneBrief): number =>
   brief.subjectAliases?.length ? subjectMatchScore({ subject: null, aliases: brief.subjectAliases, mustInclude: [], mustExclude: [] }, { text: candidate.descriptorText, author: candidateAuthor(candidate) }) : 0;
 
+/**
+ * VE2E-142: does the candidate's own metadata (caption / hashtags / author) name the video's main subject? 0 = no mention. Only meaningful when
+ * the brief carries subject aliases; used as a hard on-topic gate when no vision verdict exists to vouch for the clip.
+ */
+export const candidateSubjectMatch = (candidate: MediaCandidate, brief: SceneBrief): number => computeSubjectMatch(candidate, brief);
+
 /** A candidate whose own descriptive text matches an explicit scene exclusion is a hard filter, not just a low score - only checkable when the source provides descriptive text at all. */
 const matchesExclusion = (candidate: MediaCandidate, brief: SceneBrief): boolean => {
   if (brief.exclusions.length === 0 || !candidate.descriptorText) return false;

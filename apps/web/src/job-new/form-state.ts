@@ -15,6 +15,7 @@ import {
 import type { PublicChannel } from "../channel-api";
 import type { ApiProvider } from "../jobs-api";
 
+import { RENDER_DEFAULT_RANK } from "../studio/render-provider";
 export const usableAccounts = (providers: readonly ApiProvider[], role: ApiProvider["role"]) =>
   providers.filter((item) => item.role === role && item.enabled !== false && (item.isFake || item.status === "verified"));
 
@@ -31,7 +32,8 @@ export function creationLists(channels: readonly PublicChannel[], providers: rea
     contentIds: usableAccounts(providers, "content").map((account) => account.id),
     voiceIds: usableAccounts(providers, "tts").map((account) => account.id),
     mediaIds: mediaAccountsOf(providers).map((account) => account.id),
-    renderIds: usableAccounts(providers, "render").map((account) => account.id),
+    // VE2E-140: Creatomate first, LyOnix next, Orshot (template-only, video plan needed) last - the first id is the autofilled default.
+    renderIds: [...usableAccounts(providers, "render")].sort((a, b) => (RENDER_DEFAULT_RANK[a.provider] ?? 1) - (RENDER_DEFAULT_RANK[b.provider] ?? 1)).map((account) => account.id),
   };
 }
 

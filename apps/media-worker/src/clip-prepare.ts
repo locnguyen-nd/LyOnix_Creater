@@ -20,6 +20,10 @@ import {
 } from "@lyonix/media-jobs";
 import {
   buildCopyArgs,
+  buildCropdetectArgs,
+  decideBarCrop,
+  parseCropdetect,
+  type BarCrop,
   buildImageCropArgs,
   buildKeyframeProbeArgs,
   buildProbeArgs,
@@ -64,7 +68,7 @@ export const sha256File = (path: string): Promise<string> =>
 const toPosix = (path: string) => path.split(sep).join("/");
 
 export type ClipPrepareProcessorDeps = {
-  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts"> & Partial<Pick<MediaWorkerConfig, "ffmpegThreads" | "smoothCheck">>;
+  config: Pick<MediaWorkerConfig, "mediaRoot" | "ffmpegPath" | "ffprobePath" | "copyToleranceMs" | "jobTimeoutMs" | "maxAttempts"> & Partial<Pick<MediaWorkerConfig, "ffmpegThreads" | "smoothCheck" | "barCrop">>;
   runner: ProcessRunner;
   ffmpegVersion: string;
   now?: () => Date;
@@ -212,6 +216,20 @@ export class ClipPrepareProcessor {
     return parsed.probe;
   }
 
+  /** VE2E-143: cropdetect on 2 s of the cut. Best effort: any failure means "no bars". */
+  private async detectBarCrop(path: string, probe: ProbeInfo, startMs: number): Promise<BarCrop | null> {
+    if (this.deps.config.barCrop !== true) return null; // opt-in at the processor level (config loader enables it by default)
+    try {
+      const sampleStart = Math.min(startMs, Math.max(0, probe.durationMs - 3500));
+      const result = await this.deps.runner(this.deps.config.ffmpegPath, buildCropdetectArgs(path, sampleStart), { timeoutMs: Math.min(this.deps.config.jobTimeoutMs, 20_000), maxStdoutBytes: 64 * 1024 });
+      if (result.exitCode !== 0) return null;
+      return decideBarCrop(probe.video, parseCropdetect(result.stderrTail));
+    } catch (error) {
+      if (error instanceof BinaryNotFoundError) throw error;
+      return null;
+    }
+  }
+
   private async probeKeyframes(path: string, probe: ProbeInfo, startMs: number): Promise<number[] | null> {
     try {
       const result = await this.deps.runner(
@@ -353,6 +371,8 @@ export class ClipPrepareProcessor {
     if (!range.ok) throw new MediaJobError("RANGE_OUT_OF_BOUNDS", range.message);
 
     const keyframes = await this.probeKeyframes(sourcePath, probe, job.startMs);
+    // VE2E-143: a reframe crop plan already decides the window; otherwise remove baked-in letterbox bars before the cover-crop.
+    const barCrop = job.cropPlan ? null : await this.detectBarCrop(sourcePath, probe, job.startMs);
     let plan: ClipPlan = planClip({
       probe,
       keyframesMs: keyframes,
@@ -362,6 +382,7 @@ export class ClipPrepareProcessor {
       target: job.target,
       toleranceMs: copyToleranceMs,
       cropPlan: job.cropPlan ?? null,
+      barCrop,
     });
 
     const partialPath = join(jobDir, `${OUTPUT_FILE}.partial`);
@@ -374,7 +395,7 @@ export class ClipPrepareProcessor {
       await this.encode(
         current.mode === "copy"
           ? buildCopyArgs(current, sourcePath, partialPath, job.stripAudio)
-          : buildReencodeArgs(current, sourcePath, partialPath, job.stripAudio, job.target, probe.video.fps, job.cropPlan ?? null),
+          : buildReencodeArgs(current, sourcePath, partialPath, job.stripAudio, job.target, probe.video.fps, job.cropPlan ?? null, barCrop),
       );
       return this.probe(partialPath).catch((error: unknown) => {
         throw new MediaJobError("OUTPUT_INVALID", `output probe failed: ${error instanceof Error ? error.message : "unknown"}`);
