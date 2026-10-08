@@ -85,9 +85,14 @@ export function buildAutoRenderAssignments(
         assigned.add(mediaKey);
       }
       putText(`page${page}@subtitle`, scene.displayText);
-      putText(`page${page}@tag`, scene.tagText?.trim() || scene.displayText);
+      // Every other text slot of the page (`@tag`, `@badge`, `@title`, ...) is a short on-screen label: filling only `@tag` left required `@badge` slots empty.
+      for (const slot of slots) {
+        if (slot.key.startsWith(`page${page}@`) && slot.key !== `page${page}@subtitle`) putText(slot.key, scene.tagText?.trim() || scene.displayText);
+      }
     }
-    const missingKeys = slots.filter((slot) => slot.required && !assigned.has(slot.key)).map((slot) => slot.key);
+    // Pages past the last scene are not rendered (`orshotIncludePages`), so their required slots are not missing.
+    const usedPages = Math.min(orderedScenes.length, pageCount);
+    const missingKeys = slots.filter((slot) => slot.required && !assigned.has(slot.key) && Number(/^page(\d+)@/.exec(slot.key)?.[1] ?? 0) <= usedPages).map((slot) => slot.key);
     return missingKeys.length ? { ok: false, reason: "missing_required_slot", missingKeys } : { ok: true, assignments };
   }
 

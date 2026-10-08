@@ -120,7 +120,10 @@ export function buildRenderAssignmentsFromTimeline(
       }
       const subtitle = (scene.screenTextOverride?.trim() || scene.audioNarration?.trim() || scene.fallbackScreenText?.trim() || "");
       const tag = scene.fallbackScreenText?.trim() || subtitle;
-      for (const [key, value] of [[`page${page}@subtitle`, subtitle], [`page${page}@tag`, tag]] as const) {
+      // `@subtitle` carries the narration; every other text slot of the page (`@tag`, `@badge`, ...) is a short label.
+      const pageTextSlots: Array<readonly [string, string]> = [[`page${page}@subtitle`, subtitle]];
+      for (const slot of slots) if (slot.key.startsWith(`page${page}@`) && slot.key !== `page${page}@subtitle`) pageTextSlots.push([slot.key, tag]);
+      for (const [key, value] of pageTextSlots) {
         if (slotByKey.get(key)?.kind !== "text" || !value) continue;
         assignments.push({ modificationKey: key, kind: "text", text: value });
         claimed.add(key);
@@ -136,7 +139,7 @@ export function buildRenderAssignmentsFromTimeline(
       else continue;
       claimed.add(slot.key);
     }
-    return { assignments, filledModificationKeys: [...claimed], missingRequiredModificationKeys: slots.filter((slot) => slot.required && !claimed.has(slot.key)).map((slot) => slot.key), videoSlotKeyBySceneId };
+    return { assignments, filledModificationKeys: [...claimed], missingRequiredModificationKeys: slots.filter((slot) => slot.required && !claimed.has(slot.key) && Number(/^page(\d+)@/.exec(slot.key)?.[1] ?? 0) <= Math.min(orderedScenes.length, pageCount)).map((slot) => slot.key), videoSlotKeyBySceneId };
   }
   const videoSlots = byKind(slots, "video");
   const imageSlots = byKind(slots, "image");

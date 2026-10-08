@@ -32,7 +32,7 @@ import type { DurationBudgetDiagnostics, MediaPlanApifyUsage, MediaPlanSegmentDi
 import { sanitizeOrshotOptions } from "./orshot-render.js";
 import { EarlyClipCutter, earlyClipCutEnabled } from "./workflow-early-clips.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
-import { orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
+import { ensureUniqueSegmentIds, orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
 import {
   buildAutoRenderAssignments,
   buildAutoTimelineOptionValues,
@@ -747,13 +747,14 @@ ${correction.direction}`,
     const earlyPlan = planFor(earlyScript);
     const ledger = new SegmentSourceLedger();
     // VE2E-51: segments are sourced with bounded concurrency (3) inside MediaPlanService; each import keeps its own StepRun.
-    const runSourcing = (script: MediaPlanScript, segments: PlannedSegment[], allowSecondSource = true) =>
+    const runSourcing = (script: MediaPlanScript, segments: PlannedSegment[], allowSecondSource = true, reservedSegmentIds: readonly string[] = []) =>
       this.mediaPlans.sourceSegments(run.projectId, userId, role, {
         providerAccountId: mediaConfig.providerAccountId,
         script,
         segments,
         ledger,
         allowSecondSource,
+        reservedSegmentIds,
         // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
         guaranteeSource: true,
         // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
@@ -870,8 +871,8 @@ ${correction.direction}`,
     const durationByScene = new Map(planScript.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
     const reconciled = reconcileSourcedSegments({ finalSegments: plannedSegments, early: earlySourcing.sourced, durationOf: (sceneId) => durationByScene.get(sceneId) ?? 1 });
     let secondPass: Awaited<ReturnType<typeof runSourcing>> | null = null;
-    if (reconciled.toSource.length > 0) secondPass = await runSourcing(planScript, reconciled.toSource);
-    const sourced: SourcedSegment[] = orderByScript([...reconciled.reused, ...(secondPass?.sourced ?? [])], orderedScenes.map((scene) => scene.sceneId));
+    if (reconciled.toSource.length > 0) secondPass = await runSourcing(planScript, reconciled.toSource, true, reconciled.reused.map((piece) => piece.segment.segmentId));
+    const sourced: SourcedSegment[] = ensureUniqueSegmentIds(orderByScript([...reconciled.reused, ...(secondPass?.sourced ?? [])], orderedScenes.map((scene) => scene.sceneId)));
     // Final (real voice duration) ranges: only scenes whose range drifted > 300 ms from the early request are cut again.
     if (!secondPass?.failure && !earlySourcing.failure) launchEarlyCuts(planScript, sourced);
     const sourcing = {

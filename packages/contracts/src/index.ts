@@ -849,7 +849,7 @@ export type MediaPlanSegmentDiagnostics = {
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
-  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library";
+  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "clip";
   /** VE2E-135 (L0): match score (0..1) of the prepared-library clip when `sourceTier` is `library`. */
   libraryScore?: number;
   /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */
