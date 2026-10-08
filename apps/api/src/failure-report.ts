@@ -148,6 +148,12 @@ export type MediaDiagnosticsSummary = {
   failedSegments: number;
   apifyUsage: { runs: number; seconds: number; usd: number; searchesReused: number; libraryReuses: number; runsReporting: number };
   visionUsage: { calls: number; moderated: number; skippedSegments: number; runsReporting: number };
+  /**
+   * VE2E-149: open-source download of the chosen TikTok post (VE2E-146, `apifyQuality.downloader/ossFetchCode/ossFetchMs`): how often
+   * yt-dlp was tried, won, or fell back to the Apify Actor, why it failed, and its p50/p95. Shorts / gallery tiers show up in
+   * `bySourceProvider.social` and `byTier.shorts|gallery`.
+   */
+  ossFetch: { attempted: number; ytDlp: number; fellBackToApify: number; failureCodes: CauseCount[]; p50Ms: number; p95Ms: number };
 };
 
 const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
@@ -168,6 +174,9 @@ export const summarizeMediaDiagnostics = (outputRefs: readonly unknown[]): Media
   const rejects = new Map<string, number>();
   const apify = { runs: 0, seconds: 0, usd: 0, searchesReused: 0, libraryReuses: 0, runsReporting: 0 };
   const vision = { calls: 0, moderated: 0, skippedSegments: 0, runsReporting: 0 };
+  const oss = { attempted: 0, ytDlp: 0, fellBackToApify: 0 };
+  const ossCodes = new Map<string, number>();
+  const ossMs: number[] = [];
   let segments = 0;
   let degraded = 0;
   let failedSegments = 0;
@@ -191,6 +200,14 @@ export const summarizeMediaDiagnostics = (outputRefs: readonly unknown[]): Media
       if (seg.quality_degraded === true || seg.qualityDegraded === true) {
         degraded += 1;
         runDegraded = true;
+      }
+      const quality = asRecord(seg.apifyQuality);
+      if (quality && (typeof quality.downloader === "string" || typeof quality.ossFetchCode === "string")) {
+        oss.attempted += 1;
+        if (quality.downloader === "yt-dlp") oss.ytDlp += 1;
+        if (quality.downloader === "apify") oss.fellBackToApify += 1;
+        if (typeof quality.ossFetchCode === "string") ossCodes.set(quality.ossFetchCode, (ossCodes.get(quality.ossFetchCode) ?? 0) + 1);
+        if (typeof quality.ossFetchMs === "number") ossMs.push(quality.ossFetchMs);
       }
       const rejected = asRecord(asRecord(seg.apifyQuality)?.rejected);
       for (const [reason, n] of Object.entries(rejected ?? {})) rejects.set(reason, (rejects.get(reason) ?? 0) + num(n));
@@ -227,7 +244,14 @@ export const summarizeMediaDiagnostics = (outputRefs: readonly unknown[]): Media
     failedSegments,
     apifyUsage: apify,
     visionUsage: vision,
+    ossFetch: { ...oss, failureCodes: rank(ossCodes, 10), p50Ms: percentileOf(ossMs, 0.5), p95Ms: percentileOf(ossMs, 0.95) },
   };
+};
+
+const percentileOf = (values: number[], q: number): number => {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)]!;
 };
 
 export type StepStats = Record<string, Stat>;
@@ -277,5 +301,6 @@ export const formatReport = (r: FailureReport): string => {
   out.push(`  social reject reasons: ${m.socialRejectReasons.map((c) => `${c.cause}=${c.count}`).join(", ") || "none"}`);
   out.push(`  apifyUsage (${m.apifyUsage.runsReporting} run): runs ${m.apifyUsage.runs}, ${m.apifyUsage.seconds.toFixed(0)}s, USD ${m.apifyUsage.usd.toFixed(2)}, searchesReused ${m.apifyUsage.searchesReused}, libraryReuses ${m.apifyUsage.libraryReuses}`);
   out.push(`  visionUsage (${m.visionUsage.runsReporting} run): calls ${m.visionUsage.calls}, moderated ${m.visionUsage.moderated}, skippedSegments ${m.visionUsage.skippedSegments}`);
+  out.push(`  ossFetch (yt-dlp TikTok phase 2): attempted ${m.ossFetch.attempted}, yt-dlp ${m.ossFetch.ytDlp}, fell back to Apify ${m.ossFetch.fellBackToApify}, p50 ${(m.ossFetch.p50Ms / 1000).toFixed(1)}s p95 ${(m.ossFetch.p95Ms / 1000).toFixed(1)}s, failures: ${m.ossFetch.failureCodes.map((c) => `${c.cause}=${c.count}`).join(", ") || "none"}`);
   return out.join("\n");
 };

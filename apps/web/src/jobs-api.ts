@@ -15,8 +15,10 @@ export type ApiProvider = {
   preferredModels: string[];
   modelCooldowns: Array<{ modelId: string; cooldownUntil: string }>;
   isFake: boolean;
-  /** On/off switch for media sources (pexels/apify); missing = on. */
+  /** On/off switch for media sources (pexels/apify/social_cookies); missing = on. */
   enabled?: boolean;
+  /** VE2E-145: social_cookies only - earliest expiry of the stored cookies (null = session cookies). */
+  secretExpiresAt?: string | null;
   version: number;
 };
 

@@ -15,6 +15,9 @@ import { ComposeProcessor, RENDERS_DIR } from "./compose/compose-processor.js";
 import { ComposeConfigError, loadComposeConfig } from "./compose/config.js";
 import { startComposeConsumer } from "./compose/consumer.js";
 import { sweepExpiredMediaJobs } from "./ttl-sweep.js";
+import { loadSocialFetchConfig } from "./social-fetch/config.js";
+import { startSocialFetchConsumer } from "./social-fetch/consumer.js";
+import { SocialFetchProcessor, sweepStaleFetchDirs } from "./social-fetch/processor.js";
 
 /**
  * VE2E-36: LyOnix media worker — the only process that runs FFmpeg. Consumes
@@ -73,6 +76,12 @@ const bootstrap = async () => {
   } catch (error) {
     return fail(error instanceof ComposeConfigError ? error.message : String(error));
   }
+  let fetchCfg;
+  try {
+    fetchCfg = loadSocialFetchConfig(process.env);
+  } catch (error) {
+    return fail(error instanceof MediaWorkerConfigError ? error.message : String(error));
+  }
 
   await mkdir(join(cfg.mediaRoot, MEDIA_JOBS_DIR), { recursive: true });
   await mkdir(join(cfg.mediaRoot, RENDERS_DIR), { recursive: true });
@@ -80,6 +89,8 @@ const bootstrap = async () => {
     try {
       const { removed } = await sweepExpiredMediaJobs(cfg.mediaRoot);
       if (removed > 0) log(`TTL sweep removed ${removed} expired clip job(s)`);
+      const fetchDirs = await sweepStaleFetchDirs(cfg.mediaRoot, 60 * 60_000);
+      if (fetchDirs > 0) log(`TTL sweep removed ${fetchDirs} abandoned media.fetch download dir(s)`);
     } catch (error) {
       console.warn("[media-worker] TTL sweep failed", error instanceof Error ? error.message : error);
     }
@@ -100,6 +111,10 @@ const bootstrap = async () => {
   // VE2E-105: the internal render engine. Its own queue + connection so a long render never delays clip.prepare/frame.extract.
   const composeProcessor = new ComposeProcessor({ config: cfg, compose: composeCfg, runner: runProcess, ffmpegVersion, log });
   log(`video.compose: queue=${composeCfg.queue} prefetch=${composeCfg.prefetch} preset=${composeCfg.x264Preset} x264Threads=${composeCfg.x264Threads || "auto"} fontsDir=${composeCfg.fontsDir ?? "system fonts"} timeout=${composeCfg.timeoutMs}ms`);
+
+  // VE2E-144: yt-dlp / gallery-dl downloads + searches on their own queue (network-bound, never blocks FFmpeg cuts).
+  const fetchProcessor = new SocialFetchProcessor({ config: cfg, fetch: fetchCfg, runner: runProcess, log });
+  log(`media.fetch: ${fetchCfg.enabled ? `queue=${fetchCfg.queue} prefetch=${fetchCfg.prefetch}` : "disabled (MEDIA_WORKER_FETCH=0)"} yt-dlp=${fetchCfg.ytDlpPath} gallery-dl=${fetchCfg.galleryDlPath} proxy=${fetchCfg.proxyUrl ? "configured" : "none"}`);
 
   let stopping = false;
   let connection: MediaJobBrokerConnection | null = null;
@@ -153,11 +168,12 @@ const bootstrap = async () => {
       await startClipPrepareConsumer({ ...shared, queue: cfg.queues.clipPrepare, prefetch: cfg.prefetchByType.clipPrepare }),
       await startClipPrepareConsumer({ ...shared, queue: cfg.queues.frameExtract, prefetch: cfg.prefetchByType.frameExtract }),
       await startClipPrepareConsumer({ ...shared, queue: cfg.queues.reframeAnalyze, prefetch: cfg.prefetchByType.reframeAnalyze }),
+      ...(fetchCfg.enabled ? [await startSocialFetchConsumer({ channel: connection.channel, queue: fetchCfg.queue, prefetch: fetchCfg.prefetch, processor: fetchProcessor, log })] : []),
     ];
     const composePrefetch = cfg.prefetchByType.compose ?? composeCfg.prefetch;
     renderConsumer = await startComposeConsumer({ channel: renderConnection.channel, queue: composeCfg.queue, prefetch: composePrefetch, processor: composeProcessor, log });
     log(
-      `ready on queues ${cfg.queues.clipPrepare}(legacy, all types) + ${cfg.queues.frameExtract} + ${cfg.queues.reframeAnalyze} + ${composeCfg.queue} (${brokerLabel}); ` +
+      `ready on queues ${cfg.queues.clipPrepare}(legacy, all types) + ${cfg.queues.frameExtract} + ${cfg.queues.reframeAnalyze} + ${composeCfg.queue}${fetchCfg.enabled ? ` + ${fetchCfg.queue}` : ""} (${brokerLabel}); ` +
         `prefetch clip=${cfg.prefetchByType.clipPrepare} frame=${cfg.prefetchByType.frameExtract} reframe=${cfg.prefetchByType.reframeAnalyze} compose=${composePrefetch} ffmpegThreads=${cfg.ffmpegThreads}; FFmpeg runs here only`,
     );
     await Promise.race([closed, new Promise<void>((r) => { wake = r; })]);

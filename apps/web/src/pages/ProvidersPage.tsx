@@ -3,15 +3,16 @@ import { useTranslation } from "react-i18next";
 import { useConfirm, useToast } from "../components/feedback";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Modal } from "../components/Modal";
-import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
+import { Button, Field, PasswordInput, Select, TextArea, TextInput } from "../components/ui";
 import { useMe } from "../session";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiProvider } from "../jobs-api";
 import { isInternalRenderProvider } from "../studio/render-provider";
 import { readyModelCount } from "./provider-model-summary";
+import { cookiesExpiryNote, COOKIE_PLATFORMS, type CookiePlatform } from "./provider-cookies";
 
 type ProviderRole = "content" | "tts" | "visual" | "render";
-type AddableKind = "openai" | "gemini" | "xai" | "openrouter" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "creatomate" | "orshot";
+type AddableKind = "openai" | "gemini" | "xai" | "openrouter" | "elevenlabs" | "pexels" | "youtube" | "pinterest" | "apify" | "social_cookies" | "creatomate" | "orshot";
 type CatalogItem = { provider: string; role: string; implementationStatus: string; models: string[] };
 
 /** Every provider kind the "Add account" form can create today, mapped to the role it fills in the video pipeline. Google is intentionally absent (evaluated, not implemented - VE2E-15b). YouTube and Pinterest (VE2E-15b) can both be added/verified here, but neither produces a candidate Auto can apply yet: YouTube is discovery/embed-only (see `packages/providers/src/youtube.ts`), and Pinterest has no reliable rights signal so every candidate is rights-unclear (see `packages/providers/src/pinterest.ts`) - both are manual-Studio-review sources only. */
@@ -25,6 +26,7 @@ const PROVIDER_ROLE: Record<AddableKind, ProviderRole> = {
   youtube: "visual",
   pinterest: "visual",
   apify: "visual",
+  social_cookies: "visual",
   creatomate: "render",
   orshot: "render",
 };
@@ -44,6 +46,7 @@ const PROVIDER_BADGE: Record<string, { label: string; bg: string; fg: string }> 
   youtube: { label: "Yt", bg: "#ff0000", fg: "#fff" },
   pinterest: { label: "Pi", bg: "#e60023", fg: "#fff" },
   apify: { label: "Ap", bg: "#2b5cff", fg: "#fff" },
+  social_cookies: { label: "Ck", bg: "#a16207", fg: "#fff" },
   creatomate: { label: "Cm", bg: "#ff5a1f", fg: "#fff" },
   orshot: { label: "Os", bg: "#7c3aed", fg: "#fff" },
   vrew: { label: "Vr", bg: "#6b7280", fg: "#fff" },
@@ -75,6 +78,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [scope, setScope] = useState<"personal" | "organization">("personal");
   const [secret, setSecret] = useState("");
   const [embedId, setEmbedId] = useState("");
+  const [cookiePlatform, setCookiePlatform] = useState<CookiePlatform>("tiktok");
   const [editing, setEditing] = useState<ApiProvider | null>(null);
   const [editName, setEditName] = useState("");
   const [editModel, setEditModel] = useState("");
@@ -112,7 +116,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
     try {
       setError(null);
       const role = PROVIDER_ROLE[provider];
-      const model = provider === "orshot" ? embedId.trim() || NO_MODEL_PLACEHOLDER : modelsFor(provider)[0] ?? NO_MODEL_PLACEHOLDER;
+      const model = provider === "orshot" ? embedId.trim() || NO_MODEL_PLACEHOLDER : provider === "social_cookies" ? cookiePlatform : modelsFor(provider)[0] ?? NO_MODEL_PLACEHOLDER;
       const created = await api<ApiProvider>("/provider-accounts", { method: "POST", headers: await csrfHeaders(), body: JSON.stringify({ name, provider, role, scope, model, secret }) });
       try {
         const verified = await api<ApiProvider>(`/provider-accounts/${created.id}/verify`, { method: "POST", headers: await csrfHeaders() });
@@ -166,7 +170,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
     finally { setPending(null); }
   };
 
-  const isSwitchable = (row: ApiProvider) => row.provider === "pexels" || row.provider === "apify";
+  const isSwitchable = (row: ApiProvider) => row.provider === "pexels" || row.provider === "apify" || row.provider === "social_cookies";
   const toggleEnabled = async (row: ApiProvider, enabled: boolean) => {
     try {
       setError(null);
@@ -180,7 +184,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const rowsByRole = (role: ProviderRole) => rows.filter((row) => row.role === role);
-  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "pinterest" && row.provider !== "apify" && row.provider !== "creatomate" && row.provider !== "orshot";
+  const hasModelChoice = (row: ApiProvider) => row.provider !== "pexels" && row.provider !== "youtube" && row.provider !== "pinterest" && row.provider !== "apify" && row.provider !== "social_cookies" && row.provider !== "creatomate" && row.provider !== "orshot";
 
   return (
     <>
@@ -212,7 +216,11 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                       <StatusPill tone={row.status === "verified" ? "ok" : row.status === "failed" ? "danger" : "neutral"}>{t(`providers.${row.status}`)}</StatusPill>
                     </div>
                   </div>
-                  <p className="text-[12px] text-lyx-fg-muted">{row.provider} · {row.scope === "personal" ? t("providers.personal") : t("providers.organization")}</p>
+                  <p className="text-[12px] text-lyx-fg-muted">{row.provider}{row.provider === "social_cookies" ? ` · ${row.model}` : ""} · {row.scope === "personal" ? t("providers.personal") : t("providers.organization")}</p>
+                  {row.provider === "social_cookies" ? (() => {
+                    const note = cookiesExpiryNote(row.secretExpiresAt ?? null);
+                    return <p className={`mt-1 text-[12px] ${note.soon ? "text-lyx-danger" : "text-lyx-fg-muted"}`} data-testid={`cookies-expiry-${row.id}`}>{t(note.key, note.date ? { date: new Date(note.date).toLocaleString() } : {})}</p>;
+                  })() : null}
                   {hasModelChoice(row) ? (
                     <div className="mt-3">
                       <Field label={t("providers.model")}>
@@ -266,6 +274,13 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
             </Field>
             <p className="text-[12px] text-lyx-fg-muted">{t("providers.autoModelHint")}</p>
             {provider === "apify" ? <p className="text-[12px] text-lyx-fg-muted">{t("providers.apifyHint")}</p> : null}
+            {provider === "social_cookies" ? (
+              <Field label={t("providers.cookiesPlatform")}>
+                <Select value={cookiePlatform} onChange={(e) => setCookiePlatform(e.target.value as CookiePlatform)}>
+                  {COOKIE_PLATFORMS.map((item) => <option key={item} value={item}>{item}</option>)}
+                </Select>
+              </Field>
+            ) : null}
 {provider === "orshot" ? (
               <Field label={t("providers.orshotEmbedId")} hint={t("providers.orshotEmbedHint")}>
                 <TextInput value={embedId} onChange={(e) => setEmbedId(e.target.value)} placeholder="abc123xyz" autoComplete="off" />
@@ -277,7 +292,11 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                 {me.role === "admin" ? <option value="organization">{t("providers.organization")}</option> : null}
               </Select>
             </Field>
-            <Field label={t("providers.secret")} hint={t("providers.secretHint")}><PasswordInput value={secret} onChange={(e) => setSecret(e.target.value)} /></Field>
+            {provider === "social_cookies" ? (
+              <Field label={t("providers.cookiesFile")} hint={t("providers.cookiesHint")}><TextArea value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" className="font-mono text-[12px]" placeholder="# Netscape HTTP Cookie File" /></Field>
+            ) : (
+              <Field label={t("providers.secret")} hint={t("providers.secretHint")}><PasswordInput value={secret} onChange={(e) => setSecret(e.target.value)} /></Field>
+            )}
             <Button loading={pending === "save"} onClick={() => void save()}>{t("common.save")}</Button>
           </div>
         </Modal>
@@ -305,7 +324,11 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
               </Select>
             </Field> : null}
             {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
-            <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
+            {editing.provider === "social_cookies" ? (
+              <Field label={t("providers.cookiesFile")} hint={t("providers.cookiesHint")}><TextArea value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} spellCheck={false} autoComplete="off" className="font-mono text-[12px]" placeholder="# Netscape HTTP Cookie File" /></Field>
+            ) : (
+              <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
+            )}
             <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button loading={pending === "edit"} onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>
         </Modal>

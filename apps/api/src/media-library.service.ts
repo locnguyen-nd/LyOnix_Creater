@@ -37,7 +37,7 @@ import { PrismaService } from "./prisma.service.js";
 
 export type LibraryLedger = { jobKey: string; assetIds: Set<string>; externalIds: Set<string>; apifyPlainIds: Set<string> };
 export type LibrarySegment = { keywords?: unknown; subject?: string | null; durationMs: number; visualKind?: "video" | "image" };
-export type LibraryHit = { assetId: string; kind: "video"; durationMs: number | null; externalId: string | null; provider: "apify" | "pexels" | undefined; score: number; author: string | null };
+export type LibraryHit = { assetId: string; kind: "video"; durationMs: number | null; externalId: string | null; provider: "apify" | "pexels" | "social" | undefined; score: number; author: string | null };
 
 const plainId = (id: string) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id);
 
@@ -123,7 +123,7 @@ export class MediaLibraryService {
         ledger.apifyPlainIds.add(plainId(tags.externalId));
       }
       await this.recordUse(row, tags, ledger.jobKey, now).catch((error) => this.logger.warn(`library usage not recorded: ${String(error)}`));
-      return { assetId: row.id, kind: "video", durationMs: row.durationMs, externalId: tags.externalId, provider: row.origin === "apify" ? "apify" : row.origin === "pexels" ? "pexels" : undefined, score: best.score, author: tags.author };
+      return { assetId: row.id, kind: "video", durationMs: row.durationMs, externalId: tags.externalId, provider: row.origin === "apify" ? "apify" : row.origin === "pexels" ? "pexels" : row.origin === "social" ? "social" : undefined, score: best.score, author: tags.author };
     } catch (error) {
       this.logger.warn(`library L0 lookup failed, falling through: ${String(error)}`);
       return null;

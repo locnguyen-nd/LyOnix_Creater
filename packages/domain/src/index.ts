@@ -373,3 +373,14 @@ export {
   type RepeatCandidate,
   type RepeatGuard,
 } from "./media-library.js";
+export {
+  socialCookiePlatforms,
+  isSocialCookiePlatform,
+  SOCIAL_COOKIE_DOMAINS,
+  MAX_COOKIES_TEXT_BYTES,
+  parseSocialCookies,
+  socialCookiesExpiringSoon,
+  type SocialCookiePlatform,
+  type ParsedSocialCookies,
+} from "./social-cookies.js";
+export { selectSocialSearchItems, type SocialSearchCandidate, type SocialSearchRejectReason, type SocialSearchSelection } from "./social-search-select.js";

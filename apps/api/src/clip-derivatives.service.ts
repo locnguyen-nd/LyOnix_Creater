@@ -80,7 +80,7 @@ export const CLIP_RANGE_TOLERANCE_MS = 300;
  * the narration is the soundtrack: the template path already mutes scene video (`volume: 0`) and
  * the dynamic path previously played the B-roll's own audio under the voice.
  */
-export const decideStripAudio = (parentOrigin: string, keepSourceAudio: boolean): boolean => parentOrigin === "apify" || !keepSourceAudio;
+export const decideStripAudio = (parentOrigin: string, keepSourceAudio: boolean): boolean => parentOrigin === "apify" || parentOrigin === "social" || !keepSourceAudio;
 
 /** A derivative is reusable only for the SAME crop plan (digest) - or, when no plan applies, only if it was cut without one. */
 const cropMatches = (transform: MediaAssetTransformValue | null, cropPlanSha256: string | null): boolean =>

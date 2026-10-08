@@ -11,7 +11,7 @@
 import { computeSocialWindowRanges, socialWindowOptionsFromEnv, type MediaPlanScene, type PlannedSegment } from "@lyonix/domain";
 import type { SegmentSource, SourcedSegment } from "./media-plan.service.js";
 
-const windowOptionsFor = (provider: string | undefined) => (provider === "apify" ? socialWindowOptionsFromEnv() : { startGuardMs: 0, endGuardMs: 0 });
+const windowOptionsFor = (provider: string | undefined) => (provider === "apify" || provider === "social" ? socialWindowOptionsFromEnv() : { startGuardMs: 0, endGuardMs: 0 });
 
 const sameScenes = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id) => b.includes(id));
 

@@ -1449,7 +1449,7 @@ export function StudioProPage() {
                           <button type="button" className="text-left font-medium" onClick={() => setSelectedSceneId(segment.sceneIds[0] ?? null)}>{index + 1}. {segment.subject || visualSegment?.subject || t("studioPro.segmentFallback")}</button>
                           <span className="text-lyx-fg-muted">{segment.sceneIds.length} {t("studioPro.scenesShort")}</span>
                         </div>
-                        {source ? <p className="mt-1 truncate text-lyx-fg-muted">{source.origin === "apify" ? `⚠ ${t("studioPro.ownerAcceptedRisk")}` : source.originalFileName}</p> : null}
+                        {source ? <p className="mt-1 truncate text-lyx-fg-muted">{source.origin === "apify" || source.origin === "social" ? `⚠ ${t("studioPro.ownerAcceptedRisk")}` : source.originalFileName}</p> : null}
                         {diagnostic?.sourcing === "failed" ? <p className="mt-1 text-lyx-danger">{t("studioPro.segmentSourceMissing")}</p> : null}
                         {diagnostic ? <SourceBadge diagnostic={diagnostic} /> : null}
                         {(() => {

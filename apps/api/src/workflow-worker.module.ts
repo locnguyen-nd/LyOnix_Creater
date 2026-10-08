@@ -17,6 +17,9 @@ import { RenderJobsService } from "./render-jobs.service.js";
 import { InternalRenderService } from "./internal-render.service.js";
 import { ClipDerivativesService } from "./clip-derivatives.service.js";
 import { MediaJobsGateway } from "./media-jobs.gateway.js";
+import { SocialCookiesService } from "./social-cookies.service.js";
+import { SocialFetchService } from "./social-fetch.service.js";
+import { SocialSourceService } from "./social-source.service.js";
 import { VideoFramesService } from "./video-frames.service.js";
 import { ReframeService } from "./reframe.service.js";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
@@ -37,6 +40,9 @@ import { WorkflowRunnerService } from "./workflow-runner.service.js";
     AudioVersionsService,
     PexelsService,
     ApifyService,
+    SocialCookiesService,
+    SocialFetchService,
+    SocialSourceService,
     MediaPlanService,
     CreatomateTemplatesService,
     RenderJobsService,

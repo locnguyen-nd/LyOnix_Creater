@@ -64,8 +64,8 @@ export class MediaController {
       throw normalizedError("VALIDATION_FAILED", "Thiếu dữ liệu asset", requestId(response));
     }
     // VE2E-34: `apify` provenance is written only by the server-side Apify import path; a client can never claim it.
-    if (body.origin === "apify") {
-      throw normalizedError("VALIDATION_FAILED", "origin apify chỉ do server đặt (import Apify)", requestId(response), 400);
+    if (body.origin === "apify" || body.origin === "social") {
+      throw normalizedError("VALIDATION_FAILED", `origin ${body.origin} chỉ do server đặt (import Apify / yt-dlp / gallery-dl)`, requestId(response), 400);
     }
     const result = await this.media.registerAsset(projectId, user.id, user.role, {
       quarantineToken: body.quarantineToken,
