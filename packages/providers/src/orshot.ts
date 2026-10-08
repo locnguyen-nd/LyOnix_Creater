@@ -195,3 +195,20 @@ export async function getOrshotRender(apiKey: string, externalJobId: string): Pr
   const body = (await call(`/studio/render-jobs/${encodeURIComponent(externalJobId)}`, apiKey, { method: "GET" })) as Record<string, unknown>;
   return toRenderResult(body);
 }
+
+export type OrshotPlan = { planType: string | null; planTitle: string | null; videoRender: boolean };
+
+/**
+ * VE2E-141: the account's plan (`GET /v1/me`, read-only, no credit). Video rendering is not available on the Free plan
+ * (`POST /studio/render` answers 403 "Video generation is available on supported plans"), so Auto/Studio can refuse BEFORE spending
+ * LLM, TTS and media credits on a render that cannot happen. Unknown plan shape = allowed (the render's own 403 stays the source of truth).
+ */
+export async function getOrshotPlan(apiKey: string): Promise<OrshotPlan> {
+  const body = (await call("/me", apiKey, { method: "GET" })) as Record<string, unknown>;
+  const data = (body.data && typeof body.data === "object" ? body.data : body) as Record<string, unknown>;
+  const plan = (data.plan && typeof data.plan === "object" ? data.plan : {}) as Record<string, unknown>;
+  const planType = typeof plan.type === "string" ? plan.type : null;
+  const features = (plan.features && typeof plan.features === "object" ? plan.features : null) as Record<string, unknown> | null;
+  const explicit = features && typeof features.video_rendering === "boolean" ? features.video_rendering : features && typeof features.videoRendering === "boolean" ? features.videoRendering : null;
+  return { planType, planTitle: typeof plan.title === "string" ? plan.title : null, videoRender: explicit ?? planType?.toLowerCase() !== "free" };
+}

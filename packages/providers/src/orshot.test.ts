@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
-import { deriveOrshotModifications, getOrshotRender, getOrshotTemplate, listOrshotTemplates, probeOrshotAccount, submitOrshotRender } from "./orshot.js";
+import { deriveOrshotModifications, getOrshotPlan, getOrshotRender, getOrshotTemplate, listOrshotTemplates, probeOrshotAccount, submitOrshotRender } from "./orshot.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -115,5 +115,16 @@ describe("orshot includePages (script shorter than the template)", () => {
     expect(JSON.parse(lastCall(fetchMock)[1].body as string).response.includePages).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     await submitOrshotRender("k", { templateId: "5", modifications: {}, webhookUrl: "https://hook" });
     expect(JSON.parse(lastCall(fetchMock)[1].body as string).response).not.toHaveProperty("includePages");
+  });
+});
+
+describe("getOrshotPlan (VE2E-141)", () => {
+  it("reports no video rendering on the Free plan and allows paid plans", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ data: { plan: { type: "free", title: "Free" } } }, 200)));
+    expect(await getOrshotPlan("k")).toEqual({ planType: "free", planTitle: "Free", videoRender: false });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ data: { plan: { type: "pro", title: "Pro" } } }, 200)));
+    expect((await getOrshotPlan("k")).videoRender).toBe(true);
+    vi.stubGlobal("fetch", vi.fn(async () => json({ data: { plan: { type: "free", features: { video_rendering: true } } } }, 200)));
+    expect((await getOrshotPlan("k")).videoRender).toBe(true);
   });
 });
