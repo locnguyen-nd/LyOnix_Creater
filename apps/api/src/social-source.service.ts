@@ -1,9 +1,31 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { selectSocialSearchItems, type SocialSearchRejectReason } from "@lyonix/domain";
-import type { SocialFetchPlatform, SocialFetchTool, SocialSearchItem } from "@lyonix/media-jobs";
+import { createHash } from "node:crypto";
+import { DEFAULT_FETCH_IMAGE_MAX_BYTES, SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES, type SocialFetchPlatform, type SocialFetchTool, type SocialSearchItem } from "@lyonix/media-jobs";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
 import { PrismaService } from "./prisma.service.js";
+import { writeQuarantineFile } from "./quarantine.js";
+import { fetchBinarySafely } from "./safe-binary-fetch.js";
 import { discardQuarantined, readQuarantineHead, SocialFetchService, type SocialFetchOutcome } from "./social-fetch.service.js";
+
+/** What register() needs, whether the bytes came from the worker (yt-dlp / gallery-dl) or a direct CDN GET. */
+type Downloaded = {
+  quarantineToken: string;
+  sha256: string;
+  bytes: number;
+  probe: { durationMs: number; width: number; height: number } | null;
+  info: { width: number | null; height: number | null } | null;
+  downloader: { tool: string; version: string | null; profileVersion: string | null; steps: Array<{ via: string; code: string | null; runs: string[] }>; elapsedMs: number };
+};
+
+const fromWorker = (fetched: Extract<SocialFetchOutcome, { ok: true }>): Downloaded => ({
+  quarantineToken: fetched.result.quarantineToken,
+  sha256: fetched.result.sha256,
+  bytes: fetched.result.bytes,
+  probe: fetched.result.probe,
+  info: fetched.result.info,
+  downloader: { tool: fetched.result.tool.name, version: fetched.result.tool.version, profileVersion: fetched.result.tool.profileVersion, steps: fetched.steps.map((s) => ({ via: s.via, code: s.code, runs: s.runs.map((r) => r.step) })), elapsedMs: fetched.elapsedMs },
+});
 
 /** Same rights wording as the Apify path: social footage is owner_accepted_risk (DEC-2026-10-08-SOCIAL-FETCH-OSS), never rights-cleared. */
 export const SOCIAL_LICENSE = "Social media found and downloaded with yt-dlp / gallery-dl - owner_accepted_risk (not rights-cleared); audio always stripped";
@@ -34,7 +56,7 @@ export type SocialSourceDiagnostics = {
   considered: number;
   passed: number;
   rejected: Partial<Record<SocialSearchRejectReason, number>>;
-  downloads: Array<{ externalId: string; code: string | null; ms: number }>;
+  downloads: Array<{ externalId: string; code: string | null; ms: number; via?: "direct" | "worker" }>;
 };
 export type SocialImportOutcome =
   | { ok: true; data: { asset: SocialAsset; externalId: string; ledgerId: string; sourceUrl: string; author: string | null; reused: boolean; diagnostics: SocialSourceDiagnostics } }
@@ -109,9 +131,18 @@ export class SocialSourceService {
         input.usedExternalIds.add(id); // claim before any await
         const reused = await this.findLibraryAsset(projectId, input.platform, id);
         if (reused) return { ok: true, data: { asset: reused, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: true, diagnostics } };
+        // Fast path (images): the search already returned the CDN file URL -> one SSRF-guarded GET in the API, no worker job.
+        const direct = item.mediaType === "image" && item.mediaUrl ? await this.fetchDirect(item.mediaUrl) : null;
+        if (direct) {
+          diagnostics.downloads.push({ externalId: id, code: null, ms: direct.ms, via: "direct" });
+          const registeredDirect = await this.register(projectId, userId, role, input.platform, item, query, direct.downloaded, input.sceneId);
+          if (registeredDirect !== "rejected") {
+            return { ok: true, data: { asset: registeredDirect, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics } };
+          }
+        }
         const fetched = await this.socialFetch.fetchPost({ platform: input.platform, tool: input.tool, url: item.url, mediaType: input.mediaType, userId, role });
-        diagnostics.downloads.push({ externalId: id, code: fetched.ok ? null : fetched.code, ms: fetched.elapsedMs });
-        const registered = fetched.ok ? await this.register(projectId, userId, role, input.platform, item, query, fetched, input.sceneId) : null;
+        diagnostics.downloads.push({ externalId: id, code: fetched.ok ? null : fetched.code, ms: fetched.elapsedMs, via: "worker" });
+        const registered = fetched.ok ? await this.register(projectId, userId, role, input.platform, item, query, fromWorker(fetched), input.sceneId) : null;
         if (registered && registered !== "rejected") {
           return { ok: true, data: { asset: registered, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics } };
         }
@@ -121,6 +152,18 @@ export class SocialSourceService {
       }
     }
     return fail(lastReason);
+  }
+
+  /** Direct CDN download of a search-returned image URL (host allowlist re-checked on every redirect, bytes capped, image MIME only). */
+  private async fetchDirect(url: string): Promise<{ downloaded: Downloaded; ms: number } | null> {
+    const startedAt = Date.now();
+    const got = await fetchBinarySafely(url, { maxBytes: DEFAULT_FETCH_IMAGE_MAX_BYTES, allowedHostSuffixes: SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES, allowedMimePrefixes: ["image/"] }).catch(() => null);
+    if (!got?.ok || got.buffer.byteLength === 0) return null;
+    const quarantined = await writeQuarantineFile(got.buffer);
+    return {
+      ms: Date.now() - startedAt,
+      downloaded: { quarantineToken: quarantined.quarantineToken, sha256: createHash("sha256").update(got.buffer).digest("hex"), bytes: got.buffer.byteLength, probe: null, info: null, downloader: { tool: "direct", version: null, profileVersion: null, steps: [], elapsedMs: Date.now() - startedAt } },
+    };
   }
 
   private async findLibraryAsset(projectId: string, platform: string, externalId: string): Promise<SocialAsset | null> {
@@ -144,10 +187,9 @@ export class SocialSourceService {
     platform: SocialFetchPlatform,
     item: SocialSearchItem,
     query: string,
-    fetched: Extract<SocialFetchOutcome, { ok: true }>,
+    result: Downloaded,
     sceneId: string,
   ): Promise<SocialAsset | "rejected"> {
-    const { result } = fetched;
     let sniffed: string | null = null;
     try {
       sniffed = sniffMediaMimeType(await readQuarantineHead(result.quarantineToken));
@@ -166,8 +208,8 @@ export class SocialSourceService {
       mimeType: sniffed,
       checksumSha256: result.sha256,
       bytes: result.bytes,
-      widthPx: result.probe?.width ?? item.width ?? result.info.width ?? null,
-      heightPx: result.probe?.height ?? item.height ?? result.info.height ?? null,
+      widthPx: result.probe?.width ?? item.width ?? result.info?.width ?? null,
+      heightPx: result.probe?.height ?? item.height ?? result.info?.height ?? null,
       durationMs: item.mediaType === "image" ? null : result.probe?.durationMs ?? (item.durationSeconds ? Math.round(item.durationSeconds * 1000) : null),
       origin: "social",
       license: SOCIAL_LICENSE,
@@ -183,7 +225,7 @@ export class SocialSourceService {
         author: item.uploader ?? item.channel ?? null,
         title: item.title,
         query,
-        downloader: { tool: result.tool.name, version: result.tool.version, profileVersion: result.tool.profileVersion, steps: fetched.steps.map((s) => ({ via: s.via, code: s.code, runs: s.runs.map((r) => r.step) })), elapsedMs: fetched.elapsedMs },
+        downloader: result.downloader,
         importedAt: new Date().toISOString(),
         audioPolicy: "strip_audio",
       },

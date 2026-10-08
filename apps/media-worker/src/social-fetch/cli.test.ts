@@ -135,6 +135,15 @@ describe("output parsing (VE2E-144)", () => {
     const x = parseGallerySearch("x", JSON.stringify([[3, "https://pbs.twimg.com/media/a.jpg", { tweet_id: 9, author: { name: "nhk" }, content: "地震", lang: "ja", extension: "jpg" }]]), "image", 5);
     expect(x[0]).toMatchObject({ url: "https://x.com/nhk/status/9", description: "地震", language: "ja" });
     expect(parseGallerySearch("x", "not json", "image", 5)).toEqual([]);
+    expect(items[0]!.mediaUrl).toBe("https://i.pinimg.com/originals/a.jpg");
+    const evil = parseGallerySearch("pinterest", JSON.stringify([[3, "https://evil.example/a.jpg", { id: 5, extension: "jpg" }]]), "image", 5);
+    expect(evil[0]!.mediaUrl).toBeNull();
+  });
+
+  it("keeps 17-19 digit pin / tweet ids exact (no float rounding)", () => {
+    const out = '[[3, "https://i.pinimg.com/originals/a.jpg", {"id": 98516310598116357, "extension": "jpg"}], [3, "https://pbs.twimg.com/media/b.jpg", {"tweet_id": 1843210987654321099, "author": {"name": "nhk"}, "extension": "jpg"}]]';
+    expect(parseGallerySearch("pinterest", out, "image", 5)[0]!.url).toBe("https://www.pinterest.com/pin/98516310598116357/");
+    expect(parseGallerySearch("x", out, "image", 5)[0]!.url).toBe("https://x.com/nhk/status/1843210987654321099");
   });
 
   it("redacts signed-URL tokens, proxy credentials and long secrets", () => {

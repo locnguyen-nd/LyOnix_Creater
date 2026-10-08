@@ -49,7 +49,10 @@ Sau khi bật: `report:failures` có dòng `ossFetch` (yt-dlp vs rơi về Apify
 
 ## Giới hạn trung thực
 
-- Chưa có số đo thật (máy dev chưa cài công cụ ở thời điểm code). Tỉ lệ 403 từ IP máy chủ chưa biết.
+- Probe thật 08/10 (IP dân dụng, không cookies; `pipeline/evidence/VE2E-149/probe-2026-10-08.md` ở repo tài liệu): TikTok 20/20 p50 13,3 s / p95 23,7 s;
+  YouTube 8/9 p50 9,0 s; Pinterest gallery-dl 8/8 p50 5,3 s, tải thẳng URL ảnh p50 0,1–0,4 s. Tỉ lệ 403 từ IP datacenter **chưa đo**.
+- Tìm YouTube không trả Shorts dọc (chỉ video `watch?v=` ngang) ⇒ tầng Shorts dựa vào reframe 9:16.
+- `--download-sections` chậm hơn tải đủ với video ngắn (16,6 s vs 8,4 s) ⇒ chỉ dùng khi nguồn > 180 s.
 - yt-dlp không tìm TikTok theo từ khóa (`tiktok:tag` "Currently broken" upstream) → bước tìm TikTok vẫn là Apify.
 - Tầng `shorts`/`gallery` chưa có kiểm duyệt vision lúc lập kế hoạch như đường Apify; chỉ có lọc metadata + cổng chủ thể, sau đó reframe + quality gate.
 - Tải từ YouTube/TikTok/Pinterest/X trái điều khoản nền tảng — rủi ro do chủ dự án chấp nhận (DEC).

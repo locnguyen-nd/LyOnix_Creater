@@ -171,7 +171,15 @@ export type SocialSearchItem = SocialMediaInfo & {
   /** Post URL to pass to `media.fetch` later. */
   url: string;
   mediaType: "video" | "image";
+  /**
+   * Direct file URL the search already returned (images on Pinterest/X CDNs only, `pinimg.com` / `twimg.com`), or null. The API may fetch it
+   * straight away (probe 08/10: 0.2-1.7 s vs ~18 s through gallery-dl re-opening the pin page) and falls back to `media.fetch` on failure.
+   */
+  mediaUrl?: string | null;
 };
+
+/** Hosts a search-returned direct image URL may point at (whole DNS labels). */
+export const SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES: readonly string[] = ["pinimg.com", "twimg.com"];
 
 export type MediaSearchSuccess = {
   schemaVersion: typeof MEDIA_JOB_SCHEMA_VERSION;

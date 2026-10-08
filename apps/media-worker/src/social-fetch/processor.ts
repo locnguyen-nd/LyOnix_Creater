@@ -40,6 +40,7 @@ import {
   lastJsonLine,
   nextFetchStep,
   parseGallerySearch,
+  parseJsonKeepingBigIds,
   parseToolVersion,
   parseYtDlpSearch,
   redactCliText,
@@ -291,7 +292,7 @@ export class SocialFetchProcessor {
       const json = lastJsonLine(ran.value.stdout);
       if (json) info = ytdlpInfo(json);
     } else {
-      const meta = await readFile(`${file}.json`, "utf8").then((t) => JSON.parse(t) as Record<string, unknown>).catch(() => null);
+      const meta = await readFile(`${file}.json`, "utf8").then((t) => parseJsonKeepingBigIds(t) as Record<string, unknown>).catch(() => null);
       if (meta) info = galleryInfo(job.platform, meta);
     }
 

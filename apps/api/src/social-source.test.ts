@@ -9,6 +9,7 @@ import type { MediaService } from "./media.service.js";
 import type { PexelsService } from "./pexels.service.js";
 import type { SocialFetchOutcome, SocialFetchService, SocialSearchOutcome } from "./social-fetch.service.js";
 import { SocialSourceService, socialLedgerIdFromFileName } from "./social-source.service.js";
+import * as safeBinaryFetch from "./safe-binary-fetch.js";
 
 // VE2E-147/148: Shorts / gallery tiers. Search + download are fakes (the worker is never called), files go to a temp MEDIA_ROOT.
 
@@ -112,6 +113,30 @@ describe("SocialSourceService (VE2E-147/148)", () => {
     const out2 = await new SocialSourceService(prisma() as any, m as unknown as MediaService, ok).autoImportForSegment(projectId, "u", "staff", baseInput({ platform: "pinterest", tool: "gallery-dl", mediaType: "image" }));
     expect(out2.ok).toBe(true);
     expect(m.registerAsset.mock.calls[0]![3]).toMatchObject({ kind: "image", originalFileName: "social-pinterest-1002.jpg", durationMs: null, origin: "social" });
+  });
+});
+
+describe("SocialSourceService direct image fast path (probe 08/10)", () => {
+  const pin = (id: string, mediaUrl: string | null) => shortItem(id, { mediaType: "image", url: `https://www.pinterest.com/pin/${id}/`, durationSeconds: null, mediaUrl });
+
+  it("downloads a search-returned pinimg URL directly: no worker job, registered with downloader 'direct'", async () => {
+    const spy = vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: true, buffer: JPG, mimeType: "image/jpeg", finalUrl: "x" });
+    const fetch = fakeSocialFetch([pin("2001", "https://i.pinimg.com/originals/a.jpg")], () => JPG);
+    const m = media();
+    const out = await new SocialSourceService(prisma() as any, m as unknown as MediaService, fetch).autoImportForSegment(projectId, "u", "staff", baseInput({ platform: "pinterest", tool: "gallery-dl", mediaType: "image" }));
+    expect(out.ok).toBe(true);
+    expect(fetch.fetchPost).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith("https://i.pinimg.com/originals/a.jpg", expect.objectContaining({ allowedHostSuffixes: ["pinimg.com", "twimg.com"], allowedMimePrefixes: ["image/"] }));
+    expect(m.registerAsset.mock.calls[0]![3].serverProvenance.downloader.tool).toBe("direct");
+    expect(out.ok && out.data.diagnostics.downloads[0]!.via).toBe("direct");
+  });
+
+  it("a failed direct GET falls back to gallery-dl through the worker", async () => {
+    vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: false, reason: "fetch_failed" });
+    const fetch = fakeSocialFetch([pin("2002", "https://i.pinimg.com/originals/b.jpg")], () => JPG);
+    const out = await new SocialSourceService(prisma() as any, media() as unknown as MediaService, fetch).autoImportForSegment(projectId, "u", "staff", baseInput({ platform: "pinterest", tool: "gallery-dl", mediaType: "image" }));
+    expect(out.ok).toBe(true);
+    expect(fetch.fetchPost).toHaveBeenCalledTimes(1);
   });
 });
 

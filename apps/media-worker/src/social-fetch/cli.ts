@@ -1,5 +1,6 @@
 import {
   isAllowedSocialPostUrl,
+  SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES,
   type MediaFetchAttempt,
   type MediaFetchAttemptStep,
   type MediaFetchErrorCode,
@@ -221,6 +222,14 @@ export const lastJsonLine = (stdout: string): Record<string, unknown> | null => 
   return null;
 };
 
+/**
+ * Pinterest pin ids / X tweet ids are 17-19 digit integers in gallery-dl's JSON: above Number.MAX_SAFE_INTEGER, so a plain JSON.parse
+ * rounds them and the rebuilt post URL points at another (or no) pin (probe 08/10: 8/8 FETCH_UNAVAILABLE). Id-like keys with 16+ digit
+ * integer values are turned into strings before parsing.
+ */
+export const parseJsonKeepingBigIds = (text: string): unknown =>
+  JSON.parse(text.replace(/("(?:id|tweet_id|pin_id|conversation_id|retweet_id|quote_id|reply_id|user_id)"\s*:\s*)(-?\d{16,})/g, '$1"$2"'));
+
 /** gallery-dl kwdict (metadata file or `-j` entry) -> source-neutral metadata. Field names differ per extractor (Pinterest vs X). */
 export const galleryInfo = (platform: SocialFetchPlatform, kw: Record<string, unknown>): SocialMediaInfo => {
   const author = rec(kw.author);
@@ -248,6 +257,17 @@ export const galleryInfo = (platform: SocialFetchPlatform, kw: Record<string, un
   };
 };
 
+/** https URL on a Pinterest / X image CDN (no credentials, no port). */
+const isDirectMediaUrl = (url: string): boolean => {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    return u.protocol === "https:" && !u.username && !u.password && !u.port && SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+  } catch {
+    return false;
+  }
+};
+
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv", "m3u8"]);
 
 /**
@@ -257,7 +277,7 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm", "mkv", "m3u8"]);
 export const parseGallerySearch = (platform: SocialFetchPlatform, stdout: string, mediaType: "video" | "image", limit: number): SocialSearchItem[] => {
   let messages: unknown;
   try {
-    messages = JSON.parse(stdout);
+    messages = parseJsonKeepingBigIds(stdout);
   } catch {
     return [];
   }
@@ -274,7 +294,7 @@ export const parseGallerySearch = (platform: SocialFetchPlatform, stdout: string
     const key = info.externalId ?? info.webpageUrl;
     if (seen.has(key)) continue;
     seen.add(key);
-    items.push({ ...info, url: info.webpageUrl, mediaType: kind });
+    items.push({ ...info, url: info.webpageUrl, mediaType: kind, mediaUrl: kind === "image" && isDirectMediaUrl(message[1]) ? message[1] : null });
     if (items.length >= limit) break;
   }
   return items;

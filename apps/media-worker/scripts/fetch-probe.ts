@@ -5,6 +5,8 @@
  *
  *   tsx scripts/fetch-probe.ts --urls <file>          one "<platform> <post-url>" per line (# comments allowed)
  *   tsx scripts/fetch-probe.ts --search youtube "メッシ 引退" [--limit 5]     search, then download the results
+ *   search mode applies the SAME filter as the Shorts / gallery tiers (selectSocialSearchItems: <= 180 s, not used, right kind; --aliases "a,b" adds
+ *   the subject gate, --all disables the filter) so the timings match what production would download.
  *   options: --cookies <cookies.txt> (Netscape, copied into a private temp dir), --proxy (use MEDIA_FETCH_PROXY), --json, --keep
  *
  * Output never contains cookie values or signed CDN URLs (results are redacted by the processor). Exit 0 even when downloads fail
@@ -14,6 +16,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildMediaFetchJob, buildMediaFetchJobKey, buildMediaSearchJob, buildMediaSearchJobKey, isSocialFetchPlatform, MEDIA_FETCH_COOKIES_DIR, type SocialFetchPlatform } from "@lyonix/media-jobs";
+import { selectSocialSearchItems } from "@lyonix/domain";
 import { runProcess } from "../src/process.js";
 import { loadSocialFetchConfig } from "../src/social-fetch/config.js";
 import { SocialFetchProcessor } from "../src/social-fetch/processor.js";
@@ -50,7 +53,7 @@ const main = async () => {
   const useProxy = flag("proxy");
   if (useProxy && !fetchCfg.proxyUrl) usage("--proxy needs MEDIA_FETCH_PROXY");
 
-  const targets: Array<{ platform: SocialFetchPlatform; url: string; mediaType: "video" | "image" }> = [];
+  const targets: Array<{ platform: SocialFetchPlatform; url: string; mediaType: "video" | "image"; mediaUrl?: string }> = [];
   const searches: Array<{ platform: string; query: string; ok: boolean; items: number; code: string | null; ms: number }> = [];
   const urlsFile = arg("urls");
   const search = arg("search");
@@ -72,11 +75,26 @@ const main = async () => {
     const started = Date.now();
     const result = await processor.handleSearch(buildMediaSearchJob({ jobKey: buildMediaSearchJobKey({ platform: search as SocialFetchPlatform, tool, query: query!, limit }), platform: search as SocialFetchPlatform, tool, query: query!, limit, mediaType, cookiesRelativePath, useProxy }));
     searches.push({ platform: search, query: query!, ok: result.ok, items: result.ok ? result.items.length : 0, code: result.ok ? null : result.error.code, ms: Date.now() - started });
-    if (result.ok) for (const item of result.items) targets.push({ platform: search as SocialFetchPlatform, url: item.url, mediaType });
+    if (result.ok) {
+      const picked = flag("all")
+        ? result.items
+        : selectSocialSearchItems(result.items, { mediaType, usedIds: new Set(), minDurationSeconds: 5, maxDurationSeconds: 180, subjectAliases: (arg("aliases") ?? "").split(",").map((a) => a.trim()).filter(Boolean), keywords: [query!] }).passed.map((p) => p.item);
+      if (!flag("json")) console.log(`search kept ${picked.length}/${result.items.length} after the production filter`);
+      for (const item of picked) targets.push({ platform: search as SocialFetchPlatform, url: item.url, mediaType, ...(item.mediaUrl ? { mediaUrl: item.mediaUrl } : {}) });
+    }
   } else usage("give --urls or --search");
 
   const rows: Array<{ platform: string; ok: boolean; code: string | null; steps: string; ms: number; bytes: number; width: number | null; height: number | null; durationMs: number | null }> = [];
+  const direct: number[] = [];
   for (const target of targets) {
+    // The API's fast path for images (SocialSourceService.fetchDirect): one GET of the CDN URL the search returned.
+    if (target.mediaUrl) {
+      const started = Date.now();
+      const response = await fetch(target.mediaUrl, { signal: AbortSignal.timeout(30_000) }).catch(() => null);
+      const bytes = response?.ok ? (await response.arrayBuffer()).byteLength : 0;
+      direct.push(Date.now() - started);
+      if (!flag("json")) console.log(`${bytes > 0 ? "OK  " : "FAIL"} direct    ${String(Date.now() - started).padStart(6)}ms ${(bytes / 1e6).toFixed(1)}MB`);
+    }
     const tool = toolFor(target.platform, target.mediaType);
     const started = Date.now();
     const result = await processor.handleFetch(buildMediaFetchJob({ jobKey: buildMediaFetchJobKey({ platform: target.platform, url: target.url }), platform: target.platform, tool, url: target.url, mediaType: target.mediaType, cookiesRelativePath, useProxy }));
@@ -110,7 +128,9 @@ const main = async () => {
       codes,
     };
   }
-  const report = { at: new Date().toISOString(), tools: { ytDlp: fetchCfg.ytDlpPath, galleryDl: fetchCfg.galleryDlPath }, cookies: Boolean(cookies), proxy: useProxy, searches, byPlatform, rows };
+  const directStats = direct.length ? { n: direct.length, p50Ms: percentile(direct, 0.5), p95Ms: percentile(direct, 0.95) } : null;
+  if (directStats && !flag("json")) console.log(`direct image GET: n=${directStats.n} p50 ${(directStats.p50Ms / 1000).toFixed(1)}s p95 ${(directStats.p95Ms / 1000).toFixed(1)}s`);
+  const report = { at: new Date().toISOString(), direct: directStats, tools: { ytDlp: fetchCfg.ytDlpPath, galleryDl: fetchCfg.galleryDlPath }, cookies: Boolean(cookies), proxy: useProxy, searches, byPlatform, rows };
   if (flag("json")) console.log(JSON.stringify(report, null, 2));
   else {
     for (const s of searches) console.log(`search ${s.platform} "${s.query}": ${s.ok ? `${s.items} item(s)` : s.code} in ${s.ms}ms`);
