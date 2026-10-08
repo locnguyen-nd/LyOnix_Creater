@@ -246,7 +246,7 @@ const commonHead = (cutStartMs: number, inputPath: string, cutDurationMs: number
 const commonTail = (outputPath: string): string[] => ["-sn", "-dn", "-map_metadata", "-1", "-movflags", "+faststart", "-f", "mp4", outputPath];
 
 /** Encode profile constants (bump CLIP_PREPARE_PROFILE_VERSION when changed). */
-export const REENCODE_PROFILE = { preset: "veryfast", crf: 23, maxrate: "4M", bufsize: "8M", maxFps: 30 } as const;
+export const REENCODE_PROFILE = { preset: "superfast", crf: 22, maxrate: "4M", bufsize: "8M", maxFps: 30 } as const;
 
 export const buildCopyArgs = (plan: ClipPlan, inputPath: string, outputPath: string, stripAudio: boolean): string[] => [
   ...commonHead(plan.cutStartMs, inputPath, plan.cutDurationMs),
@@ -309,6 +309,12 @@ export const normalizedFps = (sourceFps: number | null): number => {
   return ([24, 25, 30] as const).reduce((best, candidate) => (Math.abs(candidate - sourceFps) <= Math.abs(best - sourceFps) ? candidate : best));
 };
 
+/** Whole frames in a cut of `durationMs` at `fps` (>= 1). */
+export const frameCount = (durationMs: number, fps: number): number => Math.max(1, Math.round((durationMs * fps) / 1000));
+
+/** The cut length snapped to a whole number of frames, so the clip ends on a frame boundary (frame-accurate against the voice timeline). */
+export const frameAlignedDurationMs = (durationMs: number, fps: number): number => Math.round((frameCount(durationMs, fps) * 1000) / fps);
+
 export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null, cropPlan?: ReframeCropPlan | null): string => {
   const parts = (cropPlan ? buildCropFilterParts(cropPlan, target) : null) ?? [
     `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
@@ -328,8 +334,10 @@ export const buildReencodeArgs = (
   sourceFps: number | null,
   cropPlan?: ReframeCropPlan | null,
 ): string[] => [
-  ...commonHead(plan.cutStartMs, inputPath, plan.cutDurationMs),
+  ...commonHead(plan.cutStartMs, inputPath, frameAlignedDurationMs(plan.cutDurationMs, normalizedFps(sourceFps))),
   ...audioArgs(stripAudio, "reencode"),
+  // Exactly N output frames: with CFR the clip length is then a whole number of frames, never a fraction of one.
+  "-frames:v", String(frameCount(plan.cutDurationMs, normalizedFps(sourceFps))),
   "-vf", buildReencodeFilter(target, sourceFps, cropPlan),
   "-c:v", "libx264", "-preset", REENCODE_PROFILE.preset, "-crf", String(REENCODE_PROFILE.crf),
   "-maxrate", REENCODE_PROFILE.maxrate, "-bufsize", REENCODE_PROFILE.bufsize,

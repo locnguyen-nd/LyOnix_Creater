@@ -16,7 +16,7 @@ export const DEFAULT_MEDIA_WORKER_QUEUE = "lyonix.media";
 export const CLIP_PREPARE_JOB_TYPE = "clip.prepare" as const;
 export const CLIP_PREPARE_RESULT_TYPE = "clip.prepare.result" as const;
 /** Bumped whenever the FFmpeg encode profile/decision rules change in a way that changes output bytes. */
-export const CLIP_PREPARE_PROFILE_VERSION = "clip-prepare.v1" as const;
+export const CLIP_PREPARE_PROFILE_VERSION = "clip-prepare.v2" as const;
 /**
  * VE2E-67: version of the crop-apply recipe (keyframed `crop` expression + lanczos scale to 1080x1920, still image = one JPEG).
  * Only part of the job fingerprint / lineage when a `cropPlan` (or an image source) is present, so legacy keys/manifests are unchanged.

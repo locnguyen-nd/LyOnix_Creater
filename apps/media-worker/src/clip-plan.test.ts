@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CLIP_TARGET } from "@lyonix/media-jobs";
 import {
   buildCopyArgs,
+  frameAlignedDurationMs,
+  frameCount,
   buildKeyframeProbeArgs,
   buildReencodeArgs,
   buildReencodeFilter,
@@ -179,5 +181,13 @@ describe("FFmpeg argument building", () => {
   it("keyframe probe is bounded by a read interval around the start", () => {
     const args = buildKeyframeProbeArgs("in.mp4", 20_000, 1000);
     expect(args[args.indexOf("-read_intervals") + 1]).toBe("9.000%31.000");
+  });
+});
+
+describe("frame-accurate re-encode length", () => {
+  it("snaps the cut to a whole number of frames and caps output frames", () => {
+    expect(frameCount(7123, 30)).toBe(214);
+    expect(frameAlignedDurationMs(7123, 30)).toBe(7133);
+    expect(frameCount(1, 30)).toBe(1);
   });
 });

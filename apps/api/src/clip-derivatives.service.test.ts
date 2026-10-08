@@ -67,7 +67,7 @@ describe("ClipDerivativesService.prepare", () => {
     const row = store.rows.get(derivativeId)!;
     expect(row).toMatchObject({
       parentMediaAssetVersionId: pexelsParent.id,
-      transform: { range: { startMs: 2000, durationMs: 4000 }, stripAudio: true, tool: { name: "ffmpeg", version: "ffmpeg version test" }, profileVersion: "clip-prepare.v1" },
+      transform: { range: { startMs: 2000, durationMs: 4000 }, stripAudio: true, tool: { name: "ffmpeg", version: "ffmpeg version test" }, profileVersion: "clip-prepare.v2" },
       kind: "video",
       origin: "pexels",
       license: "Pexels",

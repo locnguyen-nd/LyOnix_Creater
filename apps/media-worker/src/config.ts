@@ -61,7 +61,7 @@ const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number, min: nu
  * - MEDIA_WORKER_QUEUE (default `lyonix.media`), RABBITMQ_URL
  * - MEDIA_ROOT (default `./data/media`, resolved against the repo root like apps/api)
  * - FFMPEG_PATH / FFPROBE_PATH (default `ffmpeg` / `ffprobe` on PATH)
- * - MEDIA_WORKER_COPY_TOLERANCE_MS (default 1000), MEDIA_WORKER_JOB_TIMEOUT_MS (default 120000),
+ * - MEDIA_WORKER_COPY_TOLERANCE_MS (default 40 = about one frame; a copy that cannot start on the requested frame is re-encoded), MEDIA_WORKER_JOB_TIMEOUT_MS (default 120000),
  *   MEDIA_WORKER_MAX_ATTEMPTS (default 2),
  *   MEDIA_WORKER_PREFETCH (default min(3, CPU count), 1..16; always capped at the CPU count so FFmpeg jobs do not starve each other),
  *   VE2E-134: MEDIA_WORKER_PREFETCH_CLIP_PREPARE / _FRAME_EXTRACT / _REFRAME_ANALYZE / _COMPOSE (each defaults to the old behaviour: the
@@ -85,7 +85,7 @@ export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string, 
     mediaRoot: isAbsolute(mediaRootRaw) ? mediaRootRaw : resolve(repoRoot, mediaRootRaw),
     ffmpegPath: env.FFMPEG_PATH?.trim() || "ffmpeg",
     ffprobePath: env.FFPROBE_PATH?.trim() || "ffprobe",
-    copyToleranceMs: readInt(env, "MEDIA_WORKER_COPY_TOLERANCE_MS", 1000, 0, 10_000),
+    copyToleranceMs: readInt(env, "MEDIA_WORKER_COPY_TOLERANCE_MS", 40, 0, 10_000),
     jobTimeoutMs: readInt(env, "MEDIA_WORKER_JOB_TIMEOUT_MS", 120_000, 1_000, 30 * 60_000),
     maxAttempts: readInt(env, "MEDIA_WORKER_MAX_ATTEMPTS", 2, 1, 5),
     prefetch,
