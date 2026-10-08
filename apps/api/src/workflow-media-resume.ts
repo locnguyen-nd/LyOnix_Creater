@@ -101,3 +101,24 @@ export function orderByScript(pieces: SourcedSegment[], sceneOrder: readonly str
   const rank = (piece: SourcedSegment) => position.get(piece.segment.sceneIds[0] ?? "") ?? Number.MAX_SAFE_INTEGER;
   return [...pieces].sort((a, b) => rank(a) - rank(b));
 }
+
+/**
+ * Last line of defence before the timeline is persisted (which rejects duplicate segment ids): a later piece that reuses an id
+ * (reused early piece vs. second-source tail, repeated split) is renamed `<id>-r2`, `-r3`, ... Scene membership is untouched.
+ */
+export function ensureUniqueSegmentIds(pieces: SourcedSegment[]): SourcedSegment[] {
+  const taken = new Set(pieces.map((piece) => piece.segment.segmentId));
+  const seen = new Set<string>();
+  return pieces.map((piece) => {
+    const id = piece.segment.segmentId;
+    if (!seen.has(id)) {
+      seen.add(id);
+      return piece;
+    }
+    let candidate = id;
+    for (let n = 2; taken.has(candidate) || seen.has(candidate); n += 1) candidate = `${id}-r${n}`;
+    taken.add(candidate);
+    seen.add(candidate);
+    return { ...piece, segment: { ...piece.segment, segmentId: candidate } };
+  });
+}

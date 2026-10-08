@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PlannedSegment } from "@lyonix/domain";
 import type { SegmentSource, SourcedSegment } from "./media-plan.service.js";
-import { orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
+import { ensureUniqueSegmentIds, orderByScript, reconcileSourcedSegments, sameSegmentStructure } from "./workflow-media-resume.js";
 
 const seg = (segmentId: string, sceneIds: string[], extra: Partial<PlannedSegment> = {}): PlannedSegment => ({ segmentId, sceneIds, subject: null, priority: null, keywords: null, durationMs: 0, origin: "fallback", ...extra });
 const src = (id: string, durationMs: number | null, extra: Partial<SegmentSource> = {}): SegmentSource => ({ mediaAssetVersionId: id, kind: "video", durationMs, externalId: id, sourcing: "imported", provider: "pexels", ...extra });
@@ -75,5 +75,15 @@ describe("reconcileSourcedSegments (VE2E-133)", () => {
   it("orderByScript sorts pieces by the position of their first scene", () => {
     const pieces = [sourced(seg("t", ["c"]), null), sourced(seg("h", ["a", "b"]), null)];
     expect(orderByScript(pieces, ["a", "b", "c"]).map((piece) => piece.segment.segmentId)).toEqual(["h", "t"]);
+  });
+});
+
+describe("ensureUniqueSegmentIds", () => {
+  it("renames a repeated segment id so the timeline never sees a duplicate", () => {
+    const pieces = [sourced(seg("segment2-b", ["a"]), src("A", 9000)), sourced(seg("segment2-b", ["b"]), src("B", 9000)), sourced(seg("x", ["c"]), src("C", 9000))];
+    const ids = ensureUniqueSegmentIds(pieces).map((piece) => piece.segment.segmentId);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids[0]).toBe("segment2-b");
+    expect(ensureUniqueSegmentIds(pieces)[1]!.segment.sceneIds).toEqual(["b"]);
   });
 });

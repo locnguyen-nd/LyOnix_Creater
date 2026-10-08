@@ -75,6 +75,15 @@ describe("planBackgroundSegments", () => {
     expect(onlyMain.map((p) => p.sceneIds)).toEqual([["s1", "s2"]]);
   });
 
+  it("fitSegmentsToRange never mints a duplicate segment id when the same segment is split twice", () => {
+    const seg = (segmentId: string, sceneIds: string[]) => ({ segmentId, sceneIds, subject: null, priority: null, keywords: null, durationMs: sceneIds.length * 1000, origin: "visual_plan" as const });
+    const durations = new Map(["a", "b", "c", "d", "e", "f"].map((id) => [id, 1000] as const));
+    const result = fitSegmentsToRange([seg("segment1", ["a", "b", "c", "d", "e", "f"])], { min: 4, max: 6 }, durations);
+    const ids = result.map((segment) => segment.segmentId);
+    expect(result.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("fitSegmentsToRange is a no-op without a range", () => {
     const list = [{ segmentId: "a", sceneIds: ["s1"], subject: null, priority: null, keywords: null, durationMs: 1, origin: "fallback" as const }];
     expect(fitSegmentsToRange(list, null, new Map())).toBe(list);

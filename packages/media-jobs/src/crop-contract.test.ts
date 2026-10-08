@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { buildClipPrepareJob, buildClipPrepareJobKey, clipPrepareFingerprint, cropPlanDigest, validateClipPrepareJob } from "./contract.js";
+import { buildClipPrepareJob, buildClipPrepareJobKey, CLIP_PREPARE_PROFILE_VERSION, clipPrepareFingerprint, cropPlanDigest, validateClipPrepareJob } from "./contract.js";
 
 const base = () =>
   buildClipPrepareJob({
@@ -33,12 +33,12 @@ const crop = (overrides: Record<string, unknown> = {}) => ({
 const withCrop = (plan: unknown) => ({ ...base(), cropPlan: plan });
 
 describe("cropPlan / image extensions of clip.prepare (VE2E-67)", () => {
-  it("legacy keys and fingerprints are byte-identical to before when no cropPlan / image is involved", () => {
-    const legacyKey = `clip:${createHash("sha256").update(JSON.stringify(["mav-1", 1000, 6000, true, "clip-prepare.v1"])).digest("hex").slice(0, 40)}`;
+  it("without a cropPlan / image the key and fingerprint keep the pre-VE2E-67 shape (only the profile version moves: v3 since VE2E-143)", () => {
+    const legacyKey = `clip:${createHash("sha256").update(JSON.stringify(["mav-1", 1000, 6000, true, CLIP_PREPARE_PROFILE_VERSION])).digest("hex").slice(0, 40)}`;
     expect(buildClipPrepareJobKey({ sourceMediaAssetVersionId: "mav-1", startMs: 1000, durationMs: 6000, stripAudio: true })).toBe(legacyKey);
     const job = base();
     const legacyFingerprint = createHash("sha256")
-      .update(JSON.stringify({ profile: "clip-prepare.v1", source: job.source.relativePath, startMs: 1000, durationMs: 6000, stripAudio: true, target: job.target }))
+      .update(JSON.stringify({ profile: CLIP_PREPARE_PROFILE_VERSION, source: job.source.relativePath, startMs: 1000, durationMs: 6000, stripAudio: true, target: job.target }))
       .digest("hex");
     expect(clipPrepareFingerprint(job)).toBe(legacyFingerprint);
   });

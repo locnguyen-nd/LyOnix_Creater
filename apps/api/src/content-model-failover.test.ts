@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProviderError } from "@lyonix/providers";
-import { callContentWithModelFailover, describeLimitedModels } from "./content-model-failover.js";
+import { callContentWithModelFailover, describeLimitedModels, resetModelLatency } from "./content-model-failover.js";
 
 const accounts = () => ({
   acquireContentRequestSlot: vi.fn(async () => true),
@@ -47,5 +47,49 @@ describe("content model failover", () => {
     expect(call).toHaveBeenCalledTimes(1);
     expect(gate.cooldownContentAccount).toHaveBeenCalledTimes(1);
     expect(gate.markModelLimited).not.toHaveBeenCalled();
+  });
+});
+
+describe("content model failover - latency budget (VE2E-138)", () => {
+  const timeout = () => Object.assign(new Error("timed out"), { name: "TimeoutError" });
+
+  it("a timed-out model is benched and the next model answers (no 120 s x N wait)", async () => {
+    resetModelLatency();
+    const gate = accounts();
+    const call = vi.fn(async (modelId: string) => {
+      if (modelId === "slow") throw timeout();
+      return modelId;
+    });
+    const result = await callContentWithModelFailover(gate, "acc", ["slow", "fast"], call);
+    expect(result).toMatchObject({ ok: true, value: "fast" });
+    expect(gate.markModelLimited).toHaveBeenCalledWith("acc", "slow", expect.any(Number), "PROVIDER_TIMEOUT");
+  });
+
+  it("tries at most CONTENT_FAILOVER_MAX_MODELS models, then stops", async () => {
+    resetModelLatency();
+    process.env.CONTENT_FAILOVER_MAX_MODELS = "2";
+    try {
+      const gate = accounts();
+      const call = vi.fn(async () => { throw new ProviderError("PROVIDER_RATE_LIMITED", "per minute", true, 30_000, "minute"); });
+      const result = await callContentWithModelFailover(gate, "acc", ["a", "b", "c", "d", "e"], call);
+      expect(result.ok).toBe(false);
+      expect(call).toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.CONTENT_FAILOVER_MAX_MODELS;
+    }
+  });
+
+  it("a model that was slow last time is tried after the others", async () => {
+    resetModelLatency();
+    process.env.CONTENT_SLOW_MODEL_MS = "1000";
+    try {
+      const gate = accounts();
+      await callContentWithModelFailover(gate, "acc", ["slow"], async () => { throw timeout(); });
+      const order: string[] = [];
+      await callContentWithModelFailover(gate, "acc", ["slow", "fast"], async (modelId) => { order.push(modelId); return modelId; });
+      expect(order[0]).toBe("fast");
+    } finally {
+      delete process.env.CONTENT_SLOW_MODEL_MS;
+    }
   });
 });

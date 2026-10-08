@@ -197,7 +197,11 @@ export function fitSegmentsToRange(segments: PlannedSegment[], range: SegmentCou
       }
     }
     const first: PlannedSegment = { ...target, sceneIds: target.sceneIds.slice(0, cut), durationMs: sum(sceneDurations.slice(0, cut)) };
-    const second: PlannedSegment = { ...target, segmentId: `${target.segmentId}-b`, sceneIds: target.sceneIds.slice(cut), durationMs: sum(sceneDurations.slice(cut)) };
+    // Splitting the same segment twice (or a segment whose `-b` already exists) must not mint a duplicate id: the timeline rejects it ("segmentId trùng lặp").
+    const taken = new Set(result.map((segment) => segment.segmentId));
+    let secondId = `${target.segmentId}-b`;
+    for (let n = 2; taken.has(secondId); n += 1) secondId = `${target.segmentId}-b${n}`;
+    const second: PlannedSegment = { ...target, segmentId: secondId, sceneIds: target.sceneIds.slice(cut), durationMs: sum(sceneDurations.slice(cut)) };
     result = [...result.slice(0, best), first, second, ...result.slice(best + 1)];
   }
   return result;

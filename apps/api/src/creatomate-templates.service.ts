@@ -16,6 +16,7 @@ import {
   deriveTemplateModifications,
   deriveOrshotModifications,
   getCreatomateTemplate,
+  getOrshotPlan,
   getOrshotTemplate,
   listCreatomateTemplates,
   listOrshotTemplates,
@@ -117,7 +118,29 @@ export class CreatomateTemplatesService {
   async checkRenderable(templateSnapshotId: string, providerAccountId: string, options: { checkEngine: boolean }): Promise<TemplateRenderCheck | { ok: false; code: "NOT_FOUND"; message: string; status: 404 }> {
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: templateSnapshotId } });
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
-    return checkTemplateRenderable(this.readinessDeps(), { snapshot, providerAccountId, checkEngine: options.checkEngine });
+    const check = await checkTemplateRenderable(this.readinessDeps(), { snapshot, providerAccountId, checkEngine: options.checkEngine });
+    if (!check.ok || snapshot.engine !== "orshot") return check;
+    const blocked = await this.orshotVideoBlock(providerAccountId);
+    return blocked ? { ok: false, code: "VALIDATION_FAILED", message: blocked, reason: "account_unusable", status: 400 } : check;
+  }
+
+  private readonly orshotPlanCache = new Map<string, { until: number; message: string | null }>();
+
+  /** VE2E-141: why this Orshot account cannot render video right now (plan without video), or null. Cached 10 min; a lookup failure never blocks. */
+  private async orshotVideoBlock(providerAccountId: string): Promise<string | null> {
+    const cached = this.orshotPlanCache.get(providerAccountId);
+    if (cached && cached.until > Date.now()) return cached.message;
+    const account = await this.usableAccount(providerAccountId);
+    if (!account.ok || account.data.provider !== "orshot") return null;
+    let message: string | null = null;
+    try {
+      const plan = await getOrshotPlan(decryptSecret(account.data.encryptedSecret));
+      if (!plan.videoRender) message = `Gói Orshot hiện tại (${plan.planTitle ?? plan.planType ?? "Free"}) không cho render video. Nâng gói Orshot hoặc dùng Creatomate/LyOnix.`;
+    } catch {
+      return null;
+    }
+    this.orshotPlanCache.set(providerAccountId, { until: Date.now() + 10 * 60_000, message });
+    return message;
   }
 
   /** VE2E-111: is this the internal engine's system account? (No secret, no network: its templates are the repo's released recipes.) */

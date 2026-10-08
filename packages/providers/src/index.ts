@@ -273,6 +273,8 @@ export {
 } from "./creatomate.js";
 export {
   probeOrshotAccount,
+  getOrshotPlan,
+  type OrshotPlan,
   listOrshotTemplates,
   getOrshotTemplate,
   deriveOrshotModifications,

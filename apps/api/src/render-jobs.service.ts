@@ -86,7 +86,8 @@ const mapProviderError = (error: unknown, provider: RenderProviderName = "creato
   const label = provider === "orshot" ? "Orshot" : "Creatomate";
   if (error instanceof ProviderError) {
     const switchable = error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_AUTH_INVALID";
-    return { code: error.code, message: providerErrorMessage(label)[error.code] ?? `${label} từ chối yêu cầu (${error.message})`, status: switchable ? 429 : 502, retryable: error.retryable };
+    const base = providerErrorMessage(label)[error.code] ?? `${label} từ chối yêu cầu (${error.message})`;
+    return { code: error.code, message: error.code === "PROVIDER_QUOTA_EXHAUSTED" && provider === "orshot" ? `${base} (${error.message})` : base, status: switchable ? 429 : 502, retryable: error.retryable };
   }
   return { code: "PROVIDER_UNAVAILABLE", message: `Lỗi mạng hoặc timeout khi gọi ${label}`, status: 502, retryable: true };
 };
@@ -289,7 +290,13 @@ export class RenderJobsService {
         modifications[slot.key] = `${clampVolume(assignment.volumePercent)}%`;
       }
     }
-    const missingRequired = slots.filter((slot) => slot.required && !providedKeys.has(slot.key)).map((slot) => slot.key);
+    // Orshot page templates: pages past the last assigned page are not rendered (`orshotIncludePages`), so their required slots are not missing.
+    const lastPage = Math.max(0, ...assignments.map((assignment) => Number(/^page(\d+)@/.exec(assignment.modificationKey)?.[1] ?? 0)));
+    const pageCount = orshotPageCount(slots);
+    const missingRequired = slots
+      .filter((slot) => slot.required && !providedKeys.has(slot.key))
+      .filter((slot) => pageCount === null || lastPage === 0 || Number(/^page(\d+)@/.exec(slot.key)?.[1] ?? 0) <= lastPage)
+      .map((slot) => slot.key);
     if (missingRequired.length > 0) {
       return { ok: false, code: "VALIDATION_FAILED", message: `Thiếu modification bắt buộc: ${missingRequired.join(", ")}` };
     }

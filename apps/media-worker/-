@@ -1,0 +1,1 @@
+fake-mp4:-hide_banner -nostdin -v info -ss 3.100 -i C:\Users\nsd\AppData\Local\Temp\lyonix-media-worker-VrjgRy\projects\p1\assets\source.mp4 -t 2 -an -vf cropdetect=limit=0.1:round=2:reset=0 -f null -

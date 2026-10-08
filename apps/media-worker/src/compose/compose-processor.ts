@@ -261,7 +261,9 @@ export class ComposeProcessor {
       ...video.inputArgs, "-i", join(workDir, "audio.m4a"),
       ...filterComplexFileArgs("video-graph.txt", this.deps.ffmpegVersion),
       "-map", "[v]", "-map", `${audioIndex}:a`,
-      "-c:v", "libx264", "-preset", this.deps.compose.x264Preset, "-crf", "18", "-profile:v", "high", "-level", "4.2", "-pix_fmt", "yuv420p",
+      "-c:v", "libx264", "-preset", this.deps.compose.x264Preset, "-crf", String(this.deps.compose.x264Crf ?? 18),
+      ...((this.deps.compose.x264MaxrateKbps ?? 0) > 0 ? ["-maxrate", `${this.deps.compose.x264MaxrateKbps}k`, "-bufsize", `${(this.deps.compose.x264MaxrateKbps ?? 0) * 2}k`] : []),
+      "-profile:v", "high", "-level", "4.2", "-pix_fmt", "yuv420p",
       // the fastest presets drop CABAC/8x8dct and silently fall back to Constrained Baseline: keep the stream High whatever the preset
       "-x264-params", "cabac=1:8x8dct=1",
       "-r", String(FPS), "-fps_mode", "cfr", "-frames:v", String(plan.totalFrames),

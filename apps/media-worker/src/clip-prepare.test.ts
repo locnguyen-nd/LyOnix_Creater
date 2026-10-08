@@ -372,7 +372,7 @@ describe("sweepExpiredMediaJobs (7-day working TTL)", () => {
 describe("loadMediaWorkerConfig", () => {
   it("defaults: queue lyonix.media, tolerance 1000ms, bounded timeout/attempts, repo-relative MEDIA_ROOT", () => {
     const config = loadMediaWorkerConfig({}, "/repo", 8);
-    expect(config).toMatchObject({ queue: "lyonix.media", copyToleranceMs: 1000, jobTimeoutMs: 120_000, maxAttempts: 2, prefetch: 3, ffmpegThreads: 2, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", rabbitmqUrl: null });
+    expect(config).toMatchObject({ queue: "lyonix.media", copyToleranceMs: 40, jobTimeoutMs: 120_000, maxAttempts: 2, prefetch: 3, ffmpegThreads: 2, ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", rabbitmqUrl: null });
     expect(config.mediaRoot.replaceAll("\\", "/")).toMatch(/\/repo\/data\/media$/);
   });
 

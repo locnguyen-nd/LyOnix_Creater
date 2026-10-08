@@ -122,6 +122,7 @@ export {
   detectScriptLanguageHeuristic,
   buildBoundedQueryVariants,
   rankMediaCandidates,
+  candidateSubjectMatch,
   decideMediaSelection,
   canAutoApplyMediaCandidate,
   applyVisionFindings,

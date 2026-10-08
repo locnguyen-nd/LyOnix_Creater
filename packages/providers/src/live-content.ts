@@ -19,7 +19,8 @@ const usage = (body: Record<string, unknown>, requestId: string | null) => {
     cost: costValue !== null ? { amount: String(costValue), currency: "USD", unit: "usd" } : { amount: null, currency: null, unit: "tokens" },
   };
 };
-const timeoutMs = 120_000;
+/** VE2E-138: per-call timeout (env `CONTENT_CALL_TIMEOUT_MS`, default 90 s; was a fixed 120 s that let one slow reasoning model hold a job for minutes). */
+const callTimeoutMs = () => { const v = Number(process.env.CONTENT_CALL_TIMEOUT_MS); return Number.isFinite(v) && v >= 5_000 ? v : 90_000; };
 const redact = (value: string) => value.replace(/sk-[a-zA-Z0-9_-]+/g, "[redacted]").replace(/AIza[a-zA-Z0-9_-]+/g, "[redacted]").slice(0, 220);
 /** VE2E-56: Gemini 429 bodies carry "Please retry in 34.5s" / `"retryDelay": "34s"`; returns ms or undefined. */
 export const parseRetryDelayMs = (detail: string): number | undefined => {
@@ -62,7 +63,7 @@ const json = async (response: Response) => {
   }
   return body;
 };
-const timedFetch = (url: string, init: RequestInit) => fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+const timedFetch = (url: string, init: RequestInit) => fetch(url, { ...init, signal: AbortSignal.timeout(callTimeoutMs()) });
 
 export const liveContentKinds = ["openai", "gemini", "xai", "openrouter"] as const;
 export type LiveContentKind = (typeof liveContentKinds)[number];
