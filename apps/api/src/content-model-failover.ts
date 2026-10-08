@@ -40,7 +40,7 @@ export const modelCooldownMs = (error: ProviderError): number => {
 
 /** Errors after which the next verified content account (any provider of the same content role) is tried instead of failing the step. */
 export const rotatesToNextAccount = (code: string) =>
-  code === "PROVIDER_RATE_LIMITED" || code === "PROVIDER_QUOTA_EXHAUSTED" || code === "PROVIDER_AUTH_INVALID" || code === "PROVIDER_CAPABILITY_UNAVAILABLE" || code === "PROVIDER_SCHEMA_INVALID" || code === "PROVIDER_UNAVAILABLE";
+  code === "PROVIDER_RATE_LIMITED" || code === "PROVIDER_QUOTA_EXHAUSTED" || code === "PROVIDER_AUTH_INVALID" || code === "PROVIDER_CAPABILITY_UNAVAILABLE" || code === "PROVIDER_SCHEMA_INVALID" || code === "PROVIDER_UNAVAILABLE" || code === "PROVIDER_TIMEOUT";
 
 export const isKeyLevelLimit = (error: ProviderError) => error.quotaScope === "account" || error.quotaScope === undefined;
 
@@ -53,6 +53,30 @@ export const describeLimitedModels = (limited: readonly LimitedModel[]): string 
   const names = [...new Set(limited.map((entry) => entry.modelId))].join(", ");
   return `Các model content đang bị giới hạn quota/tốc độ: ${names}. Thử lại sớm nhất lúc ${formatRetryAt(earliest)}.`;
 };
+
+const envNumber = (name: string, fallback: number, min: number): number => {
+  const configured = Number(process.env[name]);
+  return Number.isFinite(configured) && configured >= min ? configured : fallback;
+};
+/** VE2E-138: model tries per account before moving on (skipped/cooling models do not count). Env `CONTENT_FAILOVER_MAX_MODELS`. */
+const maxModelTries = () => Math.floor(envNumber("CONTENT_FAILOVER_MAX_MODELS", 3, 1));
+/** VE2E-138: wall-clock budget of one failover walk over an account's models. Env `CONTENT_FAILOVER_DEADLINE_MS` (default 150 s). */
+const failoverDeadlineMs = () => envNumber("CONTENT_FAILOVER_DEADLINE_MS", 150_000, 5_000);
+/** VE2E-138: a model that answered slower than this (or timed out) is demoted behind every other model of the account. Env `CONTENT_SLOW_MODEL_MS` (default 75 s). */
+const slowModelMs = () => envNumber("CONTENT_SLOW_MODEL_MS", 75_000, 1_000);
+/** How long a model that timed out stays benched (env `CONTENT_TIMEOUT_BENCH_MS`, default 10 min). */
+const timeoutBenchMs = () => envNumber("CONTENT_TIMEOUT_BENCH_MS", 10 * 60_000, 1_000);
+
+const modelLatencyMs = new Map<string, number>();
+/** Test hook. */
+export const resetModelLatency = () => modelLatencyMs.clear();
+/** Last observed latency of a model (ms); a slow one sorts after the fast ones, otherwise the configured rank is kept (stable). */
+export const orderByObservedLatency = (accountId: string, models: readonly string[]): string[] => {
+  const slow = (modelId: string) => (modelLatencyMs.get(`${accountId}:${modelId}`) ?? 0) > slowModelMs();
+  return [...models].sort((a, b) => Number(slow(a)) - Number(slow(b)));
+};
+
+const isTimeout = (error: unknown) => error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 
 /**
  * VE2E-56: try the ranked `models` of ONE account in order. Skips models in per-model cooldown; a model-level
@@ -72,17 +96,33 @@ export async function callContentWithModelFailover<T>(
     return { ok: false, accountBlocked: true, limited, error: new ProviderError("PROVIDER_RATE_LIMITED", "Tài khoản đang trong cooldown hoặc đã đạt concurrency tối đa", true, 1_000) };
   }
   let lastError: ProviderError | null = null;
+  const startedAt = Date.now();
+  const deadline = startedAt + failoverDeadlineMs();
+  let tries = 0;
   try {
-    for (const modelId of models) {
+    for (const modelId of orderByObservedLatency(accountId, models)) {
+      // VE2E-138: bounded walk - a long list of rate-limited free models used to hold one job for 20+ minutes.
+      if (tries >= maxModelTries() || (tries > 0 && Date.now() >= deadline)) break;
       const availability = await accounts.getModelAvailability(accountId, modelId).catch(() => ({ available: true, retryAt: null as Date | null }));
       if (!availability.available && availability.retryAt) {
         limited.push({ accountId, modelId, retryAt: availability.retryAt });
         continue;
       }
+      tries += 1;
+      const callStarted = Date.now();
       try {
         const value = await call(modelId);
+        modelLatencyMs.set(`${accountId}:${modelId}`, Date.now() - callStarted);
         return { ok: true, value, modelId, limited };
       } catch (error) {
+        if (isTimeout(error)) {
+          // A model that does not answer in time is benched and the next model is tried (text generation is idempotent).
+          modelLatencyMs.set(`${accountId}:${modelId}`, Math.max(Date.now() - callStarted, slowModelMs() + 1)); // a timeout is slow by definition
+          const retryAt = await accounts.markModelLimited(accountId, modelId, timeoutBenchMs(), "PROVIDER_TIMEOUT").catch(() => new Date(Date.now() + timeoutBenchMs()));
+          limited.push({ accountId, modelId, retryAt });
+          lastError = new ProviderError("PROVIDER_TIMEOUT", "Model không phản hồi kịp thời hạn", true);
+          continue;
+        }
         if (!(error instanceof ProviderError)) return { ok: false, thrown: error, error: lastError, limited, accountBlocked: false };
         lastError = error;
         if (error.code === "PROVIDER_CAPABILITY_UNAVAILABLE") {
