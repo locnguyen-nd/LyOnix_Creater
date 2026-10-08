@@ -16,12 +16,13 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import i18n, { persistLocale } from "../i18n";
 import { useMe, useSession } from "../session";
 import { applyTheme, readTheme } from "../theme";
 import type { ThemePref } from "../studio/types";
 import { ChannelAvatar } from "./chrome";
+import { TabIndicator, useTabIndicator } from "./motion";
 import { Select } from "./ui";
 
 const iconProps = { size: 17, strokeWidth: 1.9 } as const;
@@ -31,11 +32,14 @@ function Item({
   icon: Icon,
   label,
   collapsed,
+  indicated,
 }: {
   to: string;
   icon: LucideIcon;
   label: string;
   collapsed?: boolean;
+  /** The sliding nav indicator is placed: the active link paints no background of its own. */
+  indicated?: boolean;
 }) {
   return (
     <NavLink
@@ -43,7 +47,7 @@ function Item({
       end={to === "/"}
       title={collapsed ? label : undefined}
       className={({ isActive }) =>
-        `flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium ${collapsed ? "justify-center" : ""} ${isActive ? "bg-lyx-muted text-lyx-fg font-semibold" : "text-lyx-fg-muted hover:text-lyx-fg"}`
+        `relative flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium ${collapsed ? "justify-center" : ""} ${isActive ? `${indicated ? "" : "bg-lyx-muted"} text-lyx-fg font-semibold` : "text-lyx-fg-muted hover:text-lyx-fg"}`
       }
     >
       <Icon {...iconProps} aria-hidden />
@@ -59,6 +63,7 @@ export function AppShell() {
   const me = useMe();
   const { logout } = useSession();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const [theme, setTheme] = useState<ThemePref>(readTheme);
   const [q, setQ] = useState("");
   const [navCollapsed, setNavCollapsed] = useState(() => (typeof localStorage === "undefined" ? false : localStorage.getItem(NAV_COLLAPSE_KEY) === "1"));
@@ -71,7 +76,11 @@ export function AppShell() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
-  const sidebarWidth = navCollapsed || narrow ? "72px" : "var(--lyx-sidebar)";
+  // `compact`: the icon-only rail (collapsed by the user, or forced on phones).
+  const compact = navCollapsed || narrow;
+  const sidebarWidth = compact ? "72px" : "var(--lyx-sidebar)";
+  const { listRef: navRef, indicator: navIndicator } = useTabIndicator<HTMLElement>(`${pathname}|${compact}|${isAdmin}`);
+  const indicated = navIndicator.box !== null;
 
   useEffect(() => {
     applyTheme(theme);
@@ -92,43 +101,48 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-lyx-muted text-lyx-fg" style={{ "--lyx-sidebar-current": sidebarWidth } as React.CSSProperties}>
       <aside
-        className={`fixed inset-y-0 left-0 z-20 flex w-[var(--lyx-sidebar-current)] flex-col gap-0.5 overflow-auto border-r border-lyx-border bg-lyx-bg py-5 transition-[width] duration-150 ${navCollapsed ? "px-2" : "px-3.5"}`}
+        ref={navRef}
+        className={`fixed inset-y-0 left-0 z-20 flex w-[var(--lyx-sidebar-current)] flex-col gap-0.5 overflow-auto border-r border-lyx-border bg-lyx-bg py-5 transition-[width] duration-150 ${compact ? "px-2" : "px-3.5"}`}
       >
-        <div className={`mb-5 flex items-center gap-2 text-[15px] font-bold tracking-tight ${navCollapsed ? "justify-center px-0" : "px-1.5"}`}>
+        <div className={`mb-5 flex items-center gap-2 text-[15px] font-bold tracking-tight ${compact ? "justify-center px-0" : "px-1.5"}`}>
           <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-[7px] bg-lyx-fg text-[12px] font-extrabold text-lyx-bg">
             {t("brand").slice(0, 2).toUpperCase()}
           </span>
-          {navCollapsed ? null : t("brand")}
+          {compact ? null : t("brand")}
         </div>
-        {navCollapsed ? null : <p className="mb-1.5 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupWorkspace")}</p>}
-        <Item to="/" icon={LayoutDashboard} label={t("nav.dashboard")} collapsed={navCollapsed} />
-        <Item to="/channels" icon={Tv} label={t("nav.channels")} collapsed={navCollapsed} />
-        <Item to="/jobs" icon={Clapperboard} label={t("nav.jobs")} collapsed={navCollapsed} />
+        <TabIndicator {...navIndicator} className="rounded-[var(--lyx-radius)] bg-lyx-muted" />
+        {compact ? null : <p className="mb-1.5 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupWorkspace")}</p>}
+        <Item to="/" icon={LayoutDashboard} label={t("nav.dashboard")} collapsed={compact} indicated={indicated} />
+        <Item to="/channels" icon={Tv} label={t("nav.channels")} collapsed={compact} indicated={indicated} />
+        <Item to="/jobs" icon={Clapperboard} label={t("nav.jobs")} collapsed={compact} indicated={indicated} />
         {/* VE2E-22: an Auto submit provisions its own throwaway Project (no ProductionRequest row), so it never appears in /jobs above - without this entry a submitted run had no way to be found again after navigating away. */}
-        <Item to="/video-productions" icon={Video} label={t("nav.videoProductions")} collapsed={navCollapsed} />
-        <Item to="/assets" icon={Folder} label={t("nav.assets")} collapsed={navCollapsed} />
-        {navCollapsed ? <div className="my-2 h-px bg-lyx-border" /> : <p className="mb-1.5 mt-4 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupSystem")}</p>}
-        <Item to="/settings" icon={Settings} label={t("nav.settings")} collapsed={navCollapsed} />
-        {isAdmin ? <Item to="/people" icon={Users} label={t("nav.people")} collapsed={navCollapsed} /> : null}
+        <Item to="/video-productions" icon={Video} label={t("nav.videoProductions")} collapsed={compact} indicated={indicated} />
+        <Item to="/assets" icon={Folder} label={t("nav.assets")} collapsed={compact} indicated={indicated} />
+        {compact ? <div className="my-2 h-px bg-lyx-border" /> : <p className="mb-1.5 mt-4 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupSystem")}</p>}
+        <Item to="/settings" icon={Settings} label={t("nav.settings")} collapsed={compact} indicated={indicated} />
+        {isAdmin ? <Item to="/people" icon={Users} label={t("nav.people")} collapsed={compact} indicated={indicated} /> : null}
         <div className="flex-1" />
-        <button
-          type="button"
-          onClick={toggleNav}
-          title={t(navCollapsed ? "nav.expand" : "nav.collapse")}
-          aria-label={t(navCollapsed ? "nav.expand" : "nav.collapse")}
-          className={`flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium text-lyx-fg-muted hover:text-lyx-fg ${navCollapsed ? "justify-center" : ""}`}
-        >
-          {navCollapsed ? <PanelLeftOpen {...iconProps} aria-hidden /> : <PanelLeftClose {...iconProps} aria-hidden />}
-          {navCollapsed ? null : t("nav.collapse")}
-        </button>
+        {/* Phones always get the rail, so there is nothing to expand there. */}
+        {narrow ? null : (
+          <button
+            type="button"
+            onClick={toggleNav}
+            title={t(navCollapsed ? "nav.expand" : "nav.collapse")}
+            aria-label={t(navCollapsed ? "nav.expand" : "nav.collapse")}
+            className={`flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium text-lyx-fg-muted hover:text-lyx-fg ${navCollapsed ? "justify-center" : ""}`}
+          >
+            {navCollapsed ? <PanelLeftOpen {...iconProps} aria-hidden /> : <PanelLeftClose {...iconProps} aria-hidden />}
+            {navCollapsed ? null : t("nav.collapse")}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => { void logout().finally(() => navigate("/login")); }}
-          title={navCollapsed ? t("topbar.logout") : undefined}
-          className={`flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium text-lyx-fg-muted hover:text-lyx-fg ${navCollapsed ? "justify-center" : ""}`}
+          title={compact ? t("topbar.logout") : undefined}
+          className={`flex h-9 items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium text-lyx-fg-muted hover:text-lyx-fg ${compact ? "justify-center" : ""}`}
         >
           <LogOut {...iconProps} aria-hidden />
-          {navCollapsed ? null : t("topbar.logout")}
+          {compact ? null : t("topbar.logout")}
         </button>
       </aside>
       <header className="fixed inset-x-0 top-0 z-10 flex h-[var(--lyx-topbar)] items-center justify-between gap-3 border-b border-lyx-border bg-lyx-bg pl-[calc(var(--lyx-sidebar-current)+12px)] pr-3 sm:pl-[calc(var(--lyx-sidebar-current)+24px)] sm:pr-6 transition-[padding] duration-150">
@@ -184,7 +198,8 @@ export function AppShell() {
         </div>
       </header>
       <main className="ml-[var(--lyx-sidebar-current)] min-w-0 pt-[var(--lyx-topbar)] transition-[margin] duration-150">
-        <div className="p-7">
+        {/* .lyx-page: each top-level block of the routed page fades up on enter (styles.css motion system). */}
+        <div className="lyx-page p-4 sm:p-7">
           <Outlet />
         </div>
       </main>

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { MediaAssetVersionSummary, ProjectSummary, SourceVersionSummary } from "@lyonix/contracts";
-import { Banner, EmptyState, PageHeader } from "../components/chrome";
+import { Banner, EmptyState, PageHeader, SkeletonCards } from "../components/chrome";
+import { TabIndicator, useTabIndicator } from "../components/motion";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/ui";
 import { api, ApiError } from "../api";
@@ -12,12 +13,14 @@ import { listProjectSources } from "../studio/sources-api";
 const KINDS = ["all", "video", "image", "audio", "document"] as const;
 type KindFilter = (typeof KINDS)[number];
 
-function FilterItem({ active, label, count, onClick }: { active: boolean; label: string; count: number; onClick: () => void }) {
+function FilterItem({ active, indicated, label, count, onClick }: { active: boolean; indicated: boolean; label: string; count: number; onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`flex h-9 w-full items-center justify-between rounded-[var(--lyx-radius)] px-2.5 text-[12.5px] font-medium ${active ? "bg-lyx-muted text-lyx-fg font-semibold" : "text-lyx-fg-muted hover:text-lyx-fg"}`}
+      aria-pressed={active}
+      data-active={active ? "true" : undefined}
+      className={`relative flex h-9 w-full items-center justify-between rounded-[var(--lyx-radius)] px-2.5 text-[12.5px] font-medium ${active ? `${indicated ? "" : "bg-lyx-bg"} text-lyx-fg font-semibold` : "text-lyx-fg-muted hover:text-lyx-fg"}`}
     >
       <span className="truncate">{label}</span>
       <span className="text-[11px] text-lyx-fg-subtle">{count}</span>
@@ -33,7 +36,7 @@ function SourceCard({ source }: { source: SourceVersionSummary }) {
   const { i18n } = useTranslation();
   const name = source.originRef || source.type;
   return (
-    <article className="flex min-w-0 flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
+    <article className="lyx-panel-hover flex min-w-0 flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
       <div className="flex items-start justify-between gap-2">
         <p className="min-w-0 truncate text-[12.5px] font-semibold">{name}</p>
         <span className="shrink-0 rounded-full bg-lyx-muted px-2 py-0.5 text-[10px]">{source.type}</span>
@@ -49,7 +52,7 @@ function SourceCard({ source }: { source: SourceVersionSummary }) {
 function MediaCard({ asset, onPreview, previewing }: { asset: MediaAssetVersionSummary; onPreview: (asset: MediaAssetVersionSummary) => void; previewing: boolean }) {
   const { t, i18n } = useTranslation();
   return (
-    <article className="flex min-w-0 flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
+    <article className="lyx-card-hover flex min-w-0 flex-col gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-3">
       <div className="flex items-start justify-between gap-2">
         <p className="min-w-0 truncate text-[12.5px] font-semibold">{asset.originalFileName}</p>
         <span className="shrink-0 rounded-full bg-lyx-muted px-2 py-0.5 text-[10px]">{t(`assets.kinds.${asset.kind === "document" ? "file" : asset.kind}`)}</span>
@@ -59,7 +62,7 @@ function MediaCard({ asset, onPreview, previewing }: { asset: MediaAssetVersionS
         {asset.expiresAt ? ` · ${new Date(asset.expiresAt).toLocaleDateString(i18n.language)}` : ""}
       </p>
       {isInlinePreviewableMediaKind(asset.kind) ? (
-        <Button variant="secondary" disabled={previewing} onClick={() => onPreview(asset)}>
+        <Button variant="secondary" loading={previewing} onClick={() => onPreview(asset)}>
           {previewing ? t("assets.previewLoading") : t("assets.previewDirect")}
         </Button>
       ) : null}
@@ -77,6 +80,7 @@ export function AssetsPage() {
   const [sources, setSources] = useState<SourceVersionSummary[]>([]);
   const [assets, setAssets] = useState<MediaAssetVersionSummary[]>([]);
   const [kind, setKind] = useState<KindFilter>("all");
+  const { listRef: kindsRef, indicator: kindsIndicator } = useTabIndicator<HTMLDivElement>(kind);
   const [query, setQuery] = useState("");
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingData, setLoadingData] = useState(false);
@@ -163,11 +167,13 @@ export function AssetsPage() {
             </select>
           </label>
           <p className="mb-1.5 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("assets.byKind")}</p>
-          <div className="flex flex-col gap-0.5">
+          <div ref={kindsRef} className="relative flex flex-col gap-0.5">
+            <TabIndicator {...kindsIndicator} className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg" />
             {KINDS.map((item) => (
               <FilterItem
                 key={item}
                 active={kind === item}
+                indicated={kindsIndicator.box !== null}
                 label={t(item === "all" ? "jobs.all" : `assets.kinds.${item === "document" ? "file" : item}`)}
                 count={countForKind(item)}
                 onClick={() => setKind(item)}
@@ -189,21 +195,22 @@ export function AssetsPage() {
           />
           {error ? <Banner variant="danger">{t("common.error")}</Banner> : null}
           {previewError ? <Banner variant="danger">{previewError}</Banner> : null}
-          {loadingProjects || loadingData ? <p className="py-8 text-[12px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
+          {loadingProjects || loadingData ? <SkeletonCards label={t("common.loading")} media={false} count={6} className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" /> : null}
           {!loadingProjects && projects.length === 0 ? <EmptyState title={t("common.empty")} /> : null}
           {!loadingProjects && !loadingData && projectId && filteredCount === 0 ? <EmptyState title={t("common.empty")} /> : null}
-          {visibleSources.length > 0 ? (
-            <section className="mb-6">
+          {/* While a project loads, the previous project's cards would be stale: the skeleton stands in for them. */}
+          {!loadingData && visibleSources.length > 0 ? (
+            <section className="lyx-enter mb-6">
               <h2 className="mb-3 text-[13px] font-semibold">{t("assets.byProject")} · {visibleSources.length}</h2>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="lyx-list grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {visibleSources.map((source) => <SourceCard key={source.id} source={source} />)}
               </div>
             </section>
           ) : null}
-          {visibleAssets.length > 0 ? (
-            <section>
+          {!loadingData && visibleAssets.length > 0 ? (
+            <section className="lyx-enter">
               <h2 className="mb-3 text-[13px] font-semibold">{t("assets.title")} · {visibleAssets.length}</h2>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="lyx-list grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {visibleAssets.map((asset) => <MediaCard key={asset.id} asset={asset} onPreview={openPreview} previewing={previewingAssetId === asset.id} />)}
               </div>
             </section>

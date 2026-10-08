@@ -54,8 +54,8 @@ export function TemplatePicker({ templates, selectedId, onChoose, onPreviewSelec
       </div>
 
       {open ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={() => setOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-label={t("templatePicker.title")} onClick={(event) => event.stopPropagation()} className="flex h-full w-full max-w-[920px] flex-col bg-lyx-bg shadow-xl" data-testid="template-picker-drawer">
+        <div className="lyx-anim-backdrop fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={() => setOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-label={t("templatePicker.title")} onClick={(event) => event.stopPropagation()} className="lyx-anim-drawer flex h-full w-full max-w-[920px] flex-col bg-lyx-bg shadow-xl" data-testid="template-picker-drawer">
             <div className="flex items-center justify-between border-b border-lyx-border px-4 py-3">
               <h2 className="text-[15px] font-semibold">{t("templatePicker.title")} <span className="text-[12px] font-normal text-lyx-fg-muted">· {t("templates.matchCount", { count: all.length })}</span></h2>
               <button type="button" onClick={() => setOpen(false)} aria-label={t("templatePicker.close")} className="rounded p-1 hover:bg-lyx-muted"><X size={18} aria-hidden="true" /></button>

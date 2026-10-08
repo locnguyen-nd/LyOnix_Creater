@@ -17,8 +17,8 @@ export function NewsDrawer({ initialQuery, selectedId, onUse, onClose }: { initi
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={onClose}>
-      <div role="dialog" aria-modal="true" aria-label={t("news.title")} onClick={(event) => event.stopPropagation()} className="flex h-full w-full max-w-[960px] flex-col bg-lyx-bg shadow-xl" data-testid="news-drawer">
+    <div className="lyx-anim-backdrop fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={t("news.title")} onClick={(event) => event.stopPropagation()} className="lyx-anim-drawer flex h-full w-full max-w-[960px] flex-col bg-lyx-bg shadow-xl" data-testid="news-drawer">
         <div className="flex items-center justify-between border-b border-lyx-border px-4 py-3">
           <h2 className="text-[15px] font-semibold">{t("news.title")}</h2>
           <button type="button" className="flex h-8 w-8 items-center justify-center rounded-[6px] text-lyx-fg-muted hover:bg-lyx-muted hover:text-lyx-fg" aria-label={t("common.close")} onClick={onClose} data-testid="news-drawer-close">

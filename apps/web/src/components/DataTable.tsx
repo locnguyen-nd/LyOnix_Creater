@@ -38,11 +38,11 @@ export function DataTable<T>({
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody className="lyx-rows">
           {rows.map((row) => (
             <tr
               key={rowKey(row)}
-              className={`border-b border-lyx-border last:border-b-0 ${onRowClick ? "cursor-pointer hover:bg-lyx-muted" : ""} ${rowClassName?.(row) ?? ""}`}
+              className={`border-b border-lyx-border transition-colors duration-150 last:border-b-0 ${onRowClick ? "cursor-pointer hover:bg-lyx-muted" : ""} ${rowClassName?.(row) ?? ""}`}
               onClick={() => onRowClick?.(row)}
             >
               {columns.map((col) => (

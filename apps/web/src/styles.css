@@ -67,7 +67,13 @@ textarea {
   font-size: 13px;
   font-weight: 600;
   line-height: 20px;
-  transition: border-color 150ms ease, background-color 150ms ease, color 150ms ease;
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+  transition-duration: var(--lyx-dur-fast);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+.lyx-btn:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 .lyx-btn:disabled {
@@ -78,6 +84,11 @@ textarea {
   background: var(--lyx-cta);
   color: var(--lyx-cta-fg);
   border: 1px solid var(--lyx-cta);
+}
+
+.lyx-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lyx-cta) 86%, var(--lyx-bg));
+  border-color: color-mix(in srgb, var(--lyx-cta) 86%, var(--lyx-bg));
 }
 
 .lyx-btn-secondary {
@@ -96,6 +107,10 @@ textarea {
   border: 1px solid var(--lyx-danger);
 }
 
+.lyx-btn-danger:hover:not(:disabled) {
+  background: var(--lyx-danger-bg);
+}
+
 .lyx-btn-ghost {
   background: transparent;
   color: var(--lyx-fg-muted);
@@ -104,6 +119,7 @@ textarea {
 
 .lyx-btn-ghost:hover:not(:disabled) {
   color: var(--lyx-fg);
+  background: var(--lyx-bg-muted);
 }
 
 /* VE2E-124: confirm dialog (destructive actions) - entrance animation, red accent, reduced-motion safe. */
@@ -166,16 +182,15 @@ textarea {
   }
 }
 
-/* V04-XX: template preview loading skeleton. (V04-01: the LyOnix simulation is animated by RecipePreview itself, frame by frame.) */
+/* Loading skeleton: a flat block that pulses softly (no gradient sweep). (V04-01: the LyOnix simulation is animated by RecipePreview itself, frame by frame.) */
 @keyframes lyx-skeleton {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .lyx-skeleton {
-  background: linear-gradient(90deg, var(--lyx-bg-muted) 25%, var(--lyx-border) 50%, var(--lyx-bg-muted) 75%);
-  background-size: 200% 100%;
-  animation: lyx-skeleton 1.2s linear infinite;
+  background: var(--lyx-skeleton-bg);
+  animation: lyx-skeleton 1.4s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -247,4 +262,169 @@ html.dark .lyx-btn-danger-solid {
 
 .lyx-anim-soft-pulse {
   animation: lyx-soft-pulse 1.6s ease-in-out infinite;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------------
+ * App motion system. Tokens live in styles/tokens.css (--lyx-dur-*, --lyx-ease-out, --lyx-enter-y, --lyx-stagger).
+ * Only opacity/transform animate (no layout work); entrances take 140-240ms and decelerate; nothing loops except loaders;
+ * no gradient or glow. prefers-reduced-motion collapses every duration and delay (tokens.css).
+ * Defaults sit in @layer base and the enter classes in @layer components, so a Tailwind utility on the element still wins.
+ * ------------------------------------------------------------------------------------------------------------------------ */
+@keyframes lyx-enter {
+  from { opacity: 0; transform: translateY(var(--lyx-enter-y)); }
+}
+
+@keyframes lyx-item-in {
+  from { opacity: 0; transform: scale(0.98); }
+}
+
+@keyframes lyx-fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes lyx-modal-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+
+@keyframes lyx-drawer-in {
+  from { opacity: 0; transform: translateX(20px); }
+}
+
+@keyframes lyx-toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+}
+
+@keyframes lyx-toast-out {
+  to { opacity: 0; transform: translateX(16px); }
+}
+
+@keyframes lyx-check-in {
+  from { opacity: 0; transform: scale(0.6); }
+}
+
+@layer base {
+  /* Hover/press colour changes everywhere ease instead of snapping; a pressed button dips to 98% (.lyx-no-press opts out, e.g. a thumbnail inside a card). */
+  :where(button, a, summary) {
+    transition-property: color, background-color, border-color, box-shadow, opacity, transform;
+    transition-duration: var(--lyx-dur-fast);
+    transition-timing-function: var(--lyx-ease-out);
+  }
+
+  :where(button:not(:disabled, .lyx-no-press):active) {
+    transform: scale(0.98);
+  }
+
+  :where(input, select, textarea) {
+    transition-property: color, background-color, border-color, box-shadow, outline-color, outline-offset;
+    transition-duration: var(--lyx-dur-fast);
+    transition-timing-function: var(--lyx-ease-out);
+  }
+
+  /* The focus ring fades in instead of popping (forced-colors keeps the system ring). */
+  @media (forced-colors: none) {
+    :where(input, select, textarea) {
+      outline: 2px solid transparent;
+      outline-offset: 0;
+    }
+  }
+
+  /* Page enter: every top-level block of a routed page (AppShell's .lyx-page) and every child of .lyx-stagger fades up. */
+  :where(.lyx-page > *, .lyx-stagger > *) {
+    animation: lyx-enter var(--lyx-dur-slow) var(--lyx-ease-out) backwards;
+  }
+
+  /* List items (.lyx-list children) fade in from 98%: an added card appears without pushing anything. */
+  :where(.lyx-list > *) {
+    animation: lyx-item-in var(--lyx-dur-base) var(--lyx-ease-out) backwards;
+  }
+
+  /* Table rows only fade: transforms on <tr> are unreliable across engines. */
+  :where(.lyx-rows > *) {
+    animation: lyx-fade-in var(--lyx-dur-base) var(--lyx-ease-out) backwards;
+  }
+
+  /* Light stagger, capped at the 6th child so a long list is never slow to appear. */
+  :where(.lyx-page, .lyx-stagger, .lyx-list, .lyx-rows) > :where(:nth-child(2)) { animation-delay: var(--lyx-stagger); }
+  :where(.lyx-page, .lyx-stagger, .lyx-list, .lyx-rows) > :where(:nth-child(3)) { animation-delay: calc(var(--lyx-stagger) * 2); }
+  :where(.lyx-page, .lyx-stagger, .lyx-list, .lyx-rows) > :where(:nth-child(4)) { animation-delay: calc(var(--lyx-stagger) * 3); }
+  :where(.lyx-page, .lyx-stagger, .lyx-list, .lyx-rows) > :where(:nth-child(5)) { animation-delay: calc(var(--lyx-stagger) * 4); }
+  :where(.lyx-page, .lyx-stagger, .lyx-list, .lyx-rows) > :where(:nth-child(n + 6)) { animation-delay: calc(var(--lyx-stagger) * 5); }
+}
+
+@layer components {
+  /* One element entering on its own (a tab panel, an inline message). */
+  .lyx-enter {
+    animation: lyx-enter var(--lyx-dur-slow) var(--lyx-ease-out) backwards;
+  }
+
+  .lyx-fade {
+    animation: lyx-fade-in var(--lyx-dur-base) var(--lyx-ease-out) backwards;
+  }
+}
+
+/* Focus, hover and indicator rules stay unlayered so they beat the static Tailwind border/shadow utilities on the same element.
+ * A focused field's border steps up to the strong colour (eased by the field transition above). */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):focus-visible {
+  border-color: var(--lyx-border-strong);
+}
+
+/* Clickable card: lifts 1px, border darkens a step, soft shadow. Hover-capable pointers only (no sticky hover on touch). */
+.lyx-card-hover {
+  transition-property: transform, border-color, box-shadow, background-color;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+/* Static panel: border only - no lift, it is not clickable. */
+.lyx-panel-hover {
+  transition-property: border-color, box-shadow;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+@media (hover: hover) {
+  .lyx-card-hover:hover {
+    transform: translateY(-1px);
+    border-color: var(--lyx-border-hover);
+    box-shadow: var(--lyx-shadow-hover);
+  }
+
+  .lyx-panel-hover:hover {
+    border-color: var(--lyx-border-hover);
+  }
+}
+
+/* Sliding tab/segment indicator (components/motion.tsx): placed with a transform, sized to the active item. */
+.lyx-tab-indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.lyx-tab-indicator[data-animated="true"] {
+  transition-property: transform, width, height, opacity;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+/* Overlays: fade + a short slide, no scale bounce. */
+.lyx-anim-modal {
+  animation: lyx-modal-in var(--lyx-dur-base) var(--lyx-ease-out) both;
+}
+
+.lyx-anim-drawer {
+  animation: lyx-drawer-in var(--lyx-dur-slow) var(--lyx-ease-out) both;
+}
+
+.lyx-anim-toast {
+  animation: lyx-toast-in var(--lyx-dur-slow) var(--lyx-ease-out) both;
+}
+
+.lyx-anim-toast-out {
+  animation: lyx-toast-out 160ms ease-in both;
+}
+
+.lyx-anim-check {
+  animation: lyx-check-in var(--lyx-dur-base) var(--lyx-ease-out) 80ms both;
 }

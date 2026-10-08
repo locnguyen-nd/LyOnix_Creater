@@ -11,8 +11,8 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="mb-5 flex items-end justify-between gap-4">
-      <div>
+    <div className="mb-5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+      <div className="min-w-0">
         <h1 className="text-[20px] leading-7 font-bold tracking-tight">{title}</h1>
         {breadcrumb ? <p className="mt-1 text-[12.5px] leading-4 text-lyx-fg-muted">{breadcrumb}</p> : null}
       </div>
@@ -39,7 +39,7 @@ export function Banner({
   const style = BANNER_STYLE[variant];
   const iconTone = variant === "danger" ? "text-lyx-danger" : variant === "warn" ? "text-lyx-warn" : variant === "success" ? "text-lyx-ok" : "text-lyx-fg-muted";
   return (
-    <div role={variant === "danger" || variant === "warn" ? "alert" : "status"} data-variant={variant} className={`relative mb-4 flex items-start gap-2.5 overflow-hidden rounded-[var(--lyx-radius)] border py-2.5 pl-4 pr-3 text-[12.5px] leading-5 ${style.box}`}>
+    <div role={variant === "danger" || variant === "warn" ? "alert" : "status"} data-variant={variant} className={`lyx-enter relative mb-4 flex items-start gap-2.5 overflow-hidden rounded-[var(--lyx-radius)] border py-2.5 pl-4 pr-3 text-[12.5px] leading-5 ${style.box}`}>
       <span className={`absolute inset-y-0 left-0 w-1 ${style.bar}`} aria-hidden="true" />
       <style.Icon size={16} className={`mt-[2px] shrink-0 ${iconTone}`} aria-hidden="true" />
       <div className="min-w-0 flex-1">{children}</div>
@@ -55,10 +55,36 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-start gap-3 rounded-[var(--lyx-radius)] border border-dashed border-lyx-border px-4 py-10">
+    <div className="lyx-fade flex flex-col items-start gap-3 rounded-[var(--lyx-radius)] border border-dashed border-lyx-border px-4 py-10">
       <Inbox size={20} strokeWidth={1.75} aria-hidden />
       <p className="text-lyx-fg-muted">{title}</p>
       {action}
+    </div>
+  );
+}
+
+/** Loading placeholder grid: flat blocks pulsing softly (.lyx-skeleton), announced once as busy. `className` lays the grid out. */
+export function SkeletonCards({ count = 6, label, className = "", media = true }: { count?: number; label: string; className?: string; media?: boolean }) {
+  return (
+    <div role="status" aria-busy="true" aria-label={label} data-testid="skeleton" className={className}>
+      {Array.from({ length: count }, (_, index) => (
+        <div key={index} aria-hidden="true" className="min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg">
+          {media ? <div className="lyx-skeleton aspect-[3/2] w-full" /> : null}
+          <div className="flex flex-col gap-2 p-2.5">
+            <div className="lyx-skeleton h-3.5 w-3/4 rounded-[4px]" />
+            <div className="lyx-skeleton h-3 w-1/2 rounded-[4px]" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Loading placeholder rows (lists, timelines, tables). */
+export function SkeletonRows({ count = 4, label, rowClassName = "h-10" }: { count?: number; label: string; rowClassName?: string }) {
+  return (
+    <div role="status" aria-busy="true" aria-label={label} data-testid="skeleton" className="flex flex-col gap-2">
+      {Array.from({ length: count }, (_, index) => <div key={index} aria-hidden="true" className={`lyx-skeleton rounded-[var(--lyx-radius)] ${rowClassName}`} />)}
     </div>
   );
 }
@@ -79,7 +105,7 @@ export function StatusPill({
           ? "text-lyx-danger bg-lyx-danger-bg"
           : "text-lyx-fg-muted bg-lyx-neutral-bg";
   return (
-    <span className={`inline-flex h-[22px] items-center rounded-full px-2.5 text-[11px] font-bold tracking-wide ${style}`}>
+    <span className={`inline-flex h-[22px] items-center rounded-full px-2.5 text-[11px] font-bold tracking-wide transition-colors duration-200 ${style}`}>
       {children}
     </span>
   );
@@ -328,7 +354,7 @@ export function KpiCard({
     <Comp
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`flex flex-col rounded-[var(--lyx-radius)] border bg-lyx-bg p-3.5 text-left transition-colors ${active ? "border-lyx-fg" : "border-lyx-border"}`}
+      className={`flex flex-col rounded-[var(--lyx-radius)] border bg-lyx-bg p-3.5 text-left ${onClick ? "lyx-card-hover" : "lyx-panel-hover"} ${active ? "!border-lyx-fg" : "border-lyx-border"}`}
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-[11px] font-semibold uppercase tracking-wide text-lyx-fg-subtle">{label}</span>

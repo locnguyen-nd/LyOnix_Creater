@@ -169,8 +169,8 @@ export function FullPreviewPlayer({ scenes, initialSceneId, onSceneChange, onClo
   const sceneNumber = (sceneId: string) => sequence.segments.findIndex((s) => s.sceneId === sceneId) + 1;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={t("studioPro.fullPreviewTitle")} data-testid="full-preview">
-      <div className="flex max-h-full w-full max-w-[980px] flex-col overflow-hidden rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg shadow-2xl">
+    <div className="lyx-anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={t("studioPro.fullPreviewTitle")} data-testid="full-preview">
+      <div className="lyx-anim-modal flex max-h-full w-full max-w-[980px] flex-col overflow-hidden rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg shadow-2xl">
         <div className="flex items-center justify-between border-b border-lyx-border px-4 py-2">
           <p className="text-[13px] font-semibold">{t("studioPro.fullPreviewTitle")}</p>
           <button type="button" className="lyx-btn lyx-btn-ghost h-8 px-2" onClick={onClose} aria-label={t("studioPro.fullPreviewClose")} title={t("studioPro.fullPreviewClose")}>

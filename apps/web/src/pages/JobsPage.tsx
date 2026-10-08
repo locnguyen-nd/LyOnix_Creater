@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { Play, Trash2 } from "lucide-react";
 import { Banner, ChannelAvatar, EmptyState, PageHeader, StatusPill } from "../components/chrome";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
+import { SegmentedTabs } from "../components/motion";
 import { Button, Select, TextInput } from "../components/ui";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { PublicChannel } from "../channel-api";
@@ -61,9 +62,9 @@ function JobVideoCard({ job, channel, open, play, remove }: {
   const { t } = useTranslation();
   const playable = isJobDone(job) && Boolean(job.render?.resultUrl);
   return (
-    <article className="group min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm transition-shadow hover:shadow-md">
+    <article className="lyx-card-hover group min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
       <div className="relative">
-        <button type="button" onClick={open} aria-label={`${t("videoGallery.openDetails")}: ${job.topic}`} className="block w-full text-left">
+        <button type="button" onClick={open} aria-label={`${t("videoGallery.openDetails")}: ${job.topic}`} className="lyx-no-press block w-full text-left">
           <VideoThumbnail snapshotUrl={job.render?.snapshotUrl} resultUrl={playable ? job.render?.resultUrl : null} className="aspect-[3/2] w-full" />
         </button>
         <span className="absolute left-2 top-2"><StatusPill tone={tone(job)}>{pipelineLabel(job, t)}</StatusPill></span>
@@ -144,22 +145,15 @@ export function JobsPage() {
         title={t("jobs.title")}
         actions={
           <>
-            <div className="flex overflow-hidden rounded-[4px] border border-lyx-strong">
-              <button
-                type="button"
-                className={`px-3 text-[12px] h-10 ${view === "list" ? "bg-lyx-fg text-lyx-bg" : "text-lyx-fg-muted"}`}
-                onClick={() => setView("list")}
-              >
-                {t("jobsByChannel.viewList")}
-              </button>
-              <button
-                type="button"
-                className={`px-3 text-[12px] h-10 ${view === "byChannel" ? "bg-lyx-fg text-lyx-bg" : "text-lyx-fg-muted"}`}
-                onClick={() => setView("byChannel")}
-              >
-                {t("jobsByChannel.viewByChannel")}
-              </button>
-            </div>
+            <SegmentedTabs
+              tone="solid"
+              value={view}
+              onChange={setView}
+              options={[
+                { id: "list", label: t("jobsByChannel.viewList") },
+                { id: "byChannel", label: t("jobsByChannel.viewByChannel") },
+              ]}
+            />
             <Button onClick={() => navigate("/jobs/new")}>{t("jobs.create")}</Button>
           </>
         }
@@ -177,13 +171,15 @@ export function JobsPage() {
             </Select>
             <Button variant="secondary" onClick={() => { setQ(""); setTab("all"); setChannelId("all"); setParams({}); }}>{t("common.reset")}</Button>
           </div>
-          <div className="mb-4 flex flex-wrap gap-2">
-            {tabs.map((item) => (
-              <Button key={item} variant={tab === item ? "primary" : "secondary" } onClick={() => setTab(item)}>{t(item === "all" ? "jobs.all" : `jobs.${item}`)}</Button>
-            ))}
-          </div>
+          <SegmentedTabs
+            tone="solid"
+            className="mb-4"
+            value={tab}
+            onChange={setTab}
+            options={tabs.map((item) => ({ id: item, label: t(item === "all" ? "jobs.all" : `jobs.${item}`) }))}
+          />
           {rows.length === 0 ? <EmptyState title={t("common.empty")} /> : (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+            <div className="lyx-list grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
               {rows.slice(0, shown).map((job) => <JobVideoCard key={job.id} job={job} channel={channels.find((item) => item.id === job.channelId)} open={() => navigate(routeForJob(job))} play={() => setPlaying(job)} remove={() => removeJob(job)} />)}
             </div>
           )}
@@ -204,7 +200,7 @@ export function JobsPage() {
                 <StatusPill tone="warn">{t("jobsByChannel.statusRunning")}: {channelJobs.filter((job) => (job.pipelineStep ? RUNNING_PIPELINE_STEPS.has(job.pipelineStep) : RUNNING_STATUSES.has(job.status))).length}</StatusPill>
                 <StatusPill tone="danger">{t("jobsByChannel.statusBlocked")}: {channelJobs.filter((job) => BLOCKED_STATUSES.has(job.status) || job.render?.status === "failed").length}</StatusPill>
               </div>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+              <div className="lyx-list grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
                 {channelJobs.length === 0 ? (
                   <p className="text-[12px] text-lyx-fg-muted">{t("jobsByChannel.emptyChannel")}</p>
                 ) : null}

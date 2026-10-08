@@ -1,15 +1,20 @@
 import { useState } from "react";
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Loader2 } from "lucide-react";
 
 type Variant = "primary" | "secondary" | "danger" | "ghost";
 
+/** `loading` shows a spinner before the label, disables the button and marks it busy. */
 export function Button({
   variant = "primary",
   className = "",
   type = "button",
+  loading = false,
+  disabled,
+  children,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; loading?: boolean }) {
   const styles: Record<Variant, string> = {
     primary: "lyx-btn-primary",
     secondary: "lyx-btn-secondary",
@@ -17,7 +22,10 @@ export function Button({
     ghost: "lyx-btn-ghost",
   };
   return (
-    <button type={type} className={`lyx-btn ${styles[variant]} ${className}`} {...props} />
+    <button type={type} className={`lyx-btn ${styles[variant]} ${className}`} disabled={disabled || loading} aria-busy={loading || undefined} {...props}>
+      {loading ? <Loader2 size={14} className="shrink-0 animate-spin" aria-hidden /> : null}
+      {children}
+    </button>
   );
 }
 
@@ -37,7 +45,7 @@ export function Field({
       <span className="text-[14px] font-medium">{label}</span>
       {children}
       {hint ? <span className="text-[12px] leading-4 text-lyx-fg-muted">{hint}</span> : null}
-      {error ? <span className="text-[12px] leading-4 text-lyx-danger">{error}</span> : null}
+      {error ? <span key={error} className="lyx-fade text-[12px] leading-4 text-lyx-danger">{error}</span> : null}
     </label>
   );
 }
