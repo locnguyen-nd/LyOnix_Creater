@@ -591,3 +591,220 @@ html.dark .lyx-btn-danger-solid {
 
 .lyx-eq > i:nth-child(2) { animation-delay: -300ms; }
 .lyx-eq > i:nth-child(3) { animation-delay: -600ms; }
+
+/* ---------------------------------------------------------------------------------------------------------------------------
+ * Studio workspace (studio/StudioWorkspaceControls.tsx): the panel switches, the rail of a collapsed panel and the Script /
+ * Voice / Media tool tabs. Each carries an accent (--section-accent): the editor panel blue, the inspector amber, the tabs
+ * blue / violet / green. Flat tints only (color-mix over transparent), no gradient; motion uses the shared duration tokens.
+ * ------------------------------------------------------------------------------------------------------------------------ */
+.lyx-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  max-width: 100%;
+  padding: 0 6px 0 5px;
+  border: 1px solid var(--lyx-border);
+  border-radius: 10px;
+  background: var(--lyx-bg);
+  color: var(--lyx-fg);
+  transition-property: border-color, background-color, transform;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+.lyx-panel-toggle[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--section-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--section-accent) 8%, var(--lyx-bg));
+}
+
+.lyx-panel-toggle:active {
+  transform: scale(0.98);
+}
+
+.lyx-panel-toggle:focus-visible,
+.lyx-panel-rail:focus-visible,
+.lyx-editor-tab:focus-visible,
+.lyx-script-row:focus-visible {
+  outline: 2px solid var(--section-accent);
+  outline-offset: 2px;
+}
+
+.lyx-panel-toggle-icon {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--section-accent);
+  background: color-mix(in srgb, var(--section-accent) 14%, transparent);
+  transition-property: transform, background-color, color;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+.lyx-panel-toggle[aria-pressed="true"] .lyx-panel-toggle-icon {
+  color: var(--lyx-bg);
+  background: var(--section-accent);
+}
+
+/* "Ẩn" / "Hiện": re-keyed on every toggle, so it pops in softly and the change is noticed. */
+.lyx-panel-toggle-state {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--lyx-fg-muted);
+  background: var(--lyx-bg-muted);
+  animation: lyx-item-in var(--lyx-dur-base) var(--lyx-ease-out) both;
+}
+
+.lyx-panel-toggle[aria-pressed="false"] .lyx-panel-toggle-state {
+  color: var(--section-accent);
+  background: color-mix(in srgb, var(--section-accent) 14%, transparent);
+}
+
+.lyx-panel-rail {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0 14px;
+  color: var(--lyx-fg);
+  transition: background-color var(--lyx-dur-base) var(--lyx-ease-out);
+}
+
+.lyx-panel-rail-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .lyx-panel-toggle:hover {
+    border-color: color-mix(in srgb, var(--section-accent) 60%, transparent);
+  }
+
+  .lyx-panel-toggle:hover .lyx-panel-toggle-icon,
+  .lyx-panel-rail:hover .lyx-panel-toggle-icon {
+    transform: translateY(-1px) rotate(-6deg);
+  }
+
+  .lyx-panel-rail:hover {
+    background: color-mix(in srgb, var(--section-accent) 7%, transparent);
+  }
+}
+
+.lyx-editor-tab {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 6px 7px;
+  border-radius: 10px;
+  color: var(--lyx-fg-muted);
+  transition: color var(--lyx-dur-base) var(--lyx-ease-out);
+}
+
+.lyx-editor-tab[data-active="true"] {
+  color: var(--lyx-fg);
+}
+
+.lyx-editor-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--section-accent);
+  background: color-mix(in srgb, var(--section-accent) 13%, transparent);
+  transition-property: transform, background-color, color;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+.lyx-editor-tab[data-active="true"] .lyx-editor-tab-icon {
+  color: var(--lyx-bg);
+  background: var(--section-accent);
+}
+
+.lyx-editor-tab-caption {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--lyx-fg-muted);
+}
+
+.lyx-editor-tab[data-active="true"] .lyx-editor-tab-caption {
+  color: var(--section-accent);
+}
+
+/* The sliding indicator takes the active tab's accent: a light tint, a thin ring and a short bar along the bottom. */
+.lyx-editor-tab-indicator {
+  border: 1px solid color-mix(in srgb, var(--section-accent) 45%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--section-accent) 10%, transparent);
+}
+
+.lyx-editor-tab-indicator::after {
+  content: "";
+  position: absolute;
+  left: 28%;
+  right: 28%;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--section-accent);
+}
+
+.lyx-editor-tab-indicator[data-animated="true"] {
+  transition-property: transform, width, height, opacity, background-color, border-color;
+}
+
+@media (hover: hover) {
+  .lyx-editor-tab:not([data-active="true"]):hover {
+    color: var(--lyx-fg);
+    background: var(--lyx-bg-muted);
+  }
+
+  .lyx-editor-tab:hover .lyx-editor-tab-icon {
+    transform: translateY(-1px);
+  }
+}
+
+/* Script tab: one row per scene; the selected scene gets the tab's accent. */
+.lyx-script-row {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition-property: background-color, border-color;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+.lyx-script-row[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--section-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--section-accent) 8%, transparent);
+}
+
+@media (hover: hover) {
+  .lyx-script-row:not([aria-pressed="true"]):hover {
+    background: var(--lyx-bg-muted);
+  }
+}

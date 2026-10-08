@@ -148,6 +148,17 @@
         "VE2E-97"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-08: thay select giọng đọc ở trang Tạo Video bằng Voice Picker (tìm theo tên/ngôn ngữ/giới tính/phong cách/provider, chip Tất cả/Nhật/Việt/Anh/Nam/Nữ, card có Play/Pause + Chọn, trạng thái loading/playing/paused/error/unavailable). Preview: ưu tiên preview_url của provider (đúng ngôn ngữ + model nếu có, miễn phí), không có thì POST /provider-accounts/:id/elevenlabs/voices/:voiceId/preview đọc 1 câu mẫu cố định theo ngôn ngữ bằng đúng model render của tài khoản, chỉ khi bấm Play, cache server 24 h + trình duyệt theo phiên, lỗi không cache, staff chỉ dùng tài khoản mình thấy. Chỉ 1 audio phát; đổi giọng thì dừng cái cũ. Preview và render dùng cùng tài khoản + voiceId (renderVoiceConfig dùng chung). voiceId vẫn lưu draft/defaults như cũ. Không đổi kiến trúc TTS/render. Provider: ElevenLabs (21 giọng premade của tài khoản admin đều có preview_url thật); giọng clone/không preview mới dùng TTS. Spec .docs/specs/VE2E-98.md. code_done 2026-10-08: web 330, api 804 (+5 skip), providers 405 (+1 fail sẵn Windows template-lint) xanh; nghiệm thu Chrome với giọng thật. Endpoint TTS preview chưa gọi thật (tránh tốn credit). Nhánh feature/create-video-ux-voice-preview, đẩy lên để review, chưa merge."
+    },
+    {
+      "id": "VE2E-99",
+      "title": "Studio: sửa Thư viện/Media không hiện ảnh/video + nút chỉnh sửa và tab Kịch bản/Voice/Media",
+      "group": "Làm mịn — Studio",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-97"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-08: tab Thư viện + Media trong Studio không hiển thị ảnh/video. Nguyên nhân gốc: URL xem trước cho trình duyệt (POST /media-assets/:id/delivery-tokens) được dựng từ PUBLIC_BASE_URL - địa chỉ dành cho provider (Creatomate), trong dev là tunnel trycloudflare đã chết -> mọi thumbnail/preview/audio lỗi (video error 4); khi PUBLIC_BASE_URL trống thì API trả 503. Phụ: chỉ prefetch 12 dòng thô đầu của thư viện (thường là audio/clip con), lỗi tải thư viện và lỗi token bị nuốt, LazyThumb không có fallback -> vùng trống. Đã sửa: issueToken có audience provider|browser (browser không cần PUBLIC_BASE_URL, trả thêm path), render vẫn dùng provider; web nạp URL qua API origin (studio/media-url.ts: browserApiUrl / deliveryUrlForBrowser, dùng cho Studio, Tư liệu, VideoMedia, kết quả render nội bộ); prefetch mọi ảnh/video gốc (thumbPrefetchIds, trần 120); trạng thái thư viện loading/ready/failed + Thử lại; tile lỗi có fallback + banner; preview giữa có loading/lỗi/chưa có media. UI: 2 nút ẩn/hiện thành nút 'Chỉnh sửa nội dung' (Kịch bản · Voice · Media, xanh dương) và 'Chỉnh sửa cảnh' (Inspector, hổ phách) có icon, trạng thái Ẩn/Hiện, hover + pop nhẹ; panel thu gọn để lại rail 56 px có icon + nhãn dọc; tab Kịch bản/Voice/Media thành tab công cụ lớn (icon, số liệu, màu xanh/tím/lục, chỉ báo trượt); tab Kịch bản thành danh sách cảnh bấm chọn; panel trái 340/380 px. Dark theme, không gradient, reduced-motion theo token. Spec .docs/specs/VE2E-99.md. code_done 2026-10-08: typecheck + build toàn repo xanh; test web 343 (+13), api 913 (+5 skip, +3), contracts 5, domain 426; providers 1 fail + media-worker 3 fail sẵn trên Windows (không đụng tới). Nghiệm thu Chrome dark 1440/1280/390: thư viện 5 video tải từ API origin, preview giữa phát, lỗi token/lỗi thư viện hiện đúng trạng thái, không cuộn ngang, console sạch. Nhánh feature/studio-media-library-ux từ dev 30d3ee1."
     }
   ]
 }

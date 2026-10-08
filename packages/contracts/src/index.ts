@@ -461,7 +461,10 @@ export type CapabilityPreflightResponse = {
 
 export type MediaDeliveryIssueResponse = {
   token: string;
+  /** Absolute when the server has PUBLIC_BASE_URL (what providers fetch), else the same as `path`. */
   url: string;
+  /** `/api/v1/media-delivery/<token>`: the browser resolves it against the API origin it already uses. */
+  path: string;
   expiresAt: string;
 };
 

@@ -17,7 +17,8 @@ export class MediaDeliveryController {
   async issue(@Param("id") id: string, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user, session } = await requireUser(request, response, this.auth);
     requireCsrf(request, response, session);
-    const result = await this.delivery.issueToken(id, user.id, user.role);
+    // Called by the web app only: the browser streams from the API it is logged in to (`path`), PUBLIC_BASE_URL is not needed.
+    const result = await this.delivery.issueToken(id, user.id, user.role, undefined, "browser");
     if (result === "not_configured") throw normalizedError("PROVIDER_NOT_CONFIGURED", "PUBLIC_BASE_URL chưa cấu hình trên server", requestId(response), 503);
     if (!result) throw normalizedError("NOT_FOUND", "Không tìm thấy asset", requestId(response), 404);
     if (result === "forbidden") throw normalizedError("NOT_FOUND", "Không tìm thấy asset", requestId(response), 404);

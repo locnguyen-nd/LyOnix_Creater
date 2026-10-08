@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /**
  * Defers mounting the real `<img>`/`<video>` until this element is near the viewport - same
@@ -10,16 +10,24 @@ import { useEffect, useRef, useState } from "react";
  * only what's actually scrolled into view. `<video>` always uses `preload="metadata"` (never
  * the browser default, which can eagerly buffer the whole file) since these clips are muted
  * background previews, never meant to play.
+ * A file that fails to load (expired token, unreachable host, unsupported codec) shows `fallback` instead of a blank box.
  */
-export function LazyThumb({ kind, url, alt = "", className = "", rootMargin = "150px" }: {
+export function LazyThumb({ kind, url, alt = "", className = "", rootMargin = "150px", fallback = null, onError }: {
   kind: "image" | "video";
   url: string;
   alt?: string;
   className?: string;
   rootMargin?: string;
+  fallback?: ReactNode;
+  onError?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const fail = () => {
+    setFailedUrl(url);
+    onError?.();
+  };
 
   useEffect(() => {
     if (!ref.current) return;
@@ -36,11 +44,11 @@ export function LazyThumb({ kind, url, alt = "", className = "", rootMargin = "1
 
   return (
     <div ref={ref} className={className}>
-      {visible ? (
+      {failedUrl === url ? fallback : visible ? (
         kind === "video" ? (
-          <video src={url} muted preload="metadata" className="h-full w-full object-cover" />
+          <video src={url} muted preload="metadata" onError={fail} className="lyx-fade h-full w-full object-cover" />
         ) : (
-          <img src={url} alt={alt} loading="lazy" className="h-full w-full object-cover" />
+          <img src={url} alt={alt} loading="lazy" onError={fail} className="lyx-fade h-full w-full object-cover" />
         )
       ) : null}
     </div>
