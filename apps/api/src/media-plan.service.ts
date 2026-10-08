@@ -1042,7 +1042,11 @@ export class MediaPlanService {
     const totalSeconds = planScript.scenes.reduce((total, scene) => total + sceneDuration(scene), 0) / 1000;
     const range = input.range(totalSeconds);
     const ledger = new SegmentSourceLedger();
-    const { sourced, apifyUsage, visionUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger, beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
+    const { sourced, apifyUsage, visionUsage } = await this.sourceSegments(projectId, userId, role, { providerAccountId: input.providerAccountId, script: planScript, segments: this.planSegments(planScript, range), ledger,
+      // VE2E-140: Studio auto-fill uses the same never-fails ladder as Auto (L4 other window / L5 stock photo / L6 brand background, flagged degraded),
+      // so one click binds every scene instead of leaving some unbound and blocking the render (it used to need 3 clicks).
+      guaranteeSource: true,
+      beforeSourcing: (pending) => this.extractKeywordsForStudio(userId, role, planScript, pending) });
     const built = this.buildBindings(planScript, sourced);
     return {
       ok: true,
