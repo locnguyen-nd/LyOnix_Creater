@@ -41,12 +41,35 @@ describe("listElevenLabsVoices / getElevenLabsVoice", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
       voices: [{ voice_id: "v1", name: "Alex", category: "cloned", preview_url: "https://cdn.elevenlabs.io/preview/v1.mp3" }],
     }), { status: 200 })));
-    await expect(listElevenLabsVoices("key")).resolves.toEqual([{ voiceId: "v1", name: "Alex", category: "cloned", previewUrl: "https://cdn.elevenlabs.io/preview/v1.mp3" }]);
+    await expect(listElevenLabsVoices("key")).resolves.toEqual([{
+      voiceId: "v1", name: "Alex", category: "cloned", previewUrl: "https://cdn.elevenlabs.io/preview/v1.mp3",
+      gender: null, language: null, accent: null, age: null, useCase: null, descriptive: null, languages: [],
+    }]);
+  });
+
+  it("keeps the search / filter metadata (labels, verified languages with their own previews), https previews only", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      voices: [{
+        voice_id: "EXAVITQu4vr4xnSDxMaL", name: "Sarah - Mature, Reassuring, Confident", category: "premade", preview_url: "https://storage.googleapis.com/eleven/sarah.mp3",
+        labels: { gender: "female", language: "en", accent: "american", age: "young", use_case: "entertainment_tv", descriptive: "professional" },
+        verified_languages: [
+          { language: "en", accent: "american", locale: "en-US", model_id: "eleven_multilingual_v2", preview_url: "https://storage.googleapis.com/eleven/sarah-en.mp3" },
+          { language: "ja", accent: "standard", locale: "ja-JP", model_id: "eleven_multilingual_v2", preview_url: "http://insecure.example/ja.mp3" },
+          { accent: "no language", preview_url: "https://x.example/a.mp3" },
+        ],
+      }],
+    }), { status: 200 })));
+    const [sarah] = await listElevenLabsVoices("key");
+    expect(sarah).toMatchObject({ gender: "female", language: "en", accent: "american", age: "young", useCase: "entertainment_tv", descriptive: "professional" });
+    expect(sarah!.languages).toEqual([
+      { language: "en", accent: "american", locale: "en-US", modelId: "eleven_multilingual_v2", previewUrl: "https://storage.googleapis.com/eleven/sarah-en.mp3" },
+      { language: "ja", accent: "standard", locale: "ja-JP", modelId: "eleven_multilingual_v2", previewUrl: null },
+    ]);
   });
 
   it("fetches a single voice detail", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ voice_id: "v1", name: "Alex", category: null, preview_url: null }), { status: 200 })));
-    await expect(getElevenLabsVoice("key", "v1")).resolves.toEqual({ voiceId: "v1", name: "Alex", category: null, previewUrl: null });
+    await expect(getElevenLabsVoice("key", "v1")).resolves.toMatchObject({ voiceId: "v1", name: "Alex", category: null, previewUrl: null, gender: null, languages: [] });
   });
 
   it("maps quota-exceeded to PROVIDER_QUOTA_EXHAUSTED", async () => {

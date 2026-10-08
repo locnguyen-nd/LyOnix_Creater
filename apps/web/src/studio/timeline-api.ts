@@ -3,7 +3,7 @@
  * VE2E-07a's `creatomate-placeholder.ts` (static seam data) and `scaffold.ts`
  * (localStorage-only persistence) with calls to the actual VE2E-00..05 endpoints.
  */
-import { api, csrfHeaders } from "../api";
+import { API_ORIGIN, ApiError, api, csrfHeaders } from "../api";
 import type {
   ApifyImportRequest,
   ApifySearchRequest,
@@ -95,6 +95,28 @@ export async function listProjectMedia(projectId: string): Promise<MediaAssetVer
 
 export async function listElevenLabsVoices(providerAccountId: string): Promise<ElevenLabsVoiceSummaryResponse[]> {
   return api<ElevenLabsVoiceSummaryResponse[]>(`/provider-accounts/${providerAccountId}/elevenlabs/voices`);
+}
+
+/**
+ * Voice Picker: a short TTS sample of a voice that has no provider preview (fixed sentence per language, chosen by the API).
+ * Returns the audio; errors keep the API code (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_RATE_LIMITED, ...) for the card to explain.
+ */
+export async function fetchVoicePreview(providerAccountId: string, voiceId: string, language: "vi" | "en" | "ja" | "ko", retried = false): Promise<Blob> {
+  const response = await fetch(`${API_ORIGIN}/api/v1/provider-accounts/${encodeURIComponent(providerAccountId)}/elevenlabs/voices/${encodeURIComponent(voiceId)}/preview`, {
+    method: "POST",
+    credentials: "include",
+    headers: { ...(await csrfHeaders()), "content-type": "application/json", accept: "audio/mpeg" },
+    body: JSON.stringify({ language }),
+  });
+  if (response.status === 401 && !retried) {
+    const refreshed = await fetch(`${API_ORIGIN}/api/v1/auth/refresh`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: "{}" });
+    if (refreshed.ok) return fetchVoicePreview(providerAccountId, voiceId, language, true);
+  }
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: { code?: string; message?: string } } | null;
+    throw new ApiError(body?.error?.code ?? "PREVIEW_FAILED", body?.error?.message ?? "Không tạo được bản nghe thử");
+  }
+  return response.blob();
 }
 
 export async function generateSceneAudio(

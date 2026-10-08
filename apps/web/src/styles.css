@@ -515,3 +515,79 @@ html.dark .lyx-btn-danger-solid {
   background: var(--lyx-accent-cta-hover);
   border-color: var(--lyx-accent-cta-hover);
 }
+
+/* ---------------------------------------------------------------------------------------------------------------------------
+ * Voice Picker (create-video "Giọng đọc"): compact cards in the section's accent; the chosen card has an accent border, a light
+ * tint and a check badge; the playing card shows small equalizer bars.
+ * ------------------------------------------------------------------------------------------------------------------------ */
+.lyx-voice-card {
+  transition-property: border-color, background-color;
+  transition-duration: var(--lyx-dur-base);
+  transition-timing-function: var(--lyx-ease-out);
+}
+
+@media (hover: hover) {
+  .lyx-voice-card:hover {
+    border-color: var(--lyx-border-hover);
+  }
+}
+
+.lyx-voice-card[data-selected="true"] {
+  border-color: var(--section-accent, var(--lyx-border-strong));
+  background: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 7%, var(--lyx-bg));
+}
+
+.lyx-voice-play {
+  color: var(--section-accent, var(--lyx-fg));
+  background: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 14%, transparent);
+}
+
+.lyx-voice-card[data-preview="playing"] .lyx-voice-play {
+  color: #fff;
+  background: var(--section-accent, var(--lyx-fg));
+}
+
+.lyx-voice-card[data-preview="error"] .lyx-voice-play {
+  color: var(--lyx-danger);
+  background: var(--lyx-danger-bg);
+}
+
+.lyx-voice-choose[aria-pressed="true"] {
+  color: var(--section-accent, var(--lyx-fg));
+  border-color: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 55%, transparent);
+  background: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 10%, transparent);
+}
+
+.lyx-voice-check {
+  background: var(--section-accent, var(--lyx-fg));
+}
+
+.lyx-voice-chip[aria-pressed="true"] {
+  color: var(--section-accent, var(--lyx-fg));
+  border-color: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 55%, transparent);
+  background: color-mix(in srgb, var(--section-accent, var(--lyx-fg)) 10%, transparent);
+}
+
+@keyframes lyx-eq {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+.lyx-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+}
+
+.lyx-eq > i {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--section-accent, currentColor);
+  transform-origin: bottom;
+  animation: lyx-eq 900ms ease-in-out infinite;
+}
+
+.lyx-eq > i:nth-child(2) { animation-delay: -300ms; }
+.lyx-eq > i:nth-child(3) { animation-delay: -600ms; }

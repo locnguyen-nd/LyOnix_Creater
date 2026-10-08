@@ -205,6 +205,7 @@ export {
   probeElevenLabsTts,
   type ElevenLabsAccountInfo,
   type ElevenLabsVoiceSummary,
+  type ElevenLabsVoiceLanguage,
   type VoiceCloneConsentEvidence,
   type VoiceCloneSampleFile,
   type CreateVoiceCloneInput,

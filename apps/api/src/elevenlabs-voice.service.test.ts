@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ElevenLabsVoiceService } from "./elevenlabs-voice.service.js";
+import { ElevenLabsVoiceService, VOICE_PREVIEW_CACHE, VOICE_PREVIEW_SAMPLES } from "./elevenlabs-voice.service.js";
 import type { MediaAssetVersionSummary } from "@lyonix/contracts";
 import { MediaService } from "./media.service.js";
 import * as secretCrypto from "./secret-crypto.js";
@@ -202,5 +202,57 @@ describe("ElevenLabsVoiceService", () => {
       expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
       expect(media.registerAsset).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("ElevenLabsVoiceService voice preview (create-video Voice Picker)", () => {
+  const sampleOk = () => new Response(JSON.stringify(alignedTtsBody), { status: 200 });
+  const setup = (opts: { visibleToStaff?: boolean } = {}) => {
+    const findFirst = vi.fn(async (args: any) => (args?.select ? (opts.visibleToStaff === false ? null : { id: "account-1" }) : accountRow()));
+    const service = new ElevenLabsVoiceService({ providerAccount: { findFirst } } as any, { registerAsset: vi.fn() } as unknown as MediaService);
+    vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("sk-test");
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => sampleOk());
+    vi.stubGlobal("fetch", fetchMock);
+    return { service, fetchMock };
+  };
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("speaks the fixed sample of the script language with the account's model (the render default) for exactly that voiceId", async () => {
+    const { service, fetchMock } = setup();
+    const outcome = await service.previewVoice("account-1", "EXAVITQu4vr4xnSDxMaL", "user-1", "admin", "ja", 1_000);
+    expect(outcome).toMatchObject({ ok: true, data: { cached: false, voiceId: "EXAVITQu4vr4xnSDxMaL", modelId: "eleven_multilingual_v2", mimeType: "audio/mpeg" } });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toContain("/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/with-timestamps");
+    expect(JSON.parse(String(init?.body))).toEqual({ text: VOICE_PREVIEW_SAMPLES.ja, model_id: "eleven_multilingual_v2" });
+  });
+
+  it("is cached per account + voice + model + sentence: a replay never calls ElevenLabs again until the TTL ends", async () => {
+    const { service, fetchMock } = setup();
+    await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 1_000);
+    const again = await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 2_000);
+    expect(again).toMatchObject({ ok: true, data: { cached: true } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "en", 2_000); // another sentence
+    await service.previewVoice("account-1", "voiceBBBB", "user-1", "admin", "vi", 2_000); // another voice
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 1_000 + VOICE_PREVIEW_CACHE.ttlMs + 1);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("provider errors come back as clear codes and are not cached (the next Play tries again)", async () => {
+    const { service, fetchMock } = setup();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: { status: "quota_exceeded", message: "This request exceeds your quota" } }), { status: 401 }));
+    expect(await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 1_000)).toMatchObject({ ok: false, code: "PROVIDER_QUOTA_EXHAUSTED", status: 429 });
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ detail: "rate limited" }), { status: 429 }));
+    expect(await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 1_000)).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
+    expect(await service.previewVoice("account-1", "voiceAAAA", "user-1", "admin", "vi", 1_000)).toMatchObject({ ok: true, data: { cached: false } });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("spends credits only for an account the user may use; a malformed voiceId is refused before any call", async () => {
+    const hidden = setup({ visibleToStaff: false });
+    expect(await hidden.service.previewVoice("account-1", "voiceAAAA", "user-2", "staff", "vi")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    expect(await hidden.service.previewVoice("account-1", "../x", "user-1", "admin", "vi")).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    expect(hidden.fetchMock).not.toHaveBeenCalled();
   });
 });

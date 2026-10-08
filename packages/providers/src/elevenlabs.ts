@@ -91,14 +91,56 @@ export async function probeElevenLabsAccount(apiKey: string): Promise<ElevenLabs
 
 // --- list/preview voices ---
 
-export type ElevenLabsVoiceSummary = { voiceId: string; name: string; category: string | null; previewUrl: string | null };
+/** One language a voice is verified for, with that language's own provider preview (if any). */
+export type ElevenLabsVoiceLanguage = { language: string; accent: string | null; locale: string | null; modelId: string | null; previewUrl: string | null };
 
-const toVoiceSummary = (row: Record<string, unknown>): ElevenLabsVoiceSummary => ({
-  voiceId: String(row.voice_id ?? ""),
-  name: String(row.name ?? ""),
-  category: typeof row.category === "string" ? row.category : null,
-  previewUrl: typeof row.preview_url === "string" ? row.preview_url : null,
-});
+export type ElevenLabsVoiceSummary = {
+  voiceId: string;
+  name: string;
+  category: string | null;
+  previewUrl: string | null;
+  /** From the voice's `labels` (search / filter metadata; null when the provider has none). */
+  gender: string | null;
+  language: string | null;
+  accent: string | null;
+  age: string | null;
+  useCase: string | null;
+  descriptive: string | null;
+  /** `verified_languages`: the languages the voice is verified to speak, each with its own preview when ElevenLabs has one. */
+  languages: ElevenLabsVoiceLanguage[];
+};
+
+const text = (value: unknown, max = 60): string | null => (typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null);
+/** Only https provider links are passed on as previews (never a data: / http: URL from an untrusted body). */
+const httpsUrl = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  try {
+    return new URL(value).protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+const toVoiceSummary = (row: Record<string, unknown>): ElevenLabsVoiceSummary => {
+  const labels = (row.labels && typeof row.labels === "object" ? row.labels : {}) as Record<string, unknown>;
+  const verified = Array.isArray(row.verified_languages) ? (row.verified_languages as Array<Record<string, unknown>>) : [];
+  return {
+    voiceId: String(row.voice_id ?? ""),
+    name: String(row.name ?? ""),
+    category: typeof row.category === "string" ? row.category : null,
+    previewUrl: httpsUrl(row.preview_url),
+    gender: text(labels.gender, 20),
+    language: text(labels.language, 10),
+    accent: text(labels.accent, 40),
+    age: text(labels.age, 20),
+    useCase: text(labels.use_case, 40),
+    descriptive: text(labels.descriptive, 40),
+    languages: verified.slice(0, 60).flatMap((entry) => {
+      const language = text(entry.language, 10);
+      return language ? [{ language, accent: text(entry.accent, 40), locale: text(entry.locale, 20), modelId: text(entry.model_id, 60), previewUrl: httpsUrl(entry.preview_url) }] : [];
+    }),
+  };
+};
 
 export async function listElevenLabsVoices(apiKey: string): Promise<ElevenLabsVoiceSummary[]> {
   const body = await call("/v1/voices", apiKey);

@@ -367,7 +367,19 @@ export type ElevenLabsVoiceSummaryResponse = {
   category: string | null;
   /** Provider's own short-lived CDN preview link. Never raw audio bytes/logged by LyOnix. */
   previewUrl: string | null;
+  /** Voice labels for search / filter (null when ElevenLabs has none). */
+  gender: string | null;
+  language: string | null;
+  accent: string | null;
+  age: string | null;
+  useCase: string | null;
+  descriptive: string | null;
+  /** Languages the voice is verified for, each with its own provider preview when there is one. */
+  languages: Array<{ language: string; accent: string | null; locale: string | null; modelId: string | null; previewUrl: string | null }>;
 };
+
+/** `POST /provider-accounts/:id/elevenlabs/voices/:voiceId/preview`: a short fixed sample sentence in this language (never free text). */
+export type VoicePreviewRequest = { language: UiLocale };
 
 export type VoiceCloneConsentRequest = {
   statementVersion: string;

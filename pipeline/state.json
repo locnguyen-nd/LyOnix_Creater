@@ -136,6 +136,18 @@
         "VE2E-96"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-08 (brief 'J. Animation chung cho các trang đầu') và duyệt quyết định cùng ngày: giữ token 140/200/240 ms, translate 6 px, stagger 35 ms, panel tĩnh không lift, segmented filter, skeleton khi đổi project, reduced-motion; không làm animation xoá/đóng modal vòng này. Micro-animation đồng bộ cho Dashboard, Kênh, Tạo Video, Video Auto, Tư liệu, Cài đặt, Nhóm & người dùng: vào trang (.lyx-page fade + 6 px, stagger), card bấm được nâng 1 px + viền + bóng nhẹ (panel tĩnh chỉ đổi viền), nút transition + scale 0.98 + Button loading spinner, tab/segmented có chỉ báo trượt (components/motion.tsx), focus viền mượt, modal/drawer fade + trượt ngắn, toast trượt vào/ra + check, skeleton phẳng nhấp nháy (bỏ gradient), list fade/scale không nhảy layout, reduced-motion bỏ cả delay/vòng lặp. Không thư viện, chỉ opacity/transform, không gradient/glow. Sửa kèm: AutoRunTimeline duplicate key (key theo timestamp) + bước tick giãn khi cửa sổ dài; mobile 390 (rail chỉ icon, PageHeader xuống dòng, Cài đặt xếp dọc, padding 16 px); VideoThumbnail ẩn ảnh vỡ + nền phẳng. Không đổi business logic. Spec .docs/specs/VE2E-97.md. code_done 2026-10-08: web typecheck/build xanh, 307 test xanh (+16 mới), git diff --check sạch; nghiệm thu Chrome 7 trang x 1440/1280/390 (24/24), 8/8 thao tác, reduced-motion 8/8, console sạch. Nhánh feature/create-video-ux-voice-preview từ 93df1a3, đẩy lên để review, chưa merge."
+    },
+    {
+      "id": "VE2E-98",
+      "title": "Voice Picker: tìm, lọc và nghe thử giọng trước khi render",
+      "group": "Làm mịn — trang Tạo Video",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-96",
+        "VE2E-97"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-08: thay select giọng đọc ở trang Tạo Video bằng Voice Picker (tìm theo tên/ngôn ngữ/giới tính/phong cách/provider, chip Tất cả/Nhật/Việt/Anh/Nam/Nữ, card có Play/Pause + Chọn, trạng thái loading/playing/paused/error/unavailable). Preview: ưu tiên preview_url của provider (đúng ngôn ngữ + model nếu có, miễn phí), không có thì POST /provider-accounts/:id/elevenlabs/voices/:voiceId/preview đọc 1 câu mẫu cố định theo ngôn ngữ bằng đúng model render của tài khoản, chỉ khi bấm Play, cache server 24 h + trình duyệt theo phiên, lỗi không cache, staff chỉ dùng tài khoản mình thấy. Chỉ 1 audio phát; đổi giọng thì dừng cái cũ. Preview và render dùng cùng tài khoản + voiceId (renderVoiceConfig dùng chung). voiceId vẫn lưu draft/defaults như cũ. Không đổi kiến trúc TTS/render. Provider: ElevenLabs (21 giọng premade của tài khoản admin đều có preview_url thật); giọng clone/không preview mới dùng TTS. Spec .docs/specs/VE2E-98.md. code_done 2026-10-08: web 330, api 804 (+5 skip), providers 405 (+1 fail sẵn Windows template-lint) xanh; nghiệm thu Chrome với giọng thật. Endpoint TTS preview chưa gọi thật (tránh tốn credit). Nhánh feature/create-video-ux-voice-preview, đẩy lên để review, chưa merge."
     }
   ]
 }

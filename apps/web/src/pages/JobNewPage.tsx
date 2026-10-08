@@ -59,6 +59,8 @@ import { SelectedNewsCard } from "../job-new/SelectedNewsCard";
 import { newsPick, newsUnpick } from "../job-new/news-pick";
 import { NewsDrawer } from "../news/NewsDrawer";
 import { ContentSourceBar } from "../job-new/ContentSourceBar";
+import { VoicePicker } from "../job-new/VoicePicker";
+import { renderVoiceConfig } from "../job-new/voice-picker";
 import { AccentCard, AdvancedSection, ChoiceField, FormSection, LabelIcon, ProgressStrip, ReadyItem, SummaryRow } from "../job-new/CreateVideoParts";
 import { analyzeIntakeUrlStream, rewriteIntakeSource } from "../job-new/intake-api";
 import { SPOKEN_STAGES, intakeApply, type IntakeApplied, type IntakeState, type IntakeTarget } from "../job-new/url-intake";
@@ -106,6 +108,7 @@ export function JobNewPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [voices, setVoices] = useState<ElevenLabsVoiceSummaryResponse[]>([]);
+  const [voicesState, setVoicesState] = useState<"loading" | "ready" | "failed">("ready");
   // V04-01: the template library = the templates of EVERY usable render account (LyOnix built-ins + Creatomate + Orshot).
   const [libraryEntries, setLibraryEntries] = useState<TemplateEntry[]>([]);
   const [libraryFailed, setLibraryFailed] = useState<string[]>([]);
@@ -296,11 +299,13 @@ export function JobNewPage() {
 
   useEffect(() => {
     const accountId = form.voiceAccountId;
-    if (!accountId) { setVoices([]); return; }
+    if (!accountId) { setVoices([]); setVoicesState("ready"); return; }
     let cancelled = false;
+    setVoicesState("loading");
     void listElevenLabsVoices(accountId).then((rows) => {
       if (cancelled) return;
       setVoices(rows);
+      setVoicesState("ready");
       const current = formRef.current.voiceId;
       if (current && rows.some((row) => row.voiceId === current)) return;
       if (current && restoredRef.current.has("voiceId")) {
@@ -312,7 +317,7 @@ export function JobNewPage() {
       }
       if (clearedRef.current.has("voiceId")) return;
       fill({ voiceId: rows[0]?.voiceId ?? "" });
-    }).catch(() => { if (!cancelled) setVoices([]); });
+    }).catch(() => { if (!cancelled) { setVoices([]); setVoicesState("failed"); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.voiceAccountId]);
@@ -704,8 +709,8 @@ export function JobNewPage() {
                     const setup = await setupAutoProfile({
                       name: (values.topic || values.autoArticleUrl || "Auto video").slice(0, 60),
                       contentAccountId: values.contentAccountId,
-                      voiceAccountId: values.voiceAccountId,
-                      voiceId: values.voiceId,
+                      // the same account + voiceId the Voice Picker previews (renderVoiceConfig is shared with it)
+                      ...renderVoiceConfig(values),
                       mediaAccountId: values.mediaAccountId,
                       renderAccountId: values.renderAccountId,
                       templateSnapshotId: snapshot.id,
@@ -821,12 +826,18 @@ export function JobNewPage() {
 
                 <div data-testid="voice-field">
                   {voiceAccounts.length > 0 ? (
-                    <Field label={t("jobs.autoVoice")} icon={<LabelIcon icon={<Mic size={14} />} />}>
-                      <Select value={form.voiceId} onChange={(e) => update({ voiceId: e.target.value })}>
-                        {placeholder(form.voiceId)}
-                        {voices.map((voice) => <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>)}
-                      </Select>
-                    </Field>
+                    <ChoiceField label={t("jobs.autoVoice")} icon={<LabelIcon icon={<Mic size={14} />} />}>
+                      {/* search / filter / preview; choosing sets form.voiceId exactly as the old select did (draft + defaults unchanged) */}
+                      <VoicePicker
+                        voices={voices}
+                        selectedId={form.voiceId}
+                        onSelect={(voiceId) => update({ voiceId })}
+                        language={form.language}
+                        accountId={form.voiceAccountId}
+                        modelId={voiceAccounts.find((account) => account.id === form.voiceAccountId)?.model ?? null}
+                        state={voicesState}
+                      />
+                    </ChoiceField>
                   ) : (
                     <ChoiceField label={t("jobs.autoVoice")} icon={<LabelIcon icon={<Mic size={14} />} />}>
                       <p className="text-[12.5px] text-lyx-fg-muted">{t("jobs.noVoiceAccount")} <Link className="underline" to="/settings?tab=providers">{t("providers.title")}</Link></p>
