@@ -41,6 +41,23 @@ import {
   type ReframeAnalyzeJobInput,
   type ReframeAnalyzeResult,
 } from "./reframe-contract.js";
+import {
+  buildMediaFetchJob,
+  buildMediaSearchJob,
+  DEFAULT_MEDIA_FETCH_QUEUE,
+  MEDIA_FETCH_JOB_TYPE,
+  MEDIA_SEARCH_JOB_TYPE,
+  parseMediaFetchResult,
+  parseMediaSearchResult,
+  validateMediaFetchJob,
+  validateMediaSearchJob,
+  type MediaFetchJob,
+  type MediaFetchJobInput,
+  type MediaFetchResult,
+  type MediaSearchJob,
+  type MediaSearchJobInput,
+  type MediaSearchResult,
+} from "./fetch-contract.js";
 import { resolveProducerQueues, splitMediaJobQueueNames } from "./queues.js";
 import { assertMediaJobQueue, connectMediaJobBroker, type MediaJobBrokerConnection, type MediaJobChannel, type MediaJobMessage } from "./transport.js";
 
@@ -96,11 +113,11 @@ export class MediaJobClient {
     private readonly defaultTimeoutMs: number,
     private readonly connection: MediaJobBrokerConnection | null,
     /** VE2E-134: where frame.extract / reframe.analyze go (the legacy `queue` unless the split is enabled). */
-    private readonly routes: { frameExtract: string; reframeAnalyze: string } = { frameExtract: queue, reframeAnalyze: queue },
+    private readonly routes: { frameExtract: string; reframeAnalyze: string; mediaFetch?: string } = { frameExtract: queue, reframeAnalyze: queue },
   ) {}
 
   /** Connects to RabbitMQ. Fails fast with MEDIA_WORKER_NOT_CONFIGURED when no URL is configured. */
-  static async connect(options: { url: string | undefined; queue?: string | undefined; renderQueue?: string | undefined; defaultTimeoutMs?: number | undefined; splitQueues?: boolean | undefined; frameQueue?: string | undefined; reframeQueue?: string | undefined }): Promise<MediaJobClient> {
+  static async connect(options: { url: string | undefined; queue?: string | undefined; renderQueue?: string | undefined; defaultTimeoutMs?: number | undefined; splitQueues?: boolean | undefined; frameQueue?: string | undefined; reframeQueue?: string | undefined; fetchQueue?: string | undefined }): Promise<MediaJobClient> {
     const url = options.url?.trim();
     if (!url) throw new MediaJobClientError("MEDIA_WORKER_NOT_CONFIGURED", "RABBITMQ_URL is not configured; media-worker jobs cannot be enqueued");
     let connection: MediaJobBrokerConnection;
@@ -109,7 +126,7 @@ export class MediaJobClient {
     } catch (error) {
       throw new MediaJobClientError("BROKER_UNAVAILABLE", `Cannot connect to RabbitMQ: ${error instanceof Error ? error.message : "unknown error"}`);
     }
-    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, renderQueue: options.renderQueue, defaultTimeoutMs: options.defaultTimeoutMs, connection, splitQueues: options.splitQueues, frameQueue: options.frameQueue, reframeQueue: options.reframeQueue });
+    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, renderQueue: options.renderQueue, defaultTimeoutMs: options.defaultTimeoutMs, connection, splitQueues: options.splitQueues, frameQueue: options.frameQueue, reframeQueue: options.reframeQueue, fetchQueue: options.fetchQueue });
   }
 
   /** Builds a client over an existing channel (used by `connect` and by tests with an in-memory channel). */
@@ -124,6 +141,8 @@ export class MediaJobClient {
     splitQueues?: boolean | undefined;
     frameQueue?: string | undefined;
     reframeQueue?: string | undefined;
+    /** VE2E-144: queue for media.fetch / media.search (default `lyonix.media.fetch`), declared lazily on first use. */
+    fetchQueue?: string | undefined;
   }): Promise<MediaJobClient> {
     const queue = options.queue?.trim() || DEFAULT_MEDIA_WORKER_QUEUE;
     const renderQueue = options.renderQueue?.trim() || DEFAULT_RENDER_QUEUE;
@@ -131,7 +150,7 @@ export class MediaJobClient {
     const reply = await options.channel.assertQueue("", { exclusive: true, autoDelete: true, durable: false });
     const names = splitMediaJobQueueNames({ MEDIA_WORKER_QUEUE: queue, MEDIA_WORKER_QUEUE_FRAME: options.frameQueue, MEDIA_WORKER_QUEUE_REFRAME: options.reframeQueue, MEDIA_WORKER_RENDER_QUEUE: renderQueue });
     const routed = resolveProducerQueues(names, options.splitQueues === true);
-    const client = new MediaJobClient(options.channel, queue, renderQueue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null, { frameExtract: routed.frame_extract, reframeAnalyze: routed.reframe_analyze });
+    const client = new MediaJobClient(options.channel, queue, renderQueue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null, { frameExtract: routed.frame_extract, reframeAnalyze: routed.reframe_analyze, mediaFetch: options.fetchQueue?.trim() || DEFAULT_MEDIA_FETCH_QUEUE });
     await options.channel.consume(reply.queue, (message) => client.onReply(message), { noAck: true });
     const onClose = (error?: Error) =>
       client.failAll(new MediaJobClientError("BROKER_UNAVAILABLE", `RabbitMQ connection closed${error ? `: ${error.message}` : ""}`));
@@ -177,6 +196,30 @@ export class MediaJobClient {
     if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
     await this.ensureRoutedQueue(this.routes.frameExtract);
     return this.request<FrameExtractResult>(FRAME_EXTRACT_JOB_TYPE, validation.value, parseFrameExtractResult, options, undefined, this.routes.frameExtract);
+  }
+
+  /**
+   * VE2E-144: downloads ONE social post with yt-dlp / gallery-dl into `_quarantine/` (queue `lyonix.media.fetch`). The result is
+   * never reused by jobKey (the API consumes the quarantine file); a transport failure rejects with MediaJobClientError.
+   */
+  async fetchMedia(job: MediaFetchJob | MediaFetchJobInput, options: PrepareClipOptions = {}): Promise<MediaFetchResult> {
+    const candidate = "schemaVersion" in job ? job : buildMediaFetchJob(job);
+    const validation = validateMediaFetchJob(candidate);
+    if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
+    const queue = this.routes.mediaFetch ?? DEFAULT_MEDIA_FETCH_QUEUE;
+    await this.ensureRoutedQueue(queue);
+    // The worker enforces the job's own budget; the client waits a little longer so the worker's answer always wins.
+    return this.request<MediaFetchResult>(MEDIA_FETCH_JOB_TYPE, validation.value, parseMediaFetchResult, { timeoutMs: validation.value.timeoutMs + 15_000, ...options }, undefined, queue);
+  }
+
+  /** VE2E-144: metadata-only search (yt-dlp `ytsearch`, gallery-dl Pinterest/X search) on the fetch queue. */
+  async searchMedia(job: MediaSearchJob | MediaSearchJobInput, options: PrepareClipOptions = {}): Promise<MediaSearchResult> {
+    const candidate = "schemaVersion" in job ? job : buildMediaSearchJob(job);
+    const validation = validateMediaSearchJob(candidate);
+    if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
+    const queue = this.routes.mediaFetch ?? DEFAULT_MEDIA_FETCH_QUEUE;
+    await this.ensureRoutedQueue(queue);
+    return this.request<MediaSearchResult>(MEDIA_SEARCH_JOB_TYPE, validation.value, parseMediaSearchResult, { timeoutMs: validation.value.timeoutMs + 15_000, ...options }, undefined, queue);
   }
 
   /** VE2E-134: a non-legacy queue is declared lazily on first use (idempotent); the legacy queue was declared in `create`. */

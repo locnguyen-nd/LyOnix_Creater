@@ -5,3 +5,4 @@ export * from "./transport.js";
 export * from "./client.js";
 export * from "./compose-contract.js";
 export * from "./queues.js";
+export * from "./fetch-contract.js";

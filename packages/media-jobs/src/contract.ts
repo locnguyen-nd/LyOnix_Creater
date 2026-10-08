@@ -143,6 +143,18 @@ export const MEDIA_JOB_ERROR_CODES = [
   "DETECTOR_FAILED",
   "DETECTOR_TIMEOUT",
   "INTERNAL",
+  /** VE2E-144: media.fetch / media.search (yt-dlp, gallery-dl) failure reasons - see fetch-contract.ts. */
+  "FETCH_FORBIDDEN",
+  "FETCH_BOT_CHECK",
+  "FETCH_COOKIES_INVALID",
+  "FETCH_RATE_LIMITED",
+  "FETCH_UNAVAILABLE",
+  "FETCH_EXTRACTOR_BROKEN",
+  "FETCH_TOO_LARGE",
+  "FETCH_TIMEOUT",
+  "FETCH_NETWORK",
+  "FETCH_TOOL_MISSING",
+  "FETCH_FAILED",
 ] as const;
 export type MediaJobErrorCode = (typeof MEDIA_JOB_ERROR_CODES)[number];
 
