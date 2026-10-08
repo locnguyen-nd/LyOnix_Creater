@@ -29,6 +29,8 @@ export type MediaWorkerConfig = {
   prefetchByType: { clipPrepare: number; frameExtract: number; reframeAnalyze: number; compose: number | null };
   /** VE2E-90: ffprobe smoothness check of every clip.prepare output (MEDIA_WORKER_SMOOTH_CHECK, default on; 0/false/off disables). A non-smooth stream copy is redone as a re-encode; a non-smooth re-encode only logs a warning. */
   smoothCheck: boolean;
+  /** VE2E-143: cut baked-in black bars of a clip before the 9:16 cover-crop (MEDIA_WORKER_BAR_CROP, default on). */
+  barCrop?: boolean;
 };
 
 export class MediaWorkerConfigError extends Error {
@@ -98,6 +100,7 @@ export const loadMediaWorkerConfig = (env: NodeJS.ProcessEnv, repoRoot: string, 
     },
     ffmpegThreads: readInt(env, "MEDIA_WORKER_FFMPEG_THREADS", Math.max(1, Math.floor(cpus / prefetch)), 1, 64),
     smoothCheck: readFlag(env, "MEDIA_WORKER_SMOOTH_CHECK", true),
+    barCrop: readFlag(env, "MEDIA_WORKER_BAR_CROP", true),
     sweepIntervalMs: readInt(env, "MEDIA_WORKER_SWEEP_INTERVAL_MS", 6 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
   };
 };

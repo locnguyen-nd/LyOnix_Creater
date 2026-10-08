@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CLIP_TARGET } from "@lyonix/media-jobs";
 import {
   buildCopyArgs,
+  decideBarCrop,
+  parseCropdetect,
   frameAlignedDurationMs,
   frameCount,
   buildKeyframeProbeArgs,
@@ -189,5 +191,31 @@ describe("frame-accurate re-encode length", () => {
     expect(frameCount(7123, 30)).toBe(214);
     expect(frameAlignedDurationMs(7123, 30)).toBe(7133);
     expect(frameCount(1, 30)).toBe(1);
+  });
+});
+
+describe("bar crop (VE2E-143)", () => {
+  const frame = { displayWidth: 1080, displayHeight: 1920 };
+  it("parses the last cropdetect suggestion", () => {
+    expect(parseCropdetect("... crop=1080:1920:0:0\n... crop=1080:608:0:656\n")).toEqual({ w: 1080, h: 608, x: 0, y: 656 });
+    expect(parseCropdetect("no crop here")).toBeNull();
+  });
+  it("applies a crop that removes letterbox bars and ignores noise", () => {
+    expect(decideBarCrop(frame, { w: 1080, h: 608, x: 0, y: 656 })).toEqual({ w: 1080, h: 608, x: 0, y: 656, mode: "blur_fill" }); // 16:9 picture in a 9:16 frame
+    expect(decideBarCrop(frame, { w: 1080, h: 200, x: 0, y: 700 })).toBeNull(); // sliver
+    expect(decideBarCrop(frame, { w: 1080, h: 1200, x: 0, y: 360 })).toEqual({ w: 1080, h: 1200, x: 0, y: 360, mode: "crop" });
+    expect(decideBarCrop(frame, { w: 1080, h: 1900, x: 0, y: 10 })).toBeNull(); // 1 % bars: noise
+    expect(decideBarCrop(frame, null)).toBeNull();
+    expect(decideBarCrop(frame, { w: 1200, h: 1200, x: 0, y: 0 })).toBeNull(); // outside the frame
+  });
+  it("puts the bar crop before the cover scale and forces a re-encode", () => {
+    const target = { width: 1080, height: 1920, videoCodec: "h264" } as const;
+    const filter = buildReencodeFilter(target as never, 30, null, { w: 1080, h: 1200, x: 0, y: 360, mode: "crop" });
+    expect(filter.startsWith("crop=1080:1200:0:360,scale=")).toBe(true);
+    const probe = { formatName: "mov", durationMs: 20000, startTimeMs: 0, video: { codec: "h264", width: 1080, height: 1920, displayWidth: 1080, displayHeight: 1920, rotation: 0, pixFmt: "yuv420p", fps: 30, rFps: 30 }, audio: null };
+    const plan = planClip({ probe: probe as never, keyframesMs: [0, 2000, 4000], startMs: 2000, durationMs: 2000, stripAudio: true, target: target as never, toleranceMs: 40, barCrop: { w: 1080, h: 1200, x: 0, y: 360, mode: "crop" } });
+    expect(plan.mode).toBe("reencode");
+    expect(plan.reencodeReasons).toContain("bar_crop");
+    expect(buildReencodeFilter(target as never, 30, null, { w: 1080, h: 608, x: 0, y: 656, mode: "blur_fill" })).toContain("boxblur");
   });
 });

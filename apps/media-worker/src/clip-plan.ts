@@ -176,6 +176,8 @@ export const planClip = (input: {
   toleranceMs: number;
   /** VE2E-67: a plan that removes pixels (not the whole frame) can never be stream-copied. */
   cropPlan?: ReframeCropPlan | null;
+  /** VE2E-143: letterbox / pillarbox bars cut away before scaling; removes pixels, so never stream-copied. */
+  barCrop?: BarCrop | null;
 }): ClipPlan => {
   const { probe, startMs, durationMs, toleranceMs } = input;
   const reencode = (reasons: string[]): ClipPlan => {
@@ -184,6 +186,7 @@ export const planClip = (input: {
   };
   const staticReasons = copyIneligibilityReasons(probe, input.target, input.stripAudio);
   if (input.cropPlan && !isFullFrameCropPlan(input.cropPlan)) staticReasons.unshift("crop_plan");
+  if (input.barCrop) staticReasons.unshift("bar_crop");
   if (staticReasons.length > 0) return reencode(staticReasons);
   const keyframes = input.keyframesMs ?? [];
   if (keyframes.length === 0) return reencode(["no_keyframe_index"]);
@@ -315,11 +318,17 @@ export const frameCount = (durationMs: number, fps: number): number => Math.max(
 /** The cut length snapped to a whole number of frames, so the clip ends on a frame boundary (frame-accurate against the voice timeline). */
 export const frameAlignedDurationMs = (durationMs: number, fps: number): number => Math.round((frameCount(durationMs, fps) * 1000) / fps);
 
-export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null, cropPlan?: ReframeCropPlan | null): string => {
+export const buildReencodeFilter = (target: ClipTarget, sourceFps: number | null, cropPlan?: ReframeCropPlan | null, barCrop?: BarCrop | null): string => {
   const parts = (cropPlan ? buildCropFilterParts(cropPlan, target) : null) ?? [
-    `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
-    `crop=${target.width}:${target.height}`,
-    "setsar=1",
+    // VE2E-143: black bars baked into the source are cut first, so the picture (not the bars) fills the 9:16 frame.
+    ...(barCrop?.mode === "blur_fill"
+      ? [`crop=${barCrop.w}:${barCrop.h}:${barCrop.x}:${barCrop.y},split[fg0][bg0];[bg0]scale=${target.width}:${target.height}:force_original_aspect_ratio=increase,crop=${target.width}:${target.height},boxblur=24:3[bg1];[fg0]scale=${target.width}:-2[fg1];[bg1][fg1]overlay=(W-w)/2:(H-h)/2`, "setsar=1"]
+      : [
+          ...(barCrop ? [`crop=${barCrop.w}:${barCrop.h}:${barCrop.x}:${barCrop.y}`] : []),
+          `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
+          `crop=${target.width}:${target.height}`,
+          "setsar=1",
+        ]),
   ];
   parts.push(`fps=${normalizedFps(sourceFps)}`);
   return parts.join(",");
@@ -333,12 +342,13 @@ export const buildReencodeArgs = (
   target: ClipTarget,
   sourceFps: number | null,
   cropPlan?: ReframeCropPlan | null,
+  barCrop?: BarCrop | null,
 ): string[] => [
   ...commonHead(plan.cutStartMs, inputPath, frameAlignedDurationMs(plan.cutDurationMs, normalizedFps(sourceFps))),
   ...audioArgs(stripAudio, "reencode"),
   // Exactly N output frames: with CFR the clip length is then a whole number of frames, never a fraction of one.
   "-frames:v", String(frameCount(plan.cutDurationMs, normalizedFps(sourceFps))),
-  "-vf", buildReencodeFilter(target, sourceFps, cropPlan),
+  "-vf", buildReencodeFilter(target, sourceFps, cropPlan, barCrop),
   "-c:v", "libx264", "-preset", REENCODE_PROFILE.preset, "-crf", String(REENCODE_PROFILE.crf),
   "-maxrate", REENCODE_PROFILE.maxrate, "-bufsize", REENCODE_PROFILE.bufsize,
   "-pix_fmt", "yuv420p", "-profile:v", "high",
@@ -420,4 +430,41 @@ export const analyzeSmoothness = (csv: string, options: { trimEdgeFrames?: numbe
   let maxGap: number | null = null;
   for (let i = 1; i < keys.length; i += 1) maxGap = Math.max(maxGap ?? 0, keys[i]! - keys[i - 1]!);
   return { ...base, maxKeyframeGapMs: maxGap === null ? null : Math.round(maxGap), keyframes: keys.length };
+};
+
+// --- VE2E-143: baked-in black bars (letterboxed / pillarboxed social clips) ---
+
+/** `crop`: the picture fills the frame after the bars are cut. `blur_fill`: a landscape picture stays sharp and whole in the middle over a blurred copy of itself (no black, no heavy up-scaling). */
+export type BarCrop = { w: number; h: number; x: number; y: number; mode: "crop" | "blur_fill" };
+
+/** `ffmpeg -vf cropdetect` over a short sample of the cut (second 1 of the range); frames are decoded, nothing is written. */
+export const buildCropdetectArgs = (inputPath: string, startMs: number): string[] => [
+  "-hide_banner", "-nostdin", "-v", "info", "-ss", toSeconds(startMs + 1000), "-i", inputPath, "-t", "2",
+  "-an", "-vf", "cropdetect=limit=0.1:round=2:reset=0", "-f", "null", "-",
+];
+
+/** The last `crop=W:H:X:Y` cropdetect suggested (it converges as it sees more frames), or null. */
+export type DetectedCrop = Omit<BarCrop, "mode">;
+export const parseCropdetect = (stderr: string): DetectedCrop | null => {
+  const all = [...stderr.matchAll(/crop=(\d+):(\d+):(\d+):(\d+)/g)];
+  const last = all.at(-1);
+  return last ? { w: Number(last[1]), h: Number(last[2]), x: Number(last[3]), y: Number(last[4]) } : null;
+};
+
+/**
+ * A detected crop is applied only when it removes a real share of the frame (>= 12 % of a side), keeps a usable picture and stays inside
+ * the displayed frame; anything smaller is noise (dark scenes) and the clip is left alone.
+ */
+export const decideBarCrop = (probe: Pick<ProbeInfo["video"], "displayWidth" | "displayHeight">, detected: DetectedCrop | null): BarCrop | null => {
+  if (!detected) return null;
+  const { displayWidth: W, displayHeight: H } = probe;
+  const { w, h, x, y } = detected;
+  if (w < 240 || h < 240 || x < 0 || y < 0 || x + w > W || y + h > H) return null;
+  const removesHeight = h <= H * 0.88;
+  const removesWidth = w <= W * 0.88;
+  if (!removesHeight && !removesWidth) return null;
+  // Refuse an absurd sliver (e.g. a mostly dark clip): keep at least 15 % of the area.
+  if (w * h < W * H * 0.15) return null;
+  const even = { w: w - (w % 2), h: h - (h % 2), x: x - (x % 2), y: y - (y % 2) };
+  return { ...even, mode: even.w / even.h >= 1.2 ? "blur_fill" : "crop" };
 };

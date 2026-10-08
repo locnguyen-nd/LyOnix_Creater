@@ -48,7 +48,7 @@ const setup = async (bytes = 2048) => {
 };
 
 describe("derivativeMatchesWithin", () => {
-  const t = { range: { startMs: 1000, durationMs: 4000 }, stripAudio: true, tool: null, profileVersion: "clip-prepare.v2" };
+  const t = { range: { startMs: 1000, durationMs: 4000 }, stripAudio: true, tool: null, profileVersion: "clip-prepare.v3" };
   it("accepts start and duration drift up to 300 ms, not more, same audio policy and profile", () => {
     expect(CLIP_RANGE_TOLERANCE_MS).toBe(300);
     expect(derivativeMatchesWithin(t, { startMs: 1300, durationMs: 3700 }, true, 300)).toBe(true);
