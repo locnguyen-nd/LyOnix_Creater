@@ -67,6 +67,7 @@ import { ReframeService } from "./reframe.service.js";
 import { decryptSecret, encryptSecret } from "./secret-crypto.js";
 import { fetchBinarySafely, type SafeBinaryFetchResult } from "./safe-binary-fetch.js";
 import { writeQuarantineFile } from "./quarantine.js";
+import { discardQuarantined, readQuarantineHead, SocialFetchService, socialFetchEnabled, type SocialFetchOutcome } from "./social-fetch.service.js";
 
 type MediaAssetVersionSummaryLike = ApifyImportResponse["asset"];
 
@@ -210,6 +211,8 @@ export class ApifyService {
     @Optional() @Inject(VideoFramesService) private readonly videoFrames?: VideoFramesService,
     /** VE2E-67: plan-time crop/overlay check. Omitted = no check (identical to the previous behaviour). */
     @Optional() @Inject(ReframeService) private readonly reframe?: ReframeService,
+    /** VE2E-146: yt-dlp download of the chosen TikTok post (MEDIA_FETCH_YTDLP=1); Apify phase 2 stays the fallback. */
+    @Optional() @Inject(SocialFetchService) private readonly socialFetch?: SocialFetchService,
   ) {}
 
   private async access(projectId: string, userId: string, role: "admin" | "staff", write: boolean) {
@@ -824,6 +827,8 @@ export class ApifyService {
     let phase2Failure = "";
     let decision: Extract<ReturnType<typeof decideMediaSelection>, { decision: "auto_select" }> | null = null;
     let toImport: ApifyCandidateResult | null = null;
+    /** VE2E-146: the chosen post was downloaded by yt-dlp and is already registered (no Actor run, no second download). */
+    let fetchedAsset: ApifyImportResponse["asset"] | null = null;
     let externalId = "";
     // VE2E-131: a phase-2 failure moves on to the next shortlisted candidate (max APIFY_MAX_PHASE2_CANDIDATES); the single-phase search is gone.
     for (let attempt = 0; attempt < APIFY_MAX_PHASE2_CANDIDATES; attempt += 1) {
@@ -849,9 +854,25 @@ export class ApifyService {
         externalId = id;
         break;
       }
+      if (chosen.deferredPostUrl && input.platform === "tiktok" && this.socialFetch && socialFetchEnabled("tiktok_download")) {
+        const candidateWithQuery: MediaCandidate = { ...chosen.candidate, provenance: { ...chosen.candidate.provenance, query: input.keyword } };
+        const fetched = await this.socialFetch.fetchPost({ platform: "tiktok", tool: "yt-dlp", url: chosen.deferredPostUrl, mediaType: "video", userId, role });
+        quality.ossFetchMs = fetched.elapsedMs;
+        const registered = fetched.ok ? await this.importFetchedPost(projectId, userId, role, input.platform, candidateWithQuery, fetched, { sceneId: input.sceneId }) : null;
+        if (registered?.ok) {
+          quality.downloader = "yt-dlp";
+          decision = next;
+          toImport = { ...chosen, candidate: candidateWithQuery };
+          fetchedAsset = registered.data.asset;
+          externalId = id;
+          break;
+        }
+        quality.ossFetchCode = fetched.ok ? `register_failed:${registered && !registered.ok ? registered.code : "unknown"}` : fetched.code;
+      }
       const phase2 = await this.fetchChosenPost(account, chosen, job, lang);
       if (phase2.ok) {
         quality.phase2 = "ok";
+        if (quality.ossFetchCode) quality.downloader = "apify";
         decision = next;
         toImport = phase2.result;
         externalId = id;
@@ -866,7 +887,9 @@ export class ApifyService {
     const release = () => input.usedExternalIds.delete(externalId);
     const importedId = toImport.candidate.externalId;
     const candidate: MediaCandidate = { ...toImport.candidate, provenance: { ...toImport.candidate.provenance, query: input.keyword } };
-    const imported = await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
+    const imported: ApifyOutcome<ApifyImportResponse> = fetchedAsset
+      ? { ok: true, data: { asset: fetchedAsset } }
+      : await this.importResult(projectId, userId, role, account, input.platform, { candidate, download: toImport.download }, { sceneId: input.sceneId });
     if (!imported.ok) {
       input.usedExternalIds.delete(importedId);
       job.failedIds.add(importedId);
@@ -888,6 +911,68 @@ export class ApifyService {
       ok: true,
       data: { asset: imported.data.asset, externalId: importedId, ledgerId: `${candidate.source}:${importedId}`, provenance: candidate.provenance.apify ?? null, platform: input.platform, quality },
     };
+  }
+
+  /**
+   * VE2E-146: registers a post that the media worker downloaded with yt-dlp straight into `_quarantine/`. Same asset shape as an Apify
+   * import (origin `apify`, file name `apify-<platform>-<id>.<ext>` so the library shortcut finds it next time, `strip_audio`): the
+   * candidate and its provenance come from the Apify search, only the transport differs, and the provenance says so (`downloader`).
+   * The bytes still decide the type (sniffed here, re-hashed by registerAsset). A refused file is deleted from quarantine.
+   */
+  private async importFetchedPost(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    platform: ApifyPlatform,
+    candidate: MediaCandidate,
+    fetched: Extract<SocialFetchOutcome, { ok: true }>,
+    options: { sceneId?: string | null },
+  ): Promise<ApifyOutcome<ApifyImportResponse>> {
+    const { result } = fetched;
+    let sniffed: string | null = null;
+    try {
+      sniffed = sniffMediaMimeType(await readQuarantineHead(result.quarantineToken));
+    } catch {
+      sniffed = null;
+    }
+    if (!sniffed || !sniffed.startsWith("video/")) {
+      await discardQuarantined(result.quarantineToken);
+      return { ok: false, code: "UNSUPPORTED_MEDIA", message: "yt-dlp trả về file không phải video", status: 415 };
+    }
+    const safeId = candidate.externalId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40) || result.sha256.slice(0, 12);
+    const registered = await this.media.registerAsset(projectId, userId, role, {
+      quarantineToken: result.quarantineToken,
+      kind: "video",
+      originalFileName: `apify-${platform}-${safeId}.${extFor(sniffed)}`,
+      mimeType: sniffed,
+      checksumSha256: result.sha256,
+      bytes: result.bytes,
+      widthPx: result.probe?.width ?? candidate.widthPx ?? null,
+      heightPx: result.probe?.height ?? candidate.heightPx ?? null,
+      durationMs: result.probe?.durationMs ?? (candidate.durationSeconds ? Math.round(candidate.durationSeconds * 1000) : null),
+      origin: "apify",
+      license: APIFY_LICENSE,
+      reusable: true,
+      folderId: null,
+      sceneId: options.sceneId ?? null,
+      serverProvenance: {
+        platform,
+        rightsStatus: "owner_accepted_risk",
+        apify: candidate.provenance.apify ?? null,
+        attribution: candidate.attribution,
+        query: candidate.provenance.query,
+        downloader: { tool: result.tool.name, version: result.tool.version, profileVersion: result.tool.profileVersion, steps: fetched.steps.map((s) => ({ via: s.via, code: s.code, runs: s.runs.map((r) => r.step) })), elapsedMs: fetched.elapsedMs },
+        importedAt: new Date().toISOString(),
+        audioPolicy: "strip_audio",
+      },
+    });
+    if (typeof registered === "string") {
+      await discardQuarantined(result.quarantineToken);
+      if (registered === "forbidden") return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
+      if (registered === "unsupported_media") return { ok: false, code: "UNSUPPORTED_MEDIA", message: "MIME không khớp loại asset", status: 415 };
+      return { ok: false, code: "VALIDATION_FAILED", message: "Không thể lưu asset tải bằng yt-dlp vào project", status: 500 };
+    }
+    return { ok: true, data: { asset: registered } };
   }
 
   private async download(account: { encryptedSecret: string }, plan: ApifyDownloadPlan): Promise<SafeBinaryFetchResult | "plan_invalid"> {

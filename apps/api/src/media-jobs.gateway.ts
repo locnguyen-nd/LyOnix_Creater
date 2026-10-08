@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { isMediaQueueSplitEnabled, MediaJobClient, MediaJobClientError, type ComposeVideoOptions, type VideoComposeJobInput, type VideoComposeResult, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
+import { isMediaQueueSplitEnabled, MediaJobClient, MediaJobClientError, type ComposeVideoOptions, type VideoComposeJobInput, type VideoComposeResult, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult, type MediaFetchJobInput, type MediaFetchResult, type MediaSearchJobInput, type MediaSearchResult } from "@lyonix/media-jobs";
 
 /** Per-clip wait for a media-worker result (env `MEDIA_PREPARE_TIMEOUT_MS`, default 180s). */
 export const mediaPrepareTimeoutMs = (): number => {
@@ -21,6 +21,12 @@ export interface ReframeAnalyzer {
   analyzeReframe(job: ReframeAnalyzeJobInput, options?: { timeoutMs?: number }): Promise<ReframeAnalyzeResult>;
 }
 
+/** VE2E-144: yt-dlp / gallery-dl downloads and searches on the worker's fetch queue (`lyonix.media.fetch`). */
+export interface SocialFetcher {
+  fetchMedia(job: MediaFetchJobInput): Promise<MediaFetchResult>;
+  searchMedia(job: MediaSearchJobInput): Promise<MediaSearchResult>;
+}
+
 /**
  * VE2E-110: the internal render engine (`video.compose` on `lyonix.render`). `renderQueueStatus` reports whether any render worker is attached
  * (`consumers: 0` = the engine is not running) and the backlog, which the Render Router uses for `local_unhealthy` / overflow.
@@ -37,12 +43,12 @@ export interface VideoComposer {
  * `RESULT_TIMEOUT`, ...) — callers map it to a render error, never to a full-source fallback.
  */
 @Injectable()
-export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAnalyzer, VideoComposer, OnModuleDestroy {
+export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAnalyzer, VideoComposer, SocialFetcher, OnModuleDestroy {
   private client: Promise<MediaJobClient> | null = null;
 
   private connect(): Promise<MediaJobClient> {
     if (!this.client) {
-      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE, renderQueue: process.env.MEDIA_WORKER_RENDER_QUEUE, splitQueues: isMediaQueueSplitEnabled(process.env.MEDIA_QUEUE_SPLIT), frameQueue: process.env.MEDIA_WORKER_QUEUE_FRAME, reframeQueue: process.env.MEDIA_WORKER_QUEUE_REFRAME });
+      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE, renderQueue: process.env.MEDIA_WORKER_RENDER_QUEUE, splitQueues: isMediaQueueSplitEnabled(process.env.MEDIA_QUEUE_SPLIT), frameQueue: process.env.MEDIA_WORKER_QUEUE_FRAME, reframeQueue: process.env.MEDIA_WORKER_QUEUE_REFRAME, fetchQueue: process.env.MEDIA_WORKER_QUEUE_FETCH });
       this.client = pending;
       pending.catch(() => {
         if (this.client === pending) this.client = null; // next call retries the connection
@@ -81,6 +87,27 @@ export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAn
     const client = await this.connect();
     try {
       return await client.analyzeReframe(job, { timeoutMs: options.timeoutMs ?? mediaPrepareTimeoutMs() });
+    } catch (error) {
+      if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
+        this.client = null;
+        await client.close().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  async fetchMedia(job: MediaFetchJobInput): Promise<MediaFetchResult> {
+    return this.withReconnect((client) => client.fetchMedia(job));
+  }
+
+  async searchMedia(job: MediaSearchJobInput): Promise<MediaSearchResult> {
+    return this.withReconnect((client) => client.searchMedia(job));
+  }
+
+  private async withReconnect<T>(call: (client: MediaJobClient) => Promise<T>): Promise<T> {
+    const client = await this.connect();
+    try {
+      return await call(client);
     } catch (error) {
       if (error instanceof MediaJobClientError && error.code === "BROKER_UNAVAILABLE") {
         this.client = null;

@@ -923,6 +923,13 @@ export type MediaPlanApifyQuality = {
   frameCheck?: "accepted" | "rejected" | "unchecked";
   /** VE2E-67: plan-time crop/overlay check (absent when reframing is off for this source). */
   reframe?: MediaPlanReframeCheck | null;
+  /**
+   * VE2E-146: who downloaded the chosen post. `yt-dlp` = the open-source path (no Actor run); `apify` = the Actor phase 2 (also the
+   * fallback when yt-dlp failed - `ossFetchCode` then says why, e.g. FETCH_FORBIDDEN / FETCH_BREAKER_OPEN). Absent = not attempted.
+   */
+  downloader?: "yt-dlp" | "apify";
+  ossFetchCode?: string;
+  ossFetchMs?: number;
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
