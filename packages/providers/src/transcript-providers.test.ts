@@ -45,12 +45,13 @@ function apify(items: unknown[], status = "SUCCEEDED", startStatus = 201) {
 describe("VE2E-96 TikTok source (Apify)", () => {
   it("asks the pinned TikTok Actor for ONE post with subtitles and the video file stored", async () => {
     expect(buildTikTokTranscriptInput(`https://www.tiktok.com/@a/video/${VIDEO_ID}`, "ja")).toEqual({
-      postURLs: [`https://www.tiktok.com/@a/video/${VIDEO_ID}`], resultsPerPage: 1, shouldDownloadSubtitles: true, shouldDownloadVideos: true, shouldDownloadCovers: false, shouldDownloadSlideshowImages: false, proxyCountryCode: "JP",
+      postURLs: [`https://www.tiktok.com/@a/video/${VIDEO_ID}`], resultsPerPage: 1, downloadSubtitlesOptions: "DOWNLOAD_SUBTITLES", shouldDownloadVideos: true, shouldDownloadCovers: false, shouldDownloadSlideshowImages: false, proxyCountryCode: "JP",
     });
     const { deps, calls } = apify([item()]);
     const video = await new ApifyTikTokTranscriptSource("apify-token", deps).resolveTikTok(`https://www.tiktok.com/@osaka.news/video/${VIDEO_ID}`, { language: "ja", timeoutSecs: 60 });
     expect(calls[0]!.url).toContain("/v2/acts/clockworks~tiktok-scraper/runs?");
-    expect(calls[0]!.body).toMatchObject({ postURLs: [`https://www.tiktok.com/@osaka.news/video/${VIDEO_ID}`], shouldDownloadSubtitles: true });
+    expect(calls[0]!.body).toMatchObject({ postURLs: [`https://www.tiktok.com/@osaka.news/video/${VIDEO_ID}`], downloadSubtitlesOptions: "DOWNLOAD_SUBTITLES" });
+    expect(calls[0]!.body).not.toHaveProperty("shouldDownloadSubtitles");
     expect(video).toMatchObject({ videoId: VIDEO_ID, author: "osaka.news", language: "ja", durationSec: 42, caption: "大阪の新駅を紹介 #osaka" });
   });
 
@@ -80,6 +81,79 @@ describe("VE2E-96 TikTok source (Apify)", () => {
   });
 });
 
+describe("TikTok source: real Actor output and its variants", () => {
+  const KV = "https://api.apify.com/v2/key-value-stores/KVx/records";
+  /** The shape of a live clockworks/tiktok-scraper 0.0.611 item (2026-10-06 run, values replaced). */
+  const liveItem = (over: Record<string, unknown> = {}) => ({
+    id: VIDEO_ID,
+    text: "大阪の新駅",
+    textLanguage: "ja",
+    webVideoUrl: `https://www.tiktok.com/@osaka.news/video/${VIDEO_ID}`,
+    authorMeta: { name: "osaka.news" },
+    videoMeta: {
+      duration: 30,
+      coverUrl: `${KV}/cover.jpg`,
+      originalCoverUrl: "https://p16-common-sign.tiktokcdn.com/cover.jpg",
+      subtitleLinks: [
+        { language: "eng-US", downloadLink: `${KV}/sub-en.vtt`, source: "MT", sourceUnabbreviated: "machine translation", version: "1", tiktokLink: "https://v16-webapp.tiktok.com/en.vtt" },
+        { language: "jpn-JP", downloadLink: `${KV}/sub-ja.vtt`, source: "ASR", sourceUnabbreviated: "automatic speech recognition", version: "1", tiktokLink: "https://v16-webapp.tiktok.com/ja.vtt" },
+      ],
+      downloadAddr: `${KV}/video-addr.mp4`,
+      transcriptionLink: {},
+    },
+    mediaUrls: [`${KV}/video.mp4`],
+    ...over,
+  });
+
+  it("live shape: original captions before machine translations; stored media copies in field order; diagnostics name the fields", () => {
+    const video = parseTikTokTranscriptItem(liveItem(), "tok")!;
+    expect(video.subtitles.map((track) => track.language)).toEqual(["ja", "en"]);
+    expect(video.mediaCandidates!.map((file) => file.url)).toEqual([`${KV}/video.mp4`, `${KV}/video-addr.mp4`]);
+    expect(video.mediaCandidates!.every((file) => file.scopedHeaders?.host === "api.apify.com")).toBe(true);
+    expect(video.media).toEqual(video.mediaCandidates![0]);
+    expect(video.diagnostics).toEqual({ itemCount: 1, subtitleFields: ["videoMeta.subtitleLinks"], subtitleTracks: 2, mediaFields: ["mediaUrls", "videoMeta.downloadAddr"] });
+    expect(JSON.stringify(video.diagnostics)).not.toContain("http");
+  });
+
+  it("other Actor versions: playAddr / videoUrl / downloadUrl / playUrl (string, list or {urlList}) on TikTok CDNs, stored copy still first", () => {
+    const video = parseTikTokTranscriptItem(liveItem({
+      mediaUrls: undefined,
+      videoMeta: { duration: 30, playAddr: "https://v16-webapp-prime.tiktokcdn.com/play.mp4" },
+      video: { playAddr: { urlList: ["https://v19.tiktokcdn-us.com/a.mp4", "https://evil.example/b.mp4"] } },
+      videoUrl: "https://v77.tiktokv.com/c.mp4",
+      downloadUrl: `${KV}/stored.mp4`,
+      playUrl: ["http://v16.tiktokcdn.com/plain-http.mp4", "https://127.0.0.1/x.mp4"],
+    }), "tok")!;
+    expect(video.mediaCandidates!.map((file) => file.url)).toEqual([
+      `${KV}/stored.mp4`,
+      "https://v16-webapp-prime.tiktokcdn.com/play.mp4",
+      "https://v19.tiktokcdn-us.com/a.mp4",
+      "https://v77.tiktokv.com/c.mp4",
+    ]);
+    expect(video.mediaCandidates![1]).toEqual({ url: "https://v16-webapp-prime.tiktokcdn.com/play.mp4", hostSuffixes: ["tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com", "tiktokv.com", "tiktokv.us", "tiktokv.eu"] });
+    expect(video.diagnostics!.mediaFields).toEqual(["downloadUrl", "videoMeta.playAddr", "video.playAddr", "videoUrl"]);
+    expect(video.subtitles).toEqual([]);
+  });
+
+  it("no subtitle and no media field: an empty plan, not an error (the intake says what is missing)", () => {
+    const video = parseTikTokTranscriptItem(liveItem({ mediaUrls: [], videoMeta: { duration: 30, subtitleLinks: [] } }), "tok")!;
+    expect(video).toMatchObject({ subtitles: [], media: null, mediaCandidates: [], diagnostics: { subtitleTracks: 0, subtitleFields: [], mediaFields: [] } });
+  });
+
+  it("errors carry safe facts: 0 items -> empty_result; 402 -> quota_exhausted; error item -> not_found with its message; never the token or a URL", async () => {
+    const url = `https://www.tiktok.com/@a/video/${VIDEO_ID}`;
+    const run = (deps: ApifyDeps) => new ApifyTikTokTranscriptSource("apify-token-1234567890abcdef", deps).resolveTikTok(url, { timeoutSecs: 60 });
+    await expect(run(apify([]).deps)).rejects.toMatchObject({ code: "empty_result", detail: { itemCount: 0 } });
+    const quota = apify([], "SUCCEEDED", 402);
+    const error = await run(quota.deps).catch((caught: TranscriptError) => caught);
+    expect(error).toMatchObject({ code: "quota_exhausted", retryable: false, detail: { httpStatus: 402, providerCode: "PROVIDER_QUOTA_EXHAUSTED" } });
+    expect(quota.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    const missing = await run(apify([{ error: "Post not found: https://www.tiktok.com/@a/video/1?token=apify-token-1234567890abcdef" }]).deps).catch((caught: TranscriptError) => caught);
+    expect(missing).toMatchObject({ code: "not_found", detail: { itemCount: 1, providerMessage: "Post not found: <url>" } });
+    expect(JSON.stringify([error, missing].map((e) => (e as TranscriptError).detail))).not.toContain("apify-token");
+  });
+});
+
 describe("VE2E-96 speech-to-text (ElevenLabs Scribe)", () => {
   const audio = new Uint8Array([1, 2, 3]);
   const call = (response: () => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>) => {
@@ -104,6 +178,11 @@ describe("VE2E-96 speech-to-text (ElevenLabs Scribe)", () => {
     expect(await codeOf(429)).toEqual(["rate_limited", false, false]);
     expect(await codeOf(422)).toEqual(["unsupported_media", false, false]);
     expect(await codeOf(503)).toEqual(["unavailable", true, false]);
+    // ElevenLabs reports used-up credits as 401 + detail.status "quota_exceeded": not a bad key
+    const quota = call(async () => ({ ok: false, status: 401, json: async () => ({ detail: { status: "quota_exceeded", message: "This request exceeds your quota" } }) }));
+    await expect(quota.stt.transcribeAudio({ audio, mimeType: "video/mp4", fileName: "v.mp4" }, { timeoutMs: 1000 })).rejects.toMatchObject({ code: "quota_exhausted", detail: { httpStatus: 401, providerCode: "quota_exceeded" } });
+    const permission = call(async () => ({ ok: false, status: 401, json: async () => ({ detail: { status: "missing_permissions" } }) }));
+    await expect(permission.stt.transcribeAudio({ audio, mimeType: "video/mp4", fileName: "v.mp4" }, { timeoutMs: 1000 })).rejects.toMatchObject({ code: "auth_invalid", detail: { providerCode: "missing_permissions" } });
     const timeout = call(async () => { const error = new Error("timed out"); error.name = "TimeoutError"; throw error; });
     await expect(timeout.stt.transcribeAudio({ audio, mimeType: "video/mp4", fileName: "v.mp4" }, { timeoutMs: 5 })).rejects.toMatchObject({ code: "timeout", retryable: true });
   });

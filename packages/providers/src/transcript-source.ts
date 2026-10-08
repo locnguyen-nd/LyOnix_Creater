@@ -6,13 +6,36 @@
  * through its SSRF-safe fetch. Errors are TranscriptError with a stable code; messages never carry a key or token.
  */
 
-export type TranscriptErrorCode = "not_configured" | "not_found" | "timeout" | "rate_limited" | "auth_invalid" | "unavailable" | "unsupported_media";
+export type TranscriptErrorCode =
+  | "not_configured"
+  | "not_found"
+  | "timeout"
+  | "rate_limited"
+  | "quota_exhausted"
+  | "auth_invalid"
+  | "unavailable"
+  | "unsupported_media"
+  /** The provider answered but returned no item at all for the video. */
+  | "empty_result";
+
+/** Safe facts for logs: HTTP status, the provider's own error code and its (token-redacted, URL-free, clipped) message. */
+export type TranscriptErrorDetail = { httpStatus?: number; providerCode?: string; providerMessage?: string; itemCount?: number };
 
 export class TranscriptError extends Error {
-  constructor(readonly code: TranscriptErrorCode, message: string, readonly retryable = false) {
+  constructor(readonly code: TranscriptErrorCode, message: string, readonly retryable = false, readonly detail: TranscriptErrorDetail = {}) {
     super(message);
   }
 }
+
+/** What a source run returned, as field NAMES and counts only (never a URL, token or text) - for the intake log. */
+export type TranscriptSourceDiagnostics = {
+  itemCount: number;
+  /** e.g. ["videoMeta.subtitleLinks"] - where subtitle tracks were found. */
+  subtitleFields: string[];
+  subtitleTracks: number;
+  /** e.g. ["mediaUrls", "videoMeta.downloadAddr"] - every field that held a usable media link, in the order they are tried. */
+  mediaFields: string[];
+};
 
 /** A file the API downloads with `fetchBinarySafely`: only from these hosts; `scopedHeaders` go to that one host only. */
 export type TranscriptDownload = { url: string; hostSuffixes: readonly string[]; scopedHeaders?: { host: string; headers: Record<string, string> } };
@@ -29,8 +52,11 @@ export type TikTokVideoInfo = {
   durationSec: number | null;
   language: string | null;
   subtitles: SubtitleTrack[];
-  /** The video file to transcribe when no subtitle can be used; null = none available. */
+  /** The video file to transcribe when no subtitle can be used; null = none available. Same as `mediaCandidates[0]`. */
   media: TranscriptDownload | null;
+  /** Every usable media file, best first (the provider's stored copy before a platform CDN link); tried in order until one downloads. */
+  mediaCandidates?: TranscriptDownload[];
+  diagnostics?: TranscriptSourceDiagnostics;
 };
 
 export interface VideoTranscriptSource {

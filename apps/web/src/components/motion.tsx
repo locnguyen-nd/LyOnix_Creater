@@ -81,7 +81,7 @@ const SEGMENT_LOOK = {
   soft: {
     list: "gap-0.5 rounded-[8px] bg-lyx-muted p-1",
     indicator: "rounded-[6px] bg-lyx-bg shadow-sm",
-    item: "rounded-[6px] px-4 py-1.5",
+    item: "rounded-[6px] px-3 py-1.5 sm:px-4",
     active: "text-lyx-fg",
     fallback: "bg-lyx-bg shadow-sm",
     idle: "text-lyx-fg-muted hover:text-lyx-fg",
@@ -116,7 +116,7 @@ export function SegmentedTabs<T extends string>({
   const { listRef, indicator } = useTabIndicator<HTMLDivElement>(`${value}|${options.map((option) => option.id).join(",")}`);
   const look = SEGMENT_LOOK[tone];
   return (
-    <div ref={listRef} role="group" aria-label={ariaLabel} data-testid={testId} className={`relative inline-flex w-fit max-w-full flex-wrap ${look.list} ${className}`}>
+    <div ref={listRef} role="group" aria-label={ariaLabel} data-testid={testId} className={`lyx-seg-${tone} relative inline-flex w-fit max-w-full flex-wrap ${look.list} ${className}`}>
       <TabIndicator {...indicator} className={look.indicator} />
       {options.map((option) => {
         const active = option.id === value;

@@ -33,16 +33,19 @@ export function Field({
   label,
   hint,
   error,
+  icon,
   children,
 }: {
   label: string;
   hint?: string;
   error?: string;
+  /** Optional small icon before the label. */
+  icon?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[14px] font-medium">{label}</span>
+      <span className={`text-[14px] font-medium ${icon ? "inline-flex items-center gap-1.5" : ""}`}>{icon}{label}</span>
       {children}
       {hint ? <span className="text-[12px] leading-4 text-lyx-fg-muted">{hint}</span> : null}
       {error ? <span key={error} className="lyx-fade text-[12px] leading-4 text-lyx-danger">{error}</span> : null}

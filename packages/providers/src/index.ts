@@ -378,8 +378,8 @@ export { NEWS_SOURCE_ADAPTERS, NEWS_FEED_LIMITS, NewsFeedError, fetchNewsFeedDoc
 export { YAHOO_JAPAN_NEWS_SOURCE } from "./news-yahoo-japan.js";
 export { parseRssItems, decodeXmlEntities, type RssItem } from "./news-rss.js";
 /** VE2E-96: URL intake - transcript providers (TikTok subtitles / media, speech-to-text) and the source rewrite. */
-export { TranscriptError, withTranscriptRetry, type SpeechToTextInput, type SpeechToTextProvider, type SpeechToTextResult, type SubtitleTrack, type TikTokVideoInfo, type TranscriptDownload, type TranscriptErrorCode, type VideoTranscriptSource } from "./transcript-source.js";
-export { ApifyTikTokTranscriptSource, TIKTOK_SUBTITLE_HOSTS, buildTikTokTranscriptInput, normalizeTikTokLanguage, parseTikTokTranscriptItem } from "./tiktok-apify-source.js";
+export { TranscriptError, withTranscriptRetry, type SpeechToTextInput, type SpeechToTextProvider, type SpeechToTextResult, type SubtitleTrack, type TikTokVideoInfo, type TranscriptDownload, type TranscriptErrorCode, type TranscriptErrorDetail, type TranscriptSourceDiagnostics, type VideoTranscriptSource } from "./transcript-source.js";
+export { ApifyTikTokTranscriptSource, TIKTOK_MEDIA_FIELDS, TIKTOK_MEDIA_HOSTS, TIKTOK_SUBTITLE_HOSTS, buildTikTokTranscriptInput, normalizeTikTokLanguage, parseTikTokTranscriptItem } from "./tiktok-apify-source.js";
 export { ELEVENLABS_STT_DEFAULT_MODEL, ELEVENLABS_STT_URL, ElevenLabsSpeechToText } from "./stt-elevenlabs.js";
 export { MOCK_TIKTOK_SUBTITLES, MockSpeechToText, MockVideoTranscriptSource } from "./transcript-mock.js";
 export { SOURCE_REWRITE_MAX_SOURCE_CHARS, SOURCE_REWRITE_PROMPT_VERSION, SOURCE_REWRITE_SCHEMA, buildSourceRewritePrompt, parseSourceRewrite, rewriteSourceAsScript, type SourceRewrite, type SourceRewriteInput } from "./source-rewrite.js";

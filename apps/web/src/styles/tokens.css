@@ -32,6 +32,14 @@
   --lyx-border-hover: #c9c9c9;
   --lyx-shadow-hover: 0 4px 12px -6px rgba(0, 0, 0, 0.14);
   --lyx-skeleton-bg: #ececec;
+  /* Accent colours (create-video sections, icons, the create button). Solid colours only - no gradient, no glow. */
+  --lyx-accent-blue: #2563eb;
+  --lyx-accent-green: #059669;
+  --lyx-accent-violet: #7c3aed;
+  --lyx-accent-amber: #d97706;
+  --lyx-accent-rose: #e11d48;
+  --lyx-accent-cta: #4f46e5;
+  --lyx-accent-cta-hover: #4338ca;
 }
 
 html.dark {
@@ -56,6 +64,13 @@ html.dark {
   --lyx-border-hover: #454545;
   --lyx-shadow-hover: 0 4px 14px -6px rgba(0, 0, 0, 0.6);
   --lyx-skeleton-bg: #262626;
+  --lyx-accent-blue: #60a5fa;
+  --lyx-accent-green: #34d399;
+  --lyx-accent-violet: #a78bfa;
+  --lyx-accent-amber: #fbbf24;
+  --lyx-accent-rose: #fb7185;
+  --lyx-accent-cta: #4f46e5;
+  --lyx-accent-cta-hover: #6366f1;
 }
 
 html {

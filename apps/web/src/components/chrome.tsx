@@ -7,7 +7,7 @@ export function PageHeader({
   actions,
 }: {
   title: string;
-  breadcrumb?: string;
+  breadcrumb?: ReactNode;
   actions?: ReactNode;
 }) {
   return (

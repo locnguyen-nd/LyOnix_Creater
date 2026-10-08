@@ -1457,8 +1457,11 @@ export type UrlIntakeRequest = {
   voiceAccountId?: string;
 };
 
-/** Progress of `POST /intake/url/stream`: reading the source, getting subtitles, speech-to-text (only when there is no subtitle). */
-export type UrlIntakeStage = "reading" | "subtitles" | "speech";
+/**
+ * Progress of `POST /intake/url/stream` - server-side intake stages, streamed as they start. TikTok: reading > subtitles > (no subtitle: no_subtitles > downloading > speech) > cleaning.
+ * An article only reports `reading`. Rewriting the script is a separate request (`/intake/rewrite`).
+ */
+export type UrlIntakeStage = "reading" | "subtitles" | "no_subtitles" | "downloading" | "speech" | "cleaning";
 
 /** One line (NDJSON) of `POST /intake/url/stream`: stages as they start, then the result (or an unexpected error). */
 export type UrlIntakeStreamEvent =
@@ -1502,12 +1505,26 @@ export type UrlIntakeErrorCode =
   | "transcript_provider_not_configured"
   | "stt_provider_not_configured"
   | "tiktok_not_found"
+  /** The TikTok provider (Apify) answered with no item at all. */
+  | "tiktok_provider_empty"
+  /** The TikTok provider run failed or was refused (see the server log for its HTTP status / code). */
+  | "tiktok_provider_failed"
+  /** The TikTok provider account's usage limit / credit is used up. */
+  | "provider_quota_exhausted"
   | "transcript_empty"
   | "transcript_timeout"
   | "transcript_rate_limited"
   | "transcript_auth_invalid"
-  | "transcript_failed"
+  /** No subtitle, and the provider gave no media file either. */
+  | "no_subtitle_no_media"
+  /** No subtitle; a media file was listed but could not be downloaded. */
   | "media_unavailable"
+  | "stt_failed"
+  | "stt_timeout"
+  | "stt_auth_invalid"
+  | "stt_rate_limited"
+  | "stt_quota_exhausted"
+  | "stt_unsupported_media"
   | "ssrf_blocked"
   | "fetch_failed"
   | "too_large"

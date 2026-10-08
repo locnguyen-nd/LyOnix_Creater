@@ -33,11 +33,11 @@ export function TemplatePicker({ templates, selectedId, onChoose, onPreviewSelec
 
   return (
     <>
-      <div className="flex items-center gap-3 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2" data-testid="template-picker-chip">
+      <div className="flex flex-wrap items-center gap-3 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2" data-testid="template-picker-chip">
         <div className="flex h-[60px] w-[34px] flex-none items-center justify-center overflow-hidden rounded-[6px] bg-lyx-muted text-[9px] text-lyx-fg-subtle">
           {selected ? <TemplateThumb template={selected} fallbackLabel="" /> : null}
         </div>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[160px] flex-1">
           {selected ? (
             <>
               <div className="truncate text-[13px] font-medium" title={selected.name}>{selected.name}</div>
@@ -49,8 +49,11 @@ export function TemplatePicker({ templates, selectedId, onChoose, onPreviewSelec
             </>
           ) : <div className="text-[12.5px] text-lyx-fg-muted">{t("templatePicker.none")}</div>}
         </div>
-        {selected && onPreviewSelected ? <Button type="button" variant="ghost" onClick={() => onPreviewSelected(selected)}>{t("templates.previewOpen")}</Button> : null}
-        <Button type="button" variant="secondary" onClick={() => setOpen(true)} data-testid="template-picker-open">{selected ? t("templatePicker.change") : t("templatePicker.choose")}</Button>
+        {/* narrow screens: the two actions move under the template instead of squeezing it */}
+        <div className="flex shrink-0 items-center justify-end gap-2 max-sm:w-full">
+          {selected && onPreviewSelected ? <Button type="button" variant="ghost" onClick={() => onPreviewSelected(selected)}>{t("templates.previewOpen")}</Button> : null}
+          <Button type="button" variant="secondary" onClick={() => setOpen(true)} data-testid="template-picker-open">{selected ? t("templatePicker.change") : t("templatePicker.choose")}</Button>
+        </div>
       </div>
 
       {open ? (

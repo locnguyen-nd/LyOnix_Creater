@@ -1,19 +1,21 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, Check, CheckCircle2, ExternalLink, FileText, Link2, Loader2, Minus, Search, Video, X } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ExternalLink, FileText, Info, Link2, Loader2, Minus, Search, Video, X } from "lucide-react";
 import { Button } from "../components/ui";
-import { intakeProgress, type IntakeState, type IntakeStep, type IntakeTarget } from "./url-intake";
+import { SPOKEN_STAGES, intakeProgress, type IntakeState, type IntakeStep, type IntakeTarget } from "./url-intake";
 
 /**
  * VE2E-96: "Nguồn nội dung" above the create-video form - a URL to analyse (TikTok transcript / article, then an original script) and a
  * news search that opens the news drawer. The result is a preview card; the form changes only through its two buttons.
  */
-export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRetryRewrite }: {
+export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRetryRewrite, embedded = false }: {
   state: IntakeState;
   onAnalyze: (url: string) => void;
   onSearchNews: (query: string) => void;
   onApply: (target: IntakeTarget) => void;
   onRetryRewrite: () => void;
+  /** Inside the create-video "Nội dung" card: a light inset block instead of its own card. */
+  embedded?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const [url, setUrl] = useState("");
@@ -22,8 +24,12 @@ export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRe
   const inputClass = "h-10 w-full min-w-0 rounded-[4px] border border-lyx-border bg-lyx-muted pl-9 pr-3 text-[13px] text-lyx-fg placeholder:text-lyx-fg-subtle";
 
   return (
-    <section className="mb-5 flex flex-col gap-2.5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4" aria-labelledby="content-source-title" data-testid="content-source">
-      <p id="content-source-title" className="text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("intake.title")}</p>
+    <section
+      className={embedded ? "flex flex-col gap-2.5 rounded-lg border border-dashed border-lyx-border bg-lyx-muted/50 p-3" : "mb-5 flex flex-col gap-2.5 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-4"}
+      aria-labelledby="content-source-title"
+      data-testid="content-source"
+    >
+      <p id="content-source-title" className={embedded ? "text-[12.5px] font-medium text-lyx-fg-muted" : "text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle"}>{t(embedded ? "intake.embeddedTitle" : "intake.title")}</p>
       <form className="flex flex-col gap-2 sm:flex-row" onSubmit={(event) => { event.preventDefault(); if (url.trim() && !busy) onAnalyze(url.trim()); }} data-testid="intake-url-form">
         <label className="relative min-w-0 flex-1">
           <span className="sr-only">{t("intake.urlLabel")}</span>
@@ -42,6 +48,11 @@ export function ContentSourceBar({ state, onAnalyze, onSearchNews, onApply, onRe
       </form>
 
       {state.kind === "loading" || state.kind === "ready" || (state.kind === "error" && state.stage) ? <IntakeProgress state={state} /> : null}
+      {state.kind === "loading" && state.sourceType === "tiktok" && (state.spoken || SPOKEN_STAGES.has(state.stage)) ? (
+        <p role="status" className="lyx-enter flex items-center gap-2 text-[12px] text-lyx-fg-muted" data-testid="intake-no-subtitles">
+          <Info size={14} className="shrink-0" aria-hidden /> {t("intake.notice.noSubtitles")}
+        </p>
+      ) : null}
 
       {state.kind === "error" ? (
         <p role="alert" className="flex items-start gap-2 rounded-[var(--lyx-radius)] border border-lyx-danger/60 px-3 py-2 text-[12.5px] text-lyx-danger" data-testid="intake-error" data-code={state.code}>
@@ -107,7 +118,10 @@ const STEP_LOOK: Record<IntakeStep["status"], string> = {
   skipped: "border-lyx-border text-lyx-fg-subtle line-through decoration-1",
 };
 
-/** Đang đọc TikTok > Đang lấy phụ đề > Đang nhận dạng giọng nói (khi cần) > Đang viết lại kịch bản > Hoàn tất - what really happens. */
+/**
+ * Đang đọc TikTok > Đang lấy phụ đề (or "Không có phụ đề, chuyển sang nhận dạng giọng nói" > Đang tải audio/video > Đang nhận dạng giọng nói)
+ * > Đang làm sạch transcript > Đang viết lại kịch bản > Hoàn tất - what really happens.
+ */
 function IntakeProgress({ state }: { state: IntakeState }) {
   const { t } = useTranslation();
   const steps = intakeProgress(state);
