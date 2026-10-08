@@ -9,6 +9,8 @@ export function VideoThumbnail({ snapshotUrl, resultUrl, className = "" }: {
 }) {
   const target = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
+  // An expired snapshot URL would show the browser's broken-image glyph: drop it and keep the placeholder.
+  const [failedSnapshot, setFailedSnapshot] = useState<string | null>(null);
 
   useEffect(() => {
     if (snapshotUrl || !resultUrl || !target.current) return;
@@ -23,9 +25,9 @@ export function VideoThumbnail({ snapshotUrl, resultUrl, className = "" }: {
   }, [snapshotUrl, resultUrl]);
 
   return (
-    <div ref={target} className={`relative overflow-hidden bg-gradient-to-br from-lyx-muted to-lyx-neutral-bg ${className}`}>
+    <div ref={target} className={`relative overflow-hidden bg-lyx-neutral-bg ${className}`}>
       <Film className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-lyx-fg-subtle" size={28} aria-hidden />
-      {snapshotUrl ? <img src={snapshotUrl} loading="lazy" alt="" className="absolute inset-0 h-full w-full object-cover" /> : null}
+      {snapshotUrl && snapshotUrl !== failedSnapshot ? <img src={snapshotUrl} loading="lazy" alt="" onError={() => setFailedSnapshot(snapshotUrl)} className="lyx-fade absolute inset-0 h-full w-full object-cover" /> : null}
       {!snapshotUrl && resultUrl && visible ? (
         <video src={`${resultUrl}#t=0.1`} preload="metadata" muted playsInline aria-hidden tabIndex={-1} className="absolute inset-0 h-full w-full object-cover" />
       ) : null}
@@ -49,8 +51,8 @@ export function VideoPlayerDialog({ title, caption, url, onClose }: {
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-3xl rounded-xl bg-lyx-bg p-4 shadow-2xl sm:p-5">
+    <div className="lyx-anim-backdrop fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-label={title} className="lyx-anim-modal w-full max-w-3xl rounded-xl bg-lyx-bg p-4 shadow-2xl sm:p-5">
         <div className="mb-3 flex items-start justify-between gap-4">
           <div className="min-w-0">
             <h2 className="line-clamp-2 text-lg font-bold">{title}</h2>

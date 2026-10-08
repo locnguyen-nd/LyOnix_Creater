@@ -64,16 +64,18 @@ export const htmlToPlainText = (html: string): string => {
 const defaultLookup: LookupLike = async (hostname) => dnsLookup(hostname, { all: true });
 const defaultFetch: FetchLike = async (url, init) => fetch(url, init as RequestInit);
 
+export type FetchPageResult =
+  | { ok: true; html: string; finalUrl: string }
+  | { ok: false; reason: "ssrf_blocked" | "fetch_failed" | "too_large" | "unsupported_content_type" | "too_many_redirects" };
+
 /**
  * Fetch `url`, following up to `MAX_REDIRECTS` redirects manually so every hop (including
  * the original URL) is re-validated against the SSRF guard and its DNS-resolved address —
  * this closes the "URL looked safe, but the DNS answer / a redirect points to a private
  * address" gap that `validateSourceUrl` alone (string-only, called at source creation) can't.
+ * VE2E-96: shared by `extractArticleText` (unchanged result) and the URL intake's `extractArticle`.
  */
-export async function extractArticleText(
-  originalUrl: string,
-  deps: { fetch?: FetchLike; lookup?: LookupLike } = {},
-): Promise<ExtractArticleResult> {
+export async function fetchPageSafely(originalUrl: string, deps: { fetch?: FetchLike; lookup?: LookupLike } = {}): Promise<FetchPageResult> {
   const doFetch = deps.fetch ?? defaultFetch;
   const doLookup = deps.lookup ?? defaultLookup;
   let currentUrl = originalUrl;
@@ -101,9 +103,18 @@ export async function extractArticleText(
     if (contentLength > MAX_BYTES) return { ok: false, reason: "too_large" };
     const raw = await response.text();
     if (raw.length > MAX_BYTES) return { ok: false, reason: "too_large" };
-    const text = htmlToPlainText(raw).slice(0, MAX_EXTRACTED_CHARS);
-    if (!text) return { ok: false, reason: "empty" };
-    return { ok: true, extractedText: text, finalUrl: currentUrl };
+    return { ok: true, html: raw, finalUrl: currentUrl };
   }
   return { ok: false, reason: "too_many_redirects" };
+}
+
+export async function extractArticleText(
+  originalUrl: string,
+  deps: { fetch?: FetchLike; lookup?: LookupLike } = {},
+): Promise<ExtractArticleResult> {
+  const page = await fetchPageSafely(originalUrl, deps);
+  if (!page.ok) return page;
+  const text = htmlToPlainText(page.html).slice(0, MAX_EXTRACTED_CHARS);
+  if (!text) return { ok: false, reason: "empty" };
+  return { ok: true, extractedText: text, finalUrl: page.finalUrl };
 }

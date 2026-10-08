@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { useConfirm } from "../components/feedback";
 import { useNavigate } from "react-router-dom";
 import { Ban, Clock3, Play, RotateCw, Trash2, Wallet } from "lucide-react";
-import { Banner, EmptyState, PageHeader, StatusPill } from "../components/chrome";
+import { Banner, EmptyState, PageHeader, SkeletonCards, SkeletonRows, StatusPill } from "../components/chrome";
+import { SegmentedTabs } from "../components/motion";
 import { QueueBadge, QueueSummaryBar } from "../components/QueueStatus";
 import { Button } from "../components/ui";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
@@ -176,27 +177,27 @@ export function VideoProductionsPage() {
       />
       {error ? <Banner variant="danger">{error}</Banner> : null}
       <QueueSummaryBar />
-      <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="lyx-list mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {filters.map((item) => (
           <button key={item} type="button" onClick={() => { setFilter(item); setShown(PAGE_SIZE); }} aria-pressed={filter === item}
-            className={`rounded-xl border p-3 text-left transition-colors ${filter === item ? "border-lyx-fg bg-lyx-muted" : "border-lyx-border bg-lyx-bg hover:bg-lyx-muted"}`}>
+            className={`lyx-card-hover rounded-xl border p-3 text-left ${filter === item ? "!border-lyx-fg bg-lyx-muted" : "border-lyx-border bg-lyx-bg hover:bg-lyx-muted"}`}>
             <span className="block text-[11px] text-lyx-fg-muted">{t(`videoProductions.filter.${item}`)}</span>
             <strong className="mt-1 block text-2xl tabular-nums">{counts[item]}</strong>
           </button>
         ))}
       </div>
-      <div className="mb-4 flex items-center justify-between gap-3">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <p className="text-[12px] text-lyx-fg-muted">{hasActive ? t("videoProductions.timeline.live") : t("videoProductions.timeline.idle")}</p>
-        <div role="group" aria-label={t("videoProductions.view.label")} className="inline-flex overflow-hidden rounded-lg border border-lyx-border text-[12.5px]">
-          {(["timeline", "gallery"] as const).map((item) => (
-            <button key={item} type="button" aria-pressed={view === item} onClick={() => setView(item)}
-              className={`px-3.5 py-1.5 ${view === item ? "bg-lyx-cta font-semibold text-lyx-cta-fg" : "bg-lyx-bg hover:bg-lyx-muted"}`}>
-              {t(`videoProductions.view.${item}`)}
-            </button>
-          ))}
-        </div>
+        <SegmentedTabs
+          tone="solid"
+          ariaLabel={t("videoProductions.view.label")}
+          value={view}
+          onChange={setView}
+          options={(["timeline", "gallery"] as const).map((item) => ({ id: item, label: t(`videoProductions.view.${item}`) }))}
+        />
       </div>
-      {loading ? <p className="text-[12px] text-lyx-fg-muted">{t("common.loading")}</p> : null}
+      {loading && view === "gallery" ? <SkeletonCards label={t("common.loading")} className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6" count={6} /> : null}
+      {loading && view === "timeline" ? <SkeletonRows label={t("common.loading")} count={5} rowClassName="h-9" /> : null}
       {!loading && view === "timeline" ? (
         timelineRows.length === 0
           ? <EmptyState title={t("videoProductions.timeline.empty")} />
@@ -204,14 +205,14 @@ export function VideoProductionsPage() {
       ) : null}
       {!loading && view === "gallery" && visible.length === 0 ? <EmptyState title={t("videoProductions.empty")} /> : null}
       {!loading && view === "gallery" && visible.length > 0 ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
+        <div className="lyx-list grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6">
           {visible.slice(0, shown).map((row) => {
             const title = row.title || t(`videoProductions.source.${row.sourceType || "unknown"}`);
             const playable = row.status === "completed" && Boolean(row.resultUrl);
             return (
-              <article key={row.id} className="min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm transition-shadow hover:shadow-md">
+              <article key={row.id} className="lyx-card-hover min-w-0 overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
                 <div className="relative">
-                  <button type="button" onClick={() => navigate(`/video-productions/${row.id}`)} aria-label={`${t("videoGallery.openDetails")}: ${title}`} className="block w-full text-left">
+                  <button type="button" onClick={() => navigate(`/video-productions/${row.id}`)} aria-label={`${t("videoGallery.openDetails")}: ${title}`} className="lyx-no-press block w-full text-left">
                     <VideoThumbnail snapshotUrl={row.snapshotUrl} resultUrl={playable ? row.resultUrl : null} className="aspect-[3/2] w-full" />
                   </button>
                   <span className="absolute left-2 top-2"><StatusPill tone={statusTone(row.status)}>{t(`videoProduction.status.${row.status}`)}</StatusPill></span>

@@ -15,6 +15,8 @@ type AutoSetupBody = {
   renderAccountId?: string;
   templateSnapshotId?: string;
   renderOptions?: unknown;
+  /** VE2E-94: the chosen caption preset, resolved to whole-video caption option values (validated by the service). */
+  captionStyle?: unknown;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;
@@ -44,6 +46,7 @@ export class VideoProductionsController {
       renderAccountId: body.renderAccountId,
       templateSnapshotId: body.templateSnapshotId,
       ...(body.renderOptions !== undefined ? { renderOptions: body.renderOptions } : {}),
+      ...(body.captionStyle !== undefined ? { captionStyle: body.captionStyle } : {}),
       ...(body.locale ? { locale: body.locale } : {}),
       ...(body.durationSec ? { durationSec: body.durationSec } : {}),
       ...(body.sceneCount ? { sceneCount: body.sceneCount } : {}),

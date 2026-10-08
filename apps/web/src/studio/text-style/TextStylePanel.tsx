@@ -27,14 +27,13 @@ import { TextStyleColorField } from "./TextStyleColorField";
 import { TextStyleFontField } from "./TextStyleFontField";
 import { TextStyleNumberField } from "./TextStyleNumberField";
 import { TextStylePositionField } from "./TextStylePositionField";
+import { CAPTION_REASON_KEY } from "./CaptionPresetViews";
+import { TextStylePresetSection } from "./TextStylePresetSection";
 
 const FILL_SWATCHES = ["#FFFFFF", "#FFE600", "#000000", "#FF3B30"] as const;
 const STROKE_SWATCHES = ["#000000", "#FFFFFF"] as const;
 
-const REASON_KEY: Record<CaptionStyleUnsupportedReason, string> = {
-  provider_unsupported: "studioPro.textStyleReasonProviderUnsupported",
-  no_word_highlight: "studioPro.textStyleReasonNoWordHighlight",
-};
+const REASON_KEY: Record<CaptionStyleUnsupportedReason, string> = CAPTION_REASON_KEY;
 const SCRIPT_KEY: Record<CaptionFontScript, string> = {
   latin: "studioPro.textStyleScriptLatin",
   ja: "studioPro.textStyleScriptJa",
@@ -156,6 +155,11 @@ export function TextStylePanel(props: TextStylePanelProps) {
             </li>
           ))}
         </ul>
+      ) : null}
+
+      {/* VE2E-94: ready-made styles apply to the whole video only (a scene keeps its own field-by-field overrides). */}
+      {scope === "video" ? (
+        <TextStylePresetSection ctx={ctx} onPreview={(edit) => session.preview(edit)} onCancel={() => session.cancel()} onCommit={(edit) => session.commit(edit)} />
       ) : null}
 
       <TextStyleFieldRow label={t("studioPro.textStylePosition")} customized={customized("position")} disabledReason={reason("position")} onReset={reset("position")}>

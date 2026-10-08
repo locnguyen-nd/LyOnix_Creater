@@ -439,6 +439,21 @@ describe("VideoProductionsService", () => {
       expect(automationProfiles.create).toHaveBeenCalledWith(userId, "staff", expect.objectContaining({ renderConfig: { providerAccountId: "render-acc", templateSnapshotId: "snap-1", orshot: { format: "webm", size: "tiktok-video" } } }));
     });
 
+    it("VE2E-94: stores the chosen caption preset as validated caption option values in renderConfig", async () => {
+      const captionStyle = { "dynamicStyle.captionFontSizePx": "96", "dynamicStyle.captionPosition": "middle", "dynamicStyle.captionPresetId": "sports-punch" };
+      const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, captionStyle });
+      expect(outcome.ok).toBe(true);
+      expect(automationProfiles.create).toHaveBeenCalledWith(userId, "staff", expect.objectContaining({ renderConfig: { providerAccountId: "render-acc", templateSnapshotId: "snap-1", captionStyle } }));
+    });
+
+    it("VE2E-94: rejects an invalid caption style (unknown key, legacy font, bad value) before provisioning a project", async () => {
+      for (const captionStyle of [{ "Text-1.fill_color": "#fff" }, { "dynamicStyle.captionFontFamily": "Inter Bold" }, { "dynamicStyle.captionMaxLines": "3" }, "nope"]) {
+        const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, captionStyle });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      }
+      expect(createdProjects).toHaveLength(0);
+    });
+
     it("rejects invalid Orshot render options before provisioning a project", async () => {
       const outcome = await service.setupAutoProfile(userId, "staff", { ...validInput, renderOptions: { fps: 25 } });
       expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-06",
+  "updatedAt": "2026-10-08",
   "tasks": [
     {
       "id": "V00-05",
@@ -101,6 +101,53 @@
         "V04-01"
       ],
       "note": "Chủ dự án duyệt 2026-10-06 sau phân tích (hướng C): v1 chỉ làm capability final renderer có hoặc nối được bằng thay đổi nhỏ (font trong catalog, cỡ chữ, màu chữ, viền, vị trí trên/giữa/dưới, 1–2 dòng, highlight chỉ LyOnix), toàn video + override từng cảnh, Orshot hiển thị khoá. Không làm: nền, bo góc, căn trái/phải, kéo x/y, animation mới, font ngoài catalog. Không migration DB. Phụ thuộc kỹ thuật: V03-03 (rule 2 dòng), V04-01 (recipe/RecipePreview), cùng các phần đã có trong code VE2E-26 (dynamicStyle.*), VE2E-103/114 (buildCaptionAss dùng chung). VE2E-92 và VE2E-68 được nêu trong brief nhưng không có trong state.json/spec/git nên không xác minh được trạng thái và không tạo giả; không có nhánh remote chưa merge nào sửa StudioProPage.tsx (kiểm tra 2026-10-06). Nhánh feature/ve2e-93-studio-text-controls từ dev 98d552f. Spec .docs/specs/VE2E-93.md. code_done 2026-10-06: typecheck/build toàn repo xanh; test toàn repo xanh trừ 4 test fail sẵn trên Windows (template-lint, 3 parity); regression baseline chụp trước khi sửa: 66/72 ASS + 16/16 Creatomate giống từng byte, 6 ASS đổi đúng quy tắc D3 (màu người dùng thắng colorCycle); render FFmpeg thật qua QC và đã xem khung hình. Không migration DB, không đổi recipe. Chưa thử trên trình duyệt (sáng/tối, 390 px, kéo); Creatomate chưa render thật (độ dày viền/vị trí cần xem bằng Preview SDK). Chưa commit."
+    },
+    {
+      "id": "VE2E-94",
+      "title": "Bộ kiểu phụ đề dựng sẵn (caption presets) dùng chung Auto + Studio",
+      "group": "Làm mịn — phụ đề (wave 3)",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-93",
+        "VE2E-124"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-07: preset là lớp giá trị trên VE2E-93, không thêm capability render. 6 preset (clean-white, news-bold, sports-punch, karaoke-highlight [chỉ LyOnix], minimal, breaking-red), một catalog domain dùng chung Auto + Studio; lưu giá trị đã resolve (+ captionPresetId cho UI), render không đọc catalog. Studio: áp style toàn video, sửa tay -> Tùy chỉnh (từ X) + Khôi phục. Auto: captionPresetId trong draft/defaults, renderConfig.captionStyle -> optionValues timeline (không cho Orshot). Không migration. Chưa làm do engine thiếu: nền chữ, animation xuất hiện, căn trái/phải, karaoke Creatomate, style Orshot. Nhánh feature/ve2e-94-caption-presets từ dev 36a30cd. Spec .docs/specs/VE2E-94.md. code_done 2026-10-07: typecheck/build toàn repo xanh; test domain 345, contracts 5, web 256, api 747 (+5 skip có sẵn) xanh; providers/media-worker chỉ còn 4 test fail sẵn trên Windows (template-lint, 3 parity). Không đổi renderer: regression VE2E-93 (ASS/Creatomate baseline) vẫn xanh. Chưa thử trên trình duyệt. Chưa commit."
+    },
+    {
+      "id": "VE2E-96",
+      "title": "News Discovery + Nguồn nội dung (URL / tin tức) cho trang Tạo Video",
+      "group": "Làm mịn — trang Tạo Video",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-94",
+        "VE2E-124"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-07; bản 1 (feed lớn + form trong panel hẹp) bị bỏ cùng ngày, thay bằng bản 2: form Tạo Video giữ đúng layout cũ (form + cột 320 px), phía trên chỉ thêm khu Nguồn nội dung: URL + [Phân tích], tìm tin + [Tìm kiếm] mở drawer tin (6 filter, card, Dùng tin này -> đóng drawer, đưa tin vào source). Tiếp nhận URL (spec mục 7): TikTok -> phụ đề (Apify clockworks/tiktok-scraper) hoặc STT (ElevenLabs Scribe) -> transcript sạch; bài báo -> extractor có cấu trúc (tiêu đề/nguồn/ngày/nội dung sạch, SSRF-safe); Yahoo JP chỉ tra feed; sau đó viết lại thành kịch bản mới bằng tài khoản content của form (chống chép: đo overlap, viết lại 1 lần nếu > 0.2). Preview card + [Đưa vào chủ đề] (<= 400 ký tự, cắt ở ranh giới) / [Đưa vào kịch bản] (Auto raw_script / Studio revise), confirm khi ghi đè chữ user tự nhập. Provider qua env (TIKTOK_SOURCE_PROVIDER/TIKTOK_APIFY_TOKEN, STT_PROVIDER/ELEVENLABS_STT_API_KEY), có mock dev; chưa cấu hình thì báo rõ. TikTok CHƯA chạy với provider thật (chưa có key). Nguồn tin = adapter (NewsSourceAdapter), TẮT MẶC ĐỊNH (NEWS_SOURCES): RSS Yahoo! JAPAN chỉ cho dùng cá nhân - chủ dự án cần xác nhận quyền dùng trước khi bật. Tin -> topic <= 400 ký tự (giới hạn sources.service), selectedNews trong draft, không vào defaults. Caption preset compact giữ chỗ cũ. JobNewPage so với VE2E-94 chỉ thêm dòng. Không đổi submit/Draft/Defaults/render/TTS/provider. Spec .docs/specs/VE2E-96.md. code_done 2026-10-07: typecheck/build toàn repo xanh; test domain 369, contracts 5, web 282, api 781 (+5 skip) xanh; providers 400 + media-worker 290 chỉ còn 4 fail sẵn trên Windows. Smoke test API dev: bài Wikipedia trích sạch, 127.0.0.1/169.254.169.254/192.168.1.1/localhost/file:// bị chặn, TikTok báo chưa cấu hình provider. TikTok intake dùng tài khoản Apify / ElevenLabs trong Cài đặt Provider (env chỉ fallback), STT chỉ khi không có phụ đề, tiến trình thật qua /intake/url/stream (NDJSON). Nghiệm thu thủ công 2026-10-07 (spec mục 8): UI desktop đạt, mobile đạt sau sửa CSS; bài báo thật (BBC) + rewrite Gemini + Đưa vào chủ đề/kịch bản + confirm đạt; TikTok mock đạt (cache 1 lần gọi); TikTok thật CHƯA chạy (env chưa có key); log không lộ secret. Lỗi tìm được đã sửa: mobile overflow, làm sạch bài báo, rewrite bịa khi nguồn ngắn (giới hạn 1.5x nguồn + cấm độn), dịch lỗi rewrite. Test sau sửa: domain 369, web 282, api 783, providers 400 (+4 fail sẵn Windows). Nhánh feature/ve2e-96-news-create-workspace từ cf92cb3, chưa commit. Cập nhật 2026-10-08 (spec mục 7b): lỗi TikTok 'Không lấy được transcript từ provider' do tài khoản Apify FREE hết hạn mức ($9.94/$10, Apify HTTP 402, không run nào được tạo). Đã: map 402 -> provider_quota_exhausted; input Actor sửa sang downloadSubtitlesOptions=DOWNLOAD_SUBTITLES (đối chiếu input schema thật); adapter dò nhiều field media (stored copy trước, CDN TikTok sau), thử lần lượt khi tải; flow phụ đề -> no_subtitles -> downloading -> speech -> cleaning, stage stream + UI tách bước; lỗi cụ thể từng trường hợp (bỏ transcript_failed), 4 ngôn ngữ; log an toàn (tên field, số item, HTTP status, mã provider; không token/URL). Test: providers 404 (+1 fail sẵn Windows template-lint), api 800 (+5 skip), web 310, contracts 5; typecheck/build toàn repo xanh. Nghiệm thu thật: Apify trả 402, UI báo đúng 'Tài khoản Apify đã hết hạn mức…', không tốn phí. Nhánh STT chưa chạy thật (Apify đang hết hạn mức). Đã commit 487fba3 + 93df1a3; cập nhật 2026-10-08 (lỗi TikTok + giao diện Tạo Video mới) trên nhánh feature/create-video-ux-voice-preview, đẩy lên để review, chưa merge."
+    },
+    {
+      "id": "VE2E-97",
+      "title": "UI Motion & Visual Polish",
+      "group": "Làm mịn — UI toàn app",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-96"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-08 (brief 'J. Animation chung cho các trang đầu') và duyệt quyết định cùng ngày: giữ token 140/200/240 ms, translate 6 px, stagger 35 ms, panel tĩnh không lift, segmented filter, skeleton khi đổi project, reduced-motion; không làm animation xoá/đóng modal vòng này. Micro-animation đồng bộ cho Dashboard, Kênh, Tạo Video, Video Auto, Tư liệu, Cài đặt, Nhóm & người dùng: vào trang (.lyx-page fade + 6 px, stagger), card bấm được nâng 1 px + viền + bóng nhẹ (panel tĩnh chỉ đổi viền), nút transition + scale 0.98 + Button loading spinner, tab/segmented có chỉ báo trượt (components/motion.tsx), focus viền mượt, modal/drawer fade + trượt ngắn, toast trượt vào/ra + check, skeleton phẳng nhấp nháy (bỏ gradient), list fade/scale không nhảy layout, reduced-motion bỏ cả delay/vòng lặp. Không thư viện, chỉ opacity/transform, không gradient/glow. Sửa kèm: AutoRunTimeline duplicate key (key theo timestamp) + bước tick giãn khi cửa sổ dài; mobile 390 (rail chỉ icon, PageHeader xuống dòng, Cài đặt xếp dọc, padding 16 px); VideoThumbnail ẩn ảnh vỡ + nền phẳng. Không đổi business logic. Spec .docs/specs/VE2E-97.md. code_done 2026-10-08: web typecheck/build xanh, 307 test xanh (+16 mới), git diff --check sạch; nghiệm thu Chrome 7 trang x 1440/1280/390 (24/24), 8/8 thao tác, reduced-motion 8/8, console sạch. Nhánh feature/create-video-ux-voice-preview từ 93df1a3, đẩy lên để review, chưa merge."
+    },
+    {
+      "id": "VE2E-98",
+      "title": "Voice Picker: tìm, lọc và nghe thử giọng trước khi render",
+      "group": "Làm mịn — trang Tạo Video",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-96",
+        "VE2E-97"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-08: thay select giọng đọc ở trang Tạo Video bằng Voice Picker (tìm theo tên/ngôn ngữ/giới tính/phong cách/provider, chip Tất cả/Nhật/Việt/Anh/Nam/Nữ, card có Play/Pause + Chọn, trạng thái loading/playing/paused/error/unavailable). Preview: ưu tiên preview_url của provider (đúng ngôn ngữ + model nếu có, miễn phí), không có thì POST /provider-accounts/:id/elevenlabs/voices/:voiceId/preview đọc 1 câu mẫu cố định theo ngôn ngữ bằng đúng model render của tài khoản, chỉ khi bấm Play, cache server 24 h + trình duyệt theo phiên, lỗi không cache, staff chỉ dùng tài khoản mình thấy. Chỉ 1 audio phát; đổi giọng thì dừng cái cũ. Preview và render dùng cùng tài khoản + voiceId (renderVoiceConfig dùng chung). voiceId vẫn lưu draft/defaults như cũ. Không đổi kiến trúc TTS/render. Provider: ElevenLabs (21 giọng premade của tài khoản admin đều có preview_url thật); giọng clone/không preview mới dùng TTS. Spec .docs/specs/VE2E-98.md. code_done 2026-10-08: web 330, api 804 (+5 skip), providers 405 (+1 fail sẵn Windows template-lint) xanh; nghiệm thu Chrome với giọng thật. Endpoint TTS preview chưa gọi thật (tránh tốn credit). Nhánh feature/create-video-ux-voice-preview, đẩy lên để review, chưa merge."
     }
   ]
 }

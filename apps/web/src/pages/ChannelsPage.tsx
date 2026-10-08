@@ -7,6 +7,7 @@ import { ChannelGrowthChart } from "../components/ChannelGrowthChart";
 import { VideoPlayerDialog, VideoThumbnail } from "../components/VideoMedia";
 import { DataTable } from "../components/DataTable";
 import { Modal } from "../components/Modal";
+import { SegmentedTabs } from "../components/motion";
 import { Button, Field, PasswordInput, Select, TextInput } from "../components/ui";
 import { API_ORIGIN, api, ApiError, csrfHeaders } from "../api";
 import { PERIODS, METRIC_COLORS, channelHandleLabel, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
@@ -78,17 +79,24 @@ export function ChannelsPage() {
       {error ? <Banner variant="danger">{error}</Banner> : null}
       {notice ? <Banner variant="info">{notice}</Banner> : null}
 
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="lyx-list mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
         <KpiCard label={t("channels.total")} value={rows.length} />
         <KpiCard label={t("channels.connected")} value={rows.filter((r) => r.connected).length} />
         <KpiCard label={t("home.metric.followers")} value={formatCount(totals.followers) ?? "0"} />
         <KpiCard label={t("home.metric.views")} value={formatCount(totals.views) ?? "0"} />
       </div>
 
-      <div className="mb-3 flex gap-2">
-        <Button variant={filter === "all" ? "primary" : "secondary"} onClick={() => setFilter("all")}>{t("jobs.all")}</Button>
-        <Button variant={filter === "connected" ? "primary" : "secondary"} onClick={() => setFilter("connected")}>{t("channels.connected")}</Button>
-        <Button variant={filter === "disconnected" ? "primary" : "secondary"} onClick={() => setFilter("disconnected")}>{t("channels.disconnected")}</Button>
+      <div className="mb-3">
+        <SegmentedTabs
+          tone="solid"
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { id: "all", label: t("jobs.all") },
+            { id: "connected", label: t("channels.connected") },
+            { id: "disconnected", label: t("channels.disconnected") },
+          ]}
+        />
       </div>
 
       <DataTable
@@ -218,6 +226,7 @@ export function ChannelDetailPage() {
               ))}
             </Select>
             <Button
+              loading={busy === "sync"}
               disabled={busy !== null || !channel.connected}
               onClick={() => void (async () => {
                 try {
@@ -240,6 +249,7 @@ export function ChannelDetailPage() {
                 <Button variant="secondary" onClick={() => { window.location.assign(`${API_ORIGIN}/api/v1/channel-oauth/tiktok/start`); }}>{t("channels.reconnect")}</Button>
                 <Button
                   variant="danger"
+                  loading={busy === "disable"}
                   disabled={busy !== null || !channel.connected}
                   onClick={() => void (async () => {
                     try {
@@ -277,7 +287,7 @@ export function ChannelDetailPage() {
           ))}
         </div>
       ) : null}
-      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
+      <div className="lyx-list mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
         {["followers", "likes", "views", "comments", "shares", "video_count"].map((id) => {
           const item = insights.metrics.find((row) => row.id === id);
           const delta = formatDelta(item?.delta ?? null, item?.pct ?? null);
@@ -306,9 +316,9 @@ export function ChannelDetailPage() {
         {videos.length === 0 ? (
           <EmptyState title={t("channels.videoLibraryEmpty")} />
         ) : (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          <div className="lyx-list grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
             {videos.map((video) => (
-              <article key={video.renderJobId} className="overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
+              <article key={video.renderJobId} className="lyx-card-hover overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
                 <div className="relative">
                   <VideoThumbnail snapshotUrl={video.thumbnailUrl} resultUrl={video.resultUrl} className="aspect-[3/2] w-full" />
                   <button type="button" onClick={() => setPlaying(video)} aria-label={`${t("videoGallery.play")}: ${video.title}`} className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full bg-black/85 text-white"><Play size={18} fill="currentColor" /></button>

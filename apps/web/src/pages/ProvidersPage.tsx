@@ -82,6 +82,8 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
   const [editPreferredModels, setEditPreferredModels] = useState("");
   const [replacementSecret, setReplacementSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** The action in flight ("save", "edit" or "verify:<id>"): its button shows a spinner. */
+  const [pending, setPending] = useState<string | null>(null);
   // V00-10: the static catalog is only a pre-connection suggestion for the "add account" form
   // (no account exists yet, so nothing has been verified). Once an account row exists,
   // `row.availableModels` is real account-scoped/generate-probed data - see `modelOptionsFor`.
@@ -106,6 +108,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
 
   const save = async () => {
     if (!(await confirmVerificationCost())) return;
+    setPending("save");
     try {
       setError(null);
       const role = PROVIDER_ROLE[provider];
@@ -118,6 +121,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       await refresh();
       setSecret(""); setEmbedId(""); setOpen(false);
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
+    finally { setPending(null); }
   };
 
   const beginEdit = (row: ApiProvider) => {
@@ -126,6 +130,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
 
   const saveEdit = async () => {
     if (!editing) return;
+    setPending("edit");
     try {
       setError(null);
       await api<ApiProvider>(`/provider-accounts/${editing.id}`, {
@@ -135,6 +140,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
       });
       await refresh(); setEditing(null); setReplacementSecret(""); toast.success(t("providers.updated"));
     } catch (err) { setError(err instanceof ApiError ? err.message : t("common.error")); }
+    finally { setPending(null); }
   };
 
   const remove = async (row: ApiProvider) => {
@@ -151,11 +157,13 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
 
   const verifyRow = async (row: ApiProvider) => {
     if (!(await confirmVerificationCost())) return;
+    setPending(`verify:${row.id}`);
     try {
       setError(null);
       const verified = await api<ApiProvider>(`/provider-accounts/${row.id}/verify`, { method: "POST", headers: await csrfHeaders() });
       toast.success(`${t("providers.verifyOk")} · ${verified.availableModels.length} models`); await refresh();
     } catch (err) { setError(err instanceof ApiError ? err.message : t("providers.verifyFail")); await refresh(); }
+    finally { setPending(null); }
   };
 
   const isSwitchable = (row: ApiProvider) => row.provider === "pexels" || row.provider === "apify";
@@ -191,9 +199,9 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
         return (
           <section key={role} className="mb-6">
             <h2 className="mb-2 text-[16px] font-semibold">{t(`providers.groups.${role}`)}</h2>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="lyx-list grid gap-3 md:grid-cols-2">
               {group.map((row) => (
-                <article key={row.id} className="border border-lyx-border p-3">
+                <article key={row.id} className="lyx-panel-hover border border-lyx-border p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <ProviderLogo provider={row.provider} />
@@ -234,7 +242,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
                     <p className="mt-3 text-[12px] text-lyx-fg-muted" data-testid="system-account-note">{t("renderEngine.systemAccountNote")}</p>
                   ) : (
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <Button variant="secondary" onClick={() => void verifyRow(row)}>{t("providers.verify")}</Button>
+                      <Button variant="secondary" loading={pending === `verify:${row.id}`} onClick={() => void verifyRow(row)}>{t("providers.verify")}</Button>
                       <Button variant="secondary" onClick={() => beginEdit(row)}>{t("providers.edit")}</Button>
                       <Button variant="danger" onClick={() => void remove(row)}>{t("providers.delete")}</Button>
                     </div>
@@ -270,7 +278,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
               </Select>
             </Field>
             <Field label={t("providers.secret")} hint={t("providers.secretHint")}><PasswordInput value={secret} onChange={(e) => setSecret(e.target.value)} /></Field>
-            <Button onClick={() => void save()}>{t("common.save")}</Button>
+            <Button loading={pending === "save"} onClick={() => void save()}>{t("common.save")}</Button>
           </div>
         </Modal>
       ) : null}
@@ -298,7 +306,7 @@ export function ProvidersPage({ embedded = false }: { embedded?: boolean }) {
             </Field> : null}
             {editing.role === "content" ? <Field label={t("providers.preferredModels", { defaultValue: "Model ưu tiên (theo thứ tự, cách nhau bằng dấu phẩy)" })}><TextInput value={editPreferredModels} onChange={(e) => setEditPreferredModels(e.target.value)} /></Field> : null}
             <Field label={t("providers.replaceSecret")} hint={t("providers.replaceSecretHint")}><PasswordInput value={replacementSecret} onChange={(e) => setReplacementSecret(e.target.value)} /></Field>
-            <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
+            <div className="flex gap-2"><Button variant="secondary" onClick={() => setEditing(null)}>{t("common.cancel")}</Button><Button loading={pending === "edit"} onClick={() => void saveEdit()}>{t("common.save")}</Button></div>
           </div>
         </Modal>
       ) : null}
