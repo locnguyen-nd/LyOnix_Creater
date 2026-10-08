@@ -59,5 +59,22 @@ describe("failure report", () => {
     expect(m.apifyUsage.usd).toBe(0.5);
     expect(m.visionUsage.calls).toBe(3);
     expect(m.failedSegments).toBe(1);
+    expect(m.ossFetch).toMatchObject({ attempted: 0, ytDlp: 0, fellBackToApify: 0, failureCodes: [] });
+  });
+
+  it("VE2E-149: counts yt-dlp downloads, Apify fallbacks, failure codes and timings; social tiers are a provider/tier like any other", () => {
+    const m = summarizeMediaDiagnostics([
+      {
+        segments: [
+          { sourceProvider: "apify", apifyQuality: { downloader: "yt-dlp", ossFetchMs: 2000 } },
+          { sourceProvider: "apify", apifyQuality: { downloader: "yt-dlp", ossFetchMs: 4000 } },
+          { sourceProvider: "apify", apifyQuality: { downloader: "apify", ossFetchCode: "FETCH_FORBIDDEN", ossFetchMs: 9000 } },
+          { sourceProvider: "social", sourceTier: "shorts" },
+        ],
+      },
+    ]);
+    expect(m.ossFetch).toEqual({ attempted: 3, ytDlp: 2, fellBackToApify: 1, failureCodes: [{ cause: "FETCH_FORBIDDEN", count: 1 }], p50Ms: 4000, p95Ms: 9000 });
+    expect(m.bySourceProvider.social).toBe(1);
+    expect(m.byTier.shorts).toBe(1);
   });
 });
