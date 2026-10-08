@@ -47,12 +47,22 @@ const messageOf = (body: Record<string, unknown>): string => {
   return typeof error === "string" ? error : "";
 };
 
+/** Apify's own error type (e.g. `not-enough-usage-to-run-paid-actor`), when the body carries one. */
+const errorTypeOf = (body: Record<string, unknown>): string => {
+  const error = body.error;
+  const type = error && typeof error === "object" ? (error as Record<string, unknown>).type : undefined;
+  return typeof type === "string" ? type : "";
+};
+
 async function failFromResponse(response: Response, token: string): Promise<never> {
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   const message = messageOf(body);
-  const suffix = message ? `: ${redact(message, token)}` : "";
+  const type = errorTypeOf(body);
+  const suffix = `${type ? ` [${redact(type, token).slice(0, 60)}]` : ""}${message ? `: ${redact(message, token)}` : ""}`;
   const status = response.status;
   if (status === 401) throw new ProviderError("PROVIDER_AUTH_INVALID", `Apify authentication failed${suffix}`, false);
+  // 402 Payment Required = the account's usage limit / credit is used up: no run starts until the plan or the cycle changes.
+  if (status === 402 || (status === 403 && /usage|credit|limit|plan|payment/i.test(`${type} ${message}`))) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Apify usage limit reached (${status})${suffix}`, false);
   if (status === 403) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Apify token lacks permission${suffix}`, false);
   if (status === 429) throw new ProviderError("PROVIDER_RATE_LIMITED", `Apify rate limit reached${suffix}`, true, Number(response.headers.get("retry-after") ?? 0) * 1000 || undefined);
   if (status === 400 || status === 404 || status === 422) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Apify rejected the request (${status})${suffix}`, false);
@@ -303,6 +313,12 @@ async function runActorWithRetry(token: string, pin: ApifyActorPin, input: Recor
       await sleep(2000);
     }
   }
+}
+
+/** VE2E-96: runs one allow-listed Actor with a caller-built input (start -> poll -> dataset, one retry) - used by the TikTok transcript source. */
+export async function runApifyActor(token: string, pin: ApifyActorPin, input: Record<string, unknown>, limit: number, options: { timeoutSecs: number; usage?: ApifyUsage }, deps?: ApifyDeps): Promise<{ runId: string; items: unknown[] }> {
+  const run = await runActorWithRetry(token, pin, input, limit, deps, { timeoutSecs: options.timeoutSecs, usage: options.usage ?? emptyApifyUsage() });
+  return { runId: run.runId, items: run.items };
 }
 
 // --- untrusted-output parsing helpers ----------------------------------------------------------------

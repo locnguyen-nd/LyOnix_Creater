@@ -33,11 +33,11 @@ export function TemplatePicker({ templates, selectedId, onChoose, onPreviewSelec
 
   return (
     <>
-      <div className="flex items-center gap-3 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2" data-testid="template-picker-chip">
+      <div className="flex flex-wrap items-center gap-3 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2" data-testid="template-picker-chip">
         <div className="flex h-[60px] w-[34px] flex-none items-center justify-center overflow-hidden rounded-[6px] bg-lyx-muted text-[9px] text-lyx-fg-subtle">
           {selected ? <TemplateThumb template={selected} fallbackLabel="" /> : null}
         </div>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[160px] flex-1">
           {selected ? (
             <>
               <div className="truncate text-[13px] font-medium" title={selected.name}>{selected.name}</div>
@@ -49,13 +49,16 @@ export function TemplatePicker({ templates, selectedId, onChoose, onPreviewSelec
             </>
           ) : <div className="text-[12.5px] text-lyx-fg-muted">{t("templatePicker.none")}</div>}
         </div>
-        {selected && onPreviewSelected ? <Button type="button" variant="ghost" onClick={() => onPreviewSelected(selected)}>{t("templates.previewOpen")}</Button> : null}
-        <Button type="button" variant="secondary" onClick={() => setOpen(true)} data-testid="template-picker-open">{selected ? t("templatePicker.change") : t("templatePicker.choose")}</Button>
+        {/* narrow screens: the two actions move under the template instead of squeezing it */}
+        <div className="flex shrink-0 items-center justify-end gap-2 max-sm:w-full">
+          {selected && onPreviewSelected ? <Button type="button" variant="ghost" onClick={() => onPreviewSelected(selected)}>{t("templates.previewOpen")}</Button> : null}
+          <Button type="button" variant="secondary" onClick={() => setOpen(true)} data-testid="template-picker-open">{selected ? t("templatePicker.change") : t("templatePicker.choose")}</Button>
+        </div>
       </div>
 
       {open ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={() => setOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-label={t("templatePicker.title")} onClick={(event) => event.stopPropagation()} className="flex h-full w-full max-w-[920px] flex-col bg-lyx-bg shadow-xl" data-testid="template-picker-drawer">
+        <div className="lyx-anim-backdrop fixed inset-0 z-50 flex justify-end bg-[var(--lyx-overlay)]" role="presentation" onClick={() => setOpen(false)}>
+          <div role="dialog" aria-modal="true" aria-label={t("templatePicker.title")} onClick={(event) => event.stopPropagation()} className="lyx-anim-drawer flex h-full w-full max-w-[920px] flex-col bg-lyx-bg shadow-xl" data-testid="template-picker-drawer">
             <div className="flex items-center justify-between border-b border-lyx-border px-4 py-3">
               <h2 className="text-[15px] font-semibold">{t("templatePicker.title")} <span className="text-[12px] font-normal text-lyx-fg-muted">· {t("templates.matchCount", { count: all.length })}</span></h2>
               <button type="button" onClick={() => setOpen(false)} aria-label={t("templatePicker.close")} className="rounded p-1 hover:bg-lyx-muted"><X size={18} aria-hidden="true" /></button>

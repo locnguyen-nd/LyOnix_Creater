@@ -26,6 +26,8 @@ const FeedbackContext = createContext<Feedback | null>(null);
 /** Auto-dismiss: errors stay longer so they can be read; every toast has a close button and pauses on hover. */
 export const TOAST_DURATION_MS: Record<ToastTone, number> = { success: 4000, info: 5000, warn: 7000, danger: 9000 };
 const MAX_TOASTS = 4;
+/** Length of the slide-out before a dismissed toast is removed (matches .lyx-anim-toast-out). */
+export const TOAST_EXIT_MS = 160;
 
 const TONE_STYLE: Record<ToastTone, { bar: string; icon: string; Icon: typeof Info }> = {
   success: { bar: "bg-lyx-ok", icon: "text-lyx-ok", Icon: CheckCircle2 },
@@ -37,11 +39,19 @@ const TONE_STYLE: Record<ToastTone, { bar: string; icon: string; Icon: typeof In
 function ToastItem({ toast, onClose }: { toast: Toast; onClose: () => void }) {
   const { t } = useTranslation();
   const [paused, setPaused] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  // Slide out first, then unmount (a timer rather than animationend, so it also leaves when animations are off).
+  const close = useCallback(() => setLeaving(true), []);
   useEffect(() => {
-    if (paused) return undefined;
-    const timer = window.setTimeout(onClose, TOAST_DURATION_MS[toast.tone]);
+    if (!leaving) return undefined;
+    const timer = window.setTimeout(onClose, TOAST_EXIT_MS);
     return () => window.clearTimeout(timer);
-  }, [paused, toast.tone, onClose]);
+  }, [leaving, onClose]);
+  useEffect(() => {
+    if (paused || leaving) return undefined;
+    const timer = window.setTimeout(close, TOAST_DURATION_MS[toast.tone]);
+    return () => window.clearTimeout(timer);
+  }, [paused, leaving, toast.tone, close]);
   const style = TONE_STYLE[toast.tone];
   return (
     <div
@@ -50,15 +60,16 @@ function ToastItem({ toast, onClose }: { toast: Toast; onClose: () => void }) {
       data-tone={toast.tone}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
-      className="lyx-anim-dialog pointer-events-auto relative flex w-[360px] max-w-full items-start gap-3 overflow-hidden rounded-[10px] border border-lyx-border bg-lyx-elevated py-3 pl-4 pr-9 shadow-xl"
+      data-leaving={leaving ? "true" : undefined}
+      className={`${leaving ? "lyx-anim-toast-out" : "lyx-anim-toast"} pointer-events-auto relative flex w-[360px] max-w-full items-start gap-3 overflow-hidden rounded-[10px] border border-lyx-border bg-lyx-elevated py-3 pl-4 pr-9 shadow-xl`}
     >
       <span className={`absolute inset-y-0 left-0 w-1 ${style.bar}`} aria-hidden="true" />
-      <style.Icon size={18} className={`mt-[1px] shrink-0 ${style.icon}`} aria-hidden="true" />
+      <style.Icon size={18} className={`mt-[1px] shrink-0 ${style.icon} ${toast.tone === "success" ? "lyx-anim-check" : ""}`} aria-hidden="true" />
       <div className="min-w-0 flex-1">
         {toast.title ? <div className="text-[13px] font-semibold leading-5 text-lyx-fg">{toast.title}</div> : null}
         <div className="break-words text-[12.5px] leading-5 text-lyx-fg-muted">{toast.message}</div>
       </div>
-      <button type="button" onClick={onClose} aria-label={t("feedback.dismiss")} className="absolute right-2 top-2 rounded-full p-1 text-lyx-fg-subtle transition-colors hover:bg-lyx-muted hover:text-lyx-fg">
+      <button type="button" onClick={close} aria-label={t("feedback.dismiss")} className="absolute right-2 top-2 rounded-full p-1 text-lyx-fg-subtle transition-colors hover:bg-lyx-muted hover:text-lyx-fg">
         <X size={14} aria-hidden="true" />
       </button>
     </div>

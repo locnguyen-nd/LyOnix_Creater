@@ -105,7 +105,7 @@ describe("RenderJobsService", () => {
     });
     grants = { forUser: async () => ({ projectIds: [projectId] }) };
     templates = { usableAccount: vi.fn(async () => ({ ok: true as const, data: { id: providerAccountId, encryptedSecret: "encrypted", provider: "creatomate" as const } })) };
-    mediaDelivery = { issueToken: vi.fn(async () => ({ token: "tok", url: "https://api.lyonix.local/api/v1/media-delivery/tok", expiresAt: new Date().toISOString() })) };
+    mediaDelivery = { issueToken: vi.fn(async () => ({ token: "tok", url: "https://api.lyonix.local/api/v1/media-delivery/tok", path: "/api/v1/media-delivery/tok", expiresAt: new Date().toISOString() })) };
     service = new RenderJobsService(prisma, grants, templates as CreatomateTemplatesService, mediaDelivery as MediaDeliveryService);
     vi.spyOn(secretCrypto, "decryptSecret").mockReturnValue("ctm-test");
   });
@@ -122,7 +122,7 @@ describe("RenderJobsService", () => {
       { id: "asset-audio", projectId, kind: "audio", origin: "generated", bytes: 1000, relativePath: "projects/project-1/assets/a.mp3", originalFileName: "a.mp3" },
     ]);
     prisma.mediaAssetVersion = store;
-    mediaDelivery.issueToken = vi.fn(async (id: string) => ({ token: id, url: `https://api.lyonix.local/api/v1/media-delivery/${id}`, expiresAt: new Date().toISOString() })) as never;
+    mediaDelivery.issueToken = vi.fn(async (id: string) => ({ token: id, url: `https://api.lyonix.local/api/v1/media-delivery/${id}`, path: `/api/v1/media-delivery/${id}`, expiresAt: new Date().toISOString() })) as never;
     const clip = new ClipDerivativesService(prisma, worker.client);
     const logs: string[] = [];
     clip.log = (message) => logs.push(message);
@@ -334,8 +334,8 @@ describe("RenderJobsService", () => {
       vi.stubGlobal("fetch", fetchMock);
       const issueToken = mediaDelivery.issueToken as ReturnType<typeof vi.fn>;
       issueToken
-        .mockResolvedValueOnce({ token: "tok-first", url: "https://api.lyonix.local/api/v1/media-delivery/tok-first", expiresAt: new Date().toISOString() })
-        .mockResolvedValueOnce({ token: "tok-retry", url: "https://api.lyonix.local/api/v1/media-delivery/tok-retry", expiresAt: new Date().toISOString() });
+        .mockResolvedValueOnce({ token: "tok-first", url: "https://api.lyonix.local/api/v1/media-delivery/tok-first", path: "/api/v1/media-delivery/tok-first", expiresAt: new Date().toISOString() })
+        .mockResolvedValueOnce({ token: "tok-retry", url: "https://api.lyonix.local/api/v1/media-delivery/tok-retry", path: "/api/v1/media-delivery/tok-retry", expiresAt: new Date().toISOString() });
       const first = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments });
       const second = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments });
       expect(fetchMock).toHaveBeenCalledTimes(1);

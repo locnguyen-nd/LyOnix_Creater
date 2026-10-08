@@ -55,6 +55,7 @@ import {
   narrationLengthCorrection,
   orshotMaxScenes,
   orshotPageCount,
+  sanitizeCaptionStyleOptionValues,
   splitSegmentsByVisualKind,
 } from "@lyonix/domain";
 import { ProviderError, type ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
@@ -74,7 +75,15 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
 
 export type ContentAccountRef = { providerAccountId: string };
 export type VoiceAccountRef = { providerAccountId: string; voiceId?: string; modelId?: string };
-export type RenderAccountRef = { providerAccountId: string; templateSnapshotId: string; outputFormat?: "mp4" | "mov" | "gif"; /** Orshot accounts only: sanitized render options (format/fps/size/fit-to-narration). */ orshot?: OrshotRenderOptions };
+export type RenderAccountRef = {
+  providerAccountId: string;
+  templateSnapshotId: string;
+  outputFormat?: "mp4" | "mov" | "gif";
+  /** Orshot accounts only: sanitized render options (format/fps/size/fit-to-narration). */
+  orshot?: OrshotRenderOptions;
+  /** VE2E-94: whole-video caption option values of the preset chosen in the Auto form (values, never a catalog lookup). */
+  captionStyle?: Record<string, string>;
+};
 
 export const asAccountRef = (value: unknown): ContentAccountRef | null => {
   if (!value || typeof value !== "object") return null;
@@ -100,11 +109,13 @@ export const asRenderRef = (value: unknown): RenderAccountRef | null => {
   if (typeof record.templateSnapshotId !== "string" || !record.templateSnapshotId) return null;
   const outputFormat = record.outputFormat;
   const orshot = sanitizeOrshotOptions(record.orshot);
+  const captionStyle = sanitizeCaptionStyleOptionValues(record.captionStyle, { strict: false });
   return {
     providerAccountId: record.providerAccountId,
     templateSnapshotId: record.templateSnapshotId,
     ...(outputFormat === "mp4" || outputFormat === "mov" || outputFormat === "gif" ? { outputFormat } : {}),
     ...(orshot.ok && Object.keys(orshot.data).length > 0 ? { orshot: orshot.data } : {}),
+    ...(captionStyle.ok && Object.keys(captionStyle.value).length > 0 ? { captionStyle: captionStyle.value } : {}),
   };
 };
 
@@ -1015,7 +1026,11 @@ ${correction.direction}`,
         })),
         segments: mediaPlan.segments,
         // Only the telop recipe has a headline slot; other internal recipes must not receive an unknown option key.
-        optionValues: snapshot.engine === "lyonix" ? (approved.title?.trim() && slots.some((slot) => slot.key === "headline") ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText),
+        // VE2E-94: the caption preset chosen in the form, as stored values (Orshot applies no caption style, so it gets none).
+        optionValues: {
+          ...(snapshot.engine === "lyonix" ? (approved.title?.trim() && slots.some((slot) => slot.key === "headline") ? { headline: approved.title.trim() } : {}) : buildAutoTimelineOptionValues(slots, sceneMedia, extraText)),
+          ...(snapshot.engine !== "orshot" ? renderConfig.captionStyle ?? {} : {}),
+        },
       });
       if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
       return outcome.data;

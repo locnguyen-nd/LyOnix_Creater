@@ -5,6 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { Button, Field, Select, TextInput } from "../components/ui";
 import { RenderEnginePanel } from "../components/RenderEnginePanel";
+import { TabIndicator, useTabIndicator } from "../components/motion";
 import { ProvidersPage } from "./ProvidersPage";
 import { api, ApiError, csrfHeaders } from "../api";
 import type { ApiJob, ApiProvider } from "../jobs-api";
@@ -55,28 +56,34 @@ export function SettingsPage() {
     { id: "operations", label: t("org.settingsTabOps"), icon: Server },
     ...(me.role === "admin" ? [{ id: "render" as const, label: t("renderEngineAdmin.tab"), icon: Film }] : []),
   ];
+  const { listRef: tabsRef, indicator: tabIndicator } = useTabIndicator<HTMLElement>(`${tab}|${tabs.length}`);
 
   return (
     <>
       <PageHeader title={t("nav.settings")} breadcrumb={t("org.settingsSubtitle")} />
-      <div className="flex gap-6">
-        <aside className="w-[220px] shrink-0">
+      <div className="flex flex-col gap-5 md:flex-row md:gap-6">
+        <aside ref={tabsRef} className="relative w-full shrink-0 md:w-[220px]" role="tablist" aria-orientation="vertical">
+          <TabIndicator {...tabIndicator} className="rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg" />
           {tabs.map((item) => (
             <button
               key={item.id}
               type="button"
+              role="tab"
+              aria-selected={tab === item.id}
+              data-active={tab === item.id ? "true" : undefined}
               onClick={() => setTab(item.id)}
-              className={`flex h-9 w-full items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium ${tab === item.id ? "bg-lyx-muted font-semibold text-lyx-fg" : "text-lyx-fg-muted hover:text-lyx-fg"}`}
+              className={`relative flex h-9 w-full items-center gap-2.5 rounded-[var(--lyx-radius)] px-2.5 text-[13px] font-medium ${tab === item.id ? `${tabIndicator.box ? "" : "bg-lyx-bg"} font-semibold text-lyx-fg` : "text-lyx-fg-muted hover:text-lyx-fg"}`}
             >
               <item.icon size={16} strokeWidth={1.9} aria-hidden />
               {item.label}
             </button>
           ))}
         </aside>
-        <div className="min-w-0 flex-1">
+        {/* Keyed by tab: the new panel fades up instead of swapping in place. */}
+        <div key={tab} className="lyx-enter min-w-0 flex-1" role="tabpanel">
 
       {tab === "general" ? (
-        <div className="flex flex-col gap-6 max-w-xl">
+        <div className="lyx-stagger flex flex-col gap-6 max-w-xl">
           <section>
             <h2 className="mb-3 text-[16px] font-semibold">{t("org.settings")}</h2>
             <Field label={t("org.timezone")}>
@@ -95,7 +102,7 @@ export function SettingsPage() {
           </section>
 
           {me.role === "admin" ? (
-            <section className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+            <section className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
               <h2 className="mb-1 text-[14px] font-semibold">{t("org.systemSettings")}</h2>
               <p className="mb-3 text-[12px] text-lyx-fg-muted">{t("org.channelSyncIntervalHint")}</p>
               {settingsMessage ? <Banner variant="info">{settingsMessage}</Banner> : null}
@@ -116,7 +123,8 @@ export function SettingsPage() {
               </Field>
               <Button
                 className="mt-3"
-                disabled={settingsBusy || systemSettings === null || syncMinutes === systemSettings.channelSyncIntervalMinutes}
+                loading={settingsBusy}
+                disabled={systemSettings === null || syncMinutes === systemSettings.channelSyncIntervalMinutes}
                 onClick={() => void (async () => {
                   try {
                     setSettingsBusy(true);
@@ -142,7 +150,7 @@ export function SettingsPage() {
           ) : null}
 
           {me.role === "admin" ? (
-            <section className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+            <section className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
               <h2 className="mb-1 text-[14px] font-semibold">{t("org.people")}</h2>
               <p className="mb-3 text-[12px] text-lyx-fg-muted">{t("org.peopleHint")}</p>
               <Link to="/people"><Button variant="secondary">{t("org.people")} →</Button></Link>
@@ -156,8 +164,8 @@ export function SettingsPage() {
       {tab === "render" ? <RenderEnginePanel /> : null}
 
       {tab === "operations" ? (
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+        <div className="lyx-list grid gap-4 md:grid-cols-2">
+          <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
             <h3 className="mb-3 text-[14px] font-semibold">{t("org.opsJobs")}</h3>
             <div className="flex flex-col gap-2 text-[12.5px]">
               <div className="flex justify-between"><span>{t("org.opsJobsTotal")}</span><span className="font-semibold">{jobs.length}</span></div>
@@ -168,7 +176,7 @@ export function SettingsPage() {
             </div>
             <Link to="/jobs" className="mt-3 inline-block text-[12px] font-semibold underline">{t("nav.jobs")} →</Link>
           </div>
-          <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+          <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
             <h3 className="mb-3 text-[14px] font-semibold">{t("org.opsProviders")}</h3>
             {providers.length === 0 ? (
               <p className="text-[12px] text-lyx-fg-muted">{t("common.empty")}</p>
@@ -184,7 +192,7 @@ export function SettingsPage() {
             )}
             <button type="button" onClick={() => setTab("providers")} className="mt-3 text-[12px] font-semibold underline">{t("providers.title")} →</button>
           </div>
-          <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4 md:col-span-2">
+          <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4 md:col-span-2">
             <h3 className="mb-1 text-[14px] font-semibold">{t("org.opsStorage")}</h3>
             <p className="text-[12px] text-lyx-fg-muted">{t("org.retention")}</p>
             {me.role === "admin" && systemSettings ? (

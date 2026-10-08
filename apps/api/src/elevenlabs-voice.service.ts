@@ -9,7 +9,7 @@ import {
   textToSpeechWithTimestamps,
 } from "@lyonix/providers";
 import { validateConsentEvidence, validateGeneratedAudio } from "@lyonix/domain";
-import type { ErrorCode, ElevenLabsVoiceSummaryResponse, TtsGenerationResponse, VoiceCloneResultResponse } from "@lyonix/contracts";
+import type { ErrorCode, ElevenLabsVoiceSummaryResponse, TtsGenerationResponse, UiLocale, VoiceCloneResultResponse } from "@lyonix/contracts";
 import { PrismaService } from "./prisma.service.js";
 import { MediaService } from "./media.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -37,6 +37,21 @@ const mapProviderError = (error: unknown): { code: ErrorCode; message: string; s
   return { code: "PROVIDER_UNAVAILABLE", message: "Lỗi mạng hoặc timeout khi gọi ElevenLabs", status: 502, retryable: true };
 };
 
+/**
+ * Voice preview (create-video Voice Picker), used only when a voice has no provider `previewUrl`: one fixed short sentence per
+ * language - the endpoint never speaks free text, so it cannot be used as a general (paid) TTS.
+ */
+export const VOICE_PREVIEW_SAMPLES: Record<UiLocale, string> = {
+  vi: "Xin chào, đây là giọng đọc mẫu cho video của bạn.",
+  en: "Hello, this is a sample of the voice for your video.",
+  ja: "こんにちは。これはあなたの動画のためのサンプル音声です。",
+  ko: "안녕하세요. 영상에 사용할 샘플 음성입니다.",
+};
+/** A synthesized preview is reused for a day (per account + voice + model + sentence), so replaying it never pays twice. */
+export const VOICE_PREVIEW_CACHE = { ttlMs: 24 * 60 * 60 * 1000, maxEntries: 200 } as const;
+
+export type VoicePreviewAudio = { audio: Buffer; mimeType: string; cached: boolean; voiceId: string; modelId: string };
+
 const consentValidationMessage: Record<string, string> = {
   missing_attestation: "Thiếu xác nhận consent (người xác nhận/thời điểm)",
   missing_statement: "Thiếu nội dung/version câu xác nhận consent",
@@ -45,6 +60,8 @@ const consentValidationMessage: Record<string, string> = {
 
 @Injectable()
 export class ElevenLabsVoiceService {
+  private readonly previewCache = new Map<string, { at: number; audio: Buffer; mimeType: string }>();
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(MediaService) private readonly media: MediaService,
@@ -60,6 +77,44 @@ export class ElevenLabsVoiceService {
     const usable = account.isFake ? process.env.NODE_ENV === "test" : account.status === "verified";
     if (!usable) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Tài khoản ElevenLabs chưa verify", status: 503 };
     return { ok: true, data: { id: account.id, model: account.model, encryptedSecret: account.encryptedSecret } };
+  }
+
+  /**
+   * A short spoken sample of `voiceId` with the account's own model - the same voice + model a render uses by default
+   * (`generateTts` falls back to `account.model`). Cached; only called when the user presses Play on a voice without a
+   * provider preview. Spends the account's credits, so the account must be one this user may use.
+   */
+  async previewVoice(providerAccountId: string, voiceId: string, userId: string, role: "admin" | "staff", language: UiLocale, now: number = Date.now()): Promise<ElevenLabsOutcome<VoicePreviewAudio>> {
+    if (!/^[A-Za-z0-9]{4,64}$/.test(voiceId)) return { ok: false, code: "VALIDATION_FAILED", message: "voiceId không hợp lệ" };
+    const text = VOICE_PREVIEW_SAMPLES[language] ?? VOICE_PREVIEW_SAMPLES.en;
+    const account = await this.usableAccount(providerAccountId);
+    if (!account.ok) return account;
+    if (role !== "admin") {
+      const visible = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }, select: { id: true } });
+      if (!visible) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tài khoản giọng đọc", status: 404 };
+    }
+    const modelId = account.data.model;
+    const key = createHash("sha256").update(["elevenlabs", providerAccountId, voiceId, modelId, text].join("\u0000")).digest("hex");
+    const hit = this.previewCache.get(key);
+    if (hit && now - hit.at < VOICE_PREVIEW_CACHE.ttlMs) {
+      return { ok: true, data: { audio: hit.audio, mimeType: hit.mimeType, cached: true, voiceId, modelId } };
+    }
+    let synthesis: Awaited<ReturnType<typeof textToSpeechWithTimestamps>>;
+    try {
+      synthesis = await textToSpeechWithTimestamps(decryptSecret(account.data.encryptedSecret), { voiceId, modelId, text });
+    } catch (error) {
+      return { ok: false, ...mapProviderError(error) };
+    }
+    const validated = validateGeneratedAudio({ buffer: synthesis.audio, declaredMimeType: synthesis.mimeType, alignmentDurationMs: synthesis.durationMs });
+    if (!validated.ok) return { ok: false, code: "UNSUPPORTED_MEDIA", message: `Audio ElevenLabs trả về không hợp lệ (${validated.reason})`, status: 422 };
+    this.previewCache.delete(key);
+    this.previewCache.set(key, { at: now, audio: synthesis.audio, mimeType: validated.mimeType });
+    while (this.previewCache.size > VOICE_PREVIEW_CACHE.maxEntries) {
+      const oldest = this.previewCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.previewCache.delete(oldest);
+    }
+    return { ok: true, data: { audio: synthesis.audio, mimeType: validated.mimeType, cached: false, voiceId, modelId } };
   }
 
   async listVoices(providerAccountId: string): Promise<ElevenLabsOutcome<ElevenLabsVoiceSummaryResponse[]>> {

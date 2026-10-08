@@ -7,12 +7,19 @@ const ATTENTION: ReadonlySet<WorkflowRunStatus> = new Set(["failed", "cancelled"
 
 const pct = (value: number, from: number, span: number) => Math.min(100, Math.max(0, ((value - from) / span) * 100));
 
-function tickLabels(fromMs: number, spanMs: number) {
-  const step = spanMs <= 40 * 60_000 ? 5 * 60_000 : 10 * 60_000;
+/** Tick step: 5 / 10 minutes as before for short windows; a long window (a run stuck for hours) widens it to stay readable (~10 labels). */
+const TICK_STEPS_MIN = [5, 10, 15, 30, 60, 120, 180, 360, 720, 1440];
+const MAX_TICKS = 10;
+
+export function tickLabels(fromMs: number, spanMs: number) {
+  const base = spanMs <= 40 * 60_000 ? 5 : 10;
+  const stepMin = TICK_STEPS_MIN.find((min) => min >= base && spanMs / (min * 60_000) <= MAX_TICKS) ?? 1440;
+  const step = stepMin * 60_000;
   const first = Math.ceil(fromMs / step) * step;
-  const ticks: { left: number; label: string }[] = [];
+  // `at` keys the tick: a window longer than a day repeats the same hh:mm label.
+  const ticks: { at: number; left: number; label: string }[] = [];
   for (let at = first; at < fromMs + spanMs; at += step) {
-    ticks.push({ left: pct(at, fromMs, spanMs), label: new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+    ticks.push({ at, left: pct(at, fromMs, spanMs), label: new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
   }
   return ticks;
 }
@@ -55,13 +62,13 @@ export function AutoRunTimeline({
         <div className="w-[230px] shrink-0 px-4 py-2">{t("videoProductions.timeline.video")}</div>
         <div className="relative h-8 grow">
           {ticks.map((tick) => (
-            <span key={tick.label} className="absolute top-2 pl-1.5" style={{ left: `${tick.left}%` }}>{tick.label}</span>
+            <span key={tick.at} className="absolute top-2 pl-1.5" style={{ left: `${tick.left}%` }}>{tick.label}</span>
           ))}
         </div>
       </div>
       <div className="relative">
         <div className="pointer-events-none absolute inset-y-0 left-[230px] right-0">
-          {ticks.map((tick) => <div key={tick.label} className="absolute inset-y-0 border-l border-lyx-border/60" style={{ left: `${tick.left}%` }} />)}
+          {ticks.map((tick) => <div key={tick.at} className="absolute inset-y-0 border-l border-lyx-border/60" style={{ left: `${tick.left}%` }} />)}
           <div className="absolute inset-y-0 border-l-2 border-lyx-danger" style={{ left: `${nowLeft}%` }} />
           <span className="absolute top-0 -translate-x-1/2 rounded-b bg-lyx-danger px-1.5 py-px text-[10px] font-bold text-white" style={{ left: `${nowLeft}%` }}>{t("videoProductions.timeline.now")}</span>
         </div>

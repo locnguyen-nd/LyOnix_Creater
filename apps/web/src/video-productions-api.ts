@@ -26,6 +26,8 @@ export type AutoProfileSetupRequest = {
   templateSnapshotId: string;
   /** Orshot render account only (server whitelists + ignores for Creatomate). */
   renderOptions?: OrshotRenderOptions;
+  /** VE2E-94: the chosen caption preset resolved to whole-video caption option values (stored as values, never re-read from the catalog). */
+  captionStyle?: Record<string, string>;
   locale?: string;
   durationSec?: number;
   sceneCount?: number;

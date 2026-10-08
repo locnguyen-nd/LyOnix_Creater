@@ -57,6 +57,25 @@ export class ElevenLabsVoiceController {
     return success(outcome.data, requestId(response));
   }
 
+  /**
+   * Voice Picker preview for a voice without a provider `previewUrl`: a fixed sample sentence in `language`, as audio bytes.
+   * Nothing is stored in a project; the service caches it, so pressing Play again costs nothing.
+   */
+  @Post("provider-accounts/:id/elevenlabs/voices/:voiceId/preview")
+  async preview(@Param("id") id: string, @Param("voiceId") voiceId: string, @Body() body: { language?: unknown }, @Req() request: Request, @Res() response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const language = body?.language === "vi" || body?.language === "en" || body?.language === "ja" || body?.language === "ko" ? body.language : "en";
+    const outcome = await this.voices.previewVoice(id, voiceId, user.id, user.role, language);
+    if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
+    response.setHeader("content-type", outcome.data.mimeType);
+    response.setHeader("cache-control", "private, max-age=86400");
+    response.setHeader("x-preview-cache", outcome.data.cached ? "hit" : "miss");
+    response.setHeader("x-preview-voice-id", outcome.data.voiceId);
+    response.setHeader("x-preview-model-id", outcome.data.modelId);
+    response.status(200).end(outcome.data.audio);
+  }
+
   @Post("provider-accounts/:id/elevenlabs/voices/:voiceId/tts")
   async tts(@Param("id") id: string, @Param("voiceId") voiceId: string, @Body() body: TtsBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const { user, session } = await requireUser(request, response, this.auth);

@@ -77,7 +77,7 @@ function TemplateRow({ template, onSaved }: { template: RenderEngineAdminTemplat
       {problem === "needsFallback" ? <Banner variant="warn">{t("renderEngineAdmin.needsFallback")}</Banner> : null}
       {isInternalOnlyRollout(draft) ? <Banner variant="info">{t("renderEngineAdmin.internalOnly")}</Banner> : null}
       {message ? <Banner variant={message.kind === "ok" ? "info" : "danger"}>{message.text}</Banner> : null}
-      <Button disabled={busy || !dirty || problem !== null} onClick={() => void save()}>{busy ? t("common.loading") : t("common.save")}</Button>
+      <Button loading={busy} disabled={!dirty || problem !== null} onClick={() => void save()}>{busy ? t("common.loading") : t("common.save")}</Button>
     </div>
   );
 }

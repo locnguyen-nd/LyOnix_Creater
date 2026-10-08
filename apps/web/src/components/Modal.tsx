@@ -22,7 +22,7 @@ export function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--lyx-overlay)] p-4"
+      className="lyx-anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[var(--lyx-overlay)] p-4"
       onClick={onClose}
       role="presentation"
     >
@@ -30,7 +30,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="max-h-[90vh] overflow-auto rounded-[4px] border border-lyx-border bg-lyx-elevated p-4"
+        className="lyx-anim-modal max-h-[90vh] overflow-auto rounded-[4px] border border-lyx-border bg-lyx-elevated p-4"
         style={{ width }}
         onClick={(event) => event.stopPropagation()}
       >

@@ -154,7 +154,8 @@ export function HomePage() {
         actions={
           selected ? (
             <Button
-              disabled={busy || !selected.connected}
+              loading={busy}
+              disabled={!selected.connected}
               onClick={() => void (async () => {
                 try {
                   setBusy(true);
@@ -185,7 +186,7 @@ export function HomePage() {
       </div>
 
       <h2 className="mb-2 text-[13px] font-semibold text-lyx-fg-muted">{t("home.systemTotal")}</h2>
-      <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
+      <div className="lyx-list mb-6 grid grid-cols-2 gap-3 xl:grid-cols-4">
         {KPI_IDS.map((id) => {
           const agg = aggregates[id];
           if (!agg) return null;
@@ -215,7 +216,7 @@ export function HomePage() {
           ))}
         </div>
       ) : null}
-      <div className="mb-6 grid grid-cols-2 gap-3 xl:grid-cols-3">
+      <div className="lyx-list mb-6 grid grid-cols-2 gap-3 xl:grid-cols-3">
         {kpis.map((item) => {
           if (!item) return null;
           const delta = formatDelta(item.delta, item.pct);
@@ -233,7 +234,7 @@ export function HomePage() {
             />
           );
         })}
-        <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-3" data-availability={revenue?.availability}>
+        <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-3" data-availability={revenue?.availability}>
           <p className="text-[11px] font-semibold uppercase tracking-wide text-lyx-fg-subtle">{t("home.revenue")}</p>
           <p className="mt-2 text-[20px] font-bold" data-testid="unavailable">{t("home.unavailable")}</p>
           <p className="mt-2 text-[12px] text-lyx-fg-muted">{revenue?.reasonCode ?? "TIKTOK_SCOPE_NOT_GRANTED"}</p>
@@ -244,7 +245,7 @@ export function HomePage() {
       </div>
 
       <div className="mb-6 grid gap-4 lg:grid-cols-2">
-        <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+        <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
           <div className="mb-3 flex items-center justify-between">
             <span className="text-[13px] font-semibold">{t("home.pipeline")}</span>
             <StatusPill tone="neutral">{jobs.length}</StatusPill>
@@ -258,13 +259,13 @@ export function HomePage() {
             ] as const).map(([key, value, barClass]) => (
               <div key={key}>
                 <div className="mb-1 flex justify-between text-[12px]"><span>{t(`home.bucket.${key}`)}</span><span className="font-semibold">{value}</span></div>
-                <div className="h-2 rounded-[4px] bg-lyx-muted"><div className={`h-2 rounded-[4px] ${barClass}`} style={{ width: `${(value / maxBucket) * 100}%` }} /></div>
+                <div className="h-2 rounded-[4px] bg-lyx-muted"><div className={`h-2 rounded-[4px] transition-[width] duration-300 ease-out ${barClass}`} style={{ width: `${(value / maxBucket) * 100}%` }} /></div>
               </div>
             ))}
           </div>
         </div>
         {me.role === "admin" ? (
-          <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+          <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
             <div className="mb-3 flex items-center justify-between">
               <span className="text-[13px] font-semibold">{t("home.providerHealth")}</span>
               <StatusPill tone={providerSummary.failed > 0 ? "warn" : "ok"}>{t("home.providerReady", { verified: providerSummary.verified, total: providerSummary.total })}</StatusPill>
@@ -305,7 +306,7 @@ export function HomePage() {
             ]}
           />
         </div>
-        <div className="rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
+        <div className="lyx-panel-hover rounded-[6px] border border-lyx-border bg-lyx-bg p-4">
           <div className="mb-3 flex items-center justify-between">
             <span className="text-[13px] font-semibold">{t("home.attention")}</span>
             <StatusPill tone={attention.length > 0 ? "warn" : "ok"}>{attention.length}</StatusPill>
@@ -313,12 +314,12 @@ export function HomePage() {
           {attention.length === 0 ? (
             <EmptyState title={t("common.empty")} />
           ) : (
-            <div className="flex flex-col gap-2">
+            <div className="lyx-list flex flex-col gap-2">
               {attention.map((job) => (
                 <button
                   key={job.id}
                   type="button"
-                  className="flex items-start justify-between gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2.5 text-left hover:border-lyx-fg"
+                  className="lyx-card-hover flex items-start justify-between gap-2 rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg p-2.5 text-left"
                   onClick={() => navigate(`/jobs/${job.id}/script`)}
                 >
                   <div>

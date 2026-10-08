@@ -4,9 +4,13 @@
  */
 import { captionFontById, unverifiedCaptionScripts, type CaptionFontScript } from "@lyonix/domain/caption-fonts";
 import { captionStyleEngineFor, type CaptionStyleEngine } from "@lyonix/domain/caption-style-capabilities";
+import { CAPTION_PRESETS, captionPresetById, captionPresetChanges, captionPresetSupport, type CaptionPreset } from "@lyonix/domain/caption-presets";
 import {
   applyCaptionStyleEdit,
   CAPTION_PATCH_FIELDS,
+  CAPTION_PRESET_OPTION_KEY,
+  captionPresetIdFromOptionValues,
+  captionStyleFieldValue,
   captionStyleFromOptionValues,
   clearCaptionStyleOptionValues,
   legacyCaptionFontFamily,
@@ -30,6 +34,8 @@ export type CaptionStyleEdit = {
   /** The scene for a `scene` edit. */
   sceneId: string | null;
   changes: readonly CaptionStyleChange[];
+  /** VE2E-94 (whole video only): this edit applies that caption preset - the whole-video style becomes the preset's and its id is kept. */
+  presetId?: string;
 };
 
 export type StudioCaptionContext = {
@@ -76,6 +82,53 @@ export function applyVideoCaptionEdit(ctx: StudioCaptionContext, changes: readon
   return values;
 }
 
+/**
+ * VE2E-94: `optionValues` after applying a caption preset to the whole video: the previous whole-video caption style (incl. a VE2E-26
+ * font) is replaced by the preset's values - stored as values, a field equal to the template default is not stored - plus the preset id.
+ * Scene overrides are untouched.
+ */
+export function applyVideoCaptionPreset(ctx: StudioCaptionContext, item: CaptionPreset): Record<string, string> {
+  const cleared = clearCaptionStyleOptionValues(ctx.optionValues);
+  return { ...applyVideoCaptionEdit({ ...ctx, optionValues: cleared }, captionPresetChanges(item)), [CAPTION_PRESET_OPTION_KEY]: item.id };
+}
+
+/** The edit "apply this preset to the whole video" (preview while hovered, one undoable change when chosen). */
+export const captionPresetEdit = (item: CaptionPreset): CaptionStyleEdit => ({ scope: "video", sceneId: null, changes: captionPresetChanges(item), presetId: item.id });
+
+/** `optionValues` after a committed whole-video edit (a preset edit replaces the style, a field edit changes only its fields). */
+export function applyVideoEdit(ctx: StudioCaptionContext, edit: CaptionStyleEdit): Record<string, string> {
+  const item = captionPresetById(edit.presetId);
+  return item ? applyVideoCaptionPreset(ctx, item) : applyVideoCaptionEdit(ctx, edit.changes);
+}
+
+export type CaptionPresetStatus = { kind: "preset"; preset: CaptionPreset } | { kind: "custom"; basedOn: CaptionPreset | null } | { kind: "template" };
+
+const sameFieldValue = (field: CaptionPatchField, a: unknown, b: unknown): boolean =>
+  (field === "fillColor" || field === "strokeColor") && typeof a === "string" && typeof b === "string" ? a.toLowerCase() === b.toLowerCase() : a === b;
+
+/** Whether the whole-video style currently looks exactly like `item` would make it (every field, as the engine resolves it). */
+export function wholeVideoMatchesPreset(ctx: StudioCaptionContext, item: CaptionPreset): boolean {
+  const current = resolveWith(ctx, ctx.optionValues, null);
+  const applied = resolveWith(ctx, applyVideoCaptionPreset(ctx, item), null);
+  return CAPTION_PATCH_FIELDS.every((field) => sameFieldValue(field, captionStyleFieldValue(current, field), captionStyleFieldValue(applied, field)));
+}
+
+/**
+ * VE2E-94: what the whole-video style is, for the preset UI. The stored preset id says which preset it came from: still identical ->
+ * that preset, edited since -> "customised from" it (nothing is reset). Without an id (a timeline made before VE2E-94) a style identical
+ * to a supported preset is recognised (deterministic: same values for every field); any other stored style is "customised", none at all is
+ * the template default.
+ */
+export function captionPresetStatus(ctx: StudioCaptionContext): CaptionPresetStatus {
+  const stored = captionPresetById(captionPresetIdFromOptionValues(ctx.optionValues));
+  if (stored) return wholeVideoMatchesPreset(ctx, stored) ? { kind: "preset", preset: stored } : { kind: "custom", basedOn: stored };
+  const parsed = captionStyleFromOptionValues(ctx.optionValues);
+  const hasStyle = Object.keys(parsed.patch).length > 0 || Boolean(parsed.legacyFontFamily);
+  if (!hasStyle) return { kind: "template" };
+  const detected = CAPTION_PRESETS.find((item) => captionPresetSupport(engineOf(ctx), item).ok && wholeVideoMatchesPreset(ctx, item));
+  return detected ? { kind: "preset", preset: detected } : { kind: "custom", basedOn: null };
+}
+
 /** A scene's override after an edit (null = the scene inherits everything). */
 export function applySceneCaptionEdit(ctx: StudioCaptionContext, scenePatch: CaptionTextStylePatch | null | undefined, changes: readonly CaptionStyleChange[]): CaptionTextStylePatch | null {
   const inherited = inheritedCaptionStyle(ctx, "scene");
@@ -96,7 +149,7 @@ export function previewCaptionStyle(ctx: StudioCaptionContext, sceneId: string |
   if (ctx.engine === "orshot") return resolveCaptionTextStyle({ engine: "orshot", defaults: ctx.defaults });
   let optionValues = ctx.optionValues;
   let patch = scenePatch ?? null;
-  if (pending?.scope === "video") optionValues = applyVideoCaptionEdit(ctx, pending.changes);
+  if (pending?.scope === "video") optionValues = applyVideoEdit(ctx, pending);
   if (pending?.scope === "scene" && sceneId !== null && pending.sceneId === sceneId) patch = applySceneCaptionEdit(ctx, patch, pending.changes);
   return resolveWith({ ...ctx, optionValues }, optionValues, patch);
 }

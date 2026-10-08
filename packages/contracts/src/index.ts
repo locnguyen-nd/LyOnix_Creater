@@ -371,7 +371,19 @@ export type ElevenLabsVoiceSummaryResponse = {
   category: string | null;
   /** Provider's own short-lived CDN preview link. Never raw audio bytes/logged by LyOnix. */
   previewUrl: string | null;
+  /** Voice labels for search / filter (null when ElevenLabs has none). */
+  gender: string | null;
+  language: string | null;
+  accent: string | null;
+  age: string | null;
+  useCase: string | null;
+  descriptive: string | null;
+  /** Languages the voice is verified for, each with its own provider preview when there is one. */
+  languages: Array<{ language: string; accent: string | null; locale: string | null; modelId: string | null; previewUrl: string | null }>;
 };
+
+/** `POST /provider-accounts/:id/elevenlabs/voices/:voiceId/preview`: a short fixed sample sentence in this language (never free text). */
+export type VoicePreviewRequest = { language: UiLocale };
 
 export type VoiceCloneConsentRequest = {
   statementVersion: string;
@@ -449,7 +461,10 @@ export type CapabilityPreflightResponse = {
 
 export type MediaDeliveryIssueResponse = {
   token: string;
+  /** Absolute when the server has PUBLIC_BASE_URL (what providers fetch), else the same as `path`. */
   url: string;
+  /** `/api/v1/media-delivery/<token>`: the browser resolves it against the API origin it already uses. */
+  path: string;
   expiresAt: string;
 };
 
@@ -1388,6 +1403,10 @@ export type JobNewFormValues = {
   templateId: string;
   orshotFormat: "" | "mp4" | "webm" | "mov" | "gif";
   orshotSize: string;
+  /** VE2E-94: "" = the template's own caption style, else a caption preset id. */
+  captionPresetId: string;
+  /** VE2E-96: the picked news item (JSON of a NewsItemResponse), "" = none. Draft only, never a default. */
+  selectedNews: string;
 };
 
 /** `GET|PUT /me/drafts/:flowType`: the signed-in user's own in-progress form (never another user's). */
@@ -1411,6 +1430,7 @@ export type CreationPreferenceOptions = Partial<
     JobNewFormValues,
     | "entryMode" | "mode" | "autoSourceType" | "channelId" | "language" | "contentAccountId" | "durationTarget" | "sceneCountTarget"
     | "backgroundSegmentsChoice" | "voiceAccountId" | "voiceId" | "mediaAccountId" | "renderAccountId" | "templateId" | "orshotFormat" | "orshotSize"
+    | "captionPresetId"
   >
 >;
 
@@ -1422,3 +1442,152 @@ export type CreationPreferencesResponse = {
 };
 
 export type SaveCreationPreferencesRequest = { options: CreationPreferenceOptions };
+
+// --- VE2E-96: news feed of the create-video page ---------------------------------------------------------------------------------
+// Structurally identical to `NewsItem` in `@lyonix/domain/news` (domain never imports contracts).
+
+export type NewsCategory = "japan" | "sports" | "entertainment" | "trending";
+export type NewsSourceId = "yahoo_jp";
+/** Filter chips: everything, one source, or one category. */
+export type NewsFeedFilter = "all" | NewsSourceId | NewsCategory;
+
+/** One headline as its source's public feed published it (the article is never fetched). */
+export type NewsItemResponse = {
+  id: string;
+  sourceId: NewsSourceId;
+  source: string;
+  publisher: string | null;
+  title: string;
+  excerpt: string | null;
+  thumbnailUrl: string | null;
+  sourceUrl: string;
+  publishedAt: string | null;
+  category: NewsCategory;
+};
+
+/** `disabled` = not enabled on this server (`NEWS_SOURCES`); `partial` = some of its feeds failed; `error` = none could be read. */
+export type NewsSourceStatusResponse = {
+  id: NewsSourceId;
+  label: string;
+  status: "ok" | "partial" | "error" | "disabled";
+  termsUrl: string;
+  message: string | null;
+};
+
+/** `GET /news?filter=&q=`: newest first, one item per story. */
+export type NewsFeedResponse = {
+  filter: NewsFeedFilter;
+  query: string;
+  items: NewsItemResponse[];
+  sources: NewsSourceStatusResponse[];
+  fetchedAt: string;
+};
+
+// --- VE2E-96: URL intake ("Nguồn nội dung" of the create-video page) ----------------------------------------------------------
+
+/**
+ * `POST /intake/url`: reads a TikTok video (subtitles, else speech-to-text) or an article (SSRF-safe extractor) into clean text and,
+ * with `rewrite`, writes an ORIGINAL short-video script from it with the given content account. Nothing is created or stored.
+ */
+export type UrlIntakeRequest = {
+  url: string;
+  rewrite?: boolean;
+  /** Content account for the rewrite (the form's); omitted = the user's first usable one. */
+  contentAccountId?: string;
+  /** Script language (the form's). */
+  language?: UiLocale;
+  /** Narration length to aim for, in seconds. */
+  durationSec?: number;
+  /** The form's media (Apify) / voice (ElevenLabs) accounts: tried first for a TikTok transcript (else the user's other accounts). */
+  mediaAccountId?: string;
+  voiceAccountId?: string;
+};
+
+/**
+ * Progress of `POST /intake/url/stream` - server-side intake stages, streamed as they start. TikTok: reading > subtitles > (no subtitle: no_subtitles > downloading > speech) > cleaning.
+ * An article only reports `reading`. Rewriting the script is a separate request (`/intake/rewrite`).
+ */
+export type UrlIntakeStage = "reading" | "subtitles" | "no_subtitles" | "downloading" | "speech" | "cleaning";
+
+/** One line (NDJSON) of `POST /intake/url/stream`: stages as they start, then the result (or an unexpected error). */
+export type UrlIntakeStreamEvent =
+  | { type: "stage"; stage: UrlIntakeStage }
+  | { type: "result"; data: UrlIntakeResponse }
+  | { type: "error"; error: { code: string; message: string } };
+
+/** How the text was obtained. */
+export type UrlIntakeMethod = "subtitle" | "speech_to_text" | "article_extractor" | "news_feed";
+
+export type UrlIntakeSource = {
+  sourceType: "tiktok" | "article";
+  sourceUrl: string;
+  title: string | null;
+  /** "TikTok · @author", the site's name, or the news source. */
+  sourceName: string | null;
+  publishedAt: string | null;
+  /** Subtitle cues / speech-to-text output / page text, before cleaning (capped). */
+  rawText: string;
+  cleanedText: string;
+  language: string | null;
+  characterCount: number;
+  wordCount: number;
+  method: UrlIntakeMethod;
+  /** e.g. "apify", "apify+elevenlabs_scribe", "article_extractor", "yahoo_jp_feed", "mock". */
+  providerUsed: string;
+  /** The text was longer than the intake keeps. */
+  truncated: boolean;
+  /** A Yahoo! JAPAN News article found in its feed (its page is never fetched). */
+  newsItem: NewsItemResponse | null;
+};
+
+export type UrlIntakeRewrite =
+  | { status: "done"; script: string; hook: string; language: string | null; characterCount: number; providerUsed: string; overlapRatio: number; overlapHigh: boolean }
+  | { status: "skipped"; reason: "not_requested" | "no_content_account" }
+  | { status: "failed"; code: string; message: string };
+
+export type UrlIntakeErrorCode =
+  | "invalid_tiktok_url"
+  | "tiktok_resolve_failed"
+  | "transcript_provider_not_configured"
+  | "stt_provider_not_configured"
+  | "tiktok_not_found"
+  /** The TikTok provider (Apify) answered with no item at all. */
+  | "tiktok_provider_empty"
+  /** The TikTok provider run failed or was refused (see the server log for its HTTP status / code). */
+  | "tiktok_provider_failed"
+  /** The TikTok provider account's usage limit / credit is used up. */
+  | "provider_quota_exhausted"
+  | "transcript_empty"
+  | "transcript_timeout"
+  | "transcript_rate_limited"
+  | "transcript_auth_invalid"
+  /** No subtitle, and the provider gave no media file either. */
+  | "no_subtitle_no_media"
+  /** No subtitle; a media file was listed but could not be downloaded. */
+  | "media_unavailable"
+  | "stt_failed"
+  | "stt_timeout"
+  | "stt_auth_invalid"
+  | "stt_rate_limited"
+  | "stt_quota_exhausted"
+  | "stt_unsupported_media"
+  | "ssrf_blocked"
+  | "fetch_failed"
+  | "too_large"
+  | "unsupported_content_type"
+  | "empty"
+  | "too_many_redirects"
+  | "news_source_disabled"
+  | "news_not_in_feed";
+
+export type UrlIntakeResponse =
+  | { ok: true; source: UrlIntakeSource; rewrite: UrlIntakeRewrite }
+  | { ok: false; sourceType: "tiktok" | "article" | null; sourceUrl: string; error: { code: UrlIntakeErrorCode; message: string } };
+
+/** `POST /intake/rewrite`: (re)writes the script from an already analysed source (no second download / transcription). */
+export type UrlIntakeRewriteRequest = {
+  source: Pick<UrlIntakeSource, "sourceType" | "sourceUrl" | "title" | "sourceName" | "cleanedText">;
+  contentAccountId?: string;
+  language?: UiLocale;
+  durationSec?: number;
+};

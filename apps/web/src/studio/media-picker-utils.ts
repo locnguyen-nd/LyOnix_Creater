@@ -16,6 +16,40 @@ export function filterLibrary(library: readonly MediaAssetVersionSummary[], filt
   });
 }
 
+export type LibraryStatus = "loading" | "ready" | "failed";
+export type LibraryView = "loading" | "failed" | "empty" | "no-match" | "grid";
+
+/**
+ * What the library tab shows. Rows already on screen win over a refresh that is loading or failed, so a working grid is never
+ * blanked; with no rows the request state decides (skeleton / error with Retry / empty with next steps).
+ */
+export function libraryView(status: LibraryStatus, visualCount: number, matchCount: number): LibraryView {
+  if (visualCount === 0) return status === "ready" ? "empty" : status;
+  return matchCount === 0 ? "no-match" : "grid";
+}
+
+/**
+ * Assets whose signed preview URL Studio fetches: the timeline's own media and voice first, then every visual library
+ * original (what the library grid shows), up to `max` (the thumbnail cache size). Ids that already failed are skipped until
+ * the user presses Retry, so a broken file is not re-requested on every render.
+ */
+export function thumbPrefetchIds(input: {
+  sceneMediaIds: readonly (string | null | undefined)[];
+  audioIds: readonly string[];
+  library: readonly MediaAssetVersionSummary[];
+  failed: Readonly<Record<string, string>>;
+  max: number;
+}): string[] {
+  const ids = new Set<string>();
+  const add = (id: string | null | undefined) => {
+    if (id && !input.failed[id] && ids.size < input.max) ids.add(id);
+  };
+  input.sceneMediaIds.forEach(add);
+  input.audioIds.forEach(add);
+  for (const asset of filterLibrary(input.library, "all")) add(asset.id);
+  return [...ids];
+}
+
 export function formatClock(ms: number | null | undefined): string | null {
   if (!ms || ms <= 0) return null;
   const total = Math.round(ms / 1000);

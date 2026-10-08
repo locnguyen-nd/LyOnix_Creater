@@ -71,6 +71,13 @@ import { StudioBridgeController } from "./studio-bridge.controller.js";
 import { StudioBridgeService } from "./studio-bridge.service.js";
 import { TimelineVersionsController } from "./timeline-versions.controller.js";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
+import { NewsController } from "./news.controller.js";
+import { NewsService } from "./news.service.js";
+import { IntakeController } from "./intake.controller.js";
+import { IntakeService } from "./intake.service.js";
+import { TikTokIntakeService } from "./tiktok-intake.service.js";
+import { IntakeRewriteService } from "./intake-rewrite.service.js";
+import { TranscriptProviderResolver } from "./transcript-config.js";
 
 @Module({
   imports: [ScheduleModule.forRoot()],
@@ -105,6 +112,8 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     QueueStatusController,
     StudioBridgeController,
     TimelineVersionsController,
+    NewsController,
+    IntakeController,
   ],
   providers: [
     PrismaService,
@@ -150,6 +159,14 @@ import { TimelineVersionsService } from "./timeline-versions.service.js";
     TiktokSyncSchedulerService,
     StudioBridgeService,
     TimelineVersionsService,
+    // VE2E-96: headlines of the enabled news sources (NEWS_SOURCES), for the create-video page.
+    NewsService,
+    // VE2E-96: what a URL pasted on the create-video page gives the form (news feed lookup / article preview).
+    IntakeService,
+    TikTokIntakeService,
+    IntakeRewriteService,
+    // VE2E-96: TikTok transcript providers from Provider Settings (Apify / ElevenLabs), env as fallback.
+    TranscriptProviderResolver,
   ],
 })
 export class AppModule {}

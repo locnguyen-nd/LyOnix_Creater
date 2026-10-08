@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
+  Clapperboard,
+  FileText,
+  ImageOff,
+  LoaderCircle,
   Pause,
   Play,
+  RefreshCw,
   Smartphone,
   ZoomIn,
   ZoomOut,
@@ -88,7 +89,10 @@ import { canForceEngine, FORCE_ENGINE_CHOICES, forceEngineValue, type ForceEngin
 import { OrshotStudioPanel } from "../studio/OrshotStudioPanel";
 import { DEFAULT_ORSHOT_OPTIONS, compactOrshotOptions } from "../studio/orshot-embed";
 import { UndoStack } from "../studio/undo-stack";
-import { MediaPicker } from "../studio/MediaPicker";
+import { MediaPicker, PickerState } from "../studio/MediaPicker";
+import { filterLibrary, thumbPrefetchIds, type LibraryStatus } from "../studio/media-picker-utils";
+import { browserApiUrl, deliveryUrlForBrowser } from "../studio/media-url";
+import { EditorTabs, editorPanelId, editorTabId, PANEL_IDS, PanelRail, PanelToggleButton, type EditorTab } from "../studio/StudioWorkspaceControls";
 import { applyShortsPlan, segmentDurations, type ShortsPlan } from "../studio/auto-shorts";
 import { SourceBadge } from "../studio/SourceBadge";
 import { SubtitleEditor } from "../studio/SubtitleEditor";
@@ -116,13 +120,12 @@ const readPanelState = (): { left: boolean; right: boolean } => {
 const PREVIEW_ZOOM_STEPS = [180, 220, 270];
 const MEDIA_SCALE_STEPS = [0.9, 1, 1.1] as const;
 const TIMELINE_PX_PER_SECOND = [7, 11, 16];
-const LIBRARY_PREVIEW_LIMIT = 12;
 /** A signed media-delivery URL is refetched once cached this long - kept comfortably under the server's own token TTL (600s default, `media-delivery.service.ts`) so a thumbnail/player never silently 403s mid-session. */
 const THUMB_CACHE_REFRESH_MS = 8 * 60_000;
 /** Hard cap on how many signed delivery URLs `thumbCache` holds at once - a long Studio session that imports/regenerates many assets must not grow this without bound. */
 const THUMB_CACHE_MAX_ENTRIES = 120;
 
-type LeftTab = "media" | "script" | "voice";
+type LeftTab = EditorTab;
 
 type SceneDraft = {
   sceneId: string;
@@ -230,6 +233,9 @@ export function StudioProPage() {
   const [providers, setProviders] = useState<ApiProvider[]>([]);
   const [mediaLibrary, setMediaLibrary] = useState<MediaAssetVersionSummary[]>([]);
   const [thumbCache, setThumbCache] = useState<Record<string, string>>({});
+  /** Asset id -> why its preview is unavailable (token refused, file not decodable): shown as a fallback, retried on demand. */
+  const [thumbErrors, setThumbErrors] = useState<Record<string, string>>({});
+  const [mediaLibraryStatus, setMediaLibraryStatus] = useState<LibraryStatus>("loading");
 
   const [draft, setDraft] = useState<TimelineDraft>({ templateSnapshotId: null, scenes: [], optionValues: {}, segments: [], addedScenes: [], removedSceneIds: [] });
   const [baseVersionId, setBaseVersionId] = useState<string | null>(null);
@@ -309,7 +315,6 @@ export function StudioProPage() {
   const [mediaScaleIdx, setMediaScaleIdx] = useState(1);
   const [timelineZoomIdx, setTimelineZoomIdx] = useState(1);
   const [playing, setPlaying] = useState(false);
-  const [libraryExpanded, setLibraryExpanded] = useState(false);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioTrackRef = useRef<HTMLAudioElement | null>(null);
   const thumbInFlight = useRef(new Set<string>());
@@ -330,6 +335,33 @@ export function StudioProPage() {
     });
   };
 
+  // The project library behind Media > Thư viện. A failed load is shown (error + Retry) instead of being swallowed, which used
+  // to leave the tab looking empty; rows already on screen stay when a refresh fails (see `libraryView`).
+  const loadMediaLibrary = (projectId: string) => {
+    setMediaLibraryStatus("loading");
+    return listProjectMedia(projectId)
+      .then((rows) => {
+        setMediaLibrary(rows);
+        setMediaLibraryStatus("ready");
+      })
+      .catch(() => setMediaLibraryStatus("failed"));
+  };
+  const markThumbFailed = (assetId: string, code = "LOAD_FAILED") => setThumbErrors((prev) => (prev[assetId] ? prev : { ...prev, [assetId]: code }));
+  /** Retry: forget every failed preview (so it is fetched again) and reload the library. */
+  const retryMediaPreviews = () => {
+    const failed = Object.keys(thumbErrors);
+    if (failed.length) {
+      for (const assetId of failed) thumbCacheMeta.current.delete(assetId);
+      setThumbCache((prev) => {
+        const next = { ...prev };
+        for (const assetId of failed) delete next[assetId];
+        return next;
+      });
+      setThumbErrors({});
+    }
+    if (context) void loadMediaLibrary(context.projectId);
+  };
+
   useEffect(() => {
     if (!id) return;
     void (isVideoProduction ? fetchVideoProductionStudioContext(id) : fetchStudioContext(id))
@@ -346,7 +378,7 @@ export function StudioProPage() {
           void getTemplateSnapshot(ctx.latestTimelineVersion.templateSnapshotId).then(setTemplate).catch(() => undefined);
         }
         void api<ApiProvider[]>("/provider-accounts").then(setProviders).catch(() => undefined);
-        void listProjectMedia(ctx.projectId).then(setMediaLibrary).catch(() => undefined);
+        void loadMediaLibrary(ctx.projectId);
       })
       .catch((err) => {
         if (err instanceof ApiError && err.code === "INVALID_STATE") setNeedsApproval(true);
@@ -704,22 +736,24 @@ export function StudioProPage() {
   // Prefetch signed media URLs outside render — calling setState from `loadThumb` during
   // paint previously queued dozens of updates on every Studio paint (library + timeline) and
   // made the page feel stuck once a project had many assets.
+  // Every visual library original is fetched (it used to be the first 12 raw rows - often voice audio or clip derivatives, so
+  // the grid's own tiles never got a URL). The URL is resolved against the API origin, not PUBLIC_BASE_URL (`media-url.ts`).
   useEffect(() => {
-    const ids = new Set<string>();
-    for (const row of draft.scenes) {
-      if (row.mediaAssetVersionId) ids.add(row.mediaAssetVersionId);
-    }
-    for (const audio of Object.values(audioBySceneId)) ids.add(audio.mediaAssetVersionId);
-    for (const asset of mediaLibrary.slice(0, libraryExpanded ? mediaLibrary.length : LIBRARY_PREVIEW_LIMIT)) {
-      ids.add(asset.id);
-    }
+    const ids = thumbPrefetchIds({
+      sceneMediaIds: draft.scenes.map((row) => row.mediaAssetVersionId),
+      audioIds: Object.values(audioBySceneId).map((audio) => audio.mediaAssetVersionId),
+      library: mediaLibrary,
+      failed: thumbErrors,
+      max: THUMB_CACHE_MAX_ENTRIES,
+    });
     for (const id of ids) {
       const cachedAt = thumbCacheMeta.current.get(id);
       const fresh = cachedAt !== undefined && Date.now() - cachedAt < THUMB_CACHE_REFRESH_MS;
       if ((thumbCache[id] && fresh) || thumbInFlight.current.has(id)) continue;
       thumbInFlight.current.add(id);
       void issueMediaDeliveryToken(id)
-        .then(({ url }) => {
+        .then((issued) => {
+          const url = deliveryUrlForBrowser(issued);
           thumbCacheMeta.current.delete(id); // re-insert at the end so it reads as most-recently-fetched for FIFO eviction below.
           thumbCacheMeta.current.set(id, Date.now());
           const evicted: string[] = [];
@@ -735,11 +769,11 @@ export function StudioProPage() {
             return next;
           });
         })
-        .catch(() => undefined)
+        .catch((err) => markThumbFailed(id, err instanceof ApiError ? err.code : "PREVIEW_FAILED"))
         .finally(() => thumbInFlight.current.delete(id));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft.scenes, audioBySceneId, mediaLibrary, libraryExpanded]);
+  }, [draft.scenes, audioBySceneId, mediaLibrary, thumbErrors]);
 
   const moveScene = (sceneId: string, direction: -1 | 1) => {
     mutate((prev) => {
@@ -862,7 +896,7 @@ export function StudioProPage() {
         undoStack.current.push(prev);
         return { ...prev, ...applyMediaPlan(prev.scenes, plan) };
       });
-      void listProjectMedia(context.projectId).then(setMediaLibrary).catch(() => undefined);
+      void loadMediaLibrary(context.projectId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t("common.error"));
     } finally {
@@ -1120,14 +1154,30 @@ export function StudioProPage() {
     return { scenes: included.length, videos: included.filter((row) => kindOf(row) === "video").length, images: included.filter((row) => kindOf(row) === "image").length, voices: included.filter((row) => Boolean(row.audioVersionId)).length };
   })();
   const workspaceGridClass = leftCollapsed && rightCollapsed
-    ? "lg:grid-cols-[36px_minmax(0,1fr)_36px]"
+    ? "lg:grid-cols-[56px_minmax(0,1fr)_56px]"
     : leftCollapsed
-      ? "lg:grid-cols-[36px_minmax(0,1fr)_260px]"
+      ? "lg:grid-cols-[56px_minmax(0,1fr)_260px] xl:grid-cols-[56px_minmax(0,1fr)_280px]"
       : rightCollapsed
-        ? "lg:grid-cols-[320px_minmax(0,1fr)_36px]"
-        : "lg:grid-cols-[320px_minmax(0,1fr)_260px]";
+        ? "lg:grid-cols-[340px_minmax(0,1fr)_56px] xl:grid-cols-[380px_minmax(0,1fr)_56px]"
+        : "lg:grid-cols-[340px_minmax(0,1fr)_260px] xl:grid-cols-[380px_minmax(0,1fr)_280px]";
   const mediaScale = MEDIA_SCALE_STEPS[mediaScaleIdx]!;
-  const visibleLibrary = libraryExpanded ? mediaLibrary : mediaLibrary.slice(0, LIBRARY_PREVIEW_LIMIT);
+  const libraryVisualCount = filterLibrary(mediaLibrary, "all").length;
+  const includedSceneRows = draft.scenes.filter((row) => !row.excluded);
+  const editorTabCaptions: Record<EditorTab, string> = {
+    script: t("studioPro.tabScriptCaption", { count: scenes.length }),
+    voice: t("studioPro.tabVoiceCaption", { done: includedSceneRows.filter((row) => row.audioVersionId).length, total: includedSceneRows.length }),
+    media: libraryVisualCount === 0 && mediaLibraryStatus !== "ready"
+      ? t(mediaLibraryStatus === "loading" ? "studioPro.tabMediaLoading" : "studioPro.tabMediaFailed")
+      : t("studioPro.tabMediaCaption", { count: libraryVisualCount }),
+  };
+  const selectedMediaId = selectedSceneDraft?.mediaAssetVersionId ?? null;
+  const selectedMediaUrl = selectedMediaId ? thumbCache[selectedMediaId] : undefined;
+  const selectedMediaVisual = !selectedMediaAsset || selectedMediaAsset.kind === "video" || selectedMediaAsset.kind === "image";
+  const previewMediaState: "ready" | "loading" | "failed" | "none" = !selectedMediaId || !selectedMediaVisual
+    ? "none"
+    : thumbErrors[selectedMediaId] || (!selectedMediaAsset && mediaLibraryStatus === "failed")
+      ? "failed"
+      : selectedMediaAsset && selectedMediaUrl ? "ready" : "loading";
   const selectedSceneIndex = selectedScene ? orderedScenes.findIndex((scene) => scene.sceneId === selectedScene.sceneId) : -1;
 
   // Media picker inputs: keyword chips for Pexels, per-segment lengths for the long-video -> shorts planner.
@@ -1155,25 +1205,6 @@ export function StudioProPage() {
         breadcrumb={`${timelineStatus === "approved" ? t("studioPro.timelineApproved") : t("studioPro.timelineDraft")} · ${saving ? t("studioPro.saving") : dirty ? t("common.save") : t("studioPro.saved")}`}
         actions={
           <>
-            <button
-              type="button"
-              className={`lyx-btn h-9 w-9 ${leftCollapsed ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
-              title={t(leftCollapsed ? "studioPro.showMediaPanel" : "studioPro.hideMediaPanel")}
-              aria-pressed={!leftCollapsed}
-              onClick={() => setPanel({ left: !leftCollapsed })}
-            >
-              {leftCollapsed ? <PanelLeftOpen size={16} strokeWidth={1.9} /> : <PanelLeftClose size={16} strokeWidth={1.9} />}
-            </button>
-            <button
-              type="button"
-              className={`lyx-btn h-9 w-9 ${rightCollapsed ? "lyx-btn-secondary" : "lyx-btn-ghost"}`}
-              title={t(rightCollapsed ? "studioPro.showInspectorPanel" : "studioPro.hideInspectorPanel")}
-              aria-pressed={!rightCollapsed}
-              onClick={() => setPanel({ right: !rightCollapsed })}
-            >
-              {rightCollapsed ? <PanelRightOpen size={16} strokeWidth={1.9} /> : <PanelRightClose size={16} strokeWidth={1.9} />}
-            </button>
-            <span className="mx-1 h-6 w-px bg-lyx-border" aria-hidden />
             <span className="flex overflow-hidden rounded-[7px] bg-lyx-muted p-0.5">
               <span className="px-3 text-[11.5px] leading-8 text-lyx-fg-muted">{t("studioPro.autoTag")}</span>
               <span className="rounded-[5px] bg-lyx-fg px-3 text-[11.5px] leading-8 text-lyx-bg">{t("studioPro.studioTag")}</span>
@@ -1254,14 +1285,14 @@ export function StudioProPage() {
             <video
               key={renderJob.resultUrl}
               className="mb-2 max-h-[360px] w-full rounded-[6px] bg-black"
-              src={renderJob.resultUrl}
+              src={browserApiUrl(renderJob.resultUrl)}
               controls
               onError={() => setRenderPlaybackError(true)}
             />
           )}
           <div className="flex gap-3 text-[11.5px]">
-            <a className="underline" href={renderJob.resultUrl} target="_blank" rel="noreferrer">{t("studioPro.openResult")}</a>
-            <a className="underline" href={renderJob.resultUrl} download>{t("studioPro.downloadResult")}</a>
+            <a className="underline" href={browserApiUrl(renderJob.resultUrl)} target="_blank" rel="noreferrer">{t("studioPro.openResult")}</a>
+            <a className="underline" href={browserApiUrl(renderJob.resultUrl)} download>{t("studioPro.downloadResult")}</a>
           </div>
         </div>
       ) : renderJob && renderJob.status !== "failed" && renderJob.status !== "cancelled" ? (
@@ -1356,30 +1387,22 @@ export function StudioProPage() {
           <Button variant="secondary" className="h-8" onClick={() => setOrshotWorkspace(true)}>{t("studioPro.orshotOpenPanel")}</Button>
         </div>
       ) : null}
+      {/* The two panel switches sit above the panels they control (desktop only: below lg the panels stack and are always shown). */}
+      <div className="mx-5 mb-2 hidden items-center justify-between gap-3 lg:flex" data-testid="studio-panel-switches">
+        <PanelToggleButton side="left" open={!leftCollapsed} onToggle={() => setPanel({ left: !leftCollapsed })} />
+        <PanelToggleButton side="right" open={!rightCollapsed} onToggle={() => setPanel({ right: !rightCollapsed })} />
+      </div>
       <div className={`mx-5 mb-5 grid min-h-0 flex-1 gap-0 overflow-hidden rounded-[var(--lyx-radius)] border border-lyx-border bg-lyx-bg ${workspaceGridClass}`}>
         {leftCollapsed ? (
-          <div className="hidden items-start justify-center border-b border-lyx-border py-2 lg:flex lg:border-b-0 lg:border-r">
-            <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={t("studioPro.showMediaPanel")} onClick={() => setPanel({ left: false })}>
-              <PanelLeftOpen size={15} strokeWidth={1.9} />
-            </button>
+          <div className="hidden border-b border-lyx-border lg:flex lg:border-b-0 lg:border-r">
+            <PanelRail side="left" onOpen={() => setPanel({ left: false })} />
           </div>
         ) : null}
-        <div className={`${leftCollapsed ? "lg:hidden" : ""} flex max-h-[calc(100vh-var(--lyx-topbar)-88px)] flex-col border-b border-lyx-border lg:border-b-0 lg:border-r`}>
-          <div className="flex gap-4 border-b border-lyx-border px-3 pt-2">
-            {(["script", "voice", "media"] as LeftTab[]).map((tabKey) => (
-              <button
-                key={tabKey}
-                type="button"
-                onClick={() => setLeftTab(tabKey)}
-                className={`pb-2 text-[12px] ${leftTab === tabKey ? "border-b-2 border-lyx-fg font-medium text-lyx-fg" : "text-lyx-fg-muted"}`}
-              >
-                {t(`studioPro.tab${tabKey.charAt(0).toUpperCase()}${tabKey.slice(1)}`)}
-              </button>
-            ))}
-          </div>
+        <div id={PANEL_IDS.left} className={`${leftCollapsed ? "lg:hidden" : ""} flex max-h-[calc(100vh-var(--lyx-topbar)-88px)] flex-col border-b border-lyx-border lg:border-b-0 lg:border-r`}>
+          <EditorTabs active={leftTab} onChange={setLeftTab} captions={editorTabCaptions} />
 
           {leftTab === "media" ? (
-            <div className="flex flex-col gap-3 overflow-y-auto p-3">
+            <div role="tabpanel" id={editorPanelId("media")} aria-labelledby={editorTabId("media")} className="lyx-fade flex flex-col gap-3 overflow-y-auto p-3">
               <div className="flex flex-col gap-2.5 rounded-xl border border-lyx-border bg-lyx-bg-muted p-3">
                 <Select value={visualAccountId} onChange={(event) => setVisualAccountId(event.target.value)} disabled={visualAccounts.length === 0}>
                   {visualAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Pexels" })}</option> : null}
@@ -1452,7 +1475,11 @@ export function StudioProPage() {
               <MediaPicker
                 projectId={context.projectId}
                 library={mediaLibrary}
+                libraryStatus={mediaLibraryStatus}
+                onRetryLibrary={retryMediaPreviews}
                 thumbCache={thumbCache}
+                thumbErrors={thumbErrors}
+                onThumbError={(assetId) => markThumbFailed(assetId)}
                 selectedAssetId={selectedSceneDraft?.mediaAssetVersionId ?? null}
                 selectedSceneLabel={selectedScene ? `#${scenes.indexOf(selectedScene) + 1}` : null}
                 onAssign={assignMediaToSelectedScene}
@@ -1488,28 +1515,46 @@ export function StudioProPage() {
           ) : null}
 
           {leftTab === "script" ? (
-            <div className="flex flex-col gap-2 overflow-y-auto p-3 text-[12px]">
-              {scenes.map((scene) => (
-                <p key={scene.sceneId} className={scene.sceneId === selectedSceneId ? "font-medium text-lyx-fg" : "text-lyx-fg-muted"}>
-                  {scene.narration}
-                </p>
-              ))}
+            <div role="tabpanel" id={editorPanelId("script")} aria-labelledby={editorTabId("script")} className="lyx-fade lyx-accent-blue flex flex-col gap-1.5 overflow-y-auto p-3">
+              {scenes.length === 0 ? (
+                <PickerState icon={<FileText size={20} strokeWidth={1.9} />} title={t("studioPro.scriptEmptyTitle")} hint={t("studioPro.scriptEmptyHint")} />
+              ) : (
+                <>
+                  <p className="px-1 pb-1 text-[11px] leading-4 text-lyx-fg-muted">{t("studioPro.scriptTabHint")}</p>
+                  {scenes.map((scene, index) => {
+                    const selected = scene.sceneId === selectedScene?.sceneId;
+                    return (
+                      <button key={scene.sceneId} type="button" aria-pressed={selected} onClick={() => setSelectedSceneId(scene.sceneId)} className="lyx-script-row flex items-start gap-2.5 px-2.5 py-2 text-left">
+                        <span className="lyx-accent-chip mt-px flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md px-1 text-[11px] font-bold tabular-nums">{index + 1}</span>
+                        <span className={`min-w-0 flex-1 text-[12.5px] leading-5 ${selected ? "text-lyx-fg" : "text-lyx-fg-muted"}`}>{scene.narration || t("studioPro.sceneNoNarration")}</span>
+                        <span className="shrink-0 pt-0.5 text-[10.5px] tabular-nums text-lyx-fg-subtle">{(scene.durationHintMs / 1000).toFixed(1)}s</span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
             </div>
           ) : null}
 
           {leftTab === "voice" ? (
-            <div className="flex flex-col gap-2 overflow-y-auto p-3 text-[12px]">
-              <Select value={voiceAccountId} onChange={(event) => setVoiceAccountId(event.target.value)} disabled={voiceAccounts.length === 0}>
-                {voiceAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "ElevenLabs" })}</option> : null}
-                {voiceAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>{account.name}</option>
-                ))}
-              </Select>
-              <Select value={selectedVoiceId} onChange={(event) => setSelectedVoiceId(event.target.value)} disabled={voices.length === 0}>
-                {voices.map((voice) => (
-                  <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>
-                ))}
-              </Select>
+            <div role="tabpanel" id={editorPanelId("voice")} aria-labelledby={editorTabId("voice")} className="lyx-fade flex flex-col gap-2.5 overflow-y-auto p-3 text-[12px]">
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-medium text-lyx-fg-muted">{t("studioPro.voiceAccountLabel")}</span>
+                <Select value={voiceAccountId} onChange={(event) => setVoiceAccountId(event.target.value)} disabled={voiceAccounts.length === 0}>
+                  {voiceAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "ElevenLabs" })}</option> : null}
+                  {voiceAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>{account.name}</option>
+                  ))}
+                </Select>
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-medium text-lyx-fg-muted">{t("studioPro.voiceLabel")}</span>
+                <Select value={selectedVoiceId} onChange={(event) => setSelectedVoiceId(event.target.value)} disabled={voices.length === 0}>
+                  {voices.map((voice) => (
+                    <option key={voice.voiceId} value={voice.voiceId}>{voice.name}</option>
+                  ))}
+                </Select>
+              </label>
               <Button variant="secondary" disabled={!voices.find((row) => row.voiceId === selectedVoiceId)?.previewUrl} onClick={playVoicePreview}>
                 {t("studioPro.previewVoice")}
               </Button>
@@ -1604,11 +1649,12 @@ export function StudioProPage() {
               {sdkState !== "ready" ? (
                 <>
                   <div className="absolute inset-0 flex items-center justify-center" style={{ transform: `scale(${mediaScale})`, transformOrigin: "center center" }}>
-                    {selectedMediaAsset?.kind === "video" && thumbCache[selectedMediaAsset.id] ? (
+                    {previewMediaState === "ready" && selectedMediaAsset?.kind === "video" ? (
                       <video
                         key={selectedMediaAsset.id}
                         ref={previewVideoRef}
-                        src={thumbCache[selectedMediaAsset.id]}
+                        src={selectedMediaUrl}
+                        onError={() => markThumbFailed(selectedMediaAsset.id)}
                         muted
                         playsInline
                         loop
@@ -1629,8 +1675,29 @@ export function StudioProPage() {
                         }}
                         className="absolute inset-0 h-full w-full object-cover"
                       />
-                    ) : selectedMediaAsset?.kind === "image" && thumbCache[selectedMediaAsset.id] ? (
-                      <img src={thumbCache[selectedMediaAsset.id]} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                    ) : previewMediaState === "ready" && selectedMediaAsset?.kind === "image" ? (
+                      <img src={selectedMediaUrl} alt="" onError={() => markThumbFailed(selectedMediaAsset.id)} className="lyx-fade absolute inset-0 h-full w-full object-cover" />
+                    ) : previewMediaState === "failed" ? (
+                      <div role="alert" className="lyx-fade flex flex-col items-center gap-1.5 px-5 text-center" data-testid="preview-media-failed">
+                        <ImageOff size={22} strokeWidth={1.8} className="text-white/60" aria-hidden="true" />
+                        <p className="text-[11.5px] font-semibold text-white/85">{t("studioPro.previewMediaFailed")}</p>
+                        <p className="text-[10.5px] leading-4 text-white/55">{t("studioPro.previewMediaFailedHint")}</p>
+                        <button type="button" onClick={retryMediaPreviews} className="mt-1 inline-flex items-center gap-1 rounded-md border border-white/25 px-2 py-1 text-[11px] font-medium text-white/85 hover:bg-white/10">
+                          <RefreshCw size={12} strokeWidth={2} aria-hidden="true" />{t("mediaPicker.retry")}
+                        </button>
+                      </div>
+                    ) : previewMediaState === "loading" ? (
+                      <span role="status" className="flex flex-col items-center gap-2 text-[11px] text-white/60">
+                        <LoaderCircle size={18} strokeWidth={2} className="animate-spin" aria-hidden="true" />{t("studioPro.previewMediaLoading")}
+                      </span>
+                    ) : selectedScene ? (
+                      <div className="lyx-fade flex flex-col items-center gap-1.5 px-5 text-center">
+                        <Clapperboard size={22} strokeWidth={1.8} className="text-white/45" aria-hidden="true" />
+                        <p className="text-[11.5px] text-white/70">{t("studioPro.previewNoMedia")}</p>
+                        <button type="button" onClick={() => { setLeftTab("media"); setPanel({ left: false }); }} className="mt-1 rounded-md border border-white/25 px-2 py-1 text-[11px] font-medium text-white/85 hover:bg-white/10">
+                          {t("studioPro.previewPickMedia")}
+                        </button>
+                      </div>
                     ) : (
                       <span className="px-4 text-[11px] text-white/40">{t("common.previewLabel")}</span>
                     )}
@@ -1764,13 +1831,11 @@ export function StudioProPage() {
         </div>
 
         {rightCollapsed ? (
-          <div className="hidden items-start justify-center border-t border-lyx-border py-2 lg:flex lg:border-t-0 lg:border-l">
-            <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={t("studioPro.showInspectorPanel")} onClick={() => setPanel({ right: false })}>
-              <PanelRightOpen size={15} strokeWidth={1.9} />
-            </button>
+          <div className="hidden border-t border-lyx-border lg:flex lg:border-t-0 lg:border-l">
+            <PanelRail side="right" onOpen={() => setPanel({ right: false })} />
           </div>
         ) : null}
-        <div className={`${rightCollapsed ? "lg:hidden" : ""} overflow-y-auto border-t border-lyx-border p-3 lg:border-t-0 lg:border-l`}>
+        <div id={PANEL_IDS.right} className={`${rightCollapsed ? "lg:hidden" : ""} overflow-y-auto border-t border-lyx-border p-3 lg:border-t-0 lg:border-l`}>
           {selectedScene && selectedSceneDraft ? (
             <>
               <p className="mb-0.5 text-[13px] font-bold">
