@@ -22,6 +22,8 @@ const fail = (status: number, retryAfter: string | null, body: unknown): never =
   const record = (body ?? {}) as Record<string, unknown>;
   const message = typeof record.error === "string" ? record.error : typeof record.message === "string" ? record.message : "";
   const suffix = message ? `: ${redact(message)}` : "";
+  // 403 with a plan message ("Video generation is available on supported plans") means the key is valid but the plan cannot do this: not an auth failure.
+  if (status === 403 && /plan|upgrade|subscription|credit/i.test(message)) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Orshot plan does not allow this${suffix}`, false);
   if (status === 401 || status === 403) throw new ProviderError("PROVIDER_AUTH_INVALID", `Orshot authentication failed${suffix}`, false);
   if (status === 404) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Orshot template or render not found${suffix}`, false);
   if (status === 402) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Orshot credits exhausted${suffix}`, false);

@@ -98,6 +98,13 @@ describe("orshot adapter", () => {
     vi.stubGlobal("fetch", vi.fn(async () => json({}, 402)));
     await expect(probeOrshotAccount("k")).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" });
   });
+
+  it("a 403 about the plan is not an invalid key", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "Video generation is available on supported plans" }, 403)));
+    await expect(probeOrshotAccount("k")).rejects.toMatchObject({ code: "PROVIDER_QUOTA_EXHAUSTED" });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "forbidden" }, 403)));
+    await expect(probeOrshotAccount("k")).rejects.toMatchObject({ code: "PROVIDER_AUTH_INVALID" });
+  });
 });
 
 describe("orshot includePages (script shorter than the template)", () => {
