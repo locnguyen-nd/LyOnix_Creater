@@ -19,13 +19,17 @@ function setup(apifyImpl: (call: number, args: any[]) => Promise<any>) {
   const apify = {
     findAccountForUser: vi.fn(async () => ({ id: "acc", encryptedSecret: "enc" })),
     autoImportForSegment: vi.fn(async (...args: any[]) => {
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Only the ja tier is counted: every segment also runs its en tier in the same race (VE2E-130).
+      const counted = String(args[4].keyword).startsWith("東京夜景");
+      if (counted) {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+      }
       try {
         await tick();
         return await apifyImpl(calls++, args);
       } finally {
-        inFlight -= 1;
+        if (counted) inFlight -= 1;
       }
     }),
   };
@@ -73,13 +77,12 @@ describe("MediaPlanService.sourceSegments (VE2E-51)", () => {
     expect(seen[0].job).toBe(seen[2].job);
   });
 
-  it("serialises Pexels fallbacks so a later segment excludes every earlier fallback clip", async () => {
-    const { service, pexelSnapshots } = setup(async () => ({ ok: false, reason: "apify_no_usable_candidate" }));
+  it("parallel Pexels fallbacks (no mutex) never share a clip", async () => {
+    const { service } = setup(async () => ({ ok: false, reason: "apify_no_usable_candidate" }));
     const script = scriptOf(3);
     const result = await service.sourceSegments(projectId, "u", "staff", { providerAccountId: "p", script, segments: service.planSegments(script, { min: 3, max: 3 }), ledger: new SegmentSourceLedger() });
     expect(result.sourced.map((s) => s.source?.provider)).toEqual(["pexels", "pexels", "pexels"]);
     expect(result.sourced.every((s) => s.source?.fallbackReason === "apify_no_usable_candidate")).toBe(true);
-    expect(pexelSnapshots.map((ids) => ids.length).sort()).toEqual([0, 1, 2]);
     expect(new Set(result.sourced.map((s) => s.source!.externalId)).size).toBe(3);
   });
 

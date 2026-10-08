@@ -39,7 +39,7 @@ describe("evaluateSocialCandidate (VE2E-51)", () => {
   it("requires vertical orientation and a duration of at least the segment length", () => {
     expect(reasons(base({ widthPx: 1280, heightPx: 720 }))).toEqual(["not_vertical"]);
     expect(reasons(base({ widthPx: null, heightPx: null }))).toEqual([]);
-    expect(reasons(base({ durationSeconds: 9 }))).toEqual(["too_short"]);
+    expect(reasons(base({ durationSeconds: 5 }))).toEqual(["too_short"]);
     expect(reasons(base({ durationSeconds: 10 }))).toEqual([]);
     expect(reasons(base({ durationSeconds: null }))).toEqual(["duration_unknown"]);
   });
@@ -70,5 +70,34 @@ describe("selectSocialCandidates", () => {
     expect(selection.passed.map((p) => p.ref)).toEqual(["b", "a"]);
     expect(selection.rejected.map((r) => r.videoId)).toEqual(["c", "d"]);
     expect(selection.rejectCounts).toEqual({ language_mismatch: 1, ad_or_sponsored: 1, too_short: 1 });
+  });
+});
+
+describe("VE2E-131 tiers, 60% duration, subject aliases", () => {
+  const en = (over: Partial<SocialFilterContext> = {}) => ctx({ tier: "en", ...over });
+  it("accepts a clip of at least 60% of the segment in both tiers", () => {
+    expect(reasons(base({ durationSeconds: 6 }))).toEqual([]);
+    expect(reasons(base({ durationSeconds: 5.9 }))).toEqual(["too_short"]);
+    expect(reasons(base({ durationSeconds: 6 }), en())).toEqual([]);
+    expect(reasons(base({ durationSeconds: 5.9 }), en())).toEqual(["too_short"]);
+  });
+  it("en tier takes en/un captions, clips outside Japan and landscape clips, ja tier keeps the strict rules", () => {
+    const loose = base({ textLanguage: "en", countryCode: "6252001", widthPx: 1280, heightPx: 720 });
+    expect(reasons(loose, en())).toEqual([]);
+    expect(reasons(loose)).toEqual(expect.arrayContaining(["language_mismatch", "location_not_jp", "not_vertical"]));
+    expect(reasons(base({ textLanguage: "un", countryCode: null }), en())).toEqual([]);
+    expect(reasons(base({ textLanguage: "ko" }), en())).toEqual(["language_mismatch"]);
+  });
+  it("en tier still rejects templates, ads and used ids", () => {
+    expect(reasons(base({ text: "capcut template", textLanguage: "en" }), en())).toEqual(["template_or_greenscreen"]);
+    expect(reasons(base({ isAd: true }), en())).toEqual(["ad_or_sponsored"]);
+    expect(reasons(base(), en({ usedVideoIds: new Set(["7001"]) }))).toEqual(["already_used"]);
+  });
+  it("adds a score bonus when caption or hashtag matches a subject alias", () => {
+    const plain = evaluateSocialCandidate(base({ text: "night walk", hashtags: ["Mbappe"] }), en({ keyword: "zzz" }));
+    const aliased = evaluateSocialCandidate(base({ text: "night walk", hashtags: ["Mbappe"] }), en({ keyword: "zzz", subjectAliases: ["Mbappé", "kylian mbappe"] }));
+    const hit = evaluateSocialCandidate(base({ text: "night walk", hashtags: ["Mbappe"] }), en({ keyword: "zzz", subjectAliases: ["mbappe"] }));
+    expect(plain.ok && hit.ok && hit.score - plain.score).toBeCloseTo(0.3, 2);
+    expect(aliased.ok && plain.ok && aliased.score).toBe(plain.ok && plain.score);
   });
 });

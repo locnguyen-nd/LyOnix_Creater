@@ -61,7 +61,7 @@ describe("VE2E-50 visualPlan handling", () => {
     const prompt = buildScriptV2PromptPackage({ sourceType: "topic", sourceText: "x", language: "ja" }).text;
     expect(prompt).toContain("2-4 words");
     expect(prompt).toContain("NEVER a camera direction");
-    expect(prompt).toContain("script-prompt.v2.2");
+    expect(prompt).toContain("script-prompt.v2.3");
   });
 });
 
@@ -75,8 +75,8 @@ describe("VE2E-50 segment keyword extraction", () => {
 
   it("keeps only known segments with a valid ja keyword", () => {
     const out = parseSegmentKeywords({ segments: [{ segmentId: "a", ja: "新宿 夜景", en: "shinjuku night" }, { segmentId: "b", ja: "night view", en: "night view" }, { segmentId: "zzz", ja: "東京", en: "tokyo" }, { segmentId: "c", ja: "渋谷", en: "A long English sentence with many many words in it." }] }, ["a", "b", "c"]);
-    expect(out.keywords).toEqual({ a: { ja: "新宿 夜景", en: "shinjuku night" }, c: { ja: "渋谷", en: "" } });
-    expect(out.rejectedSegmentIds).toEqual(["b"]);
+    expect(out.keywords).toEqual({ a: { ja: "新宿 夜景", en: "shinjuku night" }, b: { ja: "", en: "night view" }, c: { ja: "渋谷", en: "" } });
+    expect(out.rejectedSegmentIds).toEqual([]);
     expect(parseSegmentKeywords("garbage", ["a"])).toEqual({ keywords: {}, rejectedSegmentIds: ["a"] });
   });
 
@@ -85,7 +85,7 @@ describe("VE2E-50 segment keyword extraction", () => {
       const body = JSON.parse(String(init.body)) as { model: string; input: string };
       expect(body.input).toContain("seg-1");
       expect(body.input).toContain("seg-2");
-      return new Response(JSON.stringify({ output_text: JSON.stringify({ segments: [{ segmentId: "seg-1", ja: "新宿 夜景", en: "shinjuku night" }, { segmentId: "seg-2", ja: "English only", en: "x" }] }), usage: { input_tokens: 210, output_tokens: 30 } }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: JSON.stringify({ segments: [{ segmentId: "seg-1", ja: "新宿 夜景", en: "shinjuku night" }, { segmentId: "seg-2", ja: "English only", en: "x." }] }), usage: { input_tokens: 210, output_tokens: 30 } }), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
     const result = await extractSegmentKeywords("openai", "sk-test", "gpt-4o-mini", { language: "ja", segments: [{ segmentId: "seg-1", narration: "a" }, { segmentId: "seg-2", narration: "b" }] });

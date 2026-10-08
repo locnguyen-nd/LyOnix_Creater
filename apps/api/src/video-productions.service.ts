@@ -25,7 +25,7 @@ import {
   sanitizeCaptionStyleOptionValues,
   type BackgroundSegmentCountBounds,
 } from "@lyonix/domain";
-import type { DurationBudgetDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, QualityGateDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
@@ -407,6 +407,9 @@ export class VideoProductionsService {
     const budgetSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "duration_budget" }, orderBy: [{ attempt: "desc" }], take: 1 });
     const budgetOutput = budgetSteps?.[0]?.outputRef as Record<string, unknown> | null | undefined;
     const durationBudget = budgetOutput && typeof budgetOutput.targetSec === "number" ? (budgetOutput as unknown as DurationBudgetDiagnostics) : null;
+    const gateSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "quality_gate" }, orderBy: [{ attempt: "desc" }], take: 1 });
+    const gateOutput = gateSteps?.[0]?.outputRef as Record<string, unknown> | null | undefined;
+    const qualityGate = gateOutput && Array.isArray(gateOutput.checks) ? (gateOutput as unknown as QualityGateDiagnostics) : null;
     return {
       ok: true,
       data: {
@@ -425,6 +428,7 @@ export class VideoProductionsService {
         apifyUsage,
         visionUsage,
         durationBudget,
+        qualityGate,
         queue: (await this.queueStatus.workflowQueueStates([run])).get(run.id)!,
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),

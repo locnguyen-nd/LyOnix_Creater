@@ -41,6 +41,7 @@ import {
   type ReframeAnalyzeJobInput,
   type ReframeAnalyzeResult,
 } from "./reframe-contract.js";
+import { resolveProducerQueues, splitMediaJobQueueNames } from "./queues.js";
 import { assertMediaJobQueue, connectMediaJobBroker, type MediaJobBrokerConnection, type MediaJobChannel, type MediaJobMessage } from "./transport.js";
 
 /** Worker defaults: 120s per attempt x 2 attempts; client waits a bit longer than that. */
@@ -84,6 +85,7 @@ type Pending = {
 export class MediaJobClient {
   private readonly pending = new Map<string, Pending>();
   private renderQueueReady: Promise<unknown> | null = null;
+  private readonly splitQueueReady = new Map<string, Promise<unknown>>();
   private closed = false;
 
   private constructor(
@@ -93,10 +95,12 @@ export class MediaJobClient {
     private readonly replyQueue: string,
     private readonly defaultTimeoutMs: number,
     private readonly connection: MediaJobBrokerConnection | null,
+    /** VE2E-134: where frame.extract / reframe.analyze go (the legacy `queue` unless the split is enabled). */
+    private readonly routes: { frameExtract: string; reframeAnalyze: string } = { frameExtract: queue, reframeAnalyze: queue },
   ) {}
 
   /** Connects to RabbitMQ. Fails fast with MEDIA_WORKER_NOT_CONFIGURED when no URL is configured. */
-  static async connect(options: { url: string | undefined; queue?: string | undefined; renderQueue?: string | undefined; defaultTimeoutMs?: number | undefined }): Promise<MediaJobClient> {
+  static async connect(options: { url: string | undefined; queue?: string | undefined; renderQueue?: string | undefined; defaultTimeoutMs?: number | undefined; splitQueues?: boolean | undefined; frameQueue?: string | undefined; reframeQueue?: string | undefined }): Promise<MediaJobClient> {
     const url = options.url?.trim();
     if (!url) throw new MediaJobClientError("MEDIA_WORKER_NOT_CONFIGURED", "RABBITMQ_URL is not configured; media-worker jobs cannot be enqueued");
     let connection: MediaJobBrokerConnection;
@@ -105,7 +109,7 @@ export class MediaJobClient {
     } catch (error) {
       throw new MediaJobClientError("BROKER_UNAVAILABLE", `Cannot connect to RabbitMQ: ${error instanceof Error ? error.message : "unknown error"}`);
     }
-    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, renderQueue: options.renderQueue, defaultTimeoutMs: options.defaultTimeoutMs, connection });
+    return MediaJobClient.create({ channel: connection.channel, queue: options.queue, renderQueue: options.renderQueue, defaultTimeoutMs: options.defaultTimeoutMs, connection, splitQueues: options.splitQueues, frameQueue: options.frameQueue, reframeQueue: options.reframeQueue });
   }
 
   /** Builds a client over an existing channel (used by `connect` and by tests with an in-memory channel). */
@@ -116,12 +120,18 @@ export class MediaJobClient {
     renderQueue?: string | undefined;
     defaultTimeoutMs?: number | undefined;
     connection?: MediaJobBrokerConnection | null;
+    /** VE2E-134: route frame.extract / reframe.analyze to their own queues (`<queue>.frame` / `<queue>.reframe`); default off = legacy single queue. */
+    splitQueues?: boolean | undefined;
+    frameQueue?: string | undefined;
+    reframeQueue?: string | undefined;
   }): Promise<MediaJobClient> {
     const queue = options.queue?.trim() || DEFAULT_MEDIA_WORKER_QUEUE;
     const renderQueue = options.renderQueue?.trim() || DEFAULT_RENDER_QUEUE;
     await assertMediaJobQueue(options.channel, queue);
     const reply = await options.channel.assertQueue("", { exclusive: true, autoDelete: true, durable: false });
-    const client = new MediaJobClient(options.channel, queue, renderQueue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null);
+    const names = splitMediaJobQueueNames({ MEDIA_WORKER_QUEUE: queue, MEDIA_WORKER_QUEUE_FRAME: options.frameQueue, MEDIA_WORKER_QUEUE_REFRAME: options.reframeQueue, MEDIA_WORKER_RENDER_QUEUE: renderQueue });
+    const routed = resolveProducerQueues(names, options.splitQueues === true);
+    const client = new MediaJobClient(options.channel, queue, renderQueue, reply.queue, options.defaultTimeoutMs ?? DEFAULT_MEDIA_JOB_RESULT_TIMEOUT_MS, options.connection ?? null, { frameExtract: routed.frame_extract, reframeAnalyze: routed.reframe_analyze });
     await options.channel.consume(reply.queue, (message) => client.onReply(message), { noAck: true });
     const onClose = (error?: Error) =>
       client.failAll(new MediaJobClientError("BROKER_UNAVAILABLE", `RabbitMQ connection closed${error ? `: ${error.message}` : ""}`));
@@ -161,22 +171,40 @@ export class MediaJobClient {
   }
 
   /** VE2E-30: samples a few JPEG frames from a stored video (for vision moderation). Same retry/idempotency rules as `prepareClip`. */
-  extractFrames(job: FrameExtractJob | FrameExtractJobInput, options: PrepareClipOptions = {}): Promise<FrameExtractResult> {
+  async extractFrames(job: FrameExtractJob | FrameExtractJobInput, options: PrepareClipOptions = {}): Promise<FrameExtractResult> {
     const candidate = "schemaVersion" in job ? job : buildFrameExtractJob(job);
     const validation = validateFrameExtractJob(candidate);
-    if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
-    return this.request<FrameExtractResult>(FRAME_EXTRACT_JOB_TYPE, validation.value, parseFrameExtractResult, options);
+    if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
+    await this.ensureRoutedQueue(this.routes.frameExtract);
+    return this.request<FrameExtractResult>(FRAME_EXTRACT_JOB_TYPE, validation.value, parseFrameExtractResult, options, undefined, this.routes.frameExtract);
+  }
+
+  /** VE2E-134: a non-legacy queue is declared lazily on first use (idempotent); the legacy queue was declared in `create`. */
+  private async ensureRoutedQueue(name: string): Promise<void> {
+    if (name === this.queue) return;
+    let ready = this.splitQueueReady.get(name);
+    if (!ready) {
+      ready = assertMediaJobQueue(this.channel, name);
+      this.splitQueueReady.set(name, ready);
+    }
+    try {
+      await ready;
+    } catch (error) {
+      this.splitQueueReady.delete(name);
+      throw new MediaJobClientError("BROKER_UNAVAILABLE", `Cannot declare queue ${name}: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
   }
 
   /**
    * VE2E-66: analyses subject + overlay of a stored video/image and returns a `CropPlan` (no cutting). Local detectors run in the
    * worker, so a first analysis can take several seconds: pass a larger `timeoutMs` for long clips. Idempotent by `jobKey`.
    */
-  analyzeReframe(job: ReframeAnalyzeJob | ReframeAnalyzeJobInput, options: PrepareClipOptions = {}): Promise<ReframeAnalyzeResult> {
+  async analyzeReframe(job: ReframeAnalyzeJob | ReframeAnalyzeJobInput, options: PrepareClipOptions = {}): Promise<ReframeAnalyzeResult> {
     const candidate = "schemaVersion" in job ? job : buildReframeAnalyzeJob(job);
     const validation = validateReframeAnalyzeJob(candidate);
-    if (!validation.ok) return Promise.reject(new MediaJobClientError("INVALID_JOB", validation.errors.join("; ")));
-    return this.request<ReframeAnalyzeResult>(REFRAME_ANALYZE_JOB_TYPE, validation.value, parseReframeAnalyzeResult, options);
+    if (!validation.ok) throw new MediaJobClientError("INVALID_JOB", validation.errors.join("; "));
+    await this.ensureRoutedQueue(this.routes.reframeAnalyze);
+    return this.request<ReframeAnalyzeResult>(REFRAME_ANALYZE_JOB_TYPE, validation.value, parseReframeAnalyzeResult, options, undefined, this.routes.reframeAnalyze);
   }
 
   /**

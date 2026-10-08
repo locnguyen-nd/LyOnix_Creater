@@ -88,28 +88,59 @@ describe("ApifyService - VE2E-34", () => {
     expect(await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "x" })).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED" });
   });
 
-  it("caches an identical search for 15 minutes (one paid run) and refuses a concurrent run for the same project+platform", async () => {
+  it("caches an identical search for 15 minutes (one paid run); VE2E-131: searches beyond the per-project cap WAIT in a queue instead of failing", async () => {
     const deps = apifyStub([tiktokItem]);
     service.apifyDeps = deps;
     await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "夜景" });
     await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "夜景" });
     expect(deps.starts).toHaveLength(1);
 
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const slow = apifyStub([tiktokItem]);
-    const original = slow.fetch!;
-    slow.fetch = (async (input: string | URL | Request, init?: RequestInit) => { await gate; return original(input, init); }) as typeof fetch;
-    service.apifyDeps = slow;
-    // VE2E-51: up to 3 distinct runs per (project, platform) at once; the 4th is refused, an identical one shares the run.
-    const queries = ["桜", "ラーメン", "寿司"];
-    const running = queries.map((query) => service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query }));
-    for (let i = 0; i < 10; i += 1) await Promise.resolve();
-    expect(await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "温泉" })).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED" });
-    const sameAsFirst = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "桜" });
-    release();
-    expect((await Promise.all([...running, sameAsFirst])).every((r) => r.ok)).toBe(true);
+    process.env.APIFY_MAX_CONCURRENT_RUNS = "3";
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const slow = apifyStub([tiktokItem]);
+      const original = slow.fetch!;
+      slow.fetch = (async (input: string | URL | Request, init?: RequestInit) => { await gate; return original(input, init); }) as typeof fetch;
+      service.apifyDeps = slow;
+      const queries = ["桜", "ラーメン", "寿司"];
+      const running = queries.map((query) => service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query }));
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      let settled = false;
+      const fourth = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "温泉" }).then((r) => { settled = true; return r; });
+      const sameAsFirst = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "桜" });
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+      expect(settled).toBe(false); // queued, not PROVIDER_RATE_LIMITED
+      expect(slow.starts).toHaveLength(0);
+      release();
+      const all = await Promise.all([...running, fourth, sameAsFirst]);
+      expect(all.every((r) => r.ok)).toBe(true);
+      expect(slow.starts).toHaveLength(4);
+    } finally {
+      delete process.env.APIFY_MAX_CONCURRENT_RUNS;
+    }
   });
+
+  it("VE2E-131: a search that waits longer than APIFY_QUEUE_WAIT_TIMEOUT_MS ends as a retryable PROVIDER_RATE_LIMITED", async () => {
+    process.env.APIFY_MAX_CONCURRENT_RUNS = "1";
+    process.env.APIFY_QUEUE_WAIT_TIMEOUT_MS = "1000";
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const slow = apifyStub([tiktokItem]);
+      const original = slow.fetch!;
+      slow.fetch = (async (input: string | URL | Request, init?: RequestInit) => { await gate; return original(input, init); }) as typeof fetch;
+      service.apifyDeps = slow;
+      const first = service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "桜" });
+      const second = await service.search(projectId, "u1", "staff", { providerAccountId: "acct-1", platform: "tiktok", query: "寿司" });
+      expect(second).toMatchObject({ ok: false, code: "PROVIDER_RATE_LIMITED", retryable: true });
+      release();
+      expect((await first).ok).toBe(true);
+    } finally {
+      delete process.env.APIFY_MAX_CONCURRENT_RUNS;
+      delete process.env.APIFY_QUEUE_WAIT_TIMEOUT_MS;
+    }
+  }, 10_000);
 
   it("imports a TikTok candidate via api.apify.com with the server-side token, registers origin=apify with provenance", async () => {
     service.apifyDeps = apifyStub([tiktokItem]);

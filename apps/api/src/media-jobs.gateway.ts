@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy } from "@nestjs/common";
-import { MediaJobClient, MediaJobClientError, type ComposeVideoOptions, type VideoComposeJobInput, type VideoComposeResult, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
+import { isMediaQueueSplitEnabled, MediaJobClient, MediaJobClientError, type ComposeVideoOptions, type VideoComposeJobInput, type VideoComposeResult, type ClipPrepareJobInput, type ClipPrepareResult, type FrameExtractJobInput, type FrameExtractResult, type ReframeAnalyzeJobInput, type ReframeAnalyzeResult } from "@lyonix/media-jobs";
 
 /** Per-clip wait for a media-worker result (env `MEDIA_PREPARE_TIMEOUT_MS`, default 180s). */
 export const mediaPrepareTimeoutMs = (): number => {
@@ -42,7 +42,7 @@ export class MediaJobsGateway implements ClipPreparer, FrameExtractor, ReframeAn
 
   private connect(): Promise<MediaJobClient> {
     if (!this.client) {
-      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE, renderQueue: process.env.MEDIA_WORKER_RENDER_QUEUE });
+      const pending = MediaJobClient.connect({ url: process.env.RABBITMQ_URL, queue: process.env.MEDIA_WORKER_QUEUE, renderQueue: process.env.MEDIA_WORKER_RENDER_QUEUE, splitQueues: isMediaQueueSplitEnabled(process.env.MEDIA_QUEUE_SPLIT), frameQueue: process.env.MEDIA_WORKER_QUEUE_FRAME, reframeQueue: process.env.MEDIA_WORKER_QUEUE_REFRAME });
       this.client = pending;
       pending.catch(() => {
         if (this.client === pending) this.client = null; // next call retries the connection

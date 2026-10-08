@@ -112,6 +112,23 @@ export async function probeApifyAccount(accessToken: string, deps?: ApifyDeps): 
   return failFromResponse(response, accessToken);
 }
 
+/**
+ * VE2E-131: the plan's real concurrent Actor-run cap, read-only `GET /v2/users/me/limits` (`data.limits.maxConcurrentActorJobs`,
+ * Apify docs: Starter 32). Best-effort: any failure/unexpected shape returns `null` (callers then keep the env value). Never starts a run.
+ * NOT yet verified against a live account in this repo (no probe was run); the shape is read defensively.
+ */
+export async function fetchApifyConcurrencyLimit(accessToken: string, deps?: ApifyDeps): Promise<number | null> {
+  try {
+    const response = await apifyFetch(deps, "/v2/users/me/limits", accessToken);
+    if (!response.ok) return null;
+    const body = (await response.json().catch(() => null)) as { data?: { limits?: { maxConcurrentActorJobs?: unknown } } } | null;
+    const value = body?.data?.limits?.maxConcurrentActorJobs;
+    return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- pinned Actor allowlist -------------------------------------------------------------------
 
 export const apifyPlatforms = ["tiktok", "pinterest", "x", "google_image", "google_video"] as const;
@@ -727,8 +744,8 @@ export type ApifyPostFetchInput = {
 };
 
 /** Actor input for downloading exactly one post: the URL list, one result, download on. Exported for the handoff probe/tests. */
-export function buildTikTokPostInput(postUrl: string, lang: ApifyLang, postUrlField: string = APIFY_TIKTOK_POST_URL_FIELD): Record<string, unknown> {
-  return { [postUrlField]: [postUrl], resultsPerPage: 1, proxyCountryCode: countryOf(lang), shouldDownloadVideos: true, shouldDownloadCovers: true, shouldDownloadSlideshowImages: false };
+export function buildTikTokPostInput(postUrl: string | readonly string[], lang: ApifyLang, postUrlField: string = APIFY_TIKTOK_POST_URL_FIELD): Record<string, unknown> {
+  return { [postUrlField]: typeof postUrl === "string" ? [postUrl] : [...postUrl], resultsPerPage: 1, proxyCountryCode: countryOf(lang), shouldDownloadVideos: true, shouldDownloadCovers: true, shouldDownloadSlideshowImages: false };
 }
 
 /**
@@ -749,4 +766,60 @@ export async function fetchApifyTikTokPost(token: string, input: ApifyPostFetchI
   const match = results.find((r) => r.candidate.externalId === expected && r.download !== null);
   if (!match) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify post fetch returned no stored file for the requested video", false);
   return { results: [match], actor: { ...pin, role: "primary" }, runId: run.runId, primaryError: null, usage, ...(run.timedOutWithItems ? { timedOutWithItems: true } : {}) };
+}
+
+// --- VE2E-132: ONE Actor run downloading N chosen posts -------------------------------------------------------
+
+/** Max post URLs in one batch run (adapter ceiling; the service batches below this). */
+export const APIFY_MAX_BATCH_POSTS = 20;
+
+export type ApifyPostsFetchInput = {
+  posts: ReadonlyArray<{ postUrl: string; expectedVideoId: string }>;
+  lang: ApifyLang;
+  providerAccountId: string;
+  postUrlField?: string;
+  runTimeoutSecs?: number;
+  usageSink?: ApifyUsage;
+};
+export type ApifyPostFetchEntry = { ok: true; result: ApifyCandidateResult } | { ok: false; code: string; message: string };
+export type ApifyPostsFetchOutcome = {
+  /** One entry per requested video id: a missing/unstored id is an error of THAT id only. */
+  byVideoId: Map<string, ApifyPostFetchEntry>;
+  actor: { actorId: string; version: string; role: "primary" };
+  runId: string;
+  usage: ApifyUsage;
+  timedOutWithItems?: boolean;
+};
+
+/**
+ * VE2E-132: one pinned-Actor run with N `postURLs` (instead of N runs, saving N-1 Actor start-ups). Results are matched back by VIDEO ID
+ * (the dataset order/size is not trusted). A requested id without a stored file gets an error entry; the other ids still succeed. Whole-run
+ * failures (auth, run failed/timeout without items) throw like {@link fetchApifyTikTokPost}. Not probed against the real Actor yet: whether
+ * `clockworks/tiktok-scraper` takes several postURLs and the field name (`APIFY_TIKTOK_POST_URL_FIELD`) need the owner-approved probe.
+ */
+export async function fetchApifyTikTokPosts(token: string, input: ApifyPostsFetchInput, deps?: ApifyDeps): Promise<ApifyPostsFetchOutcome> {
+  const wanted = new Map<string, string>();
+  const byVideoId = new Map<string, ApifyPostFetchEntry>();
+  for (const post of input.posts) {
+    const id = post.expectedVideoId.trim();
+    const url = safeUrl(post.postUrl, ["tiktok.com"]);
+    if (!id) continue;
+    if (!url) { byVideoId.set(id, { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: "not a tiktok.com URL" }); continue; }
+    if (!wanted.has(id)) wanted.set(id, url);
+  }
+  if (wanted.size > APIFY_MAX_BATCH_POSTS) throw new ProviderError("PROVIDER_SCHEMA_INVALID", `Apify batch holds at most ${APIFY_MAX_BATCH_POSTS} posts`, false);
+  const pin = APIFY_ACTOR_ALLOWLIST.tiktok.primary;
+  const usage = input.usageSink ?? emptyApifyUsage();
+  if (wanted.size === 0) {
+    if (input.posts.length === 0 || byVideoId.size === 0) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Apify batch fetch needs tiktok.com URLs and video ids", false);
+    return { byVideoId, actor: { ...pin, role: "primary" }, runId: "", usage };
+  }
+  const field = /^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(input.postUrlField ?? "") ? input.postUrlField! : APIFY_TIKTOK_POST_URL_FIELD;
+  const run = await runActorWithRetry(token, pin, buildTikTokPostInput([...wanted.values()], input.lang, field), wanted.size, deps, { timeoutSecs: input.runTimeoutSecs ?? APIFY_DOWNLOAD_RUN_TIMEOUT_SECS, usage });
+  const results = normalizeApifyItems("tiktok", run.items, { ...pin, role: "primary", runId: run.runId }, { query: [...wanted.values()][0]!, providerAccountId: input.providerAccountId });
+  for (const id of wanted.keys()) {
+    const match = results.find((r) => r.candidate.externalId === id && r.download !== null);
+    byVideoId.set(id, match ? { ok: true, result: match } : { ok: false, code: "PROVIDER_SCHEMA_INVALID", message: "Apify batch returned no stored file for this video" });
+  }
+  return { byVideoId, actor: { ...pin, role: "primary" }, runId: run.runId, usage, ...(run.timedOutWithItems ? { timedOutWithItems: true } : {}) };
 }

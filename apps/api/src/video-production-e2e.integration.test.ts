@@ -536,11 +536,14 @@ describe("VE2E-09: Auto DAG end-to-end through real service wiring (local HTTP s
     expect(timeline).toMatchObject({ status: "approved", workflowRunId: "run-e2e", templateSnapshotId: "snap-e2e", version: 1, supersedesId: null });
     const timelineScenes = timeline.scenes as Array<Record<string, unknown>>;
     expect(timelineScenes.map((s) => s.sceneId)).toEqual(["s01", "s02"]);
-    expect(timelineScenes.map((s) => s.mediaAssetVersionId)).toEqual([...videoAssetIds]);
+    // Segments are sourced concurrently (and in parallel with TTS since VE2E-133), so asset creation order is not scene order:
+    // what matters is that each scene is bound to its own distinct video asset from the created set.
+    expect([...timelineScenes.map((s) => s.mediaAssetVersionId)].sort()).toEqual([...videoAssetIds].sort());
     expect(timelineScenes.every((s) => typeof s.audioVersionId === "string" && typeof s.subtitleVersionId === "string")).toBe(true);
     expect(timelineScenes[0]).toMatchObject({ screenTextOverride: "Messi la mot cau thu bong da noi tieng the gioi.", segmentId: "seg-1", sourceStartMs: 0 });
     // VE2E-31: each scene carries a range inside its segment source (Pexels fixture clips are 8s), sized by the real voice duration.
-    const importedVideos = fake.tables.mediaAssetVersions.filter((m) => m.kind === "video");
+    // Resolve each scene's asset through its timeline binding (asset creation order is not scene order, see above).
+    const importedVideos = timelineScenes.map((scene) => fake.tables.mediaAssetVersions.find((m) => m.id === scene.mediaAssetVersionId)!);
     for (const [index, scene] of timelineScenes.entries()) {
       const audio = fake.tables.audioVersions.find((a) => a.id === scene.audioVersionId)!;
       expect(scene.segmentId).toBe(`seg-${index + 1}`);

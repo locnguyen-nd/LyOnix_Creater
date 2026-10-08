@@ -6,8 +6,12 @@
  * - WORKFLOW_CONCURRENCY            Auto runs in flight at once (default 5, 1..64; raise only after measuring - see capacity-report)
  * - WORKFLOW_VOICE_PARALLELISM      scenes voiced in parallel inside one run (default 3, 1..8; still bounded by the elevenlabs limiter)
  * - PROVIDER_CONCURRENCY_CONTENT / _APIFY / _PEXELS / _ELEVENLABS / _CREATOMATE
- *                                   max in-flight provider calls across ALL jobs in the process (defaults 3/3/3/2/2, 1..64;
- *                                   set to the provider PLAN's own concurrency cap, never above it)
+ *                                   max in-flight provider calls across ALL jobs in the process (defaults 3/20/3/2/2, 1..64;
+ *                                   set to the provider PLAN's own concurrency cap, never above it; apify default 20 - the Starter plan allows 32 and
+ *                                   ApifyService lowers the live cap to GET /v2/users/me/limits maxConcurrentActorJobs when the API reports it)
+ * - APIFY_MAX_CONCURRENT_RUNS       Actor runs at once per project:platform inside ApifyService (default 10, 1..64); extra searches WAIT (FIFO)
+ * - APIFY_QUEUE_WAIT_TIMEOUT_MS     how long an Apify call may wait for a slot (per-project queue and the shared "apify" limiter) before
+ *                                   a retryable PROVIDER_RATE_LIMITED (default 900000 = 15 min, 1000..3600000)
  * - PROVIDER_LIMIT_WAIT_TIMEOUT_MS  max wait in the FIFO queue / cooldown before PROVIDER_RATE_LIMITED (default 120000, 1000..1800000)
  *
  * Honest limit: Creatomate's concurrent-render cap belongs to the account plan; PROVIDER_CONCURRENCY_CREATOMATE only queues on
@@ -21,10 +25,12 @@ export const MAX_WORKFLOW_CONCURRENCY = 64;
 export const DEFAULT_VOICE_PARALLELISM = 3;
 export const MAX_VOICE_PARALLELISM = 8;
 export const DEFAULT_PROVIDER_WAIT_TIMEOUT_MS = 120_000;
+export const DEFAULT_APIFY_MAX_CONCURRENT_RUNS = 10;
+export const DEFAULT_APIFY_QUEUE_WAIT_TIMEOUT_MS = 15 * 60_000;
 
 export const DEFAULT_PROVIDER_LIMITS: Readonly<Record<ProviderLimiterKey, number>> = {
   content: 3,
-  apify: 3,
+  apify: 20,
   pexels: 3,
   elevenlabs: 2,
   creatomate: 2,
@@ -36,6 +42,9 @@ export type ConcurrencyConfig = {
   voiceParallelism: number;
   providerLimits: Record<ProviderLimiterKey, number>;
   providerWaitTimeoutMs: number;
+  /** Per project:platform Actor runs in flight (ApifyService). */
+  apifyMaxConcurrentRuns: number;
+  apifyQueueWaitTimeoutMs: number;
   warnings: string[];
 };
 
@@ -63,6 +72,8 @@ export const resolveConcurrencyConfig = (env: Env = process.env): ConcurrencyCon
     voiceParallelism: readInt(env, "WORKFLOW_VOICE_PARALLELISM", DEFAULT_VOICE_PARALLELISM, 1, MAX_VOICE_PARALLELISM, warnings),
     providerLimits,
     providerWaitTimeoutMs: readInt(env, "PROVIDER_LIMIT_WAIT_TIMEOUT_MS", DEFAULT_PROVIDER_WAIT_TIMEOUT_MS, 1_000, 30 * 60_000, warnings),
+    apifyMaxConcurrentRuns: readInt(env, "APIFY_MAX_CONCURRENT_RUNS", DEFAULT_APIFY_MAX_CONCURRENT_RUNS, 1, MAX_PROVIDER_LIMIT, warnings),
+    apifyQueueWaitTimeoutMs: readInt(env, "APIFY_QUEUE_WAIT_TIMEOUT_MS", DEFAULT_APIFY_QUEUE_WAIT_TIMEOUT_MS, 1_000, 60 * 60_000, warnings),
     warnings,
   };
 };
@@ -71,7 +82,15 @@ export const resolveConcurrencyConfig = (env: Env = process.env): ConcurrencyCon
 export const resolveWorkflowConcurrency = (env: Env = process.env): number => resolveConcurrencyConfig(env).workflow;
 
 export const createProviderLimiter = (config: ConcurrencyConfig = resolveConcurrencyConfig()): ProviderLimiter =>
-  new ProviderLimiter({ limits: config.providerLimits, waitTimeoutMs: config.providerWaitTimeoutMs, maxCooldownPauseMs: Math.min(30_000, config.providerWaitTimeoutMs) });
+  new ProviderLimiter({
+    limits: config.providerLimits,
+    waitTimeoutMs: config.providerWaitTimeoutMs,
+    // VE2E-131: Apify queues for minutes (not an error) and ApifyService holds a slot per Actor call; an outer caller that still wraps a
+    // whole flow in run("apify") reuses its slot instead of deadlocking the inner per-call limiter.
+    waitTimeoutMsByKey: { apify: Math.max(config.providerWaitTimeoutMs, config.apifyQueueWaitTimeoutMs) },
+    reentrantKeys: ["apify"],
+    maxCooldownPauseMs: Math.min(30_000, config.providerWaitTimeoutMs),
+  });
 
 let shared: ProviderLimiter | null = null;
 /** Process-wide limiter: every job of this process queues behind the same per-provider semaphores. */

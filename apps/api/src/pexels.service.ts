@@ -401,7 +401,9 @@ export class PexelsService {
     // video search returns no descriptive text at all, and real per-frame verification needs
     // media-worker frame extraction that does not exist yet (see requireVerifiedSemanticSignal's
     // own doc comment in media-ranking.ts) - so it keeps its prior (pre-VE2E-15a-hardening) behavior.
-    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: true });
+    // VE2E-131: Auto drops the verified-signal gate when vision produced no verdict at all (quota/timeout/no account); Studio keeps it.
+    const visionRan = pool.some((candidate) => candidate.moderationDecision !== null);
+    const decision = decideMediaSelection(ranked, { requireVerifiedSemanticSignal: !(input.visionBudget?.unattended && !visionRan) });
     if (decision.decision === "needs_input") {
       if (decision.reason === "no_candidates") {
         // Unreachable in practice (guarded by the `pool.length === 0` check above) - kept only so this switch stays exhaustive if the guard above is ever refactored away.

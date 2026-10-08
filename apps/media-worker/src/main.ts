@@ -104,13 +104,13 @@ const bootstrap = async () => {
   let stopping = false;
   let connection: MediaJobBrokerConnection | null = null;
   let renderConnection: MediaJobBrokerConnection | null = null;
-  let consumer: ConsumerHandle | null = null;
+  let consumers: ConsumerHandle[] = [];
   let renderConsumer: ConsumerHandle | null = null;
   let wake: (() => void) | null = null;
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    consumer?.stop();
+    for (const c of consumers) c.stop();
     renderConsumer?.stop();
     wake?.();
   };
@@ -146,17 +146,28 @@ const bootstrap = async () => {
       connection!.onClose(onClose);
       renderConnection!.onClose(onClose);
     });
-    consumer = await startClipPrepareConsumer({ channel: connection.channel, queue: cfg.queue, prefetch: cfg.prefetch, processor, frameProcessor, reframeProcessor, log });
-    renderConsumer = await startComposeConsumer({ channel: renderConnection.channel, queue: composeCfg.queue, prefetch: composeCfg.prefetch, processor: composeProcessor, log });
-    log(`ready on queues ${cfg.queue} + ${composeCfg.queue} (${brokerLabel}); prefetch=${cfg.prefetch}/${composeCfg.prefetch} ffmpegThreads=${cfg.ffmpegThreads}; FFmpeg runs here only`);
+    // VE2E-134: one consumer (own prefetch) per queue on the shared channel (RabbitMQ prefetch is per consumer). The legacy queue also
+    // serves every job type, so messages from an old API / before MEDIA_QUEUE_SPLIT are still processed; the split queues isolate frame/reframe.
+    const shared = { channel: connection.channel, processor, frameProcessor, reframeProcessor, log };
+    consumers = [
+      await startClipPrepareConsumer({ ...shared, queue: cfg.queues.clipPrepare, prefetch: cfg.prefetchByType.clipPrepare }),
+      await startClipPrepareConsumer({ ...shared, queue: cfg.queues.frameExtract, prefetch: cfg.prefetchByType.frameExtract }),
+      await startClipPrepareConsumer({ ...shared, queue: cfg.queues.reframeAnalyze, prefetch: cfg.prefetchByType.reframeAnalyze }),
+    ];
+    const composePrefetch = cfg.prefetchByType.compose ?? composeCfg.prefetch;
+    renderConsumer = await startComposeConsumer({ channel: renderConnection.channel, queue: composeCfg.queue, prefetch: composePrefetch, processor: composeProcessor, log });
+    log(
+      `ready on queues ${cfg.queues.clipPrepare}(legacy, all types) + ${cfg.queues.frameExtract} + ${cfg.queues.reframeAnalyze} + ${composeCfg.queue} (${brokerLabel}); ` +
+        `prefetch clip=${cfg.prefetchByType.clipPrepare} frame=${cfg.prefetchByType.frameExtract} reframe=${cfg.prefetchByType.reframeAnalyze} compose=${composePrefetch} ffmpegThreads=${cfg.ffmpegThreads}; FFmpeg runs here only`,
+    );
     await Promise.race([closed, new Promise<void>((r) => { wake = r; })]);
     if (stopping) {
-      await Promise.all([consumer.drain(), renderConsumer.drain()]);
+      await Promise.all([...consumers.map((c) => c.drain()), renderConsumer.drain()]);
       await Promise.all([connection.close(), renderConnection.close()]);
     } else {
       await Promise.allSettled([connection.close(), renderConnection.close()]);
     }
-    consumer = null;
+    consumers = [];
     renderConsumer = null;
   }
   await detector.close();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProviderError } from "./index.js";
-import { MAX_MODERATION_FRAMES, moderateMediaWithVision, moderateSceneCandidate } from "./vision-moderation.js";
+import { MAX_MODERATION_FRAMES, moderateMediaWithVision, moderateSceneCandidate, moderateSceneCandidatesBatch } from "./vision-moderation.js";
 import { probeVisionCapability } from "./vision-probe.js";
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -144,5 +144,30 @@ describe("moderateSceneCandidate (capability-checked, always-fail-closed orchest
     });
     expect(outcome.evidenceRefs.some((ref) => ref.includes("SECRETFRAMEDATA"))).toBe(false);
     expect(outcome.evidenceRefs).toContain("frame_ts_ms:1200");
+  });
+});
+
+describe("VE2E-131 batch + deadline", () => {
+  const verdict = (over: Record<string, unknown> = {}) => ({ safety_flag: false, safety_categories: [], scene_beat_relevance: 0.8, confidence: 0.9, notes: "n", ...over });
+  const items = ["a", "b", "c"].map((id) => ({ id, frame: { mimeType: "image/jpeg", base64: "AAAA" } }));
+
+  it("judges several covers in one request and maps verdicts by index (missing index stays absent)", async () => {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(okBody({ items: [{ index: 1, ...verdict() }, { index: 3, ...verdict({ safety_flag: true }) }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await moderateSceneCandidatesBatch({ kind: "gemini", apiKey: "k", modelId: "gemini-2.5-flash-lite", sceneContext, items, capabilityEvidence: { verifiedAt: new Date().toISOString() } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)).contents[0].parts.filter((p: Record<string, unknown>) => p.inline_data || p.inlineData)).toHaveLength(3);
+    expect([...out.verdicts.keys()]).toEqual(["a", "c"]);
+    expect(out.verdicts.get("c")?.safetyFlag).toBe(true);
+    expect(out.failureCode).toBeUndefined();
+  });
+
+  it("a call slower than the deadline resolves to PROVIDER_TIMEOUT without throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
+    const out = await moderateSceneCandidatesBatch({ kind: "gemini", apiKey: "k", modelId: "m", sceneContext, items, capabilityEvidence: { verifiedAt: new Date().toISOString() }, timeoutMs: 30 });
+    expect(out.failureCode).toBe("PROVIDER_TIMEOUT");
+    expect(out.verdicts.size).toBe(0);
+    const single = await moderateSceneCandidate({ kind: "gemini", apiKey: "k", modelId: "m", operation: "image_moderation", sceneContext, frames: [items[0]!.frame], capabilityEvidence: { verifiedAt: new Date().toISOString() }, timeoutMs: 30 });
+    expect(single).toMatchObject({ raw: null, failureCode: "PROVIDER_TIMEOUT" });
   });
 });

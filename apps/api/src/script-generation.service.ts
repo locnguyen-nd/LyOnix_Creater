@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import {
   ProviderError,
   extractSegmentKeywords,
+  type VideoSubjectV2,
   generateScriptDraftV2,
   isContentLanguageV2,
   isLiveContentKind,
@@ -34,7 +35,7 @@ export type GenerateScriptDraftOutcome =
 export type SegmentKeywordsOutcome =
   | {
       ok: true;
-      keywords: Record<string, { ja: string; en: string }>;
+      keywords: Record<string, { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string }>;
       rejectedSegmentIds: string[];
       usage: { inputTokens: number | null; outputTokens: number | null; costAmount: string | null; costCurrency: string | null; providerRequestId: string | null };
       modelId: string;
@@ -159,7 +160,7 @@ export class ScriptGenerationService {
   async extractSegmentKeywords(
     userId: string,
     role: "admin" | "staff",
-    input: { providerAccountId: string; language: string; title?: string; segments: Array<{ segmentId: string; narration: string }> },
+    input: { providerAccountId: string; language: string; title?: string; /** VE2E-88: video main subject (name or `visualPlan.videoSubject`) so extracted keywords stay on-subject. */ subject?: VideoSubjectV2 | string | null; segments: Array<{ segmentId: string; narration: string }> },
   ): Promise<SegmentKeywordsOutcome> {
     if (input.segments.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Không có segment nào để trích từ khóa" };
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role, input.providerAccountId);
@@ -181,7 +182,7 @@ export class ScriptGenerationService {
       if (models.length === 0) continue;
       const apiKey = decryptSecret(account.encryptedSecret);
       const provider = account.provider;
-      const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => extractSegmentKeywords(provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), segments: input.segments }));
+      const result = await callContentWithModelFailover(this.providerAccounts, account.id, models, (modelId) => extractSegmentKeywords(provider, apiKey, modelId, { language: input.language, ...(input.title ? { title: input.title } : {}), ...(input.subject ? { subject: input.subject } : {}), segments: input.segments }));
       limited.push(...result.limited);
       if (result.ok) {
         const value = result.value;

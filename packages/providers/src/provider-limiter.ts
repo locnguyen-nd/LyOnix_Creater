@@ -9,6 +9,7 @@
  * This is a per-process guard (api worker / one process). It does not replace the Postgres-shared account gates
  * (`acquireContentRequestSlot`); it sits in front of them so waiting is cheap and ordered.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { ProviderError } from "./index.js";
 
 export type ProviderLimiterKey = "content" | "apify" | "pexels" | "elevenlabs" | "creatomate";
@@ -20,6 +21,13 @@ export type ProviderLimiterOptions = {
   defaultMaxInFlight?: number;
   /** Max time a caller waits (queue + cooldown) before PROVIDER_RATE_LIMITED. */
   waitTimeoutMs?: number;
+  /** VE2E-131: per-key override of `waitTimeoutMs` (e.g. Apify queues for minutes instead of failing after 2). */
+  waitTimeoutMsByKey?: Readonly<Record<string, number>>;
+  /**
+   * VE2E-131: keys whose `run` is re-entrant. A nested `run(key)` made while the same async chain already holds a slot of `key`
+   * reuses that slot instead of queueing again (an outer caller wrapping a whole flow cannot deadlock the inner per-call limiter).
+   */
+  reentrantKeys?: readonly string[];
   /** Longest pause honoured after a provider 429 (longer retry-after values only pause this long). */
   maxCooldownPauseMs?: number;
   /** Optional external cooldown (ms remaining, 0/null when none) for a key, e.g. DB account/model cooldown from VE2E-56. */
@@ -45,6 +53,7 @@ export class ProviderLimiter {
   private readonly waitTimeoutMs: number;
   private readonly maxCooldownPauseMs: number;
   private readonly now: () => number;
+  private readonly held = new AsyncLocalStorage<ReadonlySet<string>>();
 
   constructor(private readonly options: ProviderLimiterOptions = {}) {
     this.defaultMax = clampLimit(options.defaultMaxInFlight, 2);
@@ -52,6 +61,11 @@ export class ProviderLimiter {
     this.waitTimeoutMs = Math.max(1, options.waitTimeoutMs ?? 120_000);
     this.maxCooldownPauseMs = Math.max(0, options.maxCooldownPauseMs ?? 30_000);
     this.now = options.now ?? Date.now;
+  }
+
+  /** VE2E-131: change the cap of one key at runtime (e.g. lowered to the Apify plan's real concurrency). Raising only affects later arrivals. */
+  setLimit(key: string, limit: number): void {
+    this.limits[key] = clampLimit(limit, this.limitFor(key));
   }
 
   limitFor(key: string): number {
@@ -70,9 +84,11 @@ export class ProviderLimiter {
   }
 
   async run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const heldNow = this.held.getStore();
+    if (heldNow?.has(key) && this.options.reentrantKeys?.includes(key)) return fn();
     await this.acquire(key);
     try {
-      return await fn();
+      return await this.held.run(new Set([...(heldNow ?? []), key]), fn);
     } catch (error) {
       if (error instanceof ProviderError && (error.code === "PROVIDER_RATE_LIMITED" || error.code === "PROVIDER_QUOTA_EXHAUSTED") && error.retryAfterMs) {
         this.noteCooldown(key, error.retryAfterMs);
@@ -103,7 +119,7 @@ export class ProviderLimiter {
   }
 
   private async acquire(key: string): Promise<void> {
-    const deadline = this.now() + this.waitTimeoutMs;
+    const deadline = this.now() + (this.options.waitTimeoutMsByKey?.[key] ?? this.waitTimeoutMs);
     // 1) Honour a cooldown window first (bounded by the wait timeout; a longer cooldown fails fast with its remaining time).
     for (;;) {
       const remaining = this.cooldownRemaining(key);

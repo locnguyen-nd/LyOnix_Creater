@@ -133,11 +133,15 @@ export type ScriptVisualSegmentResponse = {
   sceneIds: string[];
   subject: string;
   priority: number;
-  keywords: { ja: string; en: string };
+  /** VE2E-88: `ja`/`en` = first phrase (unchanged); the rest is additive and optional. `moodEn` = generic backdrop for L5/L6 only, never for finding the main clip. */
+  keywords: { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string };
   styleHints: { setting: string; timeOfDay: string; lighting: string; palette: string };
 };
 
-export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[] };
+/** VE2E-88 (additive): the video's main subject + aliases + anchor/exclude terms; absent for plans stored before VE2E-88. */
+export type ScriptVisualSubjectResponse = { main: string; aliases: string[]; mustInclude: string[]; mustExclude: string[] };
+
+export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[]; videoSubject?: ScriptVisualSubjectResponse };
 
 export type ScriptDraftV2Response = {
   schemaVersion: "script-draft.v2";
@@ -157,7 +161,7 @@ export type ScriptDraftV2GenerationResponse = {
   draft: ScriptDraftV2Response;
   /** VE2E-50 (optional, additive): why the visualPlan is missing/invalid and whether the strict schema was rejected; consumed by the Auto runner diagnostics only. */
   diagnostics?: {
-    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[] };
+    visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[]; /** VE2E-88: neither ja nor en usable (needs extract_keywords). */ unusableSegmentIds?: string[] };
     schemaRejection: string | null;
     repaired: boolean;
   };
@@ -803,6 +807,15 @@ export type MediaPlanRequest = {
   backgroundSegments?: BackgroundSegmentsSetting;
 };
 
+/** VE2E-85: pre-render quality gate result stored as the `quality_gate` StepRun outputRef. */
+export type QualityGateDiagnostics = {
+  checks: Array<{ name: string; status: "ok" | "fixed" | "warning" | "failed"; detail?: string }>;
+  fixes: Array<Record<string, unknown>>;
+  warnings: Array<{ code: string; sceneId?: string; detail: string }>;
+  degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
+  failure: { code: string; sceneId: string; reason: string } | null;
+};
+
 /** VE2E-54: total-duration check stored as the `duration_budget` StepRun outputRef. */
 export type DurationBudgetDiagnostics = {
   targetSec: number;
@@ -847,6 +860,22 @@ export type MediaPlanSegmentDiagnostics = {
   apifyQuality?: MediaPlanApifyQuality | null;
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
+  /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
+  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library";
+  /** VE2E-135 (L0): match score (0..1) of the prepared-library clip when `sourceTier` is `library`. */
+  libraryScore?: number;
+  /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */
+  qualityDegraded?: boolean;
+  /** VE2E-130: which degraded level was used (`reuse_window` = L4, `stock_image` = L5, `brand_background` = L6). */
+  degradedTier?: "reuse_window" | "stock_image" | "brand_background";
+  /** VE2E-130: the source is a generated placeholder (flat brand background), not footage. */
+  placeholder?: boolean;
+  /** VE2E-130 (L5): slow zoom/pan for a still image, applied by the render/media-worker (never FFmpeg in the API). */
+  kenBurns?: { zoomFrom: number; zoomTo: number; fromX: number; fromY: number; toX: number; toY: number; durationMs: number } | null;
+  /** VE2E-130 (L4): the window of the reused clip this segment uses (ms in the clip's own timeline). */
+  reusedWindow?: { startMs: number; durationMs: number } | null;
+  /** VE2E-130: why the primary tiers (L0-L3) produced no source before the ladder degraded (per tier, e.g. `ja:apify_no_usable_candidate`). */
+  degradeReason?: string | null;
 };
 
 /** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
@@ -954,6 +983,8 @@ export type VideoProductionResponse = {
   visionUsage?: MediaPlanVisionUsage | null;
   /** VE2E-54: intake target vs real total scene voice duration; `null` before the voice step finished. */
   durationBudget: DurationBudgetDiagnostics | null;
+  /** VE2E-85: pre-render quality gate result (`quality_gate` StepRun outputRef); `null` before the gate ran or when QUALITY_GATE is off. */
+  qualityGate?: QualityGateDiagnostics | null;
   /** VE2E-62: workflow queue state (`queuePosition` is set only while the run is `draft`, i.e. waiting for a worker slot). */
   queue: QueueStateFields;
   createdAt: string;
