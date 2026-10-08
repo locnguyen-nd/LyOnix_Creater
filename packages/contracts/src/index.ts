@@ -182,7 +182,8 @@ export const mediaAssetKinds = ["image", "video", "audio", "document"] as const;
 export type MediaAssetKind = (typeof mediaAssetKinds)[number];
 
 /** `apify` (VE2E-42, DEC-2026-09-29-JP-ONESHOT-MEDIA): social media fetched through an allowlisted Apify Actor - the adapter/registration path is VE2E-34; only the origin value exists here. */
-export const mediaOrigins = ["upload", "import_url", "generated", "pexels", "apify"] as const;
+/** `social` (VE2E-147/148, DEC-2026-10-08-SOCIAL-FETCH-OSS): found AND downloaded with yt-dlp / gallery-dl (YouTube Shorts, Pinterest, X); server-set only. */
+export const mediaOrigins = ["upload", "import_url", "generated", "pexels", "apify", "social"] as const;
 export type MediaOrigin = (typeof mediaOrigins)[number];
 
 export const retentionClasses = ["project", "working"] as const;
@@ -854,7 +855,7 @@ export type MediaPlanSegmentDiagnostics = {
   /** VE2E-53: ms of voice covered by the chosen source window (only set for apify sources). */
   coveredMs?: number;
   /** VE2E-46: where the segment's source came from (`null`/absent when sourcing failed). */
-  sourceProvider?: "apify" | "pexels" | null;
+  sourceProvider?: "apify" | "pexels" | "social" | null;
   /** VE2E-46: why Apify was skipped/not used before falling back to Pexels (e.g. `apify_no_usable_candidate`, `apify_error:PROVIDER_TIMEOUT`, `no_ja_keywords`); `null` when Apify was not involved or succeeded. */
   fallbackReason?: string | null;
   /** VE2E-46: audit trail of an Apify-sourced segment (also stored on the imported asset). */
@@ -864,7 +865,7 @@ export type MediaPlanSegmentDiagnostics = {
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
-  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library";
+  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
   /** VE2E-135 (L0): match score (0..1) of the prepared-library clip when `sourceTier` is `library`. */
   libraryScore?: number;
   /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */

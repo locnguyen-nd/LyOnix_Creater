@@ -71,6 +71,8 @@ enum MediaOrigin {
   pexels
   /// VE2E-42 (DEC-2026-09-29-JP-ONESHOT-MEDIA): social media via an allowlisted Apify Actor; adapter is VE2E-34.
   apify
+  /// VE2E-147/148 (DEC-2026-10-08-SOCIAL-FETCH-OSS): social media found AND downloaded with yt-dlp / gallery-dl (YouTube Shorts, Pinterest, X).
+  social
 }
 
 enum RetentionClass {

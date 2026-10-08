@@ -72,7 +72,7 @@ describe("SocialCookiesService pool (VE2E-145)", () => {
 
   it("queries only usable accounts of the platform, rotates least recently used first", async () => {
     rows.forEach((r) => (r.encryptedSecret = encryptSecret(`# Netscape HTTP Cookie File\n${line(".tiktok.com", future)}\n`)));
-    const findMany = vi.fn(async () => rows);
+    const findMany = vi.fn(async (_args?: any) => rows);
     const service = new SocialCookiesService({ providerAccount: { findMany } } as any);
     const first = await service.candidates("tiktok", "u1", "staff");
     expect(findMany.mock.calls[0]![0]).toMatchObject({ where: { provider: "social_cookies", model: "tiktok", status: "verified", enabled: true, deletedAt: null } });
@@ -94,7 +94,7 @@ describe("SocialCookiesService pool (VE2E-145)", () => {
   });
 
   it("reportOutcome: invalid -> failed, bot check / 429 -> cool-down, success -> no write", async () => {
-    const updateMany = vi.fn(async () => ({ count: 1 }));
+    const updateMany = vi.fn(async (_args?: any) => ({ count: 1 }));
     const service = new SocialCookiesService({ providerAccount: { updateMany } } as any);
     const now = new Date("2026-10-08T00:00:00Z");
     expect(await service.reportOutcome("a", "FETCH_COOKIES_INVALID", now)).toBe("failed");

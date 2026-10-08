@@ -72,6 +72,8 @@ import { ScriptGenerationService } from "./script-generation.service.js";
 import { ApifyJobContext, ApifyService } from "./apify.service.js";
 import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
+import { socialFetchEnabled } from "./social-fetch.service.js";
+import { SocialSourceService, socialLedgerIdFromFileName } from "./social-source.service.js";
 import { PrismaService } from "./prisma.service.js";
 
 export type MediaPlanOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; /** VE2E-130: per-tier reasons the primary sourcing found nothing (feeds the degraded ladder). */ reasons?: string };
@@ -101,7 +103,7 @@ export type SegmentSource = {
   externalId: string | null;
   sourcing: "reused" | "imported";
   /** VE2E-46: which provider produced the source (reused assets are classified by their stored `origin`). */
-  provider?: "apify" | "pexels";
+  provider?: "apify" | "pexels" | "social";
   /** VE2E-46: recorded when Apify was tried/skipped and the source came from the Pexels fallback. */
   fallbackReason?: string | null;
   apifyProvenance?: MediaPlanSegmentDiagnostics["apifyProvenance"];
@@ -110,7 +112,7 @@ export type SegmentSource = {
   /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: search tier that produced this (non-degraded) source. */
-  tier?: "ja" | "en" | "broad" | "pexels" | "library";
+  tier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
   /** VE2E-135 (L0): match score of a prepared-library clip (`tier: "library"`). */
   libraryScore?: number;
   /** VE2E-130: ladder level L4-L6 (flagged `quality_degraded`); absent = a normal source. */
@@ -127,7 +129,7 @@ export type SegmentSource = {
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
 
-const plainExternalId = (id: string) => (id.startsWith("apify:") ? id.split(":").slice(2).join(":") : id);
+const plainExternalId = (id: string) => (id.startsWith("apify:") || id.startsWith("social:") ? id.split(":").slice(2).join(":") : id);
 
 /** Tracks what earlier segments of one plan already used - a new segment must never pick any of these. */
 export class SegmentSourceLedger {
@@ -144,7 +146,7 @@ export class SegmentSourceLedger {
   kenBurnsCount = 0;
   /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
   readonly authors = new Set<string>();
-  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | undefined; windows: ClipWindow[] }>();
+  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[] }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
     if (source.apifyProvenance?.author) this.authors.add(source.apifyProvenance.author);
@@ -164,7 +166,7 @@ export class SegmentSourceLedger {
 /** VE2E-51: at most this many segments are sourced at once. */
 export const MEDIA_PLAN_SOURCING_CONCURRENCY = 3;
 /** Window guards per provider: social (Apify) clips skip the author's intro/outro, stock (Pexels) clips are used from the first frame to the last. */
-const windowOptionsFor = (provider: string | undefined) => (provider === "apify" ? socialWindowOptionsFromEnv() : { startGuardMs: 0, endGuardMs: 0 });
+const windowOptionsFor = (provider: string | undefined) => (provider === "apify" || provider === "social" ? socialWindowOptionsFromEnv() : { startGuardMs: 0, endGuardMs: 0 });
 /** VE2E-53: how many times a segment may be split to source the scenes a short social clip cannot cover. */
 const MAX_SECOND_SOURCE_SPLITS = 2;
 
@@ -281,6 +283,8 @@ export class MediaPlanService {
     @Optional() @Inject(MediaService) private readonly media?: MediaService,
     /** VE2E-135: prepared media library (ladder L0 + tags on import). Absent = no L0, unchanged behaviour. */
     @Optional() @Inject(MediaLibraryService) private readonly library?: MediaLibraryService,
+    /** VE2E-147/148: yt-dlp / gallery-dl tiers (YouTube Shorts, Pinterest/X). Absent or switched off (env) = unchanged ladder. */
+    @Optional() @Inject(SocialSourceService) private readonly social?: SocialSourceService,
   ) {}
 
   /**
@@ -367,9 +371,9 @@ export class MediaPlanService {
       orderBy: { createdAt: "desc" },
     });
     if (!row || (row.kind !== "video" && row.kind !== "image")) return null;
-    const externalId = pexelsExternalIdFromFileName(row.originalFileName) ?? apifyLedgerIdFromFileName(row.originalFileName);
+    const externalId = pexelsExternalIdFromFileName(row.originalFileName) ?? apifyLedgerIdFromFileName(row.originalFileName) ?? socialLedgerIdFromFileName(row.originalFileName);
     if (ledger.assetIds.has(row.id) || (externalId && ledger.externalIds.has(externalId))) return null;
-    return { mediaAssetVersionId: row.id, kind: row.kind, durationMs: row.durationMs, externalId, sourcing: "reused", ...(row.origin === "apify" ? { provider: "apify" as const } : {}) };
+    return { mediaAssetVersionId: row.id, kind: row.kind, durationMs: row.durationMs, externalId, sourcing: "reused", ...(row.origin === "apify" ? { provider: "apify" as const } : row.origin === "social" ? { provider: "social" as const } : {}) };
   }
 
   /**
@@ -489,6 +493,53 @@ export class MediaPlanService {
   }
 
   /**
+   * VE2E-147/148: an open-source social tier. `shorts` = YouTube Shorts (yt-dlp search + download) for video slots, `gallery` =
+   * Pinterest (or X) via gallery-dl for image slots. Same ledger rules as the Apify tiers (live claim set, never a used asset/id).
+   */
+  private async socialTier(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { segment: PlannedSegment; ledger: SegmentSourceLedger; tier: "shorts" | "gallery"; queries: string[] },
+  ): Promise<{ source: SegmentSource } | { reason: string }> {
+    try {
+      const mediaType = input.tier === "gallery" ? "image" : "video";
+      const galleryPlatform = (process.env.MEDIA_GALLERY_PLATFORM ?? "").trim().toLowerCase() === "x" ? "x" : "pinterest";
+      const keywords = parseSegmentKeywords(input.segment.keywords);
+      const attempt = await this.social!.autoImportForSegment(projectId, userId, role, {
+        platform: input.tier === "shorts" ? "youtube" : galleryPlatform,
+        tool: input.tier === "shorts" ? "yt-dlp" : "gallery-dl",
+        queries: input.queries,
+        mediaType,
+        segmentDurationSeconds: input.segment.durationMs / 1000,
+        usedExternalIds: input.ledger.apifyPlainIds,
+        subjectAliases: subjectNames(subjectProfileOf(input.segment)),
+        keywords: [...keywords.ja, ...keywords.en],
+        sceneId: input.segment.sceneIds[0]!,
+      });
+      if (!attempt.ok) return { reason: attempt.reason };
+      const asset = attempt.data.asset;
+      if (input.ledger.assetIds.has(asset.id) || input.ledger.externalIds.has(attempt.data.ledgerId)) {
+        if (!input.ledger.externalIds.has(attempt.data.ledgerId)) input.ledger.apifyPlainIds.delete(attempt.data.externalId);
+        return { reason: "social_duplicate_source" };
+      }
+      return {
+        source: {
+          mediaAssetVersionId: asset.id,
+          kind: asset.kind,
+          durationMs: asset.durationMs,
+          externalId: attempt.data.ledgerId,
+          sourcing: attempt.data.reused ? "reused" : "imported",
+          provider: "social",
+          tier: input.tier,
+        },
+      };
+    } catch {
+      return { reason: "social_error:unexpected" };
+    }
+  }
+
+  /**
    * The Pexels stock tier. No per-plan mutex (VE2E-130): the chosen id is claimed in the live ledger set in the same tick it is known
    * (no await between the check and the claim), and a clash with a segment that claimed it first retries once with that id excluded.
    */
@@ -556,10 +607,10 @@ export class MediaPlanService {
     const tierKeywords = this.apify ? subjectTierKeywords(input.segment.keywords, subjectProfileOf(input.segment), isValidJaSearchKeyword, input.segment.subject) : [];
     // The Apify account is only looked up when at least one tier has a keyword to search.
     const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
-    const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels", string>> = {};
+    const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels" | "shorts" | "gallery", string>> = {};
     const qualities: Partial<Record<"ja" | "en" | "broad", MediaPlanApifyQuality | null>> = {};
     const settled = new Set<string>();
-    const tiers: Array<{ name: "ja" | "en" | "broad" | "pexels"; run: () => Promise<SegmentSource | null> }> = [];
+    const tiers: Array<{ name: "ja" | "en" | "broad" | "pexels" | "shorts" | "gallery"; run: () => Promise<SegmentSource | null> }> = [];
     const holder: { pexelsFailure: MediaPlanOutcome<SegmentSource> | null } = { pexelsFailure: null };
     if (this.apify) {
       if (!tierKeywords.some((entry) => entry.tier === "ja")) reasons.ja = "no_ja_keywords";
@@ -577,6 +628,28 @@ export class MediaPlanService {
             },
           });
         }
+      }
+    }
+    // VE2E-147/148: open-source social tiers, priority ja > en > shorts > broad > gallery > Pexels (index order = race priority).
+    if (this.social) {
+      const subjectKeywords = subjectTierKeywords(input.segment.keywords, subjectProfileOf(input.segment), isValidJaSearchKeyword, input.segment.subject);
+      const queries = [...subjectKeywords.filter((k) => k.tier === "ja"), ...subjectKeywords.filter((k) => k.tier === "en")].map((k) => k.keyword);
+      const visualKind = segmentVisualKind(input.segment);
+      const want: "shorts" | "gallery" | null = visualKind === "image" ? (socialFetchEnabled("gallery") ? "gallery" : null) : socialFetchEnabled("youtube_shorts") ? "shorts" : null;
+      if (want && queries.length === 0) reasons[want] = "no_keywords";
+      else if (want) {
+        const entry = {
+          name: want,
+          run: async () => {
+            const attempt = await this.socialTier(projectId, userId, role, { segment: input.segment, ledger: input.ledger, tier: want, queries });
+            if ("source" in attempt) return attempt.source;
+            reasons[want] = attempt.reason;
+            return null;
+          },
+        };
+        const before = tiers.findIndex((tier) => (want === "shorts" ? tier.name === "broad" : false));
+        if (before >= 0) tiers.splice(before, 0, entry);
+        else tiers.push(entry);
       }
     }
     if (pexelsAccountId) {
@@ -604,7 +677,7 @@ export class MediaPlanService {
       (_index, source) => input.ledger.release(source.externalId ? plainExternalId(source.externalId) : null),
     );
     for (const tier of tiers) if (!settled.has(tier.name)) reasons[tier.name] = "segment_deadline";
-    const reasonText = (["ja", "en", "broad", "pexels"] as const).filter((name) => reasons[name]).map((name) => `${name}:${reasons[name]}`).join("; ");
+    const reasonText = (["ja", "en", "shorts", "broad", "gallery", "pexels"] as const).filter((name) => reasons[name]).map((name) => `${name}:${reasons[name]}`).join("; ");
     if (winner) {
       const source = winner.value;
       await this.tagImportedSource(input.segment, source);

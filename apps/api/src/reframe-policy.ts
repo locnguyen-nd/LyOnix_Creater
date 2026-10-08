@@ -19,7 +19,8 @@ export type ReframePolicy = {
   analyzeTimeoutMs: number;
 };
 
-export const DEFAULT_REFRAME_ENABLED_ORIGINS = "apify";
+/** Social footage (Apify-imported and VE2E-147/148 yt-dlp / gallery-dl) carries watermarks / burned-in text: reframe it by default. */
+export const DEFAULT_REFRAME_ENABLED_ORIGINS = "apify,social";
 const ORIGIN_RE = /^[a-z0-9_-]{1,32}$/;
 
 const flag = (raw: string | undefined, fallback: boolean): boolean => {

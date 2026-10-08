@@ -103,9 +103,9 @@ const videoRequest = (parent: StoredAsset, sceneId = "s1") => ({ sceneId, parent
 const imageRequest = (parent: StoredAsset, sceneId = "s1") => ({ sceneId, parentMediaAssetVersionId: parent.id, startMs: 0, durationMs: 0, stripAudio: true, mediaKind: "image" as const });
 
 describe("reframePolicyFromEnv", () => {
-  it("defaults: on, apify only, legacy fallback + auto swap on", () => {
+  it("defaults: on, social origins only (apify + VE2E-147 social), legacy fallback + auto swap on", () => {
     const policy = reframePolicyFromEnv({});
-    expect([...policy.enabledOrigins]).toEqual(["apify"]);
+    expect([...policy.enabledOrigins]).toEqual(["apify", "social"]);
     expect(policy).toMatchObject({ enabled: true, legacyFallback: true, autoSwapOnOverlay: true, analyzeTimeoutMs: 180_000 });
   });
   it("parses origin lists, all/none, kill switch and bad values", () => {

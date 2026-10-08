@@ -382,3 +382,4 @@ export {
   type SocialCookiePlatform,
   type ParsedSocialCookies,
 } from "./social-cookies.js";
+export { selectSocialSearchItems, type SocialSearchCandidate, type SocialSearchRejectReason, type SocialSearchSelection } from "./social-search-select.js";
