@@ -82,7 +82,7 @@ import {
   submitDynamicRenderFromTimeline,
   submitRenderFromTimeline,
 } from "../studio/timeline-api";
-import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
+import { isTemplateOnlyRenderProvider, renderAccountOptionLabel, preferredRenderAccount } from "../studio/render-provider";
 import { useMe } from "../session";
 import { canForceEngine, FORCE_ENGINE_CHOICES, forceEngineValue, type ForceEngineChoice } from "../studio/render-engine";
 import { OrshotStudioPanel } from "../studio/OrshotStudioPanel";
@@ -383,7 +383,7 @@ export function StudioProPage() {
     if (providers.length === 0) return;
     setVisualAccountId((current) => current || usableAccounts(providers, "visual").find((row) => row.provider === "pexels")?.id || "");
     setVoiceAccountId((current) => current || usableAccounts(providers, "tts")[0]?.id || "");
-    setRenderAccountId((current) => current || usableAccounts(providers, "render")[0]?.id || "");
+    setRenderAccountId((current) => current || preferredRenderAccount(usableAccounts(providers, "render"))?.id || "");
   }, [providers]);
 
   useEffect(() => {

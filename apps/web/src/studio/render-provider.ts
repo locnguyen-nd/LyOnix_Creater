@@ -11,3 +11,11 @@ export const renderAccountOptionLabel = (account: Pick<ApiProvider, "name" | "pr
 
 /** Orshot only renders a saved template (fixed slots), never a fully dynamic N-scene composition. */
 export const isTemplateOnlyRenderProvider = (provider: string | undefined) => provider === "orshot";
+
+/**
+ * VE2E-140: default render account of the Studio. Orshot is template-only (and many plans cannot render video), so it is offered last;
+ * Creatomate (any template, dynamic composition) first, then the internal LyOnix engine.
+ */
+export const RENDER_DEFAULT_RANK: Record<string, number> = { creatomate: 0, lyonix: 1, orshot: 2 };
+export const preferredRenderAccount = <T extends { provider: string }>(accounts: readonly T[]): T | undefined =>
+  [...accounts].sort((a, b) => (RENDER_DEFAULT_RANK[a.provider] ?? 1) - (RENDER_DEFAULT_RANK[b.provider] ?? 1))[0];
