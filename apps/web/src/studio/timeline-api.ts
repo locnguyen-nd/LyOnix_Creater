@@ -12,6 +12,9 @@ import type {
   CreatomatePreviewConfigResponse,
   CreatomateTemplateSummaryResponse,
   ElevenLabsVoiceSummaryResponse,
+  VoiceCloneConsentRequest,
+  VoiceCloneResultResponse,
+  VoiceCloneSampleFileInput,
   MediaAssetVersionSummary,
   MediaDeliveryIssueResponse,
   MediaPlanRequest,
@@ -95,6 +98,11 @@ export async function listProjectMedia(projectId: string): Promise<MediaAssetVer
 
 export async function listElevenLabsVoices(providerAccountId: string): Promise<ElevenLabsVoiceSummaryResponse[]> {
   return api<ElevenLabsVoiceSummaryResponse[]>(`/provider-accounts/${providerAccountId}/elevenlabs/voices`);
+}
+
+/** Consented Instant Voice Clone: the new voice then shows up in `listElevenLabsVoices` (category "cloned"). */
+export async function createVoiceClone(providerAccountId: string, input: { name: string; consent: VoiceCloneConsentRequest; files: VoiceCloneSampleFileInput[] }): Promise<VoiceCloneResultResponse> {
+  return api<VoiceCloneResultResponse>(`/provider-accounts/${providerAccountId}/elevenlabs/voice-clones`, { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
 }
 
 /**

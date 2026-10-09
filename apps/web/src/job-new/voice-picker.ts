@@ -8,11 +8,14 @@ export type VoiceProvider = "elevenlabs";
 export type VoiceOption = ElevenLabsVoiceSummaryResponse & { provider: VoiceProvider };
 export type VoiceLanguageFilter = "all" | "ja" | "vi" | "en";
 export type VoiceGenderFilter = "all" | "male" | "female";
-export type VoiceFilters = { query: string; language: VoiceLanguageFilter; gender: VoiceGenderFilter; provider: "all" | VoiceProvider };
+export type VoiceFilters = { query: string; language: VoiceLanguageFilter; gender: VoiceGenderFilter; provider: "all" | VoiceProvider; /** only voices the users cloned */ cloned?: boolean };
 
 export const NO_VOICE_FILTERS: VoiceFilters = { query: "", language: "all", gender: "all", provider: "all" };
 
 export const toVoiceOptions = (rows: readonly ElevenLabsVoiceSummaryResponse[], provider: VoiceProvider = "elevenlabs"): VoiceOption[] => rows.map((row) => ({ ...row, provider }));
+
+/** A voice made through "Clone giọng" (ElevenLabs reports it as category "cloned"). */
+export const isClonedVoice = (voice: Pick<VoiceOption, "category">): boolean => voice.category === "cloned";
 
 /** Lower case, width-folded (NFKC) and without Vietnamese / Latin accents, so "tieng nhat" finds "Tiếng Nhật". */
 export const foldText = (value: string): string => value.normalize("NFKC").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d");
@@ -66,7 +69,9 @@ export function filterVoices(voices: readonly VoiceOption[], filters: VoiceFilte
   const words = foldText(filters.query).split(/\s+/).filter(Boolean);
   return voices.filter((voice) => {
     if (filters.provider !== "all" && voice.provider !== filters.provider) return false;
-    if (filters.language !== "all" && !voiceLanguages(voice).includes(filters.language)) return false;
+    if (filters.cloned && !isClonedVoice(voice)) return false;
+    // a fresh clone has no language labels but speaks every language of the multilingual models, so a language chip never hides it
+    if (filters.language !== "all" && !voiceLanguages(voice).includes(filters.language) && !(isClonedVoice(voice) && voiceLanguages(voice).length === 0)) return false;
     if (filters.gender !== "all" && (voice.gender ?? "").toLowerCase() !== filters.gender) return false;
     if (words.length === 0) return true;
     const haystack = voiceHaystack(voice);

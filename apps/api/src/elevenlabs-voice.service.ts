@@ -14,6 +14,7 @@ import { PrismaService } from "./prisma.service.js";
 import { MediaService } from "./media.service.js";
 import { decryptSecret } from "./secret-crypto.js";
 import { writeQuarantineFile } from "./quarantine.js";
+import { VOICE_CLONE_LIMITS } from "./voice-clone-limits.js";
 
 export type ElevenLabsOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 
@@ -79,6 +80,13 @@ export class ElevenLabsVoiceService {
     return { ok: true, data: { id: account.id, model: account.model, encryptedSecret: account.encryptedSecret } };
   }
 
+  /** Staff may only spend an organization account or their own personal one; admins any. Same rule as the other account-using calls. */
+  private async requireVisible(providerAccountId: string, userId: string, role: "admin" | "staff"): Promise<ElevenLabsOutcome<true>> {
+    if (role === "admin") return { ok: true, data: true };
+    const visible = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }, select: { id: true } });
+    return visible ? { ok: true, data: true } : { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tài khoản giọng đọc", status: 404 };
+  }
+
   /**
    * A short spoken sample of `voiceId` with the account's own model - the same voice + model a render uses by default
    * (`generateTts` falls back to `account.model`). Cached; only called when the user presses Play on a voice without a
@@ -89,10 +97,8 @@ export class ElevenLabsVoiceService {
     const text = VOICE_PREVIEW_SAMPLES[language] ?? VOICE_PREVIEW_SAMPLES.en;
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
-    if (role !== "admin") {
-      const visible = await this.prisma.providerAccount.findFirst({ where: { id: providerAccountId, OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }, select: { id: true } });
-      if (!visible) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tài khoản giọng đọc", status: 404 };
-    }
+    const visible = await this.requireVisible(providerAccountId, userId, role);
+    if (!visible.ok) return visible;
     const modelId = account.data.model;
     const key = createHash("sha256").update(["elevenlabs", providerAccountId, voiceId, modelId, text].join("\u0000")).digest("hex");
     const hit = this.previewCache.get(key);
@@ -149,11 +155,19 @@ export class ElevenLabsVoiceService {
     providerAccountId: string,
     userId: string,
     input: { name: string; description?: string; consent: CloneConsentInput; files: CloneSampleFileInput[] },
+    role?: "admin" | "staff",
   ): Promise<ElevenLabsOutcome<VoiceCloneResultResponse>> {
     const account = await this.usableAccount(providerAccountId);
     if (!account.ok) return account;
+    if (role) {
+      const visible = await this.requireVisible(providerAccountId, userId, role);
+      if (!visible.ok) return visible;
+    }
     if (!input.name.trim()) return { ok: false, code: "VALIDATION_FAILED", message: "Thiếu tên voice clone" };
+    if (input.name.trim().length > VOICE_CLONE_LIMITS.maxNameLength) return { ok: false, code: "VALIDATION_FAILED", message: `Tên giọng tối đa ${VOICE_CLONE_LIMITS.maxNameLength} ký tự` };
     if (input.files.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Cần ít nhất một file mẫu âm thanh" };
+    if (input.files.length > VOICE_CLONE_LIMITS.maxFiles) return { ok: false, code: "VALIDATION_FAILED", message: `Tối đa ${VOICE_CLONE_LIMITS.maxFiles} file mẫu` };
+    if (input.files.some((file) => !/^audio\//i.test(file.mimeType))) return { ok: false, code: "UNSUPPORTED_MEDIA", message: "Chỉ nhận file âm thanh (mp3, wav, m4a, ogg, flac…)", status: 415 };
     let decodedFiles: { fileName: string; mimeType: string; data: Buffer; checksum: string }[];
     try {
       decodedFiles = input.files.map((file) => {
@@ -163,6 +177,10 @@ export class ElevenLabsVoiceService {
       });
     } catch {
       return { ok: false, code: "VALIDATION_FAILED", message: "File mẫu âm thanh không hợp lệ (base64 rỗng/sai định dạng)" };
+    }
+    const total = decodedFiles.reduce((sum, file) => sum + file.data.length, 0);
+    if (decodedFiles.some((file) => file.data.length > VOICE_CLONE_LIMITS.maxFileBytes) || total > VOICE_CLONE_LIMITS.maxTotalBytes) {
+      return { ok: false, code: "VALIDATION_FAILED", message: `Mỗi file tối đa ${VOICE_CLONE_LIMITS.maxFileBytes / 1024 / 1024} MB, tổng tối đa ${VOICE_CLONE_LIMITS.maxTotalBytes / 1024 / 1024} MB`, status: 413 };
     }
     const attestedAt = input.consent.acceptedAt?.trim() || new Date().toISOString();
     const consentEvidence = {

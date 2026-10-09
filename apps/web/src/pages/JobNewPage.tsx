@@ -836,6 +836,14 @@ export function JobNewPage() {
                         accountId={form.voiceAccountId}
                         modelId={voiceAccounts.find((account) => account.id === form.voiceAccountId)?.model ?? null}
                         state={voicesState}
+                        onCloned={(result) => {
+                          // the new voice joins the list (reloaded; if that fails it is added by hand) and is chosen right away
+                          const added = { voiceId: result.voiceId, name: result.name, category: "cloned", previewUrl: null, gender: null, language: null, accent: null, age: null, useCase: null, descriptive: null, languages: [] };
+                          void listElevenLabsVoices(form.voiceAccountId)
+                            .then((rows) => setVoices(rows.some((row) => row.voiceId === result.voiceId) ? rows : [added, ...rows]))
+                            .catch(() => setVoices((current) => [added, ...current.filter((row) => row.voiceId !== result.voiceId)]));
+                          update({ voiceId: result.voiceId });
+                        }}
                       />
                     </ChoiceField>
                   ) : (

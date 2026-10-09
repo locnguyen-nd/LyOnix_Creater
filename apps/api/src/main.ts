@@ -7,6 +7,7 @@ import { openApiDocument } from "@lyonix/contracts/openapi";
 import { AppModule } from "./app.module.js";
 import { requestIdMiddleware } from "./request-id.js";
 import { HttpErrorEnvelopeFilter } from "./http-exception.filter.js";
+import { voiceCloneBodyParser } from "./voice-clone-body.js";
 
 const repoRoot = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
 config({ path: resolve(repoRoot, ".env") });
@@ -19,6 +20,7 @@ const bootstrap = async () => {
   app.setGlobalPrefix("api/v1");
   app.enableCors({ origin: process.env.WEB_ORIGIN ?? "http://localhost:5173", credentials: true });
   app.use(requestIdMiddleware);
+  app.use(voiceCloneBodyParser());
   app.useGlobalFilters(new HttpErrorEnvelopeFilter());
   app.getHttpAdapter().get("/api/openapi.json", (_request, response) => {
     response.json(openApiDocument);

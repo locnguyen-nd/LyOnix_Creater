@@ -43,7 +43,7 @@ export class ElevenLabsVoiceController {
       ...(body.description ? { description: body.description } : {}),
       consent: body.consent,
       files: body.files,
-    });
+    }, user.role);
     if (!outcome.ok) throw normalizedError(outcome.code, outcome.message, requestId(response), outcome.status ?? 400, [], outcome.retryable ?? false);
     return success(outcome.data, requestId(response));
   }

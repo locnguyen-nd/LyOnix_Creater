@@ -57,6 +57,15 @@ describe("Voice Picker search and filters", () => {
     expect(ids(filterVoices(OPTIONS, { ...NO_VOICE_FILTERS, provider: "elevenlabs" }))).toHaveLength(4);
   });
 
+  it("the Giọng clone chip keeps only cloned voices; a fresh clone (no language labels) survives every language chip", () => {
+    const fresh = toVoiceOptions([...ROWS, voice({ voiceId: "freshClone0001", name: "Mới tạo", category: "cloned", previewUrl: null })]);
+    const only = (filters: Partial<typeof NO_VOICE_FILTERS>) => ids(filterVoices(fresh, { ...NO_VOICE_FILTERS, ...filters }));
+    expect(only({ cloned: true })).toEqual(["cloneVoiceVi0001", "freshClone0001"]);
+    expect(only({ language: "ja" })).toEqual(["EXAVITQu4vr4xnSDxMaL", "freshClone0001"]);
+    expect(only({ language: "vi" })).toEqual(["cloneVoiceVi0001", "freshClone0001"]);
+    expect(only({ cloned: true, gender: "female" })).toEqual(["cloneVoiceVi0001"]);
+  });
+
   it("names split into a title and a tagline", () => {
     expect(splitVoiceName("Roger - Laid-Back, Casual, Resonant")).toEqual({ title: "Roger", tagline: "Laid-Back, Casual, Resonant" });
     expect(splitVoiceName("Lan")).toEqual({ title: "Lan", tagline: null });
@@ -209,6 +218,16 @@ describe("Voice Picker cards", () => {
     expect(render()).toMatch(/data-voice-id="cloneVoiceVi0001"[\s\S]*?>TTS</);
     const out = render({ accountId: "" });
     expect(out).toMatch(/data-voice-id="cloneVoiceVi0001"[^>]*data-preview="unavailable"[\s\S]*?<button[^>]*disabled=""[^>]*data-testid="voice-play"/);
+  });
+
+  it("cloned voices: a badge + a Giọng clone chip; the Clone giọng button only when the page can handle a new voice and has an account", () => {
+    const out = render();
+    expect(out).toContain('data-testid="voice-filter-cloned"');
+    expect(out.match(/data-testid="voice-cloned-badge"/g)).toHaveLength(1);
+    expect(out).not.toContain('data-testid="voice-clone-open"');
+    expect(render({ onCloned: () => undefined })).toContain('data-testid="voice-clone-open"');
+    expect(render({ onCloned: () => undefined, accountId: "" })).not.toContain('data-testid="voice-clone-open"');
+    expect(renderToStaticMarkup(<I18nextProvider i18n={instance}><VoicePicker voices={ROWS.slice(0, 3)} selectedId="" onSelect={() => undefined} language="ja" accountId="a" modelId={null} /></I18nextProvider>)).not.toContain('data-testid="voice-filter-cloned"');
   });
 
   it("loading and failed lists say so", () => {
