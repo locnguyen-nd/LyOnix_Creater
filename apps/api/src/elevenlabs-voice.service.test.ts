@@ -6,6 +6,7 @@ import { ElevenLabsVoiceService, VOICE_PREVIEW_CACHE, VOICE_PREVIEW_SAMPLES } fr
 import type { MediaAssetVersionSummary } from "@lyonix/contracts";
 import { MediaService } from "./media.service.js";
 import * as secretCrypto from "./secret-crypto.js";
+import { VOICE_CLONE_LIMITS } from "./voice-clone-limits.js";
 
 const fakeAsset = { id: "asset-1", projectId: "project-1" } as unknown as MediaAssetVersionSummary;
 
@@ -128,6 +129,33 @@ describe("ElevenLabsVoiceService", () => {
       expect(created.status).toBe("pending");
       expect(created.attestedByUserId).toBe("user-1");
       expect(prisma.voiceCloneConsentRecord.update).toHaveBeenCalledWith({ where: { id: "consent-1" }, data: { status: "created", externalVoiceId: "voice-new" } });
+    });
+
+    it("rejects non-audio samples, too many files and oversized samples before any audit row or provider call", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const clone = (files: typeof sampleFiles, name = "Clone A") => service.createClone("account-1", "user-1", { name, consent, files });
+      expect(await clone([{ ...sampleFiles[0]!, mimeType: "application/pdf" }])).toMatchObject({ ok: false, code: "UNSUPPORTED_MEDIA" });
+      expect(await clone(Array.from({ length: VOICE_CLONE_LIMITS.maxFiles + 1 }, () => sampleFiles[0]!))).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      const big = Buffer.alloc(VOICE_CLONE_LIMITS.maxFileBytes + 1, 1).toString("base64");
+      expect(await clone([{ ...sampleFiles[0]!, base64Data: big }])).toMatchObject({ ok: false, code: "VALIDATION_FAILED", status: 413 });
+      expect(await clone(sampleFiles, "x".repeat(VOICE_CLONE_LIMITS.maxNameLength + 1))).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(prisma.voiceCloneConsentRecord.create).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("staff cannot clone through an account they cannot see; admin always can", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ voice_id: "voice-new" }), { status: 200 })));
+      const calls: unknown[] = [];
+      prisma.providerAccount.findFirst = async (args: any) => {
+        calls.push(args.where);
+        return args.select ? null : accountRow();
+      };
+      const input = { name: "Clone A", consent, files: sampleFiles };
+      expect(await service.createClone("account-1", "user-1", input, "staff")).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      expect(prisma.voiceCloneConsentRecord.create).not.toHaveBeenCalled();
+      expect(await service.createClone("account-1", "admin-1", input, "admin")).toMatchObject({ ok: true });
+      expect(calls).toContainEqual({ id: "account-1", OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: "user-1" }] });
     });
 
     it("marks the consent audit row failed (never silently fake) when the provider rejects the clone", async () => {
