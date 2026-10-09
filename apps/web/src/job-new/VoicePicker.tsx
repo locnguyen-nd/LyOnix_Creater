@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import type { ElevenLabsVoiceSummaryResponse, UiLocale } from "@lyonix/contracts";
-import { AlertTriangle, Check, Loader2, Pause, Play, Search, VolumeX } from "lucide-react";
+import type { ElevenLabsVoiceSummaryResponse, UiLocale, VoiceCloneResultResponse } from "@lyonix/contracts";
+import { AlertTriangle, Check, Loader2, Mic, Pause, Play, Search, VolumeX } from "lucide-react";
 import { SkeletonRows } from "../components/chrome";
 import { fetchVoicePreview } from "../studio/timeline-api";
-import { NO_VOICE_FILTERS, filterVoices, previewTarget, splitVoiceName, toVoiceOptions, voiceLanguages, type VoiceFilters, type VoiceOption } from "./voice-picker";
+import { NO_VOICE_FILTERS, filterVoices, isClonedVoice, previewTarget, splitVoiceName, toVoiceOptions, voiceLanguages, type VoiceFilters, type VoiceOption } from "./voice-picker";
+import { VoiceCloneDialog } from "./VoiceCloneDialog";
 import { VoicePreviewController, type AudioLike, type PreviewStatus } from "./voice-preview";
 
 /** One preview player per mounted picker; synthesized previews are cached per session across pickers (see voice-preview.ts). */
@@ -31,7 +32,7 @@ function Equalizer() {
  * (the form's voiceId, saved with the draft / defaults as before); previews use the form's voice account + the voice's id - the
  * same pair the render uses.
  */
-export function VoicePicker({ voices, selectedId, onSelect, language, accountId, modelId, state = "ready", controller: injected }: {
+export function VoicePicker({ voices, selectedId, onSelect, language, accountId, modelId, state = "ready", controller: injected, onCloned }: {
   voices: readonly ElevenLabsVoiceSummaryResponse[];
   selectedId: string;
   onSelect: (voiceId: string) => void;
@@ -44,12 +45,15 @@ export function VoicePicker({ voices, selectedId, onSelect, language, accountId,
   state?: "loading" | "ready" | "failed";
   /** Tests inject a controller with a fake audio element. */
   controller?: VoicePreviewController;
+  /** Shows "Clone giọng"; called with the new voice once it is created (the parent reloads the list and selects it). */
+  onCloned?: (result: VoiceCloneResultResponse) => void;
 }) {
   const { t, i18n } = useTranslation();
   const own = usePreviewController();
   const controller = injected ?? own;
   const preview = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const [filters, setFilters] = useState<VoiceFilters>(NO_VOICE_FILTERS);
+  const [cloning, setCloning] = useState(false);
   const options = useMemo(() => toVoiceOptions(voices), [voices]);
   const shown = useMemo(() => filterVoices(options, filters), [options, filters]);
   const providers = useMemo(() => [...new Set(options.map((option) => option.provider))], [options]);
@@ -71,7 +75,8 @@ export function VoicePicker({ voices, selectedId, onSelect, language, accountId,
   useEffect(() => { controller.stop(); }, [controller, accountId, language]);
   useEffect(() => () => controller.stop(), [controller]);
 
-  const noFilter = filters.language === "all" && filters.gender === "all" && filters.provider === "all";
+  const hasCloned = options.some(isClonedVoice);
+  const noFilter = filters.language === "all" && filters.gender === "all" && filters.provider === "all" && !filters.cloned;
   const chip = (key: string, active: boolean, label: string, onClick: () => void) => (
     <button key={key} type="button" aria-pressed={active} onClick={onClick} className="lyx-voice-chip inline-flex h-7 items-center rounded-full border border-lyx-border px-2.5 text-[12px] font-medium text-lyx-fg-muted hover:text-lyx-fg" data-testid={`voice-filter-${key}`}>
       {label}
@@ -99,13 +104,20 @@ export function VoicePicker({ voices, selectedId, onSelect, language, accountId,
           />
         </label>
         <span className="shrink-0 text-[12px] text-lyx-fg-muted" data-testid="voice-count">{t("voicePicker.count", { shown: shown.length, total: options.length })}</span>
+        {onCloned && accountId ? (
+          <button type="button" onClick={() => setCloning(true)} className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[var(--lyx-radius)] border border-lyx-border px-3 text-[12.5px] font-semibold text-lyx-fg hover:border-lyx-strong" data-testid="voice-clone-open">
+            <Mic size={14} aria-hidden />
+            {t("voicePicker.clone")}
+          </button>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={t("voicePicker.filtersLabel")}>
-        {chip("all", noFilter, t("voicePicker.filter.all"), () => setFilters((current) => ({ ...current, language: "all", gender: "all", provider: "all" })))}
+        {chip("all", noFilter, t("voicePicker.filter.all"), () => setFilters((current) => ({ ...current, language: "all", gender: "all", provider: "all", cloned: false })))}
         {LANGUAGE_FILTERS.map((code) => chip(code, filters.language === code, t(`voicePicker.filter.${code}`), () => setFilters((current) => ({ ...current, language: current.language === code ? "all" : code }))))}
         <span className="mx-0.5 h-4 w-px bg-lyx-border" aria-hidden />
         {GENDER_FILTERS.map((gender) => chip(gender, filters.gender === gender, t(`voicePicker.filter.${gender}`), () => setFilters((current) => ({ ...current, gender: current.gender === gender ? "all" : gender }))))}
+        {hasCloned ? chip("cloned", Boolean(filters.cloned), t("voicePicker.filter.cloned"), () => setFilters((current) => ({ ...current, cloned: !current.cloned }))) : null}
         {providers.length > 1 ? providers.map((provider) => chip(provider, filters.provider === provider, t(`voicePicker.provider.${provider}`), () => setFilters((current) => ({ ...current, provider: current.provider === provider ? "all" : provider })))) : null}
       </div>
 
@@ -136,6 +148,10 @@ export function VoicePicker({ voices, selectedId, onSelect, language, accountId,
           ))}
         </ul>
       )}
+
+      {cloning && onCloned ? (
+        <VoiceCloneDialog accountId={accountId} onClose={() => setCloning(false)} onCloned={(result) => { setCloning(false); onCloned(result); }} />
+      ) : null}
     </div>
   );
 }
@@ -190,6 +206,7 @@ function VoiceCard({ voice, selected, status, error, target, onToggle, onSelect 
           {voice.gender ? <span className="rounded bg-lyx-neutral-bg px-1.5 py-0.5 text-lyx-fg-muted">{t(`voicePicker.gender.${voice.gender.toLowerCase()}`, { defaultValue: voice.gender })}</span> : null}
           {styleTags.map((tag) => <span key={tag} className="rounded bg-lyx-neutral-bg px-1.5 py-0.5 capitalize text-lyx-fg-muted">{tag}</span>)}
           <span className="lyx-accent-chip rounded px-1.5 py-0.5">{t(`voicePicker.provider.${voice.provider}`)}</span>
+          {isClonedVoice(voice) ? <span className="rounded bg-lyx-neutral-bg px-1.5 py-0.5 text-lyx-fg-muted" data-testid="voice-cloned-badge">{t("voicePicker.filter.cloned")}</span> : null}
           {!target.previewUrl && target.accountId ? <span className="rounded bg-lyx-warn-bg px-1.5 py-0.5 text-lyx-warn" title={t("voicePicker.ttsPreviewHint")}>TTS</span> : null}
         </div>
         {error ? <p className="lyx-fade mt-1 text-[11px] leading-4 text-lyx-danger" role="alert" data-testid="voice-error">{error}</p> : null}
