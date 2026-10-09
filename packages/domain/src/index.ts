@@ -113,6 +113,7 @@ export {
   type VisionFindings,
   type VisionShotFindings,
   type VisionIdentityFindings,
+  type VisionCleanlinessFindings,
   type MediaCandidateEligibility,
   type MediaCandidate,
 } from "./media-candidate.js";
@@ -124,6 +125,7 @@ export {
   detectScriptLanguageHeuristic,
   buildBoundedQueryVariants,
   rankMediaCandidates,
+  isCleanlinessFallback,
   candidateSubjectMatch,
   decideMediaSelection,
   canAutoApplyMediaCandidate,
@@ -387,6 +389,23 @@ export {
   type ParsedSocialCookies,
 } from "./social-cookies.js";
 export { selectSocialSearchItems, type SocialSearchCandidate, type SocialSearchRejectReason, type SocialSearchSelection } from "./social-search-select.js";
+export {
+  assessMediaCleanliness,
+  metadataEditSignals,
+  cleanlinessRejectionCounts,
+  CLEANLINESS_TEXT_BANDS,
+  SMALL_LOGO_MAX_RATIO,
+  CLEANLINESS_MIN_BAD_FRAMES,
+  PRE_EDITED_MIN_SIGNALS,
+  FINISHED_EDIT_MIN_SIGNALS,
+  CLEANLINESS_TIER_SCORE,
+  CLEANLINESS_TIER_FACTOR,
+  CLEANLINESS_FALLBACK_MESSAGE,
+  type CleanlinessTier,
+  type CleanlinessRejectionReason,
+  type EditSignal,
+  type MediaCleanliness,
+} from "./media-cleanliness.js";
 export {
   SUBJECT_KINDS,
   parseSubjectKind,

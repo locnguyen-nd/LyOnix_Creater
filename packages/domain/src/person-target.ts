@@ -289,8 +289,11 @@ export function personMetadataFlags(target: PersonTarget, meta: PersonMeta): Per
   return flags;
 }
 
-/** Weights of the within-tier quality (the tier decides the order first, see {@link PERSON_TIER_BANDS}). */
-export const PERSON_SCORE_WEIGHTS = { cleanliness: 0.35, framing: 0.2, motion: 0.15, base: 0.3 } as const;
+/**
+ * Weights of the within-tier quality (the person tier decides first, see {@link PERSON_TIER_BANDS}), in the VE2E-152 order: clean
+ * footage (cleanliness tier) > single subject (framing) > motion > visual quality > text / logo cleanliness > aspect / crop safety.
+ */
+export const PERSON_SCORE_WEIGHTS = { cleanTier: 0.3, framing: 0.2, motion: 0.15, visual: 0.15, textLogo: 0.1, aspect: 0.1 } as const;
 
 /**
  * Person-mode tiers, best first:
@@ -352,7 +355,20 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
  */
 export function scorePersonCandidate(
   target: PersonTarget,
-  input: PersonMeta & { mediaType: "video" | "photo" | "image"; shot?: VisionShotFindings | null; identity?: VisionIdentityFindings | null; base?: number },
+  input: PersonMeta & {
+    mediaType: "video" | "photo" | "image";
+    shot?: VisionShotFindings | null;
+    identity?: VisionIdentityFindings | null;
+    /** The caller's normal 0..1 score; stands in for `visual` / `aspect` when those are not given. */
+    base?: number;
+    /** VE2E-152: clean-footage weight of the candidate's cleanliness tier (1 clean ... 0 reject); default 1 (no evidence). */
+    cleanTier?: number;
+    /** VE2E-152: fine text / logo cleanliness (0..1); default: this function's own shot / metadata estimate. */
+    textLogo?: number;
+    /** 0..1 resolution / visual quality and aspect / crop safety (vertical fit). */
+    visual?: number;
+    aspect?: number;
+  },
 ): PersonCandidateScore {
   const identity = matchPersonIdentity(target, input);
   const flags = personMetadataFlags(target, input);
@@ -431,7 +447,15 @@ export function scorePersonCandidate(
   }
 
   const w = PERSON_SCORE_WEIGHTS;
-  const inner = clamp01(w.cleanliness * cleanliness + w.framing * framing + w.motion * motion + w.base * clamp01(input.base ?? 0.5));
+  const base = clamp01(input.base ?? 0.5);
+  const inner = clamp01(
+    w.cleanTier * clamp01(input.cleanTier ?? 1) +
+      w.framing * framing +
+      w.motion * motion +
+      w.visual * clamp01(input.visual ?? base) +
+      w.textLogo * clamp01(input.textLogo ?? cleanliness) +
+      w.aspect * clamp01(input.aspect ?? base),
+  );
   const [floor, ceil] = PERSON_TIER_BANDS[tier];
   const score = hardReject ? 0 : round3(floor + (ceil - floor) * inner);
   return {

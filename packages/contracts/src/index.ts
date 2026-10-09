@@ -956,6 +956,30 @@ export type MediaPlanSegmentDiagnostics = {
   degradeReason?: string | null;
   /** VE2E-151: person subject only - identity evidence of the segment's source. */
   person?: SegmentPersonDiagnostics;
+  /** VE2E-152: overlay / pre-edit verdict of the chosen source (absent when nothing was known about it). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
+};
+
+/** VE2E-152: how clean (reusable) the chosen source is, why candidates were dropped, and whether the pick is a fallback. */
+export type SegmentCleanlinessDiagnostics = {
+  /** `clean` (raw footage) > `acceptable` (small corner logo / a little text) > `penalized` (subtitles, headline, stickers...) > `reject`. */
+  tier: "clean" | "acceptable" | "penalized" | "reject";
+  cleanlinessScore: number;
+  /** 0..1 overlaid-text share of the frame, `null` when unknown. */
+  textAreaRatio: number | null;
+  logoDetected: boolean;
+  watermarkDetected: boolean;
+  subtitleDetected: boolean;
+  preEdited: boolean;
+  editSignals: string[];
+  method: "vision" | "shot" | "metadata" | "none";
+  /** No clean footage was usable: a medium candidate was taken (`message` says so). */
+  fallback: boolean;
+  /** `TEXT_HEAVY` | `BURNT_IN_SUBTITLES` | `LARGE_WATERMARK` | `PRE_EDITED_VIDEO` | `SOCIAL_UI_OVERLAY` | `NEWS_CARD` (a reject only). */
+  rejectionReason?: string;
+  /** Cleanliness rejections among this segment's candidates, by reason. */
+  rejected?: Record<string, number>;
+  message?: string;
 };
 
 /** VE2E-151: how sure the segment's source shows the target person, and how that was decided. */
@@ -1032,6 +1056,10 @@ export type MediaPlanApifyQuality = {
   person?: { identity: string; score: number; match: PersonMatchLevel; flags: string[]; tier: string; identityConfidence: number; verificationMethod: "vision" | "metadata" | "none"; framing: "single" | "group" | "unknown" };
   /** VE2E-151: person-rule rejections in this search's pool (also kept when the tier found nothing). */
   personRejected?: Record<string, number>;
+  /** VE2E-152: cleanliness of the chosen candidate (+ the pool's cleanliness rejections). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
+  /** VE2E-152: cleanliness of the downloaded clip's sampled frames (when `VISION_VIDEO_FRAMES=1`). */
+  frameCleanliness?: SegmentCleanlinessDiagnostics;
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */

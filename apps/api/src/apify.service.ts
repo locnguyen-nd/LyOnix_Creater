@@ -55,6 +55,7 @@ import {
   personMatchLevelOf,
   personRejectionCounts,
   visionTargetOf,
+  assessMediaCleanliness,
   PERSON_VERIFY_MIN_CONFIDENCE,
   type MediaCandidate,
   type RankedMediaCandidate,
@@ -80,6 +81,7 @@ export const personQualityOf = (ranked: readonly RankedMediaCandidate[], candida
 };
 import { getSharedProviderLimiter, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
+import { CLEANLINESS_FRAME_COUNT, CLEANLINESS_FRAME_MAX_WIDTH, chosenCleanlinessDiagnostics, cleanlinessCheckEnabled, cleanlinessDiagnosticsOf } from "./media-cleanliness-diagnostics.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
@@ -572,7 +574,8 @@ export class ApifyService {
     if (!account) return pool;
     // VE2E-151: a person subject also gets the shot description (people / close-up / text / logo / news card) in the same call.
     // The SAME call also checks the identity against the target person (match / different person / uncertain / nobody).
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}) };
+    // VE2E-152: the same call also rates how clean the media is (overlaid text, logo, watermark, subtitles, edit layout).
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}), ...(cleanlinessCheckEnabled() ? { cleanliness: true } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
@@ -598,13 +601,21 @@ export class ApifyService {
    * budgeted pipeline as the cover-frame pass. Opt-in (`VISION_VIDEO_FRAMES=1`). Only an explicit `rejected` decision blocks the
    * clip; everything else (flag off, no vision account/budget/frames, worker down) is `unchecked` and never fails sourcing.
    */
-  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<"accepted" | "rejected" | "unchecked"> {
+  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string, quality?: MediaPlanApifyQuality): Promise<"accepted" | "rejected" | "unchecked"> {
     if (!visionVideoFramesEnabled() || !this.videoFrames || asset.kind !== "video") return "unchecked";
     try {
+      // VE2E-152: 5 low-res frames (start / 25% / 50% / 75% / end) - enough to tell a captioned / watermarked edit from raw footage.
       const moderated = await this.moderatePool([candidate], brief, userId, role, usedExternalIds, budget, `${scopeKey}:frames`, async () => {
-        const outcome = await this.videoFrames!.framesForAsset(asset.id);
+        const outcome = await this.videoFrames!.framesForAsset(asset.id, { frameCount: CLEANLINESS_FRAME_COUNT, maxWidth: CLEANLINESS_FRAME_MAX_WIDTH });
         return outcome.ok ? outcome.frames : [];
       });
+      const frameCleanliness = moderated[0]?.visionFindings?.cleanliness;
+      if (frameCleanliness) {
+        const verdict = assessMediaCleanliness({ vision: frameCleanliness, text: candidate.descriptorText ?? null, platformSignals: candidate.editSignals ?? [] });
+        if (quality) quality.frameCleanliness = cleanlinessDiagnosticsOf(verdict, false);
+        // >= 2 frames with heavy text / watermark, continuous subtitles, social UI, a finished edit: drop it (the next candidate is tried).
+        if (verdict.tier === "reject") return "rejected";
+      }
       const decision = moderated[0]?.moderationDecision ?? null;
       // VE2E-151: frames of the downloaded clip that show a different person than the target reject it like an unsafe clip.
       const identity = moderated[0]?.visionFindings?.identity;
@@ -876,13 +887,15 @@ export class ApifyService {
       const id = next.chosen.externalId;
       const person = personQualityOf(next.ranked, next.chosen.candidateId);
       if (person) quality.person = person;
+      const cleanliness = chosenCleanlinessDiagnostics(next.ranked, next.chosen.candidateId);
+      if (cleanliness) quality.cleanliness = cleanliness;
       // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
       input.usedExternalIds.add(id);
       const library = await this.findLibraryAsset(projectId, input.platform, id);
       if (library) {
         quality.reusedLibraryAsset = true;
         job.usage.libraryReuses += 1;
-        quality.frameCheck = await this.verifyVideoFrames(library, next.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+        quality.frameCheck = await this.verifyVideoFrames(library, next.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId, quality);
         if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
         if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
         return { ok: true, data: { asset: library, externalId: id, ledgerId: `${next.chosen.source}:${id}`, provenance: next.chosen.provenance.apify ?? null, platform: input.platform, quality } };
@@ -935,7 +948,7 @@ export class ApifyService {
       release();
       return fail(`apify_import_failed:${imported.code}:${String((imported as { message?: string }).message ?? "").slice(0, 120)}`);
     }
-    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId, quality);
     if (quality.frameCheck === "rejected") {
       // Unbind the rejected clip from its scene so a retry never reuses it through the library shortcut; the video id stays reserved.
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);

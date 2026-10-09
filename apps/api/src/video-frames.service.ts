@@ -36,16 +36,17 @@ export class VideoFramesService {
     @Inject(MediaJobsGateway) private readonly extractor: FrameExtractor,
   ) {}
 
-  async framesForAsset(mediaAssetVersionId: string, options: { frameCount?: number; windowStartMs?: number | null; windowDurationMs?: number | null; timeoutMs?: number } = {}): Promise<VideoFramesOutcome> {
+  async framesForAsset(mediaAssetVersionId: string, options: { frameCount?: number; windowStartMs?: number | null; windowDurationMs?: number | null; timeoutMs?: number; /** VE2E-152: low-res frames for the cleanliness check. */ maxWidth?: number } = {}): Promise<VideoFramesOutcome> {
     const asset = await this.prisma.mediaAssetVersion.findFirst({ where: { id: mediaAssetVersionId, deletedAt: null }, select: { id: true, kind: true, relativePath: true } });
     if (!asset || asset.kind !== "video") return { ok: false, code: "NOT_A_VIDEO", message: "Asset không phải video để lấy khung hình", retryable: false };
     const frameCount = options.frameCount ?? videoFrameCount();
     const job: FrameExtractJobInput = {
-      jobKey: buildFrameExtractJobKey({ sourceMediaAssetVersionId: asset.id, frameCount, windowStartMs: options.windowStartMs ?? null, windowDurationMs: options.windowDurationMs ?? null }),
+      jobKey: buildFrameExtractJobKey({ sourceMediaAssetVersionId: asset.id, frameCount, windowStartMs: options.windowStartMs ?? null, windowDurationMs: options.windowDurationMs ?? null, ...(options.maxWidth ? { maxWidth: options.maxWidth } : {}) }),
       source: { relativePath: asset.relativePath, mediaAssetVersionId: asset.id },
       frameCount,
       windowStartMs: options.windowStartMs ?? null,
       windowDurationMs: options.windowDurationMs ?? null,
+      ...(options.maxWidth ? { maxWidth: options.maxWidth } : {}),
     };
     let result;
     try {

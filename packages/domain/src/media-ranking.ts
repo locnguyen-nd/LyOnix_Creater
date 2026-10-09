@@ -24,6 +24,7 @@
  */
 import { subjectMatchScore } from "./subject-filter.js";
 import { scorePersonCandidate, type PersonCandidateScore, type PersonTarget } from "./person-target.js";
+import { assessMediaCleanliness, CLEANLINESS_TIER_FACTOR, CLEANLINESS_TIER_SCORE, type MediaCleanliness } from "./media-cleanliness.js";
 import { isRightsUsableForAuto } from "./media-candidate.js";
 import type {
   MediaCandidate,
@@ -258,6 +259,11 @@ export const MEDIA_RELEVANCE_THRESHOLD = 0.45;
 export type MediaRankingOptions = {
   usedExternalIds?: ReadonlySet<string>;
   allowedTypes?: readonly MediaCandidateType[];
+  /**
+   * VE2E-152: a cleanliness `reject` (text-heavy, continuous subtitles, large watermark, social-app UI, news card, finished edit) is
+   * normally out of the auto pick (combined 0). `true` = the user allowed it: it stays at the bottom of its tier instead.
+   */
+  allowCleanlinessRejects?: boolean;
 };
 
 /** VE2E-89: max boost of a subject metadata match / of same-author coherence (only with a subject-matching clip). */
@@ -270,6 +276,8 @@ export type RankedMediaCandidate = {
   subjectMatch?: number;
   /** Person mode only (`brief.person`): tier, identity evidence, cleanliness / framing / motion of the candidate. */
   person?: PersonCandidateScore;
+  /** VE2E-152: overlay / pre-edit verdict; absent when there is no evidence at all (no vision, no edit hint in the metadata). */
+  cleanliness?: MediaCleanliness;
   semanticScore: number;
   /** False when `semanticScore` is only the blind `NEUTRAL_SEMANTIC_SCORE` default (no descriptor text, no vision findings) - i.e. we have literally no evidence the candidate matches the scene, as opposed to having checked and found a middling match. `decideMediaSelection` must never auto-select on this alone (spec §5: "do not label them as visually verified or let Auto silently accept a weak match"). */
   hasVerifiedSemanticSignal: boolean;
@@ -397,6 +405,10 @@ export function rankMediaCandidates(
         MEDIA_RANKING_WEIGHTS.cost * costScore;
       // Person mode: the tier (vision-verified > strong metadata > single portrait > group > generic > rejected) decides first; the normal
       // score only orders candidates inside a tier.
+      // VE2E-152: overlays / pre-edit (vision cleanliness, shot description, caption hints, platform signals).
+      const cleanliness = assessMediaCleanliness({ vision: candidate.visionFindings?.cleanliness ?? null, shot: candidate.visionFindings?.shot ?? null, text: candidate.descriptorText, platformSignals: candidate.editSignals ?? [] });
+      const hasCleanliness = cleanliness.method !== "none";
+      const cleanReject = cleanliness.tier === "reject" && !options.allowCleanlinessRejects;
       const person = brief.person
         ? scorePersonCandidate(brief.person, {
             text: candidate.descriptorText,
@@ -405,14 +417,22 @@ export function rankMediaCandidates(
             shot: candidate.visionFindings?.shot ?? null,
             identity: candidate.visionFindings?.identity ?? null,
             base: clamp01(base + coherence),
+            cleanTier: hasCleanliness ? (cleanliness.tier === "reject" ? 0 : CLEANLINESS_TIER_SCORE[cleanliness.tier]) : 1,
+            ...(hasCleanliness ? { textLogo: cleanliness.cleanlinessScore } : {}),
+            visual: qualityScore,
+            aspect: continuityScore,
           })
         : null;
-      const combinedRaw = person ? person.score : base + SUBJECT_MATCH_WEIGHT * subjectMatch + coherence;
-      const excludedReason = excluded ? "matches_exclusion" : person?.hardReject ? person.rejectionReason : undefined;
+      // Non-person ranking keeps its score, scaled by the cleanliness tier (no evidence = clean = unchanged).
+      const cleanFactor = cleanliness.tier === "reject" ? 0.5 : CLEANLINESS_TIER_FACTOR[cleanliness.tier];
+      const combinedRaw = person ? person.score : (base + SUBJECT_MATCH_WEIGHT * subjectMatch + coherence) * cleanFactor;
+      // A wrong person (vision) is rejected before anything about cleanliness; a clean wrong person never beats the right one.
+      const excludedReason = excluded ? "matches_exclusion" : person?.hardReject ? person.rejectionReason : cleanReject ? cleanliness.rejectionReason : undefined;
       return {
         candidate,
         ...(brief.subjectAliases?.length ? { subjectMatch } : {}),
         ...(person ? { person } : {}),
+        ...(hasCleanliness ? { cleanliness } : {}),
         semanticScore,
         // A caption/hashtag naming the subject is real metadata evidence (VE2E-89), not the blind neutral default.
         hasVerifiedSemanticSignal: hasVerifiedSemanticSignal(candidate) || subjectMatch >= 1 || person?.tier === "verified" || (person ? person.tier !== "rejected" && person.identity.score >= 0.85 : false),
@@ -424,6 +444,17 @@ export function rankMediaCandidates(
       };
     })
     .sort((a, b) => b.combinedScore - a.combinedScore);
+}
+
+/**
+ * VE2E-152: the pick is not clean footage only because nothing clean was usable (no `clean` candidate at / above the threshold in the
+ * pool): the caller logs / shows {@link CLEANLINESS_FALLBACK_MESSAGE}. A non-clean pick that beat a clean one on person relevance is not a fallback.
+ */
+export function isCleanlinessFallback(ranked: readonly RankedMediaCandidate[], chosenCandidateId: string, threshold = MEDIA_RELEVANCE_THRESHOLD): boolean {
+  const chosen = ranked.find((entry) => entry.candidate.candidateId === chosenCandidateId);
+  const tier = chosen?.cleanliness?.tier ?? "clean";
+  if (tier === "clean") return false;
+  return !ranked.some((entry) => entry !== chosen && (entry.cleanliness?.tier ?? "clean") === "clean" && entry.combinedScore >= threshold);
 }
 
 // --- safe abstention decision ---

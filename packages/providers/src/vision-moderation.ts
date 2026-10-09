@@ -9,7 +9,7 @@ import { ProviderError, type JsonSchema } from "./index.js";
 import { generateVisionStructuredOnce, type LiveContentKind } from "./live-content.js";
 import { CONTENT_MODEL_FRESHNESS_TTL_MS, isFreshCheckedAt } from "./content-probe.js";
 import { probeVisionCapability, type VisionInputKind } from "./vision-probe.js";
-import type { VisionIdentityFindings, VisionShotFindings } from "@lyonix/domain";
+import type { VisionCleanlinessFindings, VisionIdentityFindings, VisionShotFindings } from "@lyonix/domain";
 
 export type VisionModerationOperation = "image_moderation" | "video_frame_moderation";
 
@@ -30,6 +30,8 @@ export type VisionModerationSceneContext = {
    * Implies `personShot`. A refusal or malformed answer simply leaves the identity out (the metadata ranking decides).
    */
   targetPerson?: { name: string; aliases: readonly string[]; context: readonly string[]; others: readonly string[] };
+  /** VE2E-152: the SAME call also rates how clean the media is for reuse (overlaid text area, logo, watermark, subtitles, edit layout). */
+  cleanliness?: boolean;
 };
 
 /** One sampled frame (already extracted/encoded by the caller - this adapter never touches raw video bytes or runs FFmpeg; frame extraction happens outside this package, per repo convention that FFmpeg only runs in `apps/media-worker`). */
@@ -54,6 +56,8 @@ export type VisionModerationRawResult = {
   shot?: VisionShotFindings;
   /** Present when `targetPerson` was asked and both identity fields came back well-formed. */
   identity?: VisionIdentityFindings;
+  /** Present when `cleanliness` was asked and every cleanliness field came back well-formed. */
+  cleanliness?: VisionCleanlinessFindings;
 };
 
 /** Documented, bounded sampling policy: at most this many frames are ever sent for one video moderation call - a fixed, auditable ceiling, not a silently-varying per-call amount. */
@@ -111,12 +115,45 @@ const IDENTITY_PROPERTIES: Record<(typeof IDENTITY_FIELDS)[number], Record<strin
   target_confidence: { type: "number" },
 };
 
-type PersonAsk = { shot: boolean; identity: boolean };
-const personAskOf = (ctx: Pick<VisionModerationSceneContext, "personShot" | "targetPerson">): PersonAsk => ({ shot: Boolean(ctx.personShot || ctx.targetPerson), identity: Boolean(ctx.targetPerson) });
-const extraFields = (ask: PersonAsk): { required: string[]; properties: Record<string, unknown> } => ({
-  required: [...(ask.shot ? SHOT_FIELDS : []), ...(ask.identity ? IDENTITY_FIELDS : [])],
-  properties: { ...(ask.shot ? SHOT_PROPERTIES : {}), ...(ask.identity ? IDENTITY_PROPERTIES : {}) },
+/** VE2E-152: cleanliness fields (asked with `cleanliness`); the frame counts only for a multi-frame (video) call. */
+const CLEAN_FIELDS = ["text_area_pct", "text_over_subject", "burnt_in_subtitles", "logo_size", "watermark_or_username", "lower_third_or_banner", "stickers_or_emoji", "frame_or_template", "split_screen_or_pip", "social_ui_overlay", "large_overlay"] as const;
+const CLEAN_PROPERTIES: Record<(typeof CLEAN_FIELDS)[number], Record<string, unknown>> = {
+  text_area_pct: { type: "number" },
+  text_over_subject: { type: "boolean" },
+  burnt_in_subtitles: { type: "boolean" },
+  logo_size: { type: "string", enum: ["none", "small", "large"] },
+  watermark_or_username: { type: "boolean" },
+  lower_third_or_banner: { type: "boolean" },
+  stickers_or_emoji: { type: "boolean" },
+  frame_or_template: { type: "boolean" },
+  split_screen_or_pip: { type: "boolean" },
+  social_ui_overlay: { type: "boolean" },
+  large_overlay: { type: "boolean" },
+};
+const FRAME_COUNT_FIELDS = ["frames_heavy_text", "frames_with_watermark"] as const;
+const FRAME_COUNT_PROPERTIES: Record<(typeof FRAME_COUNT_FIELDS)[number], Record<string, unknown>> = { frames_heavy_text: { type: "integer" }, frames_with_watermark: { type: "integer" } };
+
+type PersonAsk = { shot: boolean; identity: boolean; cleanliness?: boolean; multiFrame?: boolean };
+const personAskOf = (ctx: Pick<VisionModerationSceneContext, "personShot" | "targetPerson" | "cleanliness">, multiFrame = false): PersonAsk => ({
+  shot: Boolean(ctx.personShot || ctx.targetPerson),
+  identity: Boolean(ctx.targetPerson),
+  cleanliness: Boolean(ctx.cleanliness),
+  multiFrame,
 });
+const extraFields = (ask: PersonAsk): { required: string[]; properties: Record<string, unknown> } => ({
+  required: [...(ask.shot ? SHOT_FIELDS : []), ...(ask.identity ? IDENTITY_FIELDS : []), ...(ask.cleanliness ? CLEAN_FIELDS : []), ...(ask.cleanliness && ask.multiFrame ? FRAME_COUNT_FIELDS : [])],
+  properties: {
+    ...(ask.shot ? SHOT_PROPERTIES : {}),
+    ...(ask.identity ? IDENTITY_PROPERTIES : {}),
+    ...(ask.cleanliness ? CLEAN_PROPERTIES : {}),
+    ...(ask.cleanliness && ask.multiFrame ? FRAME_COUNT_PROPERTIES : {}),
+  },
+});
+
+const CLEAN_PROMPT =
+  "Also rate how CLEAN the footage is for reuse in a new video - only overlays an editor added count, not things physically in the scene (a real shop sign or a jersey number is not an overlay): text_area_pct = percent (0-100) of the frame covered by overlaid text (captions, subtitles, headlines, text stickers); text_over_subject = overlaid text covers the face or main subject; burnt_in_subtitles = subtitle lines burnt into the picture; logo_size = none | small (a small corner logo, about 3% of the frame or less) | large; watermark_or_username = a platform watermark, @username or publisher banner; lower_third_or_banner = a lower-third, headline bar or news banner; stickers_or_emoji = stickers, emoji or GIF overlays; frame_or_template = a border, frame, meme or template layout; split_screen_or_pip = split screen, picture-in-picture or several panels; social_ui_overlay = social-app UI (progress bar, like / comment / share buttons) or a follow / subscribe call to action; large_overlay = a large graphic covering the subject.";
+const CLEAN_MULTI_FRAME_PROMPT =
+  "For the sampled frames: text_area_pct = the largest value seen; frames_heavy_text = how many frames have overlaid text covering more than 18% of the frame; frames_with_watermark = how many frames show a watermark, @username or logo.";
 
 /** The single-image schema, extended with the shot fields (person subject) and the identity fields (target person). */
 export const moderationSchemaFor = (ask: boolean | PersonAsk): JsonSchema => {
@@ -148,8 +185,10 @@ const buildPrompt = (operation: VisionModerationOperation, ctx: VisionModeration
     ctx.exclusions.length ? `Must NOT show: ${ctx.exclusions.join(", ")}.` : "",
     ctx.personShot || ctx.targetPerson ? SHOT_PROMPT : "",
     ctx.targetPerson ? identityPrompt(ctx.targetPerson) : "",
+    ctx.cleanliness ? CLEAN_PROMPT : "",
+    ctx.cleanliness && operation === "video_frame_moderation" && frameCount > 1 ? CLEAN_MULTI_FRAME_PROMPT : "",
     "Evaluate two SEPARATE things: (1) safety - does the content contain disallowed material (explicit violence, sexual content, hate symbols, self-harm, or anything unsafe for a general short-video audience)? (2) scene_beat_relevance - a 0..1 score for how well the VISIBLE action/setting supports the stated narrative beat and expected entities/action/setting/mood, independent of safety.",
-    `Reply with exactly one JSON object matching the schema: safety_flag (true only if genuinely unsafe/disallowed), safety_categories (short reason codes, empty array if safe), scene_beat_relevance (0..1), confidence (0..1, your confidence in this whole assessment), notes (one short sentence, no personal data)${ctx.personShot || ctx.targetPerson ? ", plus people_count, main_person_closeup, text_coverage, logo_watermark, news_card" : ""}${ctx.targetPerson ? ", target_match, target_confidence" : ""}. No other text, no markdown.`,
+    `Reply with exactly one JSON object matching the schema: safety_flag (true only if genuinely unsafe/disallowed), safety_categories (short reason codes, empty array if safe), scene_beat_relevance (0..1), confidence (0..1, your confidence in this whole assessment), notes (one short sentence, no personal data)${ctx.personShot || ctx.targetPerson ? ", plus people_count, main_person_closeup, text_coverage, logo_watermark, news_card" : ""}${ctx.targetPerson ? ", target_match, target_confidence" : ""}${ctx.cleanliness ? `, plus ${CLEAN_FIELDS.join(", ")}${operation === "video_frame_moderation" && frameCount > 1 ? `, ${FRAME_COUNT_FIELDS.join(", ")}` : ""}` : ""}. No other text, no markdown.`,
   ];
   return lines.filter(Boolean).join(" ");
 };
@@ -166,6 +205,7 @@ const parseRaw = (output: unknown): VisionModerationRawResult | null => {
   if (typeof row.notes !== "string") return null;
   const shot = parseShot(row);
   const identity = parseIdentity(row);
+  const cleanliness = parseCleanliness(row);
   return {
     safetyFlag: row.safety_flag,
     safetyCategories: row.safety_categories as string[],
@@ -174,6 +214,35 @@ const parseRaw = (output: unknown): VisionModerationRawResult | null => {
     notes: row.notes,
     ...(shot ? { shot } : {}),
     ...(identity ? { identity } : {}),
+    ...(cleanliness ? { cleanliness } : {}),
+  };
+};
+
+/** The cleanliness answer when every single-frame field is present and well-formed (frame counts optional); otherwise none. */
+const parseCleanliness = (row: Record<string, unknown>): VisionCleanlinessFindings | null => {
+  const pct = row.text_area_pct;
+  if (typeof pct !== "number" || !Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+  const logo = row.logo_size;
+  if (logo !== "none" && logo !== "small" && logo !== "large") return null;
+  const flags = ["text_over_subject", "burnt_in_subtitles", "watermark_or_username", "lower_third_or_banner", "stickers_or_emoji", "frame_or_template", "split_screen_or_pip", "social_ui_overlay", "large_overlay"] as const;
+  if (flags.some((key) => typeof row[key] !== "boolean")) return null;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(MAX_MODERATION_FRAMES, Math.round(value)) : undefined);
+  const heavy = count(row.frames_heavy_text);
+  const watermark = count(row.frames_with_watermark);
+  return {
+    textAreaPct: Math.round(pct * 10) / 10,
+    textOverSubject: row.text_over_subject as boolean,
+    subtitles: row.burnt_in_subtitles as boolean,
+    logo,
+    watermark: row.watermark_or_username as boolean,
+    lowerThird: row.lower_third_or_banner as boolean,
+    stickers: row.stickers_or_emoji as boolean,
+    frameTemplate: row.frame_or_template as boolean,
+    splitScreen: row.split_screen_or_pip as boolean,
+    socialUi: row.social_ui_overlay as boolean,
+    largeOverlay: row.large_overlay as boolean,
+    ...(heavy !== undefined ? { heavyTextFrames: heavy } : {}),
+    ...(watermark !== undefined ? { watermarkFrames: watermark } : {}),
   };
 };
 
@@ -214,9 +283,11 @@ export async function moderateMediaWithVision(input: VisionModerationCallInput):
   if (bounded.length === 0) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Every provided frame was empty or exceeded the bounded egress size", false);
   const timestamps = bounded.map((f) => f.timestampMs ?? 0);
   const prompt = buildPrompt(input.operation, input.sceneContext, bounded.length, timestamps);
-  const result = await generateVisionStructuredOnce<unknown>(input.kind, input.apiKey, input.modelId, prompt, bounded.map((f) => ({ mimeType: f.mimeType, base64: f.base64 })), moderationSchemaFor(personAskOf(input.sceneContext)));
-  const raw = parseRaw(result.output);
-  if (!raw) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Vision moderation response did not match the required structured fields", false);
+  const result = await generateVisionStructuredOnce<unknown>(input.kind, input.apiKey, input.modelId, prompt, bounded.map((f) => ({ mimeType: f.mimeType, base64: f.base64 })), moderationSchemaFor(personAskOf(input.sceneContext, input.operation === "video_frame_moderation" && bounded.length > 1)));
+  const parsed = parseRaw(result.output);
+  if (!parsed) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Vision moderation response did not match the required structured fields", false);
+  // VE2E-152: how many frames the cleanliness verdict covers (the >= 2 bad frames rule needs it).
+  const raw = parsed.cleanliness ? { ...parsed, cleanliness: { ...parsed.cleanliness, sampledFrames: bounded.length } } : parsed;
   return { raw, requestId: result.usage.providerRequestId, sampledFrameCount: bounded.length, sampledTimestampsMs: timestamps };
 }
 

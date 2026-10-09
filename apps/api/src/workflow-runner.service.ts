@@ -573,6 +573,7 @@ export class WorkflowRunnerService {
     try {
       const degradedBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.degraded ?? null] as const));
       const personMatchBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.personEvidence?.match ?? null] as const));
+      const cleanlinessBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.cleanliness] as const));
       const sourceByAsset = new Map(ctx.sourced.flatMap((piece) => (piece.source ? [[piece.source.mediaAssetVersionId, piece.source] as const] : [])));
       let dims = new Map<string, { widthPx: number | null; heightPx: number | null }>();
       try {
@@ -593,6 +594,7 @@ export class WorkflowRunnerService {
         narration: ctx.narrationByScene.get(scene.sceneId) ?? "",
         degradedTier: scene.segmentId ? degradedBySegment.get(scene.segmentId) ?? null : null,
         ...(ctx.person ? { personMatch: scene.segmentId ? personMatchBySegment.get(scene.segmentId) ?? null : null } : {}),
+        ...(scene.segmentId && cleanlinessBySegment.get(scene.segmentId) ? { cleanlinessFallback: cleanlinessBySegment.get(scene.segmentId)!.fallback } : {}),
       }));
       const person = ctx.person ? { name: ctx.person.target.name, focus: assessScriptPersonFocus(ctx.person.target, { title: ctx.person.title, scenes: ctx.person.scenes }) } : null;
       result = runQualityGate({ scenes, assets, targetSec: ctx.targetSec, config, person });

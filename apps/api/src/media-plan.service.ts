@@ -63,6 +63,7 @@ import type {
   MediaPlanResponse,
   MediaPlanSegmentDiagnostics,
   ScriptVisualPlanResponse,
+  SegmentCleanlinessDiagnostics,
   SegmentPersonDiagnostics,
   TimelineSceneBindingInput,
   TimelineSegmentInput,
@@ -134,6 +135,8 @@ export type SegmentSource = {
   degradeReason?: string | null;
   /** VE2E-151 (person subject only): identity evidence of the source (verified by vision / named in metadata / generic). */
   personEvidence?: PersonEvidence;
+  /** VE2E-152: overlay / pre-edit verdict of the chosen candidate (`fallback` = no clean footage was usable). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
 };
 
 /** VE2E-151: how sure a person subject's source shows the person, and how that was decided (feeds `SegmentPersonDiagnostics`). */
@@ -619,6 +622,7 @@ export class MediaPlanService {
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
           apifyQuality: attempt.data.quality,
           ...(attempt.data.quality?.person ? { personEvidence: personEvidenceOf(attempt.data.quality.person) } : {}),
+          ...(attempt.data.quality?.frameCleanliness ?? attempt.data.quality?.cleanliness ? { cleanliness: (attempt.data.quality.frameCleanliness ?? attempt.data.quality.cleanliness)! } : {}),
         },
       };
     } catch (error) {
@@ -720,7 +724,8 @@ export class MediaPlanService {
           continue;
         }
         input.ledger.apifyPlainIds.add(externalId); // claim (live set), same tick as the check above
-        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels" } };
+        const cleanliness = outcome.data.cleanliness;
+        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels", ...(cleanliness ? { cleanliness } : {}) } };
       }
     }
     return last;
@@ -1045,6 +1050,7 @@ export class MediaPlanService {
       const visionSkip = job.vision.skipReasonFor(segment.sceneIds[0] ?? "");
       if (source && visionSkip) source = { ...source, visionSkipped: visionSkip };
       if (source) source = withPersonEvidence(segment, source);
+      if (source?.cleanliness?.fallback && process.env.NODE_ENV !== "test") console.info(`[media] ${segment.segmentId}: ${source.cleanliness.message} (${source.cleanliness.tier}${source.cleanliness.editSignals.length ? `: ${source.cleanliness.editSignals.join(", ")}` : ""})`);
       if (source) {
         input.ledger.add(source);
         registerClipWindow(input.ledger, source, segment, segmentSceneDurations(segment));
@@ -1180,6 +1186,7 @@ export class MediaPlanService {
             }
           : {}),
         ...(personTargetOfProfile(subjectProfileOf(segment)) ? { person: segmentPersonDiagnostics(personTargetOfProfile(subjectProfileOf(segment))!, source ?? null, errorCode) } : {}),
+        ...(source?.cleanliness ? { cleanliness: { ...source.cleanliness } } : {}),
       });
     }
     return {

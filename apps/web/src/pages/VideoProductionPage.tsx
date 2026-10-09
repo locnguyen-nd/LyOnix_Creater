@@ -10,7 +10,7 @@ import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventRespo
 import { SourceBadge } from "../studio/SourceBadge";
 import { STAGE_COLORS, STAGE_KEYS, currentStage, formatElapsed, stageOfStep, summarizeStages, type StageKey } from "../video-production-stages";
 import { getVideoProduction, getWorkerHealth, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
-import { personFocusWarnings } from "../person-focus";
+import { overlayFallbackWarnings, personFocusWarnings } from "../person-focus";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
 // Matches video-productions.service.ts's own retriableStatuses — "cancelled" is deliberately
@@ -98,6 +98,7 @@ export function VideoProductionPage() {
 
   // VE2E-151: the person-focus warnings of the quality gate (script drifts off the person / too little media naming the person).
   const personWarnings = personFocusWarnings(run.qualityGate);
+  const overlayWarnings = overlayFallbackWarnings(run.qualityGate);
   const canOpenStudio = Boolean(run.scriptDraftVersionId);
   const isDone = run.status === "completed" && Boolean(run.resultUrl);
   const stages = summarizeStages(events, run, nowMs);
@@ -151,6 +152,12 @@ export function VideoProductionPage() {
         <Banner variant="warn">
           <span className="block font-semibold" data-testid="person-focus-warning">{t("videoProduction.personFocusTitle")}</span>
           {personWarnings.map((warning) => <span key={warning.code} className="block">{warning.detail}</span>)}
+        </Banner>
+      ) : null}
+      {overlayWarnings.length > 0 ? (
+        <Banner variant="info">
+          <span className="block font-semibold" data-testid="overlay-fallback-warning">{t("videoProduction.overlayFallbackTitle")}</span>
+          {overlayWarnings.map((warning) => <span key={warning.code} className="block">{warning.detail}</span>)}
         </Banner>
       ) : null}
 

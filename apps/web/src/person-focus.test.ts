@@ -18,3 +18,12 @@ describe("VE2E-151 person focus warnings", () => {
     expect(personFocusWarnings(null)).toEqual([]);
   });
 });
+
+describe("VE2E-152 overlay fallback warning", () => {
+  it("keeps only the media_overlay_fallback code", async () => {
+    const { overlayFallbackWarnings } = await import("./person-focus");
+    const gate = { checks: [], fixes: [], warnings: [{ code: "media_overlay_fallback", detail: "Không đủ footage sạch, đang dùng media có overlay nhẹ. (1 cảnh: s2)" }, { code: "script_off_target", detail: "x" }], degraded: { count: 0, sceneIds: [], tiers: {} }, failure: null };
+    expect(overlayFallbackWarnings(gate).map((warning) => warning.code)).toEqual(["media_overlay_fallback"]);
+    expect(overlayFallbackWarnings(undefined)).toEqual([]);
+  });
+});

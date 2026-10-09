@@ -181,6 +181,17 @@
         "VE2E-150"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-09: nhập/chọn một người cụ thể thì kịch bản chỉ nói về người đó, media ưu tiên video/ảnh riêng của đúng người đó, ít chữ/logo/card tin tức. Chỉ bật khi videoSubject.kind = person (model trả kind + otherPeople, prompt script-prompt.v2.4 có PERSON RULE: alias đủ dạng, mustInclude = nhóm/đội/nghề để phân biệt trùng tên, nguồn nhiều người thì re-center). Domain person-target.ts: chuẩn hoá tên (kính ngữ, ・, đảo họ-tên, romaji dài), identity strong/context/weak/author, cờ metadata (news, text_card, group, close_up, slideshow, other_person), điểm người (identity 0.45 > sạch 0.25 > khung hình 0.15 > chuyển động 0.15) gộp 55% vào rankMediaCandidates; loại card tin/quote và ảnh 'có tên mà không có người'; ảnh nhóm chỉ bị trừ điểm. Vision: thêm people_count/closeup/text_coverage/logo/news_card vào CÙNG lời gọi hiện có (không nhận diện danh tính). TikTok/Shorts/Pinterest dùng cùng tín hiệu. Pexels khi là người: query cảnh nền đã bỏ tên (stock không có người thật, tránh khuôn mặt người lạ). Script: lệch người thì viết lại 1 lần (SCRIPT_PERSON_REFOCUS=0 tắt). Quality gate: script_person_focus + person_media (tỉ lệ thời lượng có media đúng người, mặc định >= 50%, QUALITY_GATE_PERSON_MIN_SHARE), cảnh báo rõ; PERSON_FOCUS_STRICT=1 thì chặn render. Web: banner cảnh báo ở trang job. Spec .docs/specs/VE2E-151.md. Nhánh feature/person-media-relevance từ VE2E-150 82f29c0 (commit local, chưa push). Bổ sung cùng ngày: trường 'Người mục tiêu' trên Tạo Video (draft-only, Tóm tắt; WorkflowRun.targetPerson, migration 20261009130000), precedence user > tin đã chọn > model (resolveTargetPerson, videoSubject.source), prompt khoá TARGET PERSON + rewrite; vision trả target_match/target_confidence trong cùng lời gọi (metadata không bao giờ kết luận, cap 0.75), bậc verified > strong_metadata > single_portrait > group > generic > rejected, sai người >= 0.6 = loại; diagnostics mediaSourcing[].person (targetPerson, targetSource, identityConfidence, verificationMethod, rejectionReason)."
+    },
+    {
+      "id": "VE2E-152",
+      "title": "Media Cleanliness: ưu tiên footage sạch, lọc video nhiều chữ / logo / watermark / đã edit sẵn",
+      "group": "Làm mịn — Media",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-151"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-09: không ưu tiên video người khác đã edit sẵn. assessMediaCleanliness (domain): text <=8% clean, 8-18% acceptable, 18-30% penalized, >30% reject TEXT_HEAVY; chữ đè chủ thể tụt 1 bậc; logo nhỏ <=3% trừ nhẹ, logo lớn LARGE_WATERMARK; watermark/username/subtitle/headline/sticker/khung/chia màn hình = penalized; UI mạng xã hội SOCIAL_UI_OVERLAY, card tin NEWS_CARD, >=3 tín hiệu edit PRE_EDITED_VIDEO = reject; >=2 trên 5 frame nhiều chữ = TEXT_HEAVY. Bằng chứng: vision cleanliness trong CÙNG lời gọi (cover; 5 frame 384px khi VISION_VIDEO_FRAMES=1), shot VE2E-151, hashtag edit, TikTok effectStickers; metadata không bao giờ tự reject. Ranking: person tier > footage sạch > một chủ thể > chuyển động > chất lượng > chữ/logo > tỉ lệ; reject không tự chọn (allowCleanlinessRejects); fallback ghi 'Không đủ footage sạch, đang dùng media có overlay nhẹ.' (log, diagnostics, quality gate media_overlay_fallback, banner). Diagnostics mediaSourcing[].cleanliness. MEDIA_CLEANLINESS=0 tắt trường vision. Spec .docs/specs/VE2E-152.md."
     }
   ]
 }

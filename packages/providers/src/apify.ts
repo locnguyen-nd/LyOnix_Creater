@@ -377,6 +377,8 @@ type Normalized = {
   social?: SocialCandidateSignals;
   /** VE2E-51: search-only phase - the video page URL to fetch in phase 2 (no file is stored yet). */
   deferredPostUrl?: string;
+  /** VE2E-152: edit signals the platform reports itself (TikTok effect stickers). */
+  editSignals?: string[];
 };
 
 type NormalizeOptions = { deferDownload?: boolean };
@@ -447,6 +449,7 @@ function normalizeTikTok(item: Json, options: NormalizeOptions = {}): Normalized
     authorUrl: anyHttpsUrl(at(item, "authorMeta", "profileUrl") ?? at(item, "channel", "url")) || null,
     sourceUrl: pageUrl || null,
     text,
+    ...(Array.isArray(item.effectStickers) && item.effectStickers.length > 0 ? { editSignals: ["stickers_or_emoji"] } : {}),
     social: {
       videoId: externalId,
       text,
@@ -671,6 +674,7 @@ export function normalizeApifyItems(
       capabilityEvidence: null,
       metadataScore: 0,
       descriptorText: n.text || null,
+      ...(n.editSignals?.length ? { editSignals: [...n.editSignals] } : {}),
       visionFindings: null,
       relevanceScore: 0,
       moderationDecision: null,

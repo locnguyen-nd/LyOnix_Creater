@@ -10,7 +10,7 @@
  * No Jev/TypeSafe anywhere in this system (owner decision VE2E-16, 2026-09-27) - this policy
  * only ever consumes a `packages/providers` content-provider vision call.
  */
-import type { VisionFindings, VisionIdentityFindings, VisionModerationDecision, VisionShotFindings } from "./media-candidate.js";
+import type { VisionCleanlinessFindings, VisionFindings, VisionIdentityFindings, VisionModerationDecision, VisionShotFindings } from "./media-candidate.js";
 
 export type VisionModerationRawResult = {
   safetyFlag: boolean;
@@ -24,6 +24,8 @@ export type VisionModerationRawResult = {
   shot?: VisionShotFindings;
   /** Target-person identity verdict (only when it was asked); copied onto the findings, never part of the safety decision. */
   identity?: VisionIdentityFindings;
+  /** VE2E-152: cleanliness findings (only when they were asked); copied onto the findings, never part of the safety decision. */
+  cleanliness?: VisionCleanlinessFindings;
 };
 
 export type VisionModerationPolicyInput = {
@@ -68,7 +70,7 @@ export function decideVisionModeration(input: VisionModerationPolicyInput): Visi
     return { ...base, decision: "manual_review", confidence: 0, reasonCodes: ["provider_error_unsupported_or_unverified"], sceneBeatRelevance: null, safetyFindings: [] };
   }
   const { raw } = input;
-  const shot = { ...(raw.shot ? { shot: { ...raw.shot } } : {}), ...(raw.identity ? { identity: { ...raw.identity } } : {}) };
+  const shot = { ...(raw.shot ? { shot: { ...raw.shot } } : {}), ...(raw.identity ? { identity: { ...raw.identity } } : {}), ...(raw.cleanliness ? { cleanliness: { ...raw.cleanliness } } : {}) };
   if (raw.safetyFlag && raw.confidence >= VISION_HIGH_CONFIDENCE_THRESHOLD) {
     return { ...base, ...shot, decision: "rejected", confidence: raw.confidence, reasonCodes: raw.safetyCategories.length ? [...raw.safetyCategories] : ["safety_flagged"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [...raw.safetyCategories] };
   }

@@ -36,6 +36,8 @@ import {
   type SceneBrief,
 } from "@lyonix/domain";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
+import type { SegmentCleanlinessDiagnostics } from "@lyonix/contracts";
+import { chosenCleanlinessDiagnostics, cleanlinessCheckEnabled } from "./media-cleanliness-diagnostics.js";
 import type {
   ErrorCode,
   MediaAssetKind,
@@ -338,7 +340,7 @@ export class PexelsService {
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
     // VE2E-151: a person subject also gets the shot description (a stock close-up of a stranger is an impostor risk).
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}) };
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}), ...(cleanlinessCheckEnabled() ? { cleanliness: true } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
@@ -369,7 +371,7 @@ export class PexelsService {
    * trusted background `WorkflowRunnerService`, not exposed as its own HTTP endpoint (callers
    * needing manual pick-from-results control should keep using `search()` + `import()`).
    */
-  async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string }>> {
+  async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string; /** VE2E-152 */ cleanliness?: SegmentCleanlinessDiagnostics }>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
@@ -442,6 +444,7 @@ export class PexelsService {
     });
     if (!imported.ok) return imported;
     // `externalId` is internal-only (this method is never exposed as its own HTTP endpoint) - lets `WorkflowRunnerService` track cross-scene continuity without re-deriving it from the registered asset (which is identified by checksum, not the provider's external id).
-    return { ok: true, data: { asset: imported.data.asset, externalId: decision.chosen.externalId } };
+    const cleanliness = chosenCleanlinessDiagnostics(ranked, decision.chosen.candidateId);
+    return { ok: true, data: { asset: imported.data.asset, externalId: decision.chosen.externalId, ...(cleanliness ? { cleanliness } : {}) } };
   }
 }

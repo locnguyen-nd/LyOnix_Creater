@@ -8,6 +8,7 @@
 import { checkDurationBand, type DurationBandCheck } from "./duration-budget.js";
 import { findFreeWindow, type ClipWindow } from "./media-ladder.js";
 import { assessPersonMediaCoverage, PERSON_MEDIA_MIN_SHARE, type PersonMatchLevel, type PersonMediaCoverage, type ScriptPersonFocus } from "./person-target.js";
+import { CLEANLINESS_FALLBACK_MESSAGE } from "./media-cleanliness.js";
 
 export const QUALITY_GATE_DEFAULT_REPEAT_WINDOW = 3;
 export const QUALITY_GATE_DEFAULT_MIN_SHORT_SIDE_PX = 480;
@@ -31,6 +32,8 @@ export type QualityGateScene = {
   degradedTier?: "reuse_window" | "stock_image" | "brand_background" | null;
   /** Person mode: does this scene's source name the person (`verified` / `metadata`) or is it generic stock / a placeholder? */
   personMatch?: PersonMatchLevel | null;
+  /** VE2E-152: the scene's source is a medium (overlay) candidate taken because no clean footage was usable. */
+  cleanlinessFallback?: boolean;
 };
 
 export type QualityGateAsset = { id: string; kind: "video" | "image"; durationMs: number | null; widthPx: number | null; heightPx: number | null };
@@ -50,12 +53,12 @@ export type QualityGateFix =
   | { type: "source_swapped"; sceneId: string; segmentId: string; fromAssetId: string; toAssetId: string; toStartMs: number; reason: "repeat" | "low_resolution" };
 
 export type QualityGateWarning = {
-  code: "repeat_unfixed" | "duration_out_of_band" | "subtitle_over_lines" | "low_resolution" | "quality_degraded" | "script_off_target" | "person_media_low_confidence";
+  code: "repeat_unfixed" | "duration_out_of_band" | "subtitle_over_lines" | "low_resolution" | "quality_degraded" | "script_off_target" | "person_media_low_confidence" | "media_overlay_fallback";
   sceneId?: string;
   detail: string;
 };
 
-export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid" | "script_person_focus" | "person_media";
+export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid" | "script_person_focus" | "person_media" | "media_cleanliness";
 export type QualityGateCheck = { name: QualityGateCheckName; status: "ok" | "fixed" | "warning" | "failed"; detail?: string };
 
 export type QualityGateFailure = { code: "invalid_range" | "person_low_confidence"; sceneId: string; reason: string };
@@ -253,6 +256,11 @@ export function runQualityGate(input: {
   for (const scene of degradedScenes) tiers[scene.degradedTier!] = (tiers[scene.degradedTier!] ?? 0) + 1;
   if (degradedScenes.length) warnings.push({ code: "quality_degraded", detail: `${degradedScenes.length} cảnh dùng nguồn bậc thấp (${Object.entries(tiers).map(([tier, n]) => `${tier}:${n}`).join(", ")}); job vẫn render` });
   checks.push({ name: "source_degraded", status: degradedScenes.length ? "warning" : "ok", ...(degradedScenes.length ? { detail: `${degradedScenes.length} cảnh` } : {}) });
+
+  // (5b) VE2E-152: scenes on a medium (overlay) source because no clean footage was usable - reported, never blocking.
+  const overlayScenes = scenes.filter((scene) => scene.cleanlinessFallback);
+  if (overlayScenes.length > 0) warnings.push({ code: "media_overlay_fallback", detail: `${CLEANLINESS_FALLBACK_MESSAGE} (${overlayScenes.length} cảnh: ${overlayScenes.map((scene) => scene.sceneId).join(", ")})` });
+  if (scenes.some((scene) => scene.cleanlinessFallback !== undefined)) checks.push({ name: "media_cleanliness", status: overlayScenes.length ? "warning" : "ok", ...(overlayScenes.length ? { detail: `${overlayScenes.length} cảnh dùng media có overlay nhẹ` } : {}) });
 
   // (6) person mode: the script stays on the person, and most of the video shows media naming the person (not stock / a placeholder).
   let personMedia: PersonMediaCoverage | undefined;
