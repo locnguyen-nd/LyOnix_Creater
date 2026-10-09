@@ -588,6 +588,8 @@ model WorkflowRun {
   deletedAt                  DateTime?
   /// Render reliability: a retried run is claimed again no earlier than this (provider Retry-After / cooldown, else backoff).
   notBefore                  DateTime?
+  /// VE2E-151: the person the video must be about ({ user: { main, aliases, context } | null, newsText: string | null }); null = none.
+  targetPerson               Json?
   createdByUserId            String                    @db.Uuid
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt

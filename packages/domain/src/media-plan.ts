@@ -44,16 +44,22 @@ export type SegmentKeywords = {
   aliases?: string[];
   mustInclude?: string[];
   mustExclude?: string[];
+  /** `videoSubject.kind` (person / group / team / place / event / other): `person` turns on the person-focused rules. */
+  subjectKind?: string;
+  /** `videoSubject.otherPeople`: other people the script names (context only). */
+  otherPeople?: string[];
+  /** `videoSubject.source`: who named a person subject (user > news > model). */
+  targetSource?: string;
 };
 
-export type MediaPlanVideoSubject = { main: string; aliases?: string[]; mustInclude?: string[]; mustExclude?: string[] };
+export type MediaPlanVideoSubject = { main: string; aliases?: string[]; mustInclude?: string[]; mustExclude?: string[]; kind?: string; otherPeople?: string[]; source?: string };
 
 export type MediaPlanVisualSegment = {
   segmentId: string;
   sceneIds: string[];
   subject: string;
   priority: number;
-  keywords: Omit<SegmentKeywords, "subject" | "aliases" | "mustInclude" | "mustExclude">;
+  keywords: Omit<SegmentKeywords, "subject" | "aliases" | "mustInclude" | "mustExclude" | "subjectKind" | "otherPeople" | "targetSource">;
 };
 
 export type PlannedSegment = {
@@ -131,6 +137,9 @@ const plannedKeywords = (segment: MediaPlanVisualSegment, videoSubject: MediaPla
     ...(videoSubject?.aliases?.length ? { aliases: [...videoSubject.aliases] } : {}),
     ...(videoSubject?.mustInclude?.length ? { mustInclude: [...videoSubject.mustInclude] } : {}),
     ...(videoSubject?.mustExclude?.length ? { mustExclude: [...videoSubject.mustExclude] } : {}),
+    ...(videoSubject?.kind ? { subjectKind: videoSubject.kind } : {}),
+    ...(videoSubject?.otherPeople?.length ? { otherPeople: [...videoSubject.otherPeople] } : {}),
+    ...(videoSubject?.source ? { targetSource: videoSubject.source } : {}),
   };
 };
 
@@ -296,12 +305,14 @@ export function planBackgroundSegments(
     return options.subjectShareTarget ? allocateSubjectShare(fitted, scenes, options.subjectShareTarget) : fitted;
   }
   const count = chooseFallbackSegmentCount(sum([...durations.values()]), scenes.length, range);
+  // VE2E-151: an explicit subject (the user's target person) still binds the fallback segments (no visualPlan keywords: the subject only).
+  const subjectOnly = options.videoSubject?.main ? plannedKeywords({ segmentId: "", sceneIds: [], subject: "", priority: 1, keywords: { ja: "", en: "" } }, options.videoSubject) : null;
   return groupScenesByDuration(scenes, count).map((group, index) => ({
     segmentId: `seg-${index + 1}`,
     sceneIds: group.map((scene) => scene.sceneId),
-    subject: null,
-    priority: null,
-    keywords: null,
+    subject: subjectOnly ? options.videoSubject!.main : null,
+    priority: subjectOnly ? 1 : null,
+    keywords: subjectOnly ? { ...subjectOnly } : null,
     durationMs: sum(group.map((scene) => Math.max(0, scene.durationMs))),
     origin: "fallback",
   }));

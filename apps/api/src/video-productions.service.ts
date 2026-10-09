@@ -36,6 +36,7 @@ import { QueueStatusService } from "./queue-status.service.js";
 import { SourcesService } from "./sources.service.js";
 import { asAccountRef, asRenderRef, asVoiceRef } from "./workflow-runner.service.js";
 import { sanitizeOrshotOptions } from "./orshot-render.js";
+import { parseTargetPersonIntake } from "./target-person-intake.js";
 
 export type VideoProductionOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number };
 
@@ -221,6 +222,9 @@ export class VideoProductionsService {
     // VE2E-40: validated before any row (source/run) is created.
     const backgroundSegments = parseBackgroundSegmentsSetting(input.backgroundSegments, backgroundSegmentBoundsFromEnv());
     if (!backgroundSegments.ok) return { ok: false, code: "VALIDATION_FAILED", message: backgroundSegments.message };
+    // VE2E-151: the person typed on the create form (highest-priority target) + the selected news text (for the `news` target).
+    const personIntake = parseTargetPersonIntake(input.targetPerson, input.newsContext);
+    if (!personIntake.ok) return { ok: false, code: "VALIDATION_FAILED", message: personIntake.message };
 
     const profile = await this.prisma.automationProfileVersion.findUnique({ where: { id: input.automationProfileId } });
     if (!profile) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy automation profile", status: 404 };
@@ -267,6 +271,8 @@ export class VideoProductionsService {
         profileVersion: profile.version,
         sourceVersionId,
         ...(backgroundSegments.value.mode === "fixed" ? { backgroundSegments: backgroundSegments.value } : {}),
+        // A chosen person changes what the run produces (same source, other person = other video).
+        ...(personIntake.value?.user ? { targetPerson: personIntake.value.user } : {}),
       }))
       .digest("hex");
 
@@ -282,6 +288,7 @@ export class VideoProductionsService {
           createdByUserId: userId,
           status: "draft",
           backgroundSegments: backgroundSegments.value as Prisma.InputJsonValue,
+          ...(personIntake.value ? { targetPerson: personIntake.value as unknown as Prisma.InputJsonValue } : {}),
         },
       });
     } catch (error) {

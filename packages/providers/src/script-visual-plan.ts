@@ -63,12 +63,14 @@ export const SCRIPT_VISUAL_PLAN_V2_JSON_SCHEMA = {
         videoSubject: {
           type: "object",
           additionalProperties: false,
-          required: ["main", "aliases", "mustInclude", "mustExclude"],
+          required: ["main", "kind", "aliases", "mustInclude", "mustExclude", "otherPeople"],
           properties: {
-            main: { type: "string", description: "The video's MAIN subject as a proper name (the player, team, person, place or story the whole video is about)" },
-            aliases: { type: "array", items: { type: "string" }, description: "Other names/spellings/nicknames of the main subject (ja/en/native script), 0-6" },
-            mustInclude: { type: "array", items: { type: "string" }, description: "Anchor terms tied to the subject: team, match, event, 0-6" },
+            main: { type: "string", description: "The video's MAIN subject as a proper name (the player, team, person, place or story the whole video is about); for a person the full name as commonly written in the script language" },
+            kind: { type: "string", enum: ["person", "group", "team", "place", "event", "other"], description: "person = ONE specific person (athlete, idol, actor, politician...); group = a band/idol group; team = a sports team/club" },
+            aliases: { type: "array", items: { type: "string" }, description: "Other names/spellings/nicknames of the main subject: full name in native script, romaji/English spelling, stage name, nickname (ja/en/native script), 0-6" },
+            mustInclude: { type: "array", items: { type: "string" }, description: "Anchor terms tied to the subject: team, match, event; for a person the group/team/occupation that tells same-name people apart, 0-6" },
             mustExclude: { type: "array", items: { type: "string" }, description: "Terms that would make a clip off-subject (rival story, unrelated person), 0-6" },
+            otherPeople: { type: "array", items: { type: "string" }, description: "Other named people the script mentions (context only), 0-6" },
           },
         },
         segments: {

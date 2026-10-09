@@ -52,10 +52,32 @@ import {
   candidateSubjectMatch,
   selectSocialCandidates,
   socialWindowOptionsFromEnv,
+  personMatchLevelOf,
+  personRejectionCounts,
+  visionTargetOf,
+  PERSON_VERIFY_MIN_CONFIDENCE,
   type MediaCandidate,
+  type RankedMediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality, MediaPlanReframeCheck } from "@lyonix/contracts";
+
+/** VE2E-151: the person ranking of the chosen candidate (identity level, score, match level, hints) for the segment diagnostics. */
+export const personQualityOf = (ranked: readonly RankedMediaCandidate[], candidateId: string): MediaPlanApifyQuality["person"] | undefined => {
+  const person = ranked.find((entry) => entry.candidate.candidateId === candidateId)?.person;
+  return person
+    ? {
+        identity: person.identity.level,
+        score: Math.round(person.score * 1000) / 1000,
+        match: personMatchLevelOf(person),
+        flags: [...person.flags],
+        tier: person.tier,
+        identityConfidence: person.identityConfidence,
+        verificationMethod: person.verificationMethod,
+        framing: person.framingKind,
+      }
+    : undefined;
+};
 import { getSharedProviderLimiter, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
 import { GrantsService } from "./grants.service.js";
@@ -548,7 +570,9 @@ export class ApifyService {
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    // VE2E-151: a person subject also gets the shot description (people / close-up / text / logo / news card) in the same call.
+    // The SAME call also checks the identity against the target person (match / different person / uncertain / nobody).
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
@@ -582,6 +606,9 @@ export class ApifyService {
         return outcome.ok ? outcome.frames : [];
       });
       const decision = moderated[0]?.moderationDecision ?? null;
+      // VE2E-151: frames of the downloaded clip that show a different person than the target reject it like an unsafe clip.
+      const identity = moderated[0]?.visionFindings?.identity;
+      if (brief.person && identity?.match === "different_person" && identity.confidence >= PERSON_VERIFY_MIN_CONFIDENCE) return "rejected";
       return decision === "rejected" ? "rejected" : decision === "accepted" ? "accepted" : "unchecked";
     } catch {
       return "unchecked";
@@ -790,7 +817,7 @@ export class ApifyService {
     const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang, limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
     quality.searchReused = searched.reused;
     if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
-    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}) };
+    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}), ...(input.brief.person ? { person: input.brief.person } : {}) };
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
@@ -833,6 +860,7 @@ export class ApifyService {
       pool = onSubject;
     }
     let ranked = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds });
+    if (input.brief.person) quality.personRejected = personRejectionCounts(ranked.map((entry) => entry.person));
     let phase2Failure = "";
     let decision: Extract<ReturnType<typeof decideMediaSelection>, { decision: "auto_select" }> | null = null;
     let toImport: ApifyCandidateResult | null = null;
@@ -846,6 +874,8 @@ export class ApifyService {
       const chosen = byCandidateId.get(next.chosen.candidateId);
       if (!chosen) return fail("apify_no_usable_candidate");
       const id = next.chosen.externalId;
+      const person = personQualityOf(next.ranked, next.chosen.candidateId);
+      if (person) quality.person = person;
       // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
       input.usedExternalIds.add(id);
       const library = await this.findLibraryAsset(projectId, input.platform, id);

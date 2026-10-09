@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { selectSocialSearchItems, type SocialSearchRejectReason } from "@lyonix/domain";
+import { selectSocialSearchItems, type PersonTarget, type SocialSearchRejectReason } from "@lyonix/domain";
 import { createHash } from "node:crypto";
 import { DEFAULT_FETCH_IMAGE_MAX_BYTES, SOCIAL_DIRECT_MEDIA_HOST_SUFFIXES, type SocialFetchPlatform, type SocialFetchTool, type SocialSearchItem } from "@lyonix/media-jobs";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
@@ -59,7 +59,7 @@ export type SocialSourceDiagnostics = {
   downloads: Array<{ externalId: string; code: string | null; ms: number; via?: "direct" | "worker" }>;
 };
 export type SocialImportOutcome =
-  | { ok: true; data: { asset: SocialAsset; externalId: string; ledgerId: string; sourceUrl: string; author: string | null; reused: boolean; diagnostics: SocialSourceDiagnostics } }
+  | { ok: true; data: { asset: SocialAsset; externalId: string; ledgerId: string; sourceUrl: string; author: string | null; reused: boolean; diagnostics: SocialSourceDiagnostics; /** VE2E-151 (person mode): metadata identity of the chosen result. */ personIdentity?: { level: string; score: number } } }
   | { ok: false; reason: string; diagnostics: SocialSourceDiagnostics };
 
 /**
@@ -95,6 +95,8 @@ export class SocialSourceService {
       subjectAliases: string[];
       keywords: string[];
       sceneId: string;
+      /** VE2E-151: the subject is one person - person-focused ranking (single-person posts over group / news / quote posts). */
+      person?: PersonTarget | null;
     },
   ): Promise<SocialImportOutcome> {
     const queries = [...new Set(input.queries.map((q) => q.trim()).filter(Boolean))].slice(0, 2);
@@ -118,6 +120,7 @@ export class SocialSourceService {
         maxDurationSeconds: shortsMaxSeconds(),
         subjectAliases: input.subjectAliases,
         keywords: [query, ...input.keywords],
+        ...(input.person ? { person: input.person } : {}),
       });
       diagnostics.passed += selection.passed.length;
       for (const [reason, count] of Object.entries(selection.rejectCounts)) diagnostics.rejected[reason as SocialSearchRejectReason] = (diagnostics.rejected[reason as SocialSearchRejectReason] ?? 0) + (count ?? 0);
@@ -125,26 +128,27 @@ export class SocialSourceService {
         lastReason = "no_usable_candidate";
         continue;
       }
-      for (const { item } of selection.passed.slice(0, MAX_DOWNLOADS)) {
+      for (const { item, personIdentity } of selection.passed.slice(0, MAX_DOWNLOADS)) {
+        const identityField = personIdentity ? { personIdentity } : {};
         const id = item.externalId!;
         if (input.usedExternalIds.has(id)) continue;
         input.usedExternalIds.add(id); // claim before any await
         const reused = await this.findLibraryAsset(projectId, input.platform, id);
-        if (reused) return { ok: true, data: { asset: reused, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: true, diagnostics } };
+        if (reused) return { ok: true, data: { asset: reused, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: true, diagnostics, ...identityField } };
         // Fast path (images): the search already returned the CDN file URL -> one SSRF-guarded GET in the API, no worker job.
         const direct = item.mediaType === "image" && item.mediaUrl ? await this.fetchDirect(item.mediaUrl) : null;
         if (direct) {
           diagnostics.downloads.push({ externalId: id, code: null, ms: direct.ms, via: "direct" });
           const registeredDirect = await this.register(projectId, userId, role, input.platform, item, query, direct.downloaded, input.sceneId);
           if (registeredDirect !== "rejected") {
-            return { ok: true, data: { asset: registeredDirect, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics } };
+            return { ok: true, data: { asset: registeredDirect, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics, ...identityField } };
           }
         }
         const fetched = await this.socialFetch.fetchPost({ platform: input.platform, tool: input.tool, url: item.url, mediaType: input.mediaType, userId, role });
         diagnostics.downloads.push({ externalId: id, code: fetched.ok ? null : fetched.code, ms: fetched.elapsedMs, via: "worker" });
         const registered = fetched.ok ? await this.register(projectId, userId, role, input.platform, item, query, fromWorker(fetched), input.sceneId) : null;
         if (registered && registered !== "rejected") {
-          return { ok: true, data: { asset: registered, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics } };
+          return { ok: true, data: { asset: registered, externalId: id, ledgerId: socialLedgerId(input.platform, id), sourceUrl: item.url, author: item.uploader ?? item.channel, reused: false, diagnostics, ...identityField } };
         }
         input.usedExternalIds.delete(id);
         lastReason = fetched.ok ? "register_failed" : `download:${fetched.code}`;

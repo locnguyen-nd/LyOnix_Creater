@@ -15,8 +15,8 @@ import {
 import { subjectKeywordRuleLines } from "./subject-keywords.js";
 
 export const SCRIPT_DRAFT_V2_SCHEMA_VERSION = "script-draft.v2" as const;
-/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. v2.2 (VE2E-50): short real 2-4 word ja/en search phrases. v2.3 (VE2E-88): multi-tier subject-anchored keywords {ja[], en[], broad_en[], mood_en} + videoSubject. */
-export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.3" as const;
+/** v2.1 (VE2E-38): same schema version, prompt additionally asks for the optional whole-script `visualPlan`. v2.2 (VE2E-50): short real 2-4 word ja/en search phrases. v2.3 (VE2E-88): multi-tier subject-anchored keywords {ja[], en[], broad_en[], mood_en} + videoSubject. v2.4 (VE2E-151): videoSubject.kind/otherPeople + PERSON RULE (script stays on one chosen person). */
+export const SCRIPT_PROMPT_TEMPLATE_V2_VERSION = "script-prompt.v2.4" as const;
 
 export const contentLanguagesV2 = ["vi", "en", "ja", "ko"] as const;
 export type ContentLanguageV2 = (typeof contentLanguagesV2)[number];
@@ -345,6 +345,8 @@ export function buildScriptV2PromptPackage(input: {
   backgroundSegmentRange?: { min: number; max: number } | null;
   /** VE2E-54: narration budget from the intake target (chars + scene range). Absent = legacy 55-65 s / 10-14 scenes line. */
   durationBudget?: NarrationBudget | null;
+  /** VE2E-151: the person the user chose on the create form (highest priority): the script and videoSubject are locked on this person. */
+  targetPerson?: { main: string; aliases: readonly string[]; context: readonly string[] } | null;
 }): ScriptPromptPackageV2 {
   const language: ContentLanguageV2 = isContentLanguageV2(input.language) ? input.language : "vi";
   const sourceType = isScriptSourceKind(input.sourceType) ? input.sourceType : "topic";
@@ -369,7 +371,8 @@ visualPlan (whole-video background plan, decided after writing all scenes): spli
 - segments: in script order, covering every sceneId exactly once, each segment a run of consecutive sceneIds.
 - Keep all scenes about the same subject (person, place or event) in the same segment - never split one subject across segments; the segment showing the video's main subject gets priority 1 and the most scenes; other segments priority 2+.
 - subject: short label of what that segment shows.
-- videoSubject: the ONE main subject of the whole video as a proper name (main), its aliases/other spellings (aliases), related anchor terms such as team/match/event (mustInclude) and terms that would make footage off-subject (mustExclude).
+- videoSubject: the ONE main subject of the whole video as a proper name (main), what it is (kind: person | group | team | place | event | other), its aliases/other spellings (aliases), related anchor terms such as team/match/event (mustInclude), terms that would make footage off-subject (mustExclude) and the other named people the script mentions (otherPeople).
+${PERSON_SUBJECT_RULES}${input.targetPerson ? `\n${targetPersonLockLine(input.targetPerson)}` : ""}
 - keywords is a multi-tier object {ja, en, broad_en, mood_en}: ja = 1-2 SHORT real Japanese search phrases (2-4 words, kana/kanji, separated by spaces) a Japanese TikTok user would type to find footage of the video's real ENTITY, person, place or event (examples: "東京 夜景", "渋谷 スクランブル交差点"); en = 1-2 English phrases (2-4 words) with the same meaning; broad_en = 1-2 wider English topic phrases; mood_en = ONE generic background mood phrase (example: "city night timelapse"). NEVER a camera direction, shot description, sentence or a copy of a scene visualQuery. ja and en are required for every segment, even when the script language is not Japanese.
 ${subjectKeywordRuleLines().join("\n")}
 - Always return a visualPlan object (not null) unless the script truly has no consistent subject.
@@ -388,4 +391,23 @@ The previous reply was not valid ${SCRIPT_DRAFT_V2_SCHEMA_VERSION}. Repair it: o
     text: body,
     repairText,
   };
+}
+
+/**
+ * Person rules of the script prompt: when the user names / picks one person, that person is the main subject (kind person, every
+ * spelling in aliases, the group/team/occupation in mustInclude to tell same-name people apart) and the script stays on that person.
+ */
+export const PERSON_SUBJECT_RULES = `PERSON RULE: if the topic, title or creative direction names one specific person, that person is the main subject (videoSubject.kind = "person", main = the full name as commonly written in the script language). aliases = the other spellings of the SAME person: full name in native script, romaji / English spelling, stage name, nickname. mustInclude = the group, team or occupation that tells this person apart from same-name people (take it from the title/topic). If several people share the name, pick the one the title/topic is about.
+When videoSubject.kind is "person": every scene is about that person - their own words, actions, career, the event that happened to them. Name the person in the hook (first scene) and again regularly. Mention other people, teams or events ONLY when they are direct context for that person, never as a topic of their own; if the source covers several people, re-center the script on the chosen person and drop the parts that are only about the others. List the other people you still mention in otherPeople.`;
+
+/** VE2E-151: the user's explicit target person outranks anything the source / title suggests. */
+export const targetPersonLockLine = (person: { main: string; aliases: readonly string[]; context: readonly string[] }): string =>
+  `TARGET PERSON (chosen by the user - highest priority, overrides the source and the title): ${person.main}${person.aliases.length ? ` (also written: ${person.aliases.join(", ")})` : ""}${person.context.length ? `, ${person.context.join(", ")}` : ""}. videoSubject.kind MUST be "person" and videoSubject.main MUST be ${person.main}. The whole script is about ${person.main}; if the source is mainly about someone else, keep only what concerns ${person.main} or explains their situation directly, and list the others in otherPeople.`;
+
+/** One rewrite request when a person-subject draft drifted off the person (see `assessScriptPersonFocus`). */
+export function buildPersonRefocusText(pkg: Pick<ScriptPromptPackageV2, "text">, person: { name: string; others: readonly string[] }, reasons: readonly string[]): string {
+  const others = person.others.length ? ` Other people (${person.others.join(", ")}) appear only as direct context in a scene that is about ${person.name}.` : "";
+  return `${pkg.text}
+
+The previous reply drifted away from the main person (${reasons.join(", ")}). Rewrite the WHOLE script centered on ${person.name}: videoSubject.kind = "person" and main = ${person.name}; name ${person.name} in the first scene and at least in every third scene; every scene is about ${person.name}.${others} Output a single JSON object of the same schema only.`;
 }

@@ -2,9 +2,12 @@
  * VE2E-85 (CR-MEDIA-SLA §3.1/§7): pre-render quality gate. Pure functions - no DB/provider access, no FFmpeg.
  * Checks the planned timeline, auto-corrects what it can (repeated clip windows, low-resolution sources) and reports the rest.
  * A missing/degraded source (ladder L4-L6, `quality_degraded`) NEVER fails the job - it is only reported.
+ * Person mode (the subject is one person, `input.person`): the script focus and the share of the video showing media that names the
+ * person are reported with a clear warning; only `PERSON_FOCUS_STRICT=1` turns a low share into a failure.
  */
 import { checkDurationBand, type DurationBandCheck } from "./duration-budget.js";
 import { findFreeWindow, type ClipWindow } from "./media-ladder.js";
+import { assessPersonMediaCoverage, PERSON_MEDIA_MIN_SHARE, type PersonMatchLevel, type PersonMediaCoverage, type ScriptPersonFocus } from "./person-target.js";
 
 export const QUALITY_GATE_DEFAULT_REPEAT_WINDOW = 3;
 export const QUALITY_GATE_DEFAULT_MIN_SHORT_SIDE_PX = 480;
@@ -26,6 +29,8 @@ export type QualityGateScene = {
   narration: string;
   /** VE2E-130 ladder level L4-L6 of this scene's source; absent = a normal source. */
   degradedTier?: "reuse_window" | "stock_image" | "brand_background" | null;
+  /** Person mode: does this scene's source name the person (`verified` / `metadata`) or is it generic stock / a placeholder? */
+  personMatch?: PersonMatchLevel | null;
 };
 
 export type QualityGateAsset = { id: string; kind: "video" | "image"; durationMs: number | null; widthPx: number | null; heightPx: number | null };
@@ -34,6 +39,10 @@ export type QualityGateConfig = {
   enabled: boolean;
   repeatWindow: number;
   minShortSidePx: number;
+  /** Person mode: minimum share of the duration with media naming the person (default {@link PERSON_MEDIA_MIN_SHARE}). */
+  personMinShare: number;
+  /** Person mode: a share below the minimum fails the gate instead of only warning (`PERSON_FOCUS_STRICT=1`). */
+  personStrict: boolean;
 };
 
 export type QualityGateFix =
@@ -41,15 +50,15 @@ export type QualityGateFix =
   | { type: "source_swapped"; sceneId: string; segmentId: string; fromAssetId: string; toAssetId: string; toStartMs: number; reason: "repeat" | "low_resolution" };
 
 export type QualityGateWarning = {
-  code: "repeat_unfixed" | "duration_out_of_band" | "subtitle_over_lines" | "low_resolution" | "quality_degraded";
+  code: "repeat_unfixed" | "duration_out_of_band" | "subtitle_over_lines" | "low_resolution" | "quality_degraded" | "script_off_target" | "person_media_low_confidence";
   sceneId?: string;
   detail: string;
 };
 
-export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid";
+export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid" | "script_person_focus" | "person_media";
 export type QualityGateCheck = { name: QualityGateCheckName; status: "ok" | "fixed" | "warning" | "failed"; detail?: string };
 
-export type QualityGateFailure = { code: "invalid_range"; sceneId: string; reason: string };
+export type QualityGateFailure = { code: "invalid_range" | "person_low_confidence"; sceneId: string; reason: string };
 
 export type QualityGateResult = {
   enabled: boolean;
@@ -61,6 +70,8 @@ export type QualityGateResult = {
   duration: DurationBandCheck | null;
   degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
   failure: QualityGateFailure | null;
+  /** Person mode only: share of the duration showing media that names the person. */
+  personMedia?: PersonMediaCoverage;
 };
 
 export function qualityGateConfigFromEnv(env: Record<string, string | undefined> = process.env): QualityGateConfig {
@@ -69,10 +80,13 @@ export function qualityGateConfigFromEnv(env: Record<string, string | undefined>
     return raw !== undefined && Number.isFinite(value) && value >= min ? Math.trunc(value) : fallback;
   };
   const flag = env.QUALITY_GATE?.trim().toLowerCase();
+  const share = Number(env.QUALITY_GATE_PERSON_MIN_SHARE);
   return {
     enabled: flag !== "0" && flag !== "false" && flag !== "off",
     repeatWindow: int(env.QUALITY_GATE_REPEAT_WINDOW, QUALITY_GATE_DEFAULT_REPEAT_WINDOW, 1),
     minShortSidePx: int(env.QUALITY_GATE_MIN_SHORT_SIDE_PX, QUALITY_GATE_DEFAULT_MIN_SHORT_SIDE_PX, 1),
+    personMinShare: env.QUALITY_GATE_PERSON_MIN_SHARE !== undefined && Number.isFinite(share) && share >= 0 && share <= 1 ? share : PERSON_MEDIA_MIN_SHARE,
+    personStrict: /^(1|true|on)$/i.test(env.PERSON_FOCUS_STRICT?.trim() ?? ""),
   };
 }
 
@@ -115,6 +129,8 @@ export function runQualityGate(input: {
   assets: readonly QualityGateAsset[];
   targetSec: number;
   config?: Partial<QualityGateConfig>;
+  /** Person mode (the subject is one person): the script focus check (computed by the caller from the script) turns on the person checks. */
+  person?: { focus: ScriptPersonFocus | null; name: string } | null;
 }): QualityGateResult {
   const config: QualityGateConfig = { ...qualityGateConfigFromEnv({}), ...input.config };
   const scenes = input.scenes.map((scene) => ({ ...scene }));
@@ -238,5 +254,24 @@ export function runQualityGate(input: {
   if (degradedScenes.length) warnings.push({ code: "quality_degraded", detail: `${degradedScenes.length} cảnh dùng nguồn bậc thấp (${Object.entries(tiers).map(([tier, n]) => `${tier}:${n}`).join(", ")}); job vẫn render` });
   checks.push({ name: "source_degraded", status: degradedScenes.length ? "warning" : "ok", ...(degradedScenes.length ? { detail: `${degradedScenes.length} cảnh` } : {}) });
 
-  return { enabled: true, checks, fixes, warnings, scenes, duration, degraded: { count: degradedScenes.length, sceneIds: degradedScenes.map((scene) => scene.sceneId), tiers }, failure: null };
+  // (6) person mode: the script stays on the person, and most of the video shows media naming the person (not stock / a placeholder).
+  let personMedia: PersonMediaCoverage | undefined;
+  let personFailure: QualityGateFailure | null = null;
+  if (input.person) {
+    const name = input.person.name;
+    const focus = input.person.focus;
+    if (focus) {
+      if (!focus.ok) warnings.push({ code: "script_off_target", detail: `Kịch bản chưa bám sát ${name}: ${focus.reasons.join(", ")} (độ phủ tên ${Math.round(focus.coverage * 100)}%${focus.dominantOther ? `, nhắc ${focus.dominantOther} nhiều hơn` : ""})` });
+      checks.push({ name: "script_person_focus", status: focus.ok ? "ok" : "warning", detail: `${Math.round(focus.coverage * 100)}% cảnh nhắc ${name}` });
+    }
+    personMedia = assessPersonMediaCoverage(scenes.map((scene) => ({ durationMs: scene.sceneDurationMs, personMatch: scene.personMatch ?? null })), config.personMinShare);
+    const detail = `${Math.round(personMedia.onTargetShare * 100)}% thời lượng có media đúng ${name} (tối thiểu ${Math.round(config.personMinShare * 100)}%), ${Math.round(personMedia.genericShare * 100)}% là media chung/stock`;
+    if (personMedia.lowConfidence) {
+      warnings.push({ code: "person_media_low_confidence", detail: `Không đủ media chắc chắn là ${name}: ${detail}` });
+      if (config.personStrict) personFailure = { code: "person_low_confidence", sceneId: scenes[0]?.sceneId ?? "", reason: `Không đủ media chắc chắn là ${name} (${detail}); PERSON_FOCUS_STRICT=1 chặn render` };
+    }
+    checks.push({ name: "person_media", status: personFailure ? "failed" : personMedia.lowConfidence ? "warning" : "ok", detail });
+  }
+
+  return { enabled: true, checks, fixes, warnings, scenes, duration, degraded: { count: degradedScenes.length, sceneIds: degradedScenes.map((scene) => scene.sceneId), tiers }, failure: personFailure, ...(personMedia ? { personMedia } : {}) };
 }

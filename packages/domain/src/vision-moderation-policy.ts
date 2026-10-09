@@ -10,7 +10,7 @@
  * No Jev/TypeSafe anywhere in this system (owner decision VE2E-16, 2026-09-27) - this policy
  * only ever consumes a `packages/providers` content-provider vision call.
  */
-import type { VisionFindings, VisionModerationDecision } from "./media-candidate.js";
+import type { VisionFindings, VisionIdentityFindings, VisionModerationDecision, VisionShotFindings } from "./media-candidate.js";
 
 export type VisionModerationRawResult = {
   safetyFlag: boolean;
@@ -20,6 +20,10 @@ export type VisionModerationRawResult = {
   /** 0..1 confidence in the whole assessment. */
   confidence: number;
   notes: string;
+  /** Person-focused shot description (only when it was asked); copied onto the findings, never part of the safety decision. */
+  shot?: VisionShotFindings;
+  /** Target-person identity verdict (only when it was asked); copied onto the findings, never part of the safety decision. */
+  identity?: VisionIdentityFindings;
 };
 
 export type VisionModerationPolicyInput = {
@@ -64,14 +68,15 @@ export function decideVisionModeration(input: VisionModerationPolicyInput): Visi
     return { ...base, decision: "manual_review", confidence: 0, reasonCodes: ["provider_error_unsupported_or_unverified"], sceneBeatRelevance: null, safetyFindings: [] };
   }
   const { raw } = input;
+  const shot = { ...(raw.shot ? { shot: { ...raw.shot } } : {}), ...(raw.identity ? { identity: { ...raw.identity } } : {}) };
   if (raw.safetyFlag && raw.confidence >= VISION_HIGH_CONFIDENCE_THRESHOLD) {
-    return { ...base, decision: "rejected", confidence: raw.confidence, reasonCodes: raw.safetyCategories.length ? [...raw.safetyCategories] : ["safety_flagged"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [...raw.safetyCategories] };
+    return { ...base, ...shot, decision: "rejected", confidence: raw.confidence, reasonCodes: raw.safetyCategories.length ? [...raw.safetyCategories] : ["safety_flagged"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [...raw.safetyCategories] };
   }
   if (!raw.safetyFlag && raw.confidence >= VISION_HIGH_CONFIDENCE_THRESHOLD) {
-    return { ...base, decision: "accepted", confidence: raw.confidence, reasonCodes: ["safety_clear_high_confidence"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [] };
+    return { ...base, ...shot, decision: "accepted", confidence: raw.confidence, reasonCodes: ["safety_clear_high_confidence"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [] };
   }
   // Low confidence, or a conflicting/borderline read - never guess between accept/reject.
-  return { ...base, decision: "manual_review", confidence: raw.confidence, reasonCodes: ["low_confidence_or_conflicting"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [...raw.safetyCategories] };
+  return { ...base, ...shot, decision: "manual_review", confidence: raw.confidence, reasonCodes: ["low_confidence_or_conflicting"], sceneBeatRelevance: raw.sceneBeatRelevance, safetyFindings: [...raw.safetyCategories] };
 }
 
 // --- reviewer override audit (pure shape only - see file-level limitation note in state.json/handoff: no DB/API/UI persistence wired in this pass) ---

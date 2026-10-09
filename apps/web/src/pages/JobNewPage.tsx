@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useConfirm } from "../components/feedback";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
-import { BookmarkCheck, Bot, Captions, Clapperboard, FileText, Film, Languages, LayoutTemplate, Lightbulb, Link2, ListChecks, Mic, Palette, PenLine, Rocket, SlidersHorizontal, Sparkles, Timer, Tv } from "lucide-react";
+import { BookmarkCheck, Bot, Captions, Clapperboard, FileText, Film, Languages, LayoutTemplate, Lightbulb, Link2, ListChecks, Mic, Palette, PenLine, Rocket, SlidersHorizontal, Sparkles, Timer, Tv, UserRound } from "lucide-react";
 import { Button, Field, Select, TextArea, TextInput } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
@@ -36,6 +36,7 @@ import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVo
 // Browser-safe subpaths (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { parseSelectedNews } from "@lyonix/domain/news";
+import { TARGET_PERSON_MAX_CHARS, targetPersonSubmitFields, targetPersonSummary, withTargetPersonDirection } from "../job-new/target-person";
 import { classifyIntakeUrl } from "@lyonix/domain/url-intake";
 import {
   AUTO_SOURCE_TYPES,
@@ -703,6 +704,10 @@ export function JobNewPage() {
                 <TextInput form={FORM_ID} inputMode="url" placeholder={t("jobs.placeholder.articleUrl")} value={form.autoArticleUrl} onChange={(e) => update({ autoArticleUrl: e.target.value })} required />
               </Field>
             )}
+            {/* VE2E-151: optional target person - the highest-priority subject (over the selected news and the model). Draft only. */}
+            <Field label={t("jobs.targetPerson")} hint={t("jobs.targetPersonHint")} icon={<LabelIcon icon={<UserRound size={14} />} />}>
+              <TextInput form={FORM_ID} data-testid="target-person" maxLength={TARGET_PERSON_MAX_CHARS} placeholder={t("jobs.targetPersonPlaceholder")} value={form.targetPerson} onChange={(e) => update({ targetPerson: e.target.value })} />
+            </Field>
           </FormSection>
           {newsDrawer ? (
             <NewsDrawer initialQuery={newsDrawer.query} selectedId={selectedNews?.id ?? null} onUse={(item) => void pickNewsItem(item)} onClose={() => setNewsDrawer(null)} />
@@ -748,7 +753,7 @@ export function JobNewPage() {
                       durationSec: midpoint(values.durationTarget),
                       sceneCount: midpoint(values.sceneCountTarget),
                     });
-                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice));
+                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice), targetPersonSubmitFields(values));
                     await closeDraft();
                     navigate(`/video-productions/${submitted.id}`);
                   } catch (err) {
@@ -780,7 +785,9 @@ export function JobNewPage() {
                   await closeDraft();
                   try {
                     const targetHint = TARGET_HINT_BY_LOCALE[values.language](values.durationTarget.replace(/s$/, ""), values.sceneCountTarget);
-                    const direction = values.promptSpec.trim() ? `${values.promptSpec.slice(0, 450)} (${targetHint})` : targetHint;
+                    const baseDirection = values.promptSpec.trim() ? `${values.promptSpec.slice(0, 450)} (${targetHint})` : targetHint;
+                    // VE2E-151: the manual (Studio) script has no visualPlan lock: the chosen person goes into the direction instead.
+                    const direction = withTargetPersonDirection(baseDirection, values.targetPerson);
                     const generated = await api<ApiJob>(`/jobs/${job.id}/script/generate`, {
                       method: "POST",
                       headers: await csrfHeaders(),
@@ -1009,6 +1016,7 @@ export function JobNewPage() {
               <SummaryRow accent="green" icon={<Languages size={13} />} label={t("jobs.language")} value={form.language.toUpperCase()} />
               <SummaryRow accent="green" icon={<Timer size={13} />} label={t("jobs.durationTarget")} value={form.durationTarget} />
               <SummaryRow accent="green" icon={<Film size={13} />} label={t("jobs.sceneCountTarget")} value={form.sceneCountTarget} />
+              {targetPersonSummary(form.targetPerson) ? <SummaryRow accent="green" icon={<UserRound size={13} />} label={t("jobs.targetPerson")} value={targetPersonSummary(form.targetPerson)!} /> : null}
               {form.entryMode === "auto" ? (
                 <>
                   <SummaryRow accent="violet" icon={<LayoutTemplate size={13} />} label={t("jobs.summaryLabel.template")} value={captionTemplate?.name ?? t("jobs.notChosen")} empty={!captionTemplate} />

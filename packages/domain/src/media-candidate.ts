@@ -81,12 +81,41 @@ export type VisionModerationDecision = (typeof visionModerationDecisions)[number
  * same call, so a caller can never accidentally treat "looks safe" as "fits the beat" or vice
  * versa. `sceneBeatRelevance` is `null` only when the response was malformed/unusable.
  */
+/**
+ * Person-focused shot description, asked in the SAME moderation call only when the video's subject is one person. It describes the
+ * frame (how many people, close-up, overlaid text, logo, news / quote card) and never who is shown: identity comes from metadata.
+ */
+export type VisionShotFindings = {
+  peopleCount: number;
+  /** One person is the clear main subject with the face visible (close-up / portrait / medium shot). */
+  closeUp: boolean;
+  textCoverage: "none" | "little" | "heavy";
+  /** Broadcaster / publisher / channel logo or watermark visible. */
+  logo: boolean;
+  /** News / article screenshot, TV news graphic, headline or quote card, meme, collage - not real footage / a photo of a person. */
+  newsCard: boolean;
+};
+
+/**
+ * Person-focused identity verdict, asked in the SAME moderation call only when the video is about one person: is the media the target
+ * person (`match`), visibly someone else (`different_person`), nobody (`no_person`) or not decidable (`uncertain`)? Metadata / hashtags
+ * alone never conclude the identity; a refusal or malformed answer leaves this absent (metadata ranking decides).
+ */
+export type VisionIdentityFindings = {
+  match: "match" | "different_person" | "uncertain" | "no_person";
+  confidence: number;
+};
+
 export type VisionFindings = {
   decision: VisionModerationDecision;
   confidence: number;
   reasonCodes: string[];
   sceneBeatRelevance: number | null;
   safetyFindings: string[];
+  /** Present only when the person-focused shot fields were asked (and answered). */
+  shot?: VisionShotFindings;
+  /** Present only when the target-person identity check was asked (and answered). */
+  identity?: VisionIdentityFindings;
   provider: string;
   model: string;
   operation: string;

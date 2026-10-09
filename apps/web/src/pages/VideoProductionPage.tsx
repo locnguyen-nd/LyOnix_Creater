@@ -10,6 +10,7 @@ import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventRespo
 import { SourceBadge } from "../studio/SourceBadge";
 import { STAGE_COLORS, STAGE_KEYS, currentStage, formatElapsed, stageOfStep, summarizeStages, type StageKey } from "../video-production-stages";
 import { getVideoProduction, getWorkerHealth, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
+import { personFocusWarnings } from "../person-focus";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
 // Matches video-productions.service.ts's own retriableStatuses — "cancelled" is deliberately
@@ -95,6 +96,8 @@ export function VideoProductionPage() {
   if (error) return <Banner variant="danger">{error}</Banner>;
   if (!run) return <Banner variant="info">{t("common.loading")}</Banner>;
 
+  // VE2E-151: the person-focus warnings of the quality gate (script drifts off the person / too little media naming the person).
+  const personWarnings = personFocusWarnings(run.qualityGate);
   const canOpenStudio = Boolean(run.scriptDraftVersionId);
   const isDone = run.status === "completed" && Boolean(run.resultUrl);
   const stages = summarizeStages(events, run, nowMs);
@@ -144,6 +147,12 @@ export function VideoProductionPage() {
       {run.status === "draft" && run.lastError?.retryAt && Date.parse(run.lastError.retryAt) > nowMs ? (
         <Banner variant="info">{t("videoProduction.retryScheduled", { time: new Date(run.lastError.retryAt).toLocaleTimeString(), reason: run.lastError.message })}</Banner>
       ) : run.lastError ? <Banner variant="danger">{run.lastError.message}</Banner> : null}
+      {personWarnings.length > 0 ? (
+        <Banner variant="warn">
+          <span className="block font-semibold" data-testid="person-focus-warning">{t("videoProduction.personFocusTitle")}</span>
+          {personWarnings.map((warning) => <span key={warning.code} className="block">{warning.detail}</span>)}
+        </Banner>
+      ) : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 rounded-xl border border-lyx-border bg-lyx-bg p-4">

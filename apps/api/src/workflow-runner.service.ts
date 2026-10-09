@@ -41,6 +41,10 @@ import {
   checkDurationBand,
   qualityGateConfigFromEnv,
   runQualityGate,
+  assessScriptPersonFocus,
+  personTargetOf,
+  resolveTargetPerson,
+  type PersonTarget,
   type QualityGateAsset,
   type QualityGateResult,
   type QualityGateScene,
@@ -63,6 +67,7 @@ import { AudioVersionsService } from "./audio-versions.service.js";
 import { getSharedProviderLimiter, mapBounded, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { StageRecorder, type StageCache } from "./stage-timing.js";
 import { formatRetryClock, msUntil, planRunRetry } from "./run-retry.js";
+import { readTargetPersonIntake, type TargetPersonIntake } from "./target-person-intake.js";
 import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { countTemplateSceneSlots } from "@lyonix/providers";
 import { fixedSlotPathApplies } from "./render-mode.js";
@@ -210,6 +215,15 @@ export const workflowHeartbeatMs = () => envMs("WORKFLOW_HEARTBEAT_MS", 30_000, 
 /** VE2E-139: a run untouched for this long is considered orphaned. */
 export const workflowStaleMs = () => envMs("WORKFLOW_STALE_MS", 180_000, 5_000);
 const workflowRecoveryMaxAttempts = () => Math.floor(envMs("WORKFLOW_RECOVERY_MAX_ATTEMPTS", 3, 1));
+
+/**
+ * VE2E-151: the quality gate's person input when the video is about one person: the target by precedence (the run's typed person >
+ * the selected news > the script's own subject), `null` for any other subject.
+ */
+export const personGateInput = (script: MediaPlanScript, title: string | null, intake: TargetPersonIntake = { user: null, newsText: null }): { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }> } | null => {
+  const target = personTargetOf(resolveTargetPerson({ user: intake.user, newsText: intake.newsText, model: script.visualPlan?.videoSubject }));
+  return target ? { target, title, scenes: script.scenes.map((scene) => ({ sceneId: scene.sceneId, narration: scene.narration, screenText: scene.screenText })) } : null;
+};
 
 @Injectable()
 export class WorkflowRunnerService {
@@ -549,6 +563,8 @@ export class WorkflowRunnerService {
       narrationByScene: Map<string, string>;
       durationByScene: Map<string, number>;
       targetSec: number;
+      /** VE2E-151: the subject is one person - the gate also checks the script focus and the share of media naming the person. */
+      person?: { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }> } | null;
     },
   ): Promise<void> {
     const config = qualityGateConfigFromEnv();
@@ -556,6 +572,7 @@ export class WorkflowRunnerService {
     let result: QualityGateResult;
     try {
       const degradedBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.degraded ?? null] as const));
+      const personMatchBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.personEvidence?.match ?? null] as const));
       const sourceByAsset = new Map(ctx.sourced.flatMap((piece) => (piece.source ? [[piece.source.mediaAssetVersionId, piece.source] as const] : [])));
       let dims = new Map<string, { widthPx: number | null; heightPx: number | null }>();
       try {
@@ -575,8 +592,10 @@ export class WorkflowRunnerService {
         sceneDurationMs: ctx.durationByScene.get(scene.sceneId) ?? 0,
         narration: ctx.narrationByScene.get(scene.sceneId) ?? "",
         degradedTier: scene.segmentId ? degradedBySegment.get(scene.segmentId) ?? null : null,
+        ...(ctx.person ? { personMatch: scene.segmentId ? personMatchBySegment.get(scene.segmentId) ?? null : null } : {}),
       }));
-      result = runQualityGate({ scenes, assets, targetSec: ctx.targetSec, config });
+      const person = ctx.person ? { name: ctx.person.target.name, focus: assessScriptPersonFocus(ctx.person.target, { title: ctx.person.title, scenes: ctx.person.scenes }) } : null;
+      result = runQualityGate({ scenes, assets, targetSec: ctx.targetSec, config, person });
     } catch {
       return;
     }
@@ -595,7 +614,7 @@ export class WorkflowRunnerService {
         if (segment) segment.mediaAssetVersionId = fix.toAssetId;
       }
     }
-    await this.saveStepDiagnostics(run, "quality_gate", { checks: result.checks, fixes: result.fixes, warnings: result.warnings, degraded: result.degraded, failure: result.failure });
+    await this.saveStepDiagnostics(run, "quality_gate", { checks: result.checks, fixes: result.fixes, warnings: result.warnings, degraded: result.degraded, failure: result.failure, ...(result.personMedia ? { personMedia: result.personMedia } : {}) });
     if (result.failure) throw new WorkflowStepFailure("VALIDATION_FAILED", `Cổng chất lượng: ${result.failure.reason}`);
   }
 
@@ -706,6 +725,9 @@ export class WorkflowRunnerService {
     // intake target duration - used both for the visualPlan the content call writes and for the
     // media plan's segment count, so a retry that reuses the approved script plans the same count.
     const backgroundSegmentRange = resolveBackgroundSegmentRange(readBackgroundSegmentsSetting(run.backgroundSegments), profile.durationSec);
+    // VE2E-151: the person typed on the create form (highest priority) + the selected news text, for the script, the media plan and the gate.
+    const personIntake = readTargetPersonIntake(run.targetPerson);
+    const personScriptInput = { ...(personIntake.user ? { targetPerson: personIntake.user } : {}), ...(personIntake.newsText ? { newsText: personIntake.newsText } : {}) };
     let approved = existingApproved;
     // VE2E-54: narration budget (targetChars + scene range) from the intake target, calibrated on this voice's history.
     const resolvedBudget = await this.resolveNarrationBudget(profile.durationSec, profile.locale, voiceConfig.voiceId, voiceConfig.modelId);
@@ -733,6 +755,7 @@ export class WorkflowRunnerService {
             direction,
             ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
             durationBudget,
+            ...personScriptInput,
           });
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
@@ -760,6 +783,7 @@ export class WorkflowRunnerService {
 ${correction.direction}`,
                   ...(backgroundSegmentRange ? { backgroundSegmentRange } : {}),
                   durationBudget,
+                  ...personScriptInput,
                 });
                 if (!next || next === "forbidden" || !next.ok) break;
                 if (Math.abs(charsOf(next.response) - durationBudget.targetChars) < Math.abs(correction.totalChars - durationBudget.targetChars)) best = next.response;
@@ -854,8 +878,10 @@ ${correction.direction}`,
       })),
       visualPlan: approved.visualPlan ?? null,
     });
+    // VE2E-151: the resolved target person also binds plans without a visualPlan (fallback segments get the person as their subject).
+    const targetSubject = resolveTargetPerson({ user: personIntake.user, newsText: personIntake.newsText, model: approved.visualPlan?.videoSubject });
     const planFor = (script: MediaPlanScript): PlannedSegment[] => {
-      let segments = this.mediaPlans.planSegments(script, backgroundSegmentRange);
+      let segments = this.mediaPlans.planSegments(script, backgroundSegmentRange, targetSubject);
       if (kindByScene) {
         const durations = new Map(script.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
         segments = splitSegmentsByVisualKind(segments, kindByScene, durations);
@@ -1037,6 +1063,7 @@ ${correction.direction}`,
       narrationByScene: new Map(approved.scenes.map((scene: { sceneId: string; narration?: string }) => [scene.sceneId, scene.narration ?? ""] as const)),
       durationByScene,
       targetSec: profile.durationSec,
+      person: personGateInput(planScript, approved.title ?? null, personIntake),
     });
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));

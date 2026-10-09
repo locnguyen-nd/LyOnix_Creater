@@ -5,12 +5,25 @@
  * - `anchorKeywordToSubject` / `subjectTierKeywords`: every search tier (ja/en/broad) carries the subject (name/alias).
  * - `subjectMatchScore`: caption/hashtag/author vs aliases -> 0..1; only ever a RANKING signal (never fails a job, Q2).
  * - `applySubjectToBrief`: puts aliases/mustExclude/preferred authors on a scene brief for `rankMediaCandidates`;
- *   the vision gate sees the subject only for high-priority segments.
+ *   the vision gate sees the subject only for high-priority segments. A `person` subject also gets the person target
+ *   (person-focused ranking, `person-target.ts`).
  */
 import { parseSegmentKeywords, type KeywordTier } from "./media-ladder.js";
 import type { SceneBrief } from "./media-ranking.js";
+import { parseSubjectKind, parseTargetPersonSource, personTargetOf, type PersonTarget, type SubjectKind, type TargetPersonSource } from "./person-target.js";
 
-export type SubjectProfile = { subject: string | null; aliases: string[]; mustInclude: string[]; mustExclude: string[] };
+export type SubjectProfile = {
+  subject: string | null;
+  aliases: string[];
+  mustInclude: string[];
+  mustExclude: string[];
+  /** What the subject is (`person` turns on the person-focused rules); absent for plans written before it existed. */
+  kind?: SubjectKind | null;
+  /** Other people the script names (context only). */
+  otherPeople?: string[];
+  /** Who named a person subject: user (create form) > news > model. */
+  targetSource?: TargetPersonSource | null;
+};
 
 const asStrings = (value: unknown): string[] => {
   if (!Array.isArray(value)) return [];
@@ -30,8 +43,15 @@ export function subjectProfileOf(segment: { keywords?: unknown }): SubjectProfil
   const record = segment.keywords && typeof segment.keywords === "object" ? (segment.keywords as Record<string, unknown>) : {};
   const subject = (typeof record.subject === "string" && record.subject.trim()) || null;
   const aliases = asStrings(record.aliases);
-  return { subject, aliases, mustInclude: asStrings(record.mustInclude), mustExclude: asStrings(record.mustExclude) };
+  const kind = parseSubjectKind(record.subjectKind);
+  const otherPeople = asStrings(record.otherPeople);
+  const targetSource = parseTargetPersonSource(record.targetSource);
+  return { subject, aliases, mustInclude: asStrings(record.mustInclude), mustExclude: asStrings(record.mustExclude), ...(kind ? { kind } : {}), ...(otherPeople.length ? { otherPeople } : {}), ...(targetSource ? { targetSource } : {}) };
 }
+
+/** The person target of a segment's subject profile; `null` unless the subject is one person. */
+export const personTargetOfProfile = (profile: SubjectProfile): PersonTarget | null =>
+  personTargetOf({ kind: profile.kind, main: profile.subject, aliases: profile.aliases, mustInclude: profile.mustInclude, mustExclude: profile.mustExclude, otherPeople: profile.otherPeople, source: profile.targetSource });
 
 /** Subject name first, then aliases (>= 2 chars), de-duplicated. */
 export const subjectNames = (profile: SubjectProfile): string[] => {
@@ -116,11 +136,13 @@ export function applySubjectToBrief(brief: SceneBrief, profile: SubjectProfile, 
   const exclusions = [...new Set([...brief.exclusions, ...profile.mustExclude.map((term) => term.toLowerCase())])];
   const highPriority = options.priority != null && options.priority <= HIGH_PRIORITY_MAX;
   const entities = highPriority ? [...new Set([...names.map((name) => name.toLowerCase()), ...brief.entities])] : brief.entities;
+  const person = personTargetOfProfile(profile);
   return {
     ...brief,
     entities,
     exclusions,
     ...(names.length > 0 ? { subjectAliases: names } : {}),
     ...(options.preferredAuthors?.length ? { preferredAuthors: [...options.preferredAuthors] } : {}),
+    ...(person ? { person } : {}),
   };
 }

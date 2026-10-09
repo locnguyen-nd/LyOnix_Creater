@@ -31,6 +31,7 @@ import {
   deriveSceneBrief,
   detectScriptLanguageHeuristic,
   rankMediaCandidates,
+  visionTargetOf,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
@@ -336,7 +337,8 @@ export class PexelsService {
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    // VE2E-151: a person subject also gets the shot description (a stock close-up of a stranger is an impostor risk).
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,

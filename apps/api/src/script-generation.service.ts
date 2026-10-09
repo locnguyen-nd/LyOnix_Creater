@@ -11,7 +11,7 @@ import {
   CONTENT_MODEL_RANKING_VERSION,
 } from "@lyonix/providers";
 import type { ErrorCode, ScriptDraftV2GenerationResponse } from "@lyonix/contracts";
-import type { NarrationBudget } from "@lyonix/domain";
+import type { NarrationBudget, TargetPersonInput } from "@lyonix/domain";
 import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -25,6 +25,10 @@ export type GenerateScriptDraftInput = {
   backgroundSegmentRange?: { min: number; max: number } | null;
   /** VE2E-54: narration budget from the intake target (Auto passes it; absent = legacy prompt line). Internal only. */
   durationBudget?: NarrationBudget | null;
+  /** VE2E-151: the person typed on the create form (highest-priority target). Internal only. */
+  targetPerson?: TargetPersonInput | null;
+  /** VE2E-151: selected news headline + excerpt (a model person named there is the `news` target). Internal only. */
+  newsText?: string | null;
 };
 
 export type GenerateScriptDraftOutcome =
@@ -116,6 +120,8 @@ export class ScriptGenerationService {
         ...(input.direction ? { direction: input.direction } : {}),
         ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
         ...(input.durationBudget ? { durationBudget: input.durationBudget } : {}),
+        ...(input.targetPerson ? { targetPerson: input.targetPerson } : {}),
+        ...(input.newsText ? { newsText: input.newsText } : {}),
       }));
       limited.push(...result.limited);
       if (result.ok) {

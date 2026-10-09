@@ -55,6 +55,11 @@ export type JobNewFormValues = {
   captionPresetId: string;
   /** VE2E-96: the news item the topic was made from (`serializeSelectedNews`); "" = none. Content: draft only, never a default. */
   selectedNews: string;
+  /**
+   * VE2E-151: the person the video must be about, typed by the user ("Lee Felix / フィリックス (Stray Kids)": names / aliases, the
+   * group / team in brackets); "" = let the model find the subject. Highest-priority target. Content: draft only, never a default.
+   */
+  targetPerson: string;
 };
 
 export type JobNewFieldKey = keyof JobNewFormValues;
@@ -84,10 +89,11 @@ export const SYSTEM_CREATION_DEFAULTS: JobNewFormValues = {
   orshotSize: "",
   captionPresetId: "",
   selectedNews: "",
+  targetPerson: "",
 };
 
 /** Job content: in a draft, never in defaults. */
-export const CREATION_CONTENT_KEYS = ["topic", "promptSpec", "existingScript", "autoRawScript", "autoArticleUrl", "selectedNews"] as const satisfies readonly JobNewFieldKey[];
+export const CREATION_CONTENT_KEYS = ["topic", "promptSpec", "existingScript", "autoRawScript", "autoArticleUrl", "selectedNews", "targetPerson"] as const satisfies readonly JobNewFieldKey[];
 /** Options a user may save as their defaults. */
 export const CREATION_PREFERENCE_KEYS = [
   "entryMode",

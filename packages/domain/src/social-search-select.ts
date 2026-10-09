@@ -9,7 +9,11 @@
  * - subject gate (same idea as VE2E-142): when the video has a named subject, a result whose title / description / channel / tags never
  *   names it is off-topic and rejected;
  * - score = subject hits x 3 + keyword-token overlap + Shorts URL + vertical + a small popularity term.
+ * - person mode (`context.person`): subject hits are replaced by the person identity x 4 (a short name without the group/team counts
+ *   less: same-name people), news / quote / meme / group results lose score and close-ups gain, so a group photo or a news card is
+ *   only taken when no single-person result exists.
  */
+import { matchPersonIdentity, personMetadataFlags, type PersonTarget } from "./person-target.js";
 
 export type SocialSearchCandidate = {
   url: string;
@@ -29,7 +33,8 @@ export type SocialSearchCandidate = {
 export type SocialSearchRejectReason = "used" | "wrong_type" | "too_short" | "too_long" | "landscape" | "off_subject" | "no_id";
 
 export type SocialSearchSelection<T extends SocialSearchCandidate> = {
-  passed: Array<{ item: T; score: number; subjectHits: number }>;
+  /** `personIdentity` (person mode only): how strongly the result's metadata names the person (VE2E-151 diagnostics). */
+  passed: Array<{ item: T; score: number; subjectHits: number; personIdentity?: { level: string; score: number } }>;
   rejectCounts: Partial<Record<SocialSearchRejectReason, number>>;
 };
 
@@ -47,6 +52,15 @@ const keywordTokens = (keywords: readonly string[]): string[] => {
   return [...out];
 };
 
+/** Person-mode term of one search result: identity x 4, minus news 2 / quote-meme card 3 / group 1.5 / other person 1.5, plus close-up 1. */
+const personSearchTerm = (person: PersonTarget, item: SocialSearchCandidate): { term: number; identity: { level: string; score: number } } => {
+  const meta = { text: [item.title, item.description, ...item.tags.map((tag) => `#${tag}`)].filter(Boolean).join(" \n "), author: item.channel ?? item.uploader };
+  const identity = matchPersonIdentity(person, meta);
+  const flags = personMetadataFlags(person, meta);
+  const term = identity.score * 4 - (flags.includes("news") ? 2 : 0) - (flags.includes("text_card") ? 3 : 0) - (flags.includes("group") ? 1.5 : 0) - (flags.includes("other_person") ? 1.5 : 0) + (flags.includes("close_up") ? 1 : 0);
+  return { term, identity: { level: identity.level, score: identity.score } };
+};
+
 export const selectSocialSearchItems = <T extends SocialSearchCandidate>(
   items: readonly T[],
   context: {
@@ -56,6 +70,8 @@ export const selectSocialSearchItems = <T extends SocialSearchCandidate>(
     maxDurationSeconds: number;
     subjectAliases: readonly string[];
     keywords: readonly string[];
+    /** The subject is one person (person-focused ranking). */
+    person?: PersonTarget | null;
   },
 ): SocialSearchSelection<T> => {
   const rejectCounts: SocialSearchSelection<T>["rejectCounts"] = {};
@@ -83,7 +99,9 @@ export const selectSocialSearchItems = <T extends SocialSearchCandidate>(
     const shortsUrl = /\/shorts\//.test(item.url) ? 1 : 0;
     const vertical = known && item.height! >= item.width! ? 0.5 : 0;
     const popularity = item.viewCount && item.viewCount > 0 ? Math.min(2, Math.log10(item.viewCount) * 0.3) : 0;
-    passed.push({ item, score: subjectHits * 3 + overlap + shortsUrl + vertical + popularity - (landscape ? 1 : 0), subjectHits });
+    const person = context.person ? personSearchTerm(context.person, item) : null;
+    const subjectTerm = person ? person.term : subjectHits * 3;
+    passed.push({ item, score: subjectTerm + overlap + shortsUrl + vertical + popularity - (landscape ? 1 : 0), subjectHits, ...(person ? { personIdentity: person.identity } : {}) });
   }
   passed.sort((a, b) => b.score - a.score);
   return { passed, rejectCounts };
