@@ -65,6 +65,7 @@ import { UserDraftsService } from "./user-drafts.service.js";
 import { CreationPreferencesService } from "./creation-preferences.service.js";
 import { VideoProductionsController } from "./video-productions.controller.js";
 import { VideoProductionsService } from "./video-productions.service.js";
+import { AutoPreflightService } from "./auto-preflight.service.js";
 import { QueueStatusController } from "./queue-status.controller.js";
 import { QueueStatusService } from "./queue-status.service.js";
 import { TiktokSyncSchedulerService } from "./tiktok-sync-scheduler.service.js";
@@ -160,6 +161,7 @@ import { TranscriptProviderResolver } from "./transcript-config.js";
     UserDraftsService,
     CreationPreferencesService,
     VideoProductionsService,
+    AutoPreflightService,
     QueueStatusService,
     SystemSettingsService,
     TiktokSyncSchedulerService,

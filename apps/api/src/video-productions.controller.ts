@@ -4,6 +4,7 @@ import type { VideoProductionSubmitRequest } from "@lyonix/contracts";
 import { requireCsrf, requireUser, requestId } from "./auth.helpers.js";
 import { AuthService } from "./auth.service.js";
 import { normalizedError, success } from "./envelopes.js";
+import { AutoPreflightService } from "./auto-preflight.service.js";
 import { VideoProductionsService } from "./video-productions.service.js";
 
 type AutoSetupBody = {
@@ -20,6 +21,8 @@ type AutoSetupBody = {
   locale?: string;
   durationSec?: number;
   sceneCount?: number;
+  /** Preflight only: the template picked in the form before it is pinned. */
+  externalTemplateId?: string;
 };
 
 @Controller()
@@ -27,7 +30,36 @@ export class VideoProductionsController {
   constructor(
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(VideoProductionsService) private readonly productions: VideoProductionsService,
+    @Inject(AutoPreflightService) private readonly preflight: AutoPreflightService,
   ) {}
+
+  /**
+   * Render reliability: read-only check of everything an Auto job needs (workers, render account + template, PUBLIC_BASE_URL,
+   * content model quota, voice, media) for the create-video form, before anything is created or paid. Submit runs the same checks.
+   */
+  @Post("video-productions/preflight")
+  async preflightCheck(@Body() body: AutoSetupBody, @Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    const { user, session } = await requireUser(request, response, this.auth);
+    requireCsrf(request, response, session);
+    const result = await this.preflight.check(user.id, user.role, {
+      contentAccountId: body.contentAccountId?.trim() ?? "",
+      voiceAccountId: body.voiceAccountId?.trim() ?? "",
+      voiceId: body.voiceId?.trim() ?? "",
+      mediaAccountId: body.mediaAccountId?.trim() ?? "",
+      renderAccountId: body.renderAccountId?.trim() ?? "",
+      templateSnapshotId: body.templateSnapshotId?.trim() ?? "",
+      ...(body.externalTemplateId?.trim() ? { externalTemplateId: body.externalTemplateId.trim() } : {}),
+      sceneCount: typeof body.sceneCount === "number" ? body.sceneCount : null,
+    });
+    return success(result, requestId(response));
+  }
+
+  /** Render reliability: are the background workers (workflow, audio, media-worker) running? */
+  @Get("system/workers")
+  async workers(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
+    await requireUser(request, response, this.auth);
+    return success(await this.preflight.workerHealth(), requestId(response));
+  }
 
   /** VE2E-08: provisions the Project + AutomationProfileVersion a one-click Auto submit needs - see VideoProductionsService.setupAutoProfile. */
   @Post("video-productions/auto-setup")

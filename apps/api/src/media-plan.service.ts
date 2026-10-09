@@ -60,7 +60,7 @@ import type {
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { ProviderError, isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { ProviderError, isValidJaSearchKeyword, normalizePexelsQuery, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { createHash, randomUUID } from "node:crypto";
@@ -112,7 +112,7 @@ export type SegmentSource = {
   /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: search tier that produced this (non-degraded) source. */
-  tier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
+  tier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery" | "clip";
   /** VE2E-135 (L0): match score of a prepared-library clip (`tier: "library"`). */
   libraryScore?: number;
   /** VE2E-130: ladder level L4-L6 (flagged `quality_degraded`); absent = a normal source. */
@@ -146,7 +146,7 @@ export class SegmentSourceLedger {
   kenBurnsCount = 0;
   /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
   readonly authors = new Set<string>();
-  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[] }>();
+  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[]; /** VE2E-136: normalised subjects of the segments that took a window of this clip (same-subject segments may take another window instead of a new search). Lost in the dev merge of VE2E-136 + VE2E-147, restored. */ subjects: Set<string> }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
     if (source.apifyProvenance?.author) this.authors.add(source.apifyProvenance.author);
@@ -281,6 +281,21 @@ const pexelsSubjectQueries = (segment: PlannedSegment): string[] => {
   const keywords = parseSegmentKeywords(segment.keywords);
   return [...new Set([keywords.en[0], keywords.broad[0], profile.subject].filter((value): value is string => Boolean(value)).map((value) => anchorKeywordToSubject(value, profile, "en")))].slice(0, 2);
 };
+
+const searchable = (value: string | null | undefined): value is string => typeof value === "string" && value.trim().length > 0;
+
+/**
+ * Pexels queries of one segment, never empty strings: the caller's subject-bound queries, else the first non-empty of the brief's
+ * phrases, the segment scenes' visual queries, its en / broad keywords, mood and subject. `[]` = nothing searchable (skip the tier).
+ */
+export function pexelsQueriesFor(given: readonly string[] | undefined, phrases: readonly string[], script: MediaPlanScript, segment: PlannedSegment): string[] {
+  const explicit = (given ?? []).map(normalizePexelsQuery).filter(searchable);
+  if (explicit.length > 0) return explicit;
+  const keywords = parseSegmentKeywords(segment.keywords);
+  const sceneQueries = segment.sceneIds.map((sceneId) => script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery);
+  const fallback = [...phrases, ...sceneQueries, ...keywords.en, ...keywords.broad, keywords.mood, segment.subject].find(searchable);
+  return fallback ? [normalizePexelsQuery(fallback)] : [];
+}
 
 /** L5 stock-photo queries: subject-bound keywords first (en, broad, subject), the generic `mood` only as the last resort; at most 2 tries (Pexels is fast but metered). */
 const stockImageQueries = (segment: PlannedSegment): string[] => {
@@ -573,9 +588,13 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; pexelsAccountId: string; mediaType?: "video" | "image"; queries?: string[] },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const brief = this.segmentBrief(input.script, input.segment, input.ledger);
-    const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     const excluded = new Set<string>();
-    const queries = input.queries && input.queries.length > 0 ? input.queries : [brief.phrases[0] ?? firstScene?.visualQuery ?? ""];
+    const queries = pexelsQueriesFor(input.queries, brief.phrases, input.script, input.segment);
+    // Pexels answers an empty query with 400 ("No query param given"): never send one - the segment simply has no searchable words.
+    if (queries.length === 0) {
+      if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${input.segment.segmentId}: skipped, no searchable keyword (never sends an empty query)`);
+      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Không có từ khoá để tìm trên Pexels (no_query)", status: 422 };
+    }
     const mediaType = input.mediaType ?? input.segment.visualKind;
     let last: MediaPlanOutcome<SegmentSource> = { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Pexels không có nguồn phù hợp.", status: 422 };
     for (const query of queries) {

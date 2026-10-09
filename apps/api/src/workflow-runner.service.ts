@@ -61,6 +61,8 @@ import {
 import { ProviderError, type ProviderLimiter, type ProviderLimiterKey } from "@lyonix/providers";
 import { AudioVersionsService } from "./audio-versions.service.js";
 import { getSharedProviderLimiter, mapBounded, resolveConcurrencyConfig } from "./concurrency-config.js";
+import { StageRecorder, type StageCache } from "./stage-timing.js";
+import { formatRetryClock, msUntil, planRunRetry } from "./run-retry.js";
 import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { countTemplateSceneSlots } from "@lyonix/providers";
 import { fixedSlotPathApplies } from "./render-mode.js";
@@ -130,10 +132,17 @@ const buildAutoDirection = (locale: string, durationSec: number, sceneCount: num
 
 /** Normalized failure raised by a pipeline step; every service call this runner makes already returns an `{ok:false,code,message}` outcome instead of throwing, so each step site converts that into this before `recordStep()`'s catch handles it uniformly. */
 export class WorkflowStepFailure extends Error {
-  constructor(readonly code: string, message: string) {
+  /** `retryAfterMs`: how long the provider / cooldown asked us to wait before trying again (drives the run's re-queue time). */
+  constructor(readonly code: string, message: string, readonly retryAfterMs?: number) {
     super(message);
   }
 }
+
+/** The wait a failure asks for: a step's own cooldown / Retry-After, or a provider limiter's. */
+const retryAfterOf = (error: unknown): number | null => {
+  const value = error instanceof WorkflowStepFailure || error instanceof ProviderError ? error.retryAfterMs : undefined;
+  return typeof value === "number" && value > 0 ? value : null;
+};
 
 const BLOCKED_CODES = new Set(["PROVIDER_NOT_CONFIGURED", "PROVIDER_CAPABILITY_UNAVAILABLE", "PROVIDER_AUTH_INVALID", "SSRF_BLOCKED"]);
 const NEEDS_INPUT_CODES = new Set(["VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN", "MEDIA_RELEVANCE_BELOW_THRESHOLD", "MEDIA_RELEVANCE_UNVERIFIED", "MEDIA_RIGHTS_UNRESOLVED"]);
@@ -150,6 +159,20 @@ const errorCodeOf = (error: unknown): string => (error instanceof WorkflowStepFa
 const DEFAULT_MAX_ATTEMPTS = 2;
 
 type ProviderStepMeta = { role: "content" | "tts" | "visual" | "render"; operation: string; providerAccountId: string };
+
+/** Cache hit/miss + a few plain facts of a step result for its timing line (media source tier, reused script/audio). */
+function describeStepResult(value: unknown): { cache?: StageCache; detail?: Record<string, string | number | boolean | null> } {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : null;
+  const data = record && "ok" in record && record.data && typeof record.data === "object" ? record.data as Record<string, unknown> : record;
+  if (!data) return {};
+  const detail: Record<string, string | number | boolean | null> = {};
+  for (const key of ["sourcing", "tier", "provider", "kind", "reused", "cached"] as const) {
+    const field = data[key];
+    if (typeof field === "string" || typeof field === "boolean") detail[key] = field;
+  }
+  const cache: StageCache | undefined = data.sourcing === "reused" || data.reused === true || data.cached === true ? "hit" : data.sourcing === "imported" ? "miss" : undefined;
+  return { ...(cache ? { cache } : {}), ...(Object.keys(detail).length ? { detail } : {}) };
+}
 
 /** VE2E-50/54: one paid call recorded in the run-level `run_usage` ledger. */
 export type RunUsageEntry = {
@@ -222,9 +245,12 @@ export class WorkflowRunnerService {
    * immediately try the next one), else the `{ done }` handle of the started run (`done` never rejects: failures go through handleFailure).
    */
   async startNextDraft(): Promise<{ done: Promise<void> } | "lost_race" | null> {
-    const candidate = await this.prisma.workflowRun.findFirst({ where: { mode: "auto", status: "draft" }, orderBy: { createdAt: "asc" } });
+    // A re-queued run waits for its `notBefore` (provider cooldown / backoff); a fresh one has none.
+    const now = new Date();
+    const due = { mode: "auto" as const, status: "draft" as const, OR: [{ notBefore: null }, { notBefore: { lte: now } }] };
+    const candidate = await this.prisma.workflowRun.findFirst({ where: due, orderBy: { createdAt: "asc" } });
     if (!candidate) return null;
-    const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, status: "draft" }, data: { status: "source_ready" } });
+    const claimed = await this.prisma.workflowRun.updateMany({ where: { id: candidate.id, ...due }, data: { status: "source_ready", notBefore: null } });
     if (claimed.count !== 1) return "lost_race";
     const run: WorkflowRunRow = { ...candidate, status: "source_ready" };
     // VE2E-139: heartbeat while this process owns the run, so `recoverStaleRuns` can tell a live run from one whose worker died.
@@ -233,9 +259,14 @@ export class WorkflowRunnerService {
     }, workflowHeartbeatMs());
     heartbeat.unref?.();
     const done = (async () => {
+      const timings = new StageRecorder("run", run.id);
+      this.stageTimings.set(run.id, timings);
+      const pipelineStartedAt = Date.now();
+      let pipelineOk = true;
       try {
         await this.runPipeline(run);
       } catch (error) {
+        pipelineOk = false;
         try {
           await this.handleFailure(run, error);
         } catch (failure) {
@@ -243,6 +274,10 @@ export class WorkflowRunnerService {
         }
       } finally {
         clearInterval(heartbeat);
+        // Up to the render hand-off; the render's own stages are recorded by the render job (`render_timings`).
+        timings.add("run_pipeline", pipelineStartedAt, Date.now(), { attempt: run.attempts, ok: pipelineOk });
+        this.stageTimings.delete(run.id);
+        await this.saveStepDiagnostics(run, "stage_timings", { events: timings.events });
       }
     })();
     return { done };
@@ -322,6 +357,13 @@ export class WorkflowRunnerService {
    * bookkeeping instead of every step re-implementing it.
    */
   private async recordStep<T>(run: WorkflowRunRow, stepKey: string, meta: ProviderStepMeta | null, fn: () => Promise<T>): Promise<T> {
+    const timings = this.stageTimings.get(run.id);
+    if (!timings) return this.recordStepRow(run, stepKey, meta, fn);
+    const provider = meta ? await this.providerName(meta.providerAccountId) : null;
+    return timings.time(stepKey, { attempt: run.attempts, provider }, () => this.recordStepRow(run, stepKey, meta, fn), describeStepResult);
+  }
+
+  private async recordStepRow<T>(run: WorkflowRunRow, stepKey: string, meta: ProviderStepMeta | null, fn: () => Promise<T>): Promise<T> {
     const stepRun = await this.prisma.stepRun.upsert({
       where: { workflowRunId_stepKey_attempt: { workflowRunId: run.id, stepKey, attempt: run.attempts } },
       create: { workflowRunId: run.id, stepKey, attempt: run.attempts, status: "running", startedAt: new Date() },
@@ -405,6 +447,23 @@ export class WorkflowRunnerService {
 
   /** VE2E-133: per-run append chains for `run_usage` (the only class-level mutable state; keyed by run id, so concurrent runs never share an entry). */
   private readonly usageChains = new Map<string, Promise<void>>();
+  /** Stage timings of the runs this worker is executing (persisted as the `stage_timings` StepRun when the pipeline ends). */
+  private readonly stageTimings = new Map<string, StageRecorder>();
+  /** providerAccountId -> provider name (gemini, elevenlabs, pexels, ...) for timing lines; looked up once per account. */
+  private readonly providerNames = new Map<string, Promise<string | null>>();
+
+  private providerName(providerAccountId: string): Promise<string | null> {
+    let pending = this.providerNames.get(providerAccountId);
+    if (!pending) {
+      // Never lets a timing label fail a step (deferred so even a synchronous throw becomes `null`).
+      pending = Promise.resolve()
+        .then(() => this.prisma.providerAccount.findUnique({ where: { id: providerAccountId }, select: { provider: true } }))
+        .then((row) => row?.provider ?? null)
+        .catch(() => null);
+      this.providerNames.set(providerAccountId, pending);
+    }
+    return pending;
+  }
 
   /** Never rejects: lets two parallel branches both finish before the first failure is rethrown (no orphaned promise, no unobserved rejection). */
   private settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
@@ -581,8 +640,15 @@ export class WorkflowRunnerService {
       const profile = run.automationProfileVersionId ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId } }) : null;
       const retryPolicy = (profile?.retryPolicy ?? {}) as { maxAttempts?: number };
       const maxAttempts = typeof retryPolicy.maxAttempts === "number" && retryPolicy.maxAttempts > 0 ? retryPolicy.maxAttempts : DEFAULT_MAX_ATTEMPTS;
-      if (run.attempts < maxAttempts) {
-        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "draft", attempts: { increment: 1 }, lastError: { code, message, retryable: true } } });
+      // Re-queued no earlier than the provider allows (Retry-After / cooldown), else bounded exponential backoff - never ~1 s later
+      // straight into a cooldown that is still active. A wait beyond MAX_AUTO_RETRY_WAIT_MS (daily quota) fails now with the retry time.
+      const plan = planRunRetry({ attempt: run.attempts, retryAfterMs: retryAfterOf(error), now: new Date() });
+      if (run.attempts < maxAttempts && plan.retry) {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "draft", attempts: { increment: 1 }, notBefore: plan.notBefore, lastError: { code, message, retryable: true, retryAt: plan.notBefore.toISOString() } } });
+        return;
+      }
+      if (!plan.retry) {
+        await this.prisma.workflowRun.update({ where: { id: run.id }, data: { status: "failed", notBefore: null, lastError: { code, message: `${message} Có thể thử lại sau ${formatRetryClock(plan.retryAt)}.`, retryable: true, retryAt: plan.retryAt.toISOString() } } });
         return;
       }
     }
@@ -670,7 +736,7 @@ export class WorkflowRunnerService {
           });
           if (!outcome) throw new WorkflowStepFailure("NOT_FOUND", "Không tìm thấy nguồn");
           if (outcome === "forbidden") throw new WorkflowStepFailure("FORBIDDEN", "Không có quyền truy cập nguồn");
-          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message);
+          if (!outcome.ok) throw new WorkflowStepFailure(outcome.code, outcome.message, msUntil(outcome.retryAt, new Date()) ?? undefined);
           // VE2E-54: a draft far outside the narration budget (e.g. 28 s of voice for a 78 s target) is regenerated ONCE with an explicit
           // length correction; the closer of the two drafts is kept. A failed second call keeps the first draft (never fails the run).
           const narrations = (outcome.response.draft.scenes ?? []).map((scene: { narration?: string }) => scene.narration ?? "");
@@ -849,6 +915,7 @@ ${correction.direction}`,
       const voiced = await mapBounded(approved!.scenes, this.voiceParallelism, async (scene) => {
         const existingAudio = existingAudioByScene.get(scene.id);
         if (existingAudio) {
+          this.stageTimings.get(run.id)?.hit(`generate_audio_${scene.sceneId}`, { attempt: run.attempts, provider: await this.providerName(voiceConfig.providerAccountId), detail: { reused: "audio_version" } });
           return {
             sceneId: scene.sceneId,
             value: {

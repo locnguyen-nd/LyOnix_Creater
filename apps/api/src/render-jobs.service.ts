@@ -50,7 +50,8 @@ import { InternalRenderService } from "./internal-render.service.js";
 import { ClipDerivativesService, type ClipDerivativeRequest } from "./clip-derivatives.service.js";
 import { CreatomateTemplatesService, type RenderProviderName } from "./creatomate-templates.service.js";
 import { GrantsService } from "./grants.service.js";
-import { MediaDeliveryService, publicBaseUrlConfigured } from "./media-delivery.service.js";
+import { MediaDeliveryService } from "./media-delivery.service.js";
+import { checkPublicBaseUrl } from "./public-base-url.js";
 import { PrismaService } from "./prisma.service.js";
 import { fixedSlotPathApplies } from "./render-mode.js";
 import { estimateOrshotCost, narrationDurationMs, resolveOrshotPricing, sanitizeOrshotOptions } from "./orshot-render.js";
@@ -314,7 +315,11 @@ export class RenderJobsService {
     // Preflight: provider account usable and PUBLIC_BASE_URL reachable *before* touching the DB or Creatomate — no charge on a preflight failure.
     const account = await this.templates.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
-    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+    {
+      // The provider downloads every scene file from PUBLIC_BASE_URL: a missing / local / dead (expired tunnel) URL fails here, before any paid call.
+      const publicBase = await checkPublicBaseUrl();
+      if (!publicBase.ok) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: publicBase.message, status: 503 };
+    }
 
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: input.templateSnapshotId } });
     if (!snapshot) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy template snapshot", status: 404 };
@@ -505,7 +510,11 @@ export class RenderJobsService {
       // Same no-charge preflight `submit` runs, but before any clip is cut.
       const account = await this.templates.usableAccount(input.providerAccountId);
       if (!account.ok) return account;
-      if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+      {
+      // The provider downloads every scene file from PUBLIC_BASE_URL: a missing / local / dead (expired tunnel) URL fails here, before any paid call.
+      const publicBase = await checkPublicBaseUrl();
+      if (!publicBase.ok) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: publicBase.message, status: 503 };
+    }
       const withDerivatives = await this.withClipDerivatives(projectId, userId, resolved, clipRequests, queuedJobId);
       if (!withDerivatives.ok) return withDerivatives;
       built = buildRenderAssignmentsFromTimeline(slots, withDerivatives.data, optionValues);
@@ -715,7 +724,11 @@ export class RenderJobsService {
     const account = await this.templates.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
     if (account.data.provider === "orshot") return { ok: false, code: "VALIDATION_FAILED", message: ORSHOT_NO_DYNAMIC_MESSAGE };
-    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+    {
+      // The provider downloads every scene file from PUBLIC_BASE_URL: a missing / local / dead (expired tunnel) URL fails here, before any paid call.
+      const publicBase = await checkPublicBaseUrl();
+      if (!publicBase.ok) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: publicBase.message, status: 503 };
+    }
 
     const timeline = await this.prisma.timelineVersion.findUnique({ where: { id: timelineVersionId } });
     if (!timeline || timeline.projectId !== projectId) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy timeline version", status: 404 };
@@ -824,7 +837,11 @@ export class RenderJobsService {
     if (input.forceEngine === "lyonix") return { ok: false, code: "VALIDATION_FAILED", message: "Mẫu của provider không có bản render nội bộ tương đương" };
     const account = await this.templates.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
-    if (!publicBaseUrlConfigured()) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "PUBLIC_BASE_URL chưa cấu hình trên server", status: 503 };
+    {
+      // The provider downloads every scene file from PUBLIC_BASE_URL: a missing / local / dead (expired tunnel) URL fails here, before any paid call.
+      const publicBase = await checkPublicBaseUrl();
+      if (!publicBase.ok) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: publicBase.message, status: 503 };
+    }
     const snapshot = await this.prisma.templateSnapshot.findUnique({ where: { id: timeline.templateSnapshotId } });
     if (!snapshot || snapshot.providerAccountId !== input.providerAccountId) return { ok: false, code: "VALIDATION_FAILED", message: "Template không thuộc tài khoản render đã chọn" };
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];

@@ -19,7 +19,13 @@ export const CURATED_CONTENT_MODELS: Record<ContentKind, readonly string[]> = {
   gemini: [
     "gemini-3.1-pro-preview",
     "gemini-2.5-flash",
+    // Current flash generation: separate free-tier quota per model, so they are real fallbacks when one model's daily quota is spent.
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
     "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
   ],
@@ -74,6 +80,16 @@ export const isTextContentModel = (id: string) => {
   return !SKIP.test(name);
 };
 
+/**
+ * Models an account lists that cannot serve our script / keyword / moderation calls (plain chat `generateContent` /
+ * `chat.completions`): agent and research models reachable only through Google's Interactions API, image / music / robotics /
+ * computer-use models, tool-only variants. They are filtered out BEFORE the priority list is built, so a call is never routed
+ * to an API the model does not support (e.g. `antigravity-*` -> 400 "only supports Interactions API").
+ */
+const NOT_SCRIPT_CAPABLE = /antigravity|deep-research|interactions|-image|image-|nano-banana|lyria|robotics|computer-use|customtools|omni|native-audio|-live|embed|aqa/i;
+
+export const isScriptCapableModel = (_kind: ContentKind, id: string) => isTextContentModel(id) && !NOT_SCRIPT_CAPABLE.test(normalizeModelId(id));
+
 export const resolveContentModel = (kind: ContentKind, id: string) => {
   const name = normalizeModelId(id);
   return RETIRED_CONTENT_MODELS[kind][name] ?? name;
@@ -82,7 +98,7 @@ export const resolveContentModel = (kind: ContentKind, id: string) => {
 /** Stable quality-preference order, constrained to model IDs discovered for one account. */
 export const rankContentModels = (kind: ContentKind, accountModels: readonly string[]) => {
   const preference = CURATED_CONTENT_MODELS[kind];
-  return [...new Set(accountModels.map((id) => resolveContentModel(kind, id)))].sort((left, right) => {
+  return [...new Set(accountModels.map((id) => resolveContentModel(kind, id)))].filter((id) => isScriptCapableModel(kind, id)).sort((left, right) => {
     const leftRank = preference.indexOf(left);
     const rightRank = preference.indexOf(right);
     if (leftRank >= 0 && rightRank >= 0) return leftRank - rightRank;

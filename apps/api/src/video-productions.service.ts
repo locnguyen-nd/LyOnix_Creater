@@ -28,6 +28,8 @@ import {
 import type { DurationBudgetDiagnostics, QualityGateDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
+import { AutoPreflightService } from "./auto-preflight.service.js";
+import { preflightRefusal } from "./auto-preflight.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { QueueStatusService } from "./queue-status.service.js";
@@ -84,7 +86,30 @@ export class VideoProductionsService {
     @Inject(AutomationProfilesService) private readonly automationProfiles: AutomationProfilesService,
     // V04-01: the shared template readiness / compatibility check (always provided by the app module; optional for narrow unit tests).
     @Optional() @Inject(CreatomateTemplatesService) private readonly templates?: CreatomateTemplatesService,
+    // Render reliability: full Auto preflight (workers, render, PUBLIC_BASE_URL, content quota...) at submit / retry; optional for unit tests.
+    @Optional() @Inject(AutoPreflightService) private readonly preflight?: AutoPreflightService,
   ) {}
+
+  /** Runs the Auto preflight for a profile's accounts + template; a blocking failure refuses BEFORE any run / provider call. */
+  private async autoPreflight(userId: string, role: "admin" | "staff", profile: { contentConfig: unknown; voiceConfig: unknown; mediaConfig: unknown; renderConfig: unknown; sceneCount: number | null }): Promise<VideoProductionOutcome<null> | null> {
+    if (!this.preflight) return null;
+    const content = asAccountRef(profile.contentConfig);
+    const voice = asVoiceRef(profile.voiceConfig);
+    const media = asAccountRef(profile.mediaConfig);
+    const render = asRenderRef(profile.renderConfig);
+    if (!content || !voice?.voiceId || !media || !render) return null;
+    const result = await this.preflight.check(userId, role, {
+      contentAccountId: content.providerAccountId,
+      voiceAccountId: voice.providerAccountId,
+      voiceId: voice.voiceId,
+      mediaAccountId: media.providerAccountId,
+      renderAccountId: render.providerAccountId,
+      templateSnapshotId: render.templateSnapshotId,
+      sceneCount: profile.sceneCount,
+    });
+    const refusal = preflightRefusal(result);
+    return refusal ? { ok: false, code: "PREFLIGHT_FAILED", message: refusal, status: 409 } : { ok: true, data: null };
+  }
 
   /**
    * V04-01: Auto preflight - the pinned template must belong to the chosen render account and be renderable (internal engine: rollout /
@@ -118,8 +143,19 @@ export class VideoProductionsService {
     if (!orshotOptions.ok) return { ok: false, code: "VALIDATION_FAILED", message: orshotOptions.message };
     const captionStyle = sanitizeCaptionStyleOptionValues(input.captionStyle, { strict: true });
     if (!captionStyle.ok) return { ok: false, code: "VALIDATION_FAILED", message: `Kiểu phụ đề không hợp lệ: ${captionStyle.errors.join("; ")}` };
-    const preflight = await this.renderPreflight(input.renderAccountId, input.templateSnapshotId, false);
-    if (!preflight.ok) return preflight;
+    // Render reliability: the full Auto preflight (workers, render + template, PUBLIC_BASE_URL, content quota, voice, media) refuses a
+    // job that cannot finish BEFORE the project / profile exist; without the preflight service (narrow unit tests) the template check only.
+    const preflight = this.preflight
+      ? await this.autoPreflight(userId, role, {
+          contentConfig: { providerAccountId: input.contentAccountId },
+          voiceConfig: { providerAccountId: input.voiceAccountId, voiceId: input.voiceId },
+          mediaConfig: { providerAccountId: input.mediaAccountId },
+          renderConfig: { providerAccountId: input.renderAccountId, templateSnapshotId: input.templateSnapshotId },
+          sceneCount: input.sceneCount ?? null,
+        })
+      : null;
+    const renderCheck = preflight ?? (await this.renderPreflight(input.renderAccountId, input.templateSnapshotId, false));
+    if (!renderCheck.ok) return renderCheck;
     const project = await this.prisma.project.create({ data: { name: input.name.trim(), createdByUserId: userId } });
     await this.grants.replaceProjectGrants(project.id, [], [userId]);
     const profile = await this.automationProfiles.create(userId, role, {
@@ -204,7 +240,9 @@ export class VideoProductionsService {
         status: 503,
       };
     }
-    const preflight = await this.renderPreflight(renderConfig.providerAccountId, renderConfig.templateSnapshotId, true);
+    // Everything the job needs is checked here, before the source / run exist: a worker that is not running, a template or
+    // PUBLIC_BASE_URL that cannot render, or content models all in cooldown refuse the submit instead of failing minutes later.
+    const preflight = (await this.autoPreflight(userId, role, profile)) ?? (await this.renderPreflight(renderConfig.providerAccountId, renderConfig.templateSnapshotId, true));
     if (!preflight.ok) return preflight;
 
     let sourceVersionId: string;
@@ -355,15 +393,21 @@ export class VideoProductionsService {
    * them, so a run that failed at e.g. the media step does not re-pay for script/voice again.
    */
   async retry(id: string, userId: string, role: "admin" | "staff"): Promise<VideoProductionOutcome<{ retried: true }>> {
-    const run = await this.prisma.workflowRun.findUnique({ where: { id }, select: { id: true, mode: true, projectId: true, createdByUserId: true, status: true, deletedAt: true } });
+    const run = await this.prisma.workflowRun.findUnique({ where: { id }, select: { id: true, mode: true, projectId: true, createdByUserId: true, status: true, deletedAt: true, automationProfileVersionId: true } });
     if (!run || run.mode !== "auto" || run.deletedAt || run.createdByUserId !== userId) return notFoundRun;
     if (!(await this.assertReadAccess(run.projectId, userId, role))) return notFoundRun;
     if (!retriableStatuses.includes(run.status as (typeof retriableStatuses)[number])) {
       return { ok: false, code: "INVALID_STATE", message: "Chỉ có thể làm lại video đã thất bại, bị chặn, hoặc cần xử lý thủ công.", status: 409 };
     }
+    // A manual retry into a stopped worker / an active quota cooldown would fail again within a second: refuse it with the reason.
+    const profile = run.automationProfileVersionId ? await this.prisma.automationProfileVersion.findUnique({ where: { id: run.automationProfileVersionId } }) : null;
+    if (profile) {
+      const preflight = await this.autoPreflight(userId, role, profile);
+      if (preflight && !preflight.ok) return preflight;
+    }
     const updated = await this.prisma.workflowRun.updateMany({
       where: { id, status: run.status, deletedAt: null },
-      data: { status: "draft", attempts: 1, lastError: Prisma.JsonNull },
+      data: { status: "draft", attempts: 1, notBefore: null, lastError: Prisma.JsonNull },
     });
     if (updated.count === 0) return { ok: false, code: "INVALID_STATE", message: "Trạng thái video vừa thay đổi. Hãy tải lại rồi thử lại.", status: 409 };
     return { ok: true, data: { retried: true } };

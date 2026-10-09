@@ -61,7 +61,41 @@ export type ErrorCode =
   // (Creatomate would synthesize + bill voice itself). CONFLICT = LyOnix refused to render;
   // FAILED = Creatomate-side TTS (ElevenLabs integration/quota) failed during the render.
   | "TEMPLATE_TTS_CONFLICT"
-  | "TEMPLATE_TTS_FAILED";
+  | "TEMPLATE_TTS_FAILED"
+  // Render reliability: an Auto job was refused before submit / retry because something it needs is not ready
+  // (worker down, render template / PUBLIC_BASE_URL / content model unavailable...). The message names the cause and the fix.
+  | "PREFLIGHT_FAILED";
+
+/** Render reliability: one check of the Auto preflight (`POST /video-productions/preflight`). `warn` never blocks. */
+export type PreflightCheckResponse = {
+  key: "worker" | "media_worker" | "render_account" | "template" | "public_base_url" | "scene_count" | "slots" | "content" | "voice" | "media";
+  ok: boolean;
+  severity: "block" | "warn";
+  message: string;
+  fix: string | null;
+};
+export type AutoPreflightResponse = { ok: boolean; checkedAt: string; checks: PreflightCheckResponse[] };
+export type AutoPreflightRequest = {
+  contentAccountId: string;
+  voiceAccountId: string;
+  voiceId: string;
+  mediaAccountId: string;
+  renderAccountId: string;
+  /** The pinned snapshot, or empty with `externalTemplateId` for the form's template before it is pinned. */
+  templateSnapshotId: string;
+  externalTemplateId?: string;
+  sceneCount?: number;
+};
+
+/** Render reliability: `GET /system/workers` - liveness of the background workers. */
+export type WorkerStateResponse = { up: boolean; lastSeenAt: string | null; ageMs: number | null };
+export type WorkerHealthResponse = {
+  checkedAt: string;
+  workflow: WorkerStateResponse;
+  audio: WorkerStateResponse;
+  mediaWorker: { up: boolean | null; consumers: number | null };
+  problems: string[];
+};
 
 export type ErrorEnvelope = {
   error: {
@@ -865,7 +899,7 @@ export type MediaPlanSegmentDiagnostics = {
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
-  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
+  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery" | "clip";
   /** VE2E-135 (L0): match score (0..1) of the prepared-library clip when `sourceTier` is `library`. */
   libraryScore?: number;
   /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */
@@ -983,7 +1017,8 @@ export type VideoProductionResponse = {
   scriptDraftVersionId: string | null;
   renderJobId: string | null;
   resultUrl: string | null;
-  lastError: { code: string; message: string; stepKey?: string } | null;
+  /** `retryAt`: a transient failure re-queued the run no earlier than this (provider cooldown / backoff), or the earliest manual retry. */
+  lastError: { code: string; message: string; stepKey?: string; retryable?: boolean; retryAt?: string } | null;
   /** VE2E-40: the run's persisted background segment setting (legacy runs read as auto) and its resolved range. */
   backgroundSegments: BackgroundSegmentsResolvedResponse;
   /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */

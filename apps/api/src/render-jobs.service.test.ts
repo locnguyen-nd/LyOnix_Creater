@@ -322,6 +322,16 @@ describe("RenderJobsService", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it("render reliability: a local / dead PUBLIC_BASE_URL fails BEFORE any Creatomate call or render job, with the fix in the message", async () => {
+      process.env.PUBLIC_BASE_URL = "http://localhost:3000";
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments });
+      expect(outcome).toMatchObject({ ok: false, code: "PROVIDER_NOT_CONFIGURED", status: 503, message: expect.stringContaining("tunnel") });
+      expect(prisma.renderJob.create).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it("rejects a media assignment referencing an asset from a different project", async () => {
       prisma.mediaAssetVersion.findFirst = async () => ({ id: "asset-1", projectId: "other-project", deletedAt: null });
       const outcome = await service.submit(projectId, "user-1", "staff", { templateSnapshotId, providerAccountId, assignments });

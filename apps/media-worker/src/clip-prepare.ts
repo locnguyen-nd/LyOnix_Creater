@@ -39,6 +39,7 @@ import {
   type ProbeInfo,
 } from "./clip-plan.js";
 import type { MediaWorkerConfig } from "./config.js";
+import { lockOwner, lockOwnerGone } from "./compose/job-lock.js";
 import { JobLockBusyError, MediaJobError } from "./job-errors.js";
 import { resolveMediaSource } from "./media-source.js";
 import { BinaryNotFoundError, ProcessTimeoutError, type ProcessRunner } from "./process.js";
@@ -172,7 +173,7 @@ export class ClipPrepareProcessor {
     for (let tries = 0; tries < 2; tries += 1) {
       try {
         const handle = await open(lockPath, "wx");
-        await handle.writeFile(String(process.pid));
+        await handle.writeFile(lockOwner());
         await handle.close();
         return async () => {
           await rm(lockPath, { force: true });
@@ -180,7 +181,8 @@ export class ClipPrepareProcessor {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         const info = await stat(lockPath).catch(() => null);
-        if (info && this.now().getTime() - info.mtimeMs > staleAfterMs) {
+        // a lock left by a worker process that died on this host is taken over at once (see compose/job-lock.ts)
+        if ((info && this.now().getTime() - info.mtimeMs > staleAfterMs) || (await lockOwnerGone(lockPath))) {
           await rm(lockPath, { force: true });
           continue;
         }

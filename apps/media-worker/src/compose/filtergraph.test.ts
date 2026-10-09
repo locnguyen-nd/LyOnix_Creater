@@ -110,6 +110,25 @@ describe("buildVideoGraph", () => {
     expect(vid.filterComplex).not.toContain("eval=frame");
   });
 
+  it("freeze guard: a video scene with near-static footage gets a slow zoom (alternating), other video scenes stay as the recipe says", () => {
+    const p = plan([scene("v0", 0, 240), scene("v1", 240, 240), scene("v2", 480, 240)], 0, 0);
+    const guarded = buildVideoGraph(baseInput(p, { staticScenes: new Set([0, 1]) }));
+    const [s0, s1, s2] = guarded.filterComplex.split(";\n");
+    expect(s0).toMatch(/1\+0\.1\*t\//); // zoom in (STATIC_GUARD_INTENSITY: fast enough to move even a smooth, text-less card)
+    expect(s1).toMatch(/1\+0\.1\*\(1-t\//); // next static scene zooms out
+    expect(s2).not.toContain("eval=frame"); // moving footage is left alone
+    expect(buildVideoGraph(baseInput(p)).filterComplex).not.toContain("eval=frame");
+  });
+
+  it("freeze guard: a ranged video clearly shorter than its scene (held last frame) is guarded; a few frames short is not", () => {
+    const ranged = (id: string, durationMs: number): ComposeScene => scene(id, 0, 240, { media: { relativePath: `m/${id}.mp4`, kind: "video", sourceStartMs: 1000, sourceDurationMs: durationMs } });
+    const short = buildVideoGraph(baseInput(plan([ranged("short", 2500)], 0, 0))); // 4 s scene, 2.5 s of footage
+    expect(short.filterComplex).toContain("tpad=stop_mode=clone");
+    expect(short.filterComplex).toContain("eval=frame");
+    const almost = buildVideoGraph(baseInput(plan([ranged("almost", 3800)], 0, 0))); // 200 ms short: rounding, not a visible hold
+    expect(almost.filterComplex).not.toContain("eval=frame");
+  });
+
   it("draws boxes with the resolved slot colour, text layers via ASS only when the slot has a value, captions last", () => {
     const p = plan([scene("a", 15, 120)]);
     const graph = buildVideoGraph(baseInput(p, { fontsDir: "C:\\fonts\\jp" }));

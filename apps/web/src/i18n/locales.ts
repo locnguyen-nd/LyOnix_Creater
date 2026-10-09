@@ -274,6 +274,7 @@ const vi = {
       article_url: "Link bài viết",
     },
     autoPreflightTitle: "Kiểm tra trước khi chạy",
+    serverPreflight: { title: "Kiểm tra hệ thống", checking: "Đang kiểm tra worker, template, quota…", allReady: "Worker, template, URL công khai và quota đều sẵn sàng.", unavailable: "Không kiểm tra được hệ thống lúc này; khi tạo, server vẫn kiểm tra lại." },
     autoPreflight: {
       content: "Tài khoản content (kịch bản)",
       voice: "Tài khoản + giọng đọc (ElevenLabs)",
@@ -382,6 +383,7 @@ const vi = {
     openStudio: "Mở trong Studio",
     retry: "Làm lại",
     retrying: "Đang làm lại…",
+    retryScheduled: "Lỗi tạm thời, sẽ tự thử lại lúc {{time}}. ({{reason}})",
     attempts: "Lần chạy: {{count}}",
     reviewTitle: "Xem lại & xuất",
     openResult: "Mở video",
@@ -1683,6 +1685,7 @@ const en: typeof vi = {
       article_url: "Article link",
     },
     autoPreflightTitle: "Preflight",
+    serverPreflight: { title: "System check", checking: "Checking workers, template, quota…", allReady: "Workers, template, public URL and quota are ready.", unavailable: "Could not check the system right now; the server checks again on create." },
     autoPreflight: {
       content: "Content account (script)",
       voice: "Voice account + voice (ElevenLabs)",
@@ -1792,6 +1795,7 @@ const en: typeof vi = {
     openStudio: "Open in Studio",
     retry: "Retry",
     retrying: "Retrying…",
+    retryScheduled: "Temporary error: retrying automatically at {{time}}. ({{reason}})",
     attempts: "Attempts: {{count}}",
     reviewTitle: "Review & export",
     openResult: "Open video",
@@ -2999,6 +3003,7 @@ const ja: typeof vi = {
   jobs: {
     ...en.jobs,
     draftSave: "下書きを保存",
+    serverPreflight: { title: "システムチェック", checking: "ワーカー・テンプレート・クォータを確認中…", allReady: "ワーカー、テンプレート、公開URL、クォータの準備ができています。", unavailable: "現在システムを確認できません。作成時にサーバーが再確認します。" },
     draftSaving: "保存中…",
     draftPending: "未保存の変更があります",
     draftSavedAt: "{{time}} に保存しました",
@@ -4002,6 +4007,7 @@ const ko: typeof vi = {
   jobs: {
     ...en.jobs,
     draftSave: "임시 저장",
+    serverPreflight: { title: "시스템 점검", checking: "워커·템플릿·쿼터 확인 중…", allReady: "워커, 템플릿, 공개 URL, 쿼터가 모두 준비되었습니다.", unavailable: "지금은 시스템을 확인할 수 없습니다. 생성 시 서버가 다시 확인합니다." },
     draftSaving: "저장 중…",
     draftPending: "저장되지 않은 변경 사항",
     draftSavedAt: "{{time}}에 저장됨",

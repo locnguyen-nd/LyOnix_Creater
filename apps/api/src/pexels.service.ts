@@ -17,6 +17,7 @@ import {
   isLiveContentKind,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
+  normalizePexelsQuery,
   pickPexelsVideoFile,
   searchPexelsPhotos,
   searchPexelsVideos,
@@ -115,6 +116,11 @@ export type AutoImportForSceneInput = {
   visionBudget?: VisionBudget;
   /** Template-aware sourcing: `image` = photos only, `video` = videos only (no cross-kind fallback). Omitted = legacy (video, else photo). */
   mediaType?: "video" | "image";
+};
+
+/** Operational trace of each Pexels search (the query is the stock-search keyword, never a secret); silent under tests. */
+const logPexelsSearch = (type: PexelsMediaType, query: string, results: number) => {
+  if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${type} search "${query.slice(0, 80)}" -> ${results} result(s)`);
 };
 
 @Injectable()
@@ -291,14 +297,21 @@ export class PexelsService {
         if (type === "video") {
           const videos = await searchPexelsVideos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
           candidates.push(...videos.map((v) => pexelsVideoToMediaCandidate(v, { query: variant, providerAccountId: accountId, queriedAt })));
+          logPexelsSearch(type, variant, videos.length);
         } else {
           const photos = await searchPexelsPhotos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
           candidates.push(...photos.map((p) => pexelsPhotoToMediaCandidate(p, { query: variant, providerAccountId: accountId, queriedAt })));
+          logPexelsSearch(type, variant, photos.length);
         }
       } catch (error) {
         await this.providerAccounts.releaseContentRequestSlot(accountId, "visual").catch(() => undefined);
         if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") {
           await this.providerAccounts.cooldownContentAccount(accountId, error.retryAfterMs, new Date(), "visual").catch(() => undefined);
+        }
+        // One variant Pexels rejects (400) must not discard the pool the other variants already found.
+        if (error instanceof ProviderError && error.code === "PROVIDER_SCHEMA_INVALID") {
+          if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${type} search "${variant.slice(0, 80)}" rejected by Pexels (skipped)`);
+          continue;
         }
         return { ok: false, error };
       }
@@ -368,7 +381,12 @@ export class PexelsService {
       { language: detectScriptLanguageHeuristic(trimmedQuery), scenes: [{ sceneId: input.sceneId, narration: "", screenText: "", visualQuery: trimmedQuery, durationHintMs: 5000 }] },
       0,
     );
-    const variants = buildBoundedQueryVariants(brief);
+    // Pexels rejects an empty query with 400: blank variants are dropped, and no search is made when nothing searchable is left.
+    // Line breaks (on-screen text) make Pexels answer 400 "Invalid query": every variant is normalized to one line first.
+    const briefVariants = [...new Set(buildBoundedQueryVariants(brief).map(normalizePexelsQuery).filter(Boolean))];
+    const fallbackVariant = normalizePexelsQuery(trimmedQuery);
+    const variants = briefVariants.length > 0 ? briefVariants : fallbackVariant ? [fallbackVariant] : [];
+    if (variants.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Không có từ khoá để tìm trên Pexels cho cảnh này" };
     const queriedAt = new Date().toISOString();
     const usedExternalIds = new Set(input.usedExternalIds ?? []);
 

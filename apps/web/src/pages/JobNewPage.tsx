@@ -50,7 +50,8 @@ import {
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
 import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
 import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/orshot-embed";
-import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
+import { checkAutoPreflight, setupAutoProfile, submitVideoProduction } from "../video-productions-api";
+import { ServerPreflightPanel, serverPreflightBlocks, type ServerPreflightState } from "../job-new/ServerPreflight";
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
 import { DraftSaveControl } from "../job-new/DraftSaveControl";
@@ -178,6 +179,33 @@ export function JobNewPage() {
     { key: "template", ok: templateState.kind === "ok" },
   ] as const;
   const preflightReady = preflight.every((row) => row.ok);
+  // Render reliability: once the form names every account + template, the server checks what the browser cannot (workers running,
+  // template renderable, PUBLIC_BASE_URL reachable, content quota / cooldown, voice, media). Re-checked every 20 s (a worker may start).
+  const [serverPreflight, setServerPreflight] = useState<ServerPreflightState>({ status: "idle" });
+  const serverPreflightKey = form.entryMode === "auto" && preflightReady && hydrated
+    ? [form.contentAccountId, form.voiceAccountId, form.voiceId, form.mediaAccountId, form.renderAccountId, form.templateId, midpoint(form.sceneCountTarget)].join("|")
+    : "";
+  useEffect(() => {
+    if (!serverPreflightKey) {
+      setServerPreflight({ status: "idle" });
+      return undefined;
+    }
+    const [contentAccountId, voiceAccountId, voiceId, mediaAccountId, renderAccountId, externalTemplateId, sceneCount] = serverPreflightKey.split("|");
+    let cancelled = false;
+    const run = () => {
+      setServerPreflight((prev) => ({ status: "loading", previous: prev.status === "ready" ? prev.result : prev.status === "loading" ? prev.previous : null }));
+      void checkAutoPreflight({ contentAccountId: contentAccountId!, voiceAccountId: voiceAccountId!, voiceId: voiceId!, mediaAccountId: mediaAccountId!, renderAccountId: renderAccountId!, templateSnapshotId: "", externalTemplateId: externalTemplateId!, sceneCount: Number(sceneCount) })
+        .then((result) => { if (!cancelled) setServerPreflight({ status: "ready", result }); })
+        .catch(() => { if (!cancelled) setServerPreflight({ status: "failed" }); });
+    };
+    const debounce = setTimeout(run, 400);
+    const interval = setInterval(run, 20_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounce);
+      clearInterval(interval);
+    };
+  }, [serverPreflightKey]);
   const selected = contentAccounts.find((item) => item.id === form.contentAccountId);
   const selectedVoice = voices.find((voice) => voice.voiceId === form.voiceId);
   // Card status chips ("Bước N" -> "Xong"): display only, they never block anything themselves.
@@ -186,7 +214,7 @@ export function JobNewPage() {
     : form.autoSourceType === "topic" ? Boolean(form.topic.trim()) : form.autoSourceType === "raw_script" ? Boolean(form.autoRawScript.trim()) : Boolean(form.autoArticleUrl.trim());
   const videoDone = Boolean(form.channelId);
   const styleDone = templateState.kind === "ok" && Boolean(form.voiceId) && captionPresetCheck.ok;
-  const canSubmit = Boolean(form.contentAccountId) && (form.entryMode !== "auto" || preflightReady);
+  const canSubmit = Boolean(form.contentAccountId) && (form.entryMode !== "auto" || (preflightReady && !serverPreflightBlocks(serverPreflight)));
   const progressSteps = [
     { name: t("jobs.section.content.title"), accent: "blue" as const, done: contentDone },
     { name: t("jobs.section.video.title"), accent: "green" as const, done: videoDone },
@@ -1005,6 +1033,7 @@ export function JobNewPage() {
                     />
                   ))}
                 </ul>
+                <ServerPreflightPanel state={serverPreflight} />
               </div>
             ) : (
               <div className="flex flex-col gap-1.5 border-t border-lyx-border pt-3">

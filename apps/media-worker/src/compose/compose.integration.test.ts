@@ -186,6 +186,19 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
     expect(result.qc.checks.find((c) => c.code === "QC_FREEZE")).toMatchObject({ ok: true, measured: "skipped (static by design)" });
   }, 240_000);
 
+  it("freeze guard: a near-static video source (a still picture posted as a video) gets a slow zoom and passes QC_FREEZE", async () => {
+    // a news/text card with real edges (like the TikTok "photo" posts that froze a render), not a featureless gradient
+    generate(["-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=1", "-frames:v", "1", join(root, "projects/p/card.png")]);
+    generate(["-loop", "1", "-i", join(root, "projects/p/card.png"), "-t", "6", "-r", "30", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", join(root, "projects/p/static-card.mp4")]);
+    const plan = makePlan(files, { voiceSeconds: [4], texts: [""] });
+    plan.scenes[0]!.media = { relativePath: "projects/p/static-card.mp4", kind: "video", sourceStartMs: null, sourceDurationMs: null };
+    const result = await processor.handle(buildVideoComposeJob({ jobKey: "compose:it-static-video", recipe: { id: "test-telop", version: 1 }, plan }));
+    if (!result.ok) throw new Error(`static video failed: ${result.error.code}: ${result.error.message}`);
+    expect(result.qc.checks.find((c) => c.code === "QC_FREEZE")).toMatchObject({ ok: true });
+    expect(result.qc.measured.freezeMs).toBe(0);
+    expect(result.metrics.stagesMs).toHaveProperty("staticProbe");
+  }, 240_000);
+
   it("is idempotent by jobKey: a second delivery reuses the stored render without running FFmpeg again", async () => {
     const plan = makePlan(files, { voiceSeconds: [2, 2, 2] });
     const job = buildVideoComposeJob({ jobKey: "compose:it-idem", recipe: { id: "test-telop", version: 1 }, plan });

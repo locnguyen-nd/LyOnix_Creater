@@ -23,11 +23,11 @@ import { buildAudioGraph, parseLoudnormMeasurement, type LoudnormMeasurement } f
 import type { ComposeConfig } from "./config.js";
 import { ComposeJobError } from "./errors.js";
 import { checkFontsAvailable } from "./fonts.js";
-import { buildVideoGraph, filterComplexFileArgs, FPS, motionFor } from "./filtergraph.js";
+import { buildVideoGraph, filterComplexFileArgs, FPS, motionFor, planSceneTimeline } from "./filtergraph.js";
 import { buildOverlayDocuments, captionFontsForPlan } from "./overlays.js";
 import { FfmpegProgressParser, progressPercent, type ProgressStage } from "./progress.js";
 import { evaluateStructure, measurementsFromProbe, parseProbedOutput, probeOutput, reportFromChecks } from "./qc.js";
-import { runFullQc, type FullQcContext } from "./qc-signal.js";
+import { parseFreezedetect, runFullQc, type FullQcContext } from "./qc-signal.js";
 import { acquireJobLock } from "./job-lock.js";
 
 /** Relative (to MEDIA_ROOT) directory for `video.compose` outputs - `working` retention class, swept after 7 days. */
@@ -36,6 +36,10 @@ const MANIFEST_FILE = "result.json";
 const VIDEO_FILE = "video.mp4";
 const THUMB_FILE = "thumb.jpg";
 const WORK_DIR = "work";
+/** Freeze guard probe (see detectStaticScenes): same noise tolerance as the QC freezedetect, a slightly shorter minimum stretch, 3 scenes at a time. */
+const STATIC_PROBE_NOISE = "-55dB";
+const STATIC_PROBE_MIN_SEC = 0.8;
+const STATIC_PROBE_PARALLEL = 3;
 
 type StoredManifest = { fingerprint: string; result: VideoComposeSuccess };
 
@@ -185,6 +189,35 @@ export class ComposeProcessor {
     return path;
   }
 
+  /**
+   * Freeze guard probe: which VIDEO scenes are a near-static picture (a social clip that is really a still photo / text card)? Each
+   * scene's footage is decoded small and at 10 fps with the QC's own noise tolerance; a frozen stretch of {@link STATIC_PROBE_MIN_SEC}
+   * or more marks the scene, and the graph then gives it a slow zoom like a photo, so the final QC_FREEZE check cannot fail on footage.
+   * A probe that fails is ignored (the scene renders as before).
+   */
+  private async detectStaticScenes(plan: VideoComposeJob["plan"], mediaPaths: string[]): Promise<Set<number>> {
+    const timeline = planSceneTimeline(plan);
+    const found = new Set<number>();
+    const probes = plan.scenes.map((scene, index) => async () => {
+      if (scene.media.kind !== "video") return;
+      const sceneSec = timeline[index]!.clipFrames / FPS;
+      const ranged = scene.media.sourceStartMs != null && scene.media.sourceDurationMs != null
+        ? ["-ss", (scene.media.sourceStartMs! / 1000).toFixed(3), "-t", (scene.media.sourceDurationMs! / 1000).toFixed(3)]
+        : [];
+      try {
+        const result = await this.deps.runner(this.deps.config.ffmpegPath, [
+          "-hide_banner", "-nostdin", "-v", "info", "-nostats", ...ranged, "-i", mediaPaths[index]!, "-t", sceneSec.toFixed(3), "-an",
+          "-vf", `fps=10,scale=160:-2,freezedetect=n=${STATIC_PROBE_NOISE}:d=${STATIC_PROBE_MIN_SEC}`, "-f", "null", "-",
+        ], { timeoutMs: 60_000, maxStdoutBytes: 16 * 1024 });
+        if (result.exitCode === 0 && parseFreezedetect(result.stderrTail, sceneSec).some((seconds) => seconds >= STATIC_PROBE_MIN_SEC)) found.add(index);
+      } catch {
+        // a failed probe only means no guard for this scene
+      }
+    });
+    for (let next = 0; next < probes.length; next += STATIC_PROBE_PARALLEL) await Promise.all(probes.slice(next, next + STATIC_PROBE_PARALLEL).map((probe) => probe()));
+    return found;
+  }
+
   private async ffmpeg(args: string[], options: { cwd?: string; onLine?: (line: string) => void; timeoutMs?: number; sampleCpu?: boolean }): Promise<{ stderrTail: string; cpuSeconds: number | null }> {
     const result = await this.deps.runner(this.deps.config.ffmpegPath, ["-hide_banner", "-nostdin", ...args], {
       timeoutMs: options.timeoutMs ?? this.deps.compose.timeoutMs,
@@ -199,6 +232,14 @@ export class ComposeProcessor {
 
   private async execute(job: VideoComposeJob, jobDir: string, jobRel: string, onProgress?: (progress: VideoComposeProgress) => void): Promise<VideoComposeSuccess> {
     const startedAt = performance.now();
+    // Wall time of each stage, in order (returned as metrics.stagesMs for the render timing report).
+    const stagesMs: Record<string, number> = {};
+    let lapAt = startedAt;
+    const lap = (stage: string) => {
+      const now = performance.now();
+      stagesMs[stage] = Math.round(now - lapAt);
+      lapAt = now;
+    };
     const { plan } = job;
     const recipe = this.recipeFor(job);
     this.emit(job, onProgress, "preparing", null, null);
@@ -209,6 +250,7 @@ export class ComposeProcessor {
     const fonts = await checkFontsAvailable(this.deps.runner, requiredFonts, this.deps.compose.fontsDir);
     if (!fonts.ok) throw new ComposeJobError("FONT_MISSING", `font(s) not installed on the render host: ${fonts.missing.join(", ")} (install them or set RENDER_FONTS_DIR)`);
     if (!fonts.checked) this.log("video.compose: fontconfig tools not found; font availability was not checked");
+    lap("fonts");
 
     // 1. sources: real files inside MEDIA_ROOT with the right streams
     const mediaPaths: string[] = [];
@@ -218,6 +260,10 @@ export class ComposeProcessor {
       voicePaths.push(await this.resolveAndProbe(scene.voice.relativePath, "audio", `scene ${scene.sceneId} voice`));
     }
     const musicPath = plan.music ? await this.resolveAndProbe(plan.music.relativePath, "audio", "music") : null;
+    lap("probe");
+    const staticScenes = await this.detectStaticScenes(plan, mediaPaths);
+    if (staticScenes.size > 0) this.log(`video.compose ${job.jobKey}: near-static footage in scene(s) ${[...staticScenes].map((index) => index + 1).join(", ")} -> slow zoom (freeze guard)`);
+    lap("staticProbe");
 
     // 2. work directory: ASS overlays + graph files (FFmpeg runs with this as cwd so the graph only uses plain file names)
     const workDir = join(jobDir, WORK_DIR);
@@ -232,8 +278,9 @@ export class ComposeProcessor {
     }
     if (overlays.captions) await writeFile(join(workDir, "captions.ass"), overlays.captions.ass);
     const params = resolveRecipeParams(recipe, plan.params);
-    const video = buildVideoGraph({ plan, recipe, params: { ...plan.params, ...params }, mediaPaths, overlays: { layerAss, captionsAss: overlays.captions ? "captions.ass" : null }, fontsDir: this.deps.compose.fontsDir });
+    const video = buildVideoGraph({ plan, recipe, params: { ...plan.params, ...params }, mediaPaths, overlays: { layerAss, captionsAss: overlays.captions ? "captions.ass" : null }, fontsDir: this.deps.compose.fontsDir, staticScenes });
     await writeFile(join(workDir, "video-graph.txt"), video.filterComplex);
+    lap("overlays");
 
     // 3. audio: measure, then apply linearly -> AAC
     const audioInputs: string[] = voicePaths.flatMap((path) => ["-i", path]);
@@ -245,9 +292,11 @@ export class ComposeProcessor {
       return this.ffmpeg(["-v", "info", "-nostats", "-y", ...audioInputs, ...filterComplexFileArgs("audio-graph.txt", this.deps.ffmpegVersion), "-map", "[aout]", ...output], { cwd: workDir, timeoutMs: 5 * 60_000, sampleCpu: true });
     };
     const measured = await runAudio("measure", ["-f", "null", "-"]);
+    lap("audioMeasure");
     const measurement = parseLoudnormMeasurement(measured.stderrTail);
     if (!measurement) throw new ComposeJobError("QC_AUDIO", "the mixed audio is silent or could not be measured (loudnorm)");
     const audioPass = await runAudio(measurement, ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "audio.m4a"]);
+    lap("audioEncode");
 
     // 4. video: one FFmpeg run, progress from -progress pipe:1
     const partial = join(jobDir, `${VIDEO_FILE}.partial`);
@@ -285,6 +334,8 @@ export class ComposeProcessor {
       },
     });
 
+    lap("videoEncode");
+
     // 5. finalize files, thumbnail, QC
     const videoPath = join(jobDir, VIDEO_FILE);
     await rename(partial, videoPath);
@@ -292,6 +343,7 @@ export class ComposeProcessor {
     const thumbAt = Math.min(plan.padStartFrames / FPS + 0.8, Math.max(0, plan.totalFrames / FPS - 0.1));
     await this.ffmpeg(["-v", "error", "-y", "-ss", thumbAt.toFixed(3), "-i", videoPath, "-frames:v", "1", "-vf", "scale=in_range=tv:out_range=pc,format=yuvj420p", "-q:v", "2", thumbPath], { timeoutMs: 60_000 });
 
+    lap("thumbnail");
     this.emit(job, onProgress, "qc", plan.totalFrames, null);
     const expectedDurationMs = (plan.totalFrames * 1000) / FPS;
     const qc = await this.qc({
@@ -312,8 +364,10 @@ export class ComposeProcessor {
       throw new ComposeJobError(first.code, `QC failed: ${failed.map((check) => `${check.code} (${check.message}; measured ${String(check.measured)}, expected ${String(check.expected)})`).join("; ")}`, false, qc);
     }
 
+    lap("qc");
     this.emit(job, onProgress, "finalizing", plan.totalFrames, null);
     const [videoInfo, thumbInfo, videoSha, thumbSha] = await Promise.all([stat(videoPath), stat(thumbPath), sha256File(videoPath), sha256File(thumbPath)]);
+    lap("finalize");
     const completedAt = this.now();
     const expiresAt = computeExpiresAt("working", completedAt);
     if (!expiresAt) throw new ComposeJobError("INTERNAL", "working retention must expire");
@@ -337,7 +391,7 @@ export class ComposeProcessor {
       },
       thumbnail: { relativePath: toPosix(`${jobRel}/${THUMB_FILE}`), mimeType: "image/jpeg", sha256: thumbSha, bytes: thumbInfo.size, width: 1080, height: 1920 },
       qc,
-      metrics: { renderMs: Math.round(performance.now() - startedAt), cpuSeconds: cpu === null ? null : Math.round(cpu * 10) / 10, x264Preset: this.deps.compose.x264Preset, x264Threads: threads },
+      metrics: { renderMs: Math.round(performance.now() - startedAt), cpuSeconds: cpu === null ? null : Math.round(cpu * 10) / 10, x264Preset: this.deps.compose.x264Preset, x264Threads: threads, stagesMs },
       retentionClass: "working",
       expiresAt: expiresAt.toISOString(),
       tool: { profileVersion: COMPOSE_PROFILE_VERSION, ffmpegVersion: this.deps.ffmpegVersion, recipe: { id: recipe.id, version: recipe.version } },

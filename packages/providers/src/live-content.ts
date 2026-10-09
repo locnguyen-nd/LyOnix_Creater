@@ -35,14 +35,33 @@ const parseRetryAfterMs = (header: string | null): number | undefined => {
   const date = Date.parse(header);
   return Number.isFinite(date) && date > Date.now() ? date - Date.now() : undefined;
 };
+/** A model's quota with no free allowance at all (`limit: 0` / quotaValue "0"): it will not recover by the next minute. */
+const NO_ALLOWANCE_RETRY_MS = 24 * 60 * 60_000;
+
+/**
+ * Where a 429 / quota error applies. Gemini quotas are per project AND per model (`...PerProjectPerModel...`, "model: x" in the
+ * message): one model running out must only bench that model, even though Google's text also says "check your plan and billing".
+ * Only billing / credit / key-wide errors WITHOUT a model in them reach the whole account.
+ */
+export const classifyQuotaScope = (detail: string): "daily" | "minute" | "account" | undefined => {
+  const modelScoped = /PerModel|model:\s*[\w.-]+|model=[\w.-]+/i.test(detail);
+  const daily = /PerDay|per day|daily/i.test(detail);
+  const minute = /PerMinute|per minute/i.test(detail);
+  if (modelScoped) return daily ? "daily" : "minute";
+  if (/insufficient_quota|current quota|no credits remaining|you have no credits|billing/i.test(detail)) return "account";
+  return daily ? "daily" : minute ? "minute" : undefined;
+};
+
 const fail = (status: number, retryAfter: string | null, detail = "") => {
   const suffix = detail ? `: ${redact(detail)}` : "";
-  const quota = /insufficient_quota|no credits remaining|you have no credits|quota exceeded/i.test(detail);
+  const quota = /insufficient_quota|no credits remaining|you have no credits|quota exceeded|RESOURCE_EXHAUSTED/i.test(detail) && status !== 400;
   const retired = status === 404 || /no longer available|is not found|not found for API version/i.test(detail);
-  const accountLevel = /insufficient_quota|current quota|no credits remaining|you have no credits|billing/i.test(detail);
-  const daily = /PerDay|per day|daily/i.test(detail);
-  const scope = accountLevel ? "account" as const : daily ? "daily" as const : /PerMinute|per minute/i.test(detail) ? "minute" as const : undefined;
-  const retryAfterMs = parseRetryAfterMs(retryAfter) ?? parseRetryDelayMs(detail);
+  // Interactions-only agent models (antigravity / deep-research) answer generateContent with 400: not a payload problem, the model is unusable here.
+  const wrongApi = /only supports Interactions API|not supported for generateContent|does not support (?:generateContent|chat)/i.test(detail);
+  const scope = classifyQuotaScope(detail);
+  const noAllowance = /limit[:=]\s*0\b|quotaValue[:=]"?0"?(?:\D|$)/i.test(detail);
+  const retryAfterMs = parseRetryAfterMs(retryAfter) ?? parseRetryDelayMs(detail) ?? (noAllowance ? NO_ALLOWANCE_RETRY_MS : undefined);
+  if (wrongApi) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Model does not support this API${suffix}`, false);
   if (quota) throw new ProviderError("PROVIDER_QUOTA_EXHAUSTED", `Provider quota exhausted${suffix}`, false, retryAfterMs, scope);
   if (retired) throw new ProviderError("PROVIDER_CAPABILITY_UNAVAILABLE", `Model is no longer available${suffix}`, false);
   // VE2E-79: OpenRouter 402 = the prepaid balance cannot cover THIS request. Cost depends on the model (a reasoning model such as
@@ -58,12 +77,34 @@ const json = async (response: Response) => {
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
     const err = body.error as Record<string, unknown> | string | undefined;
-    const detail = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : JSON.stringify(body).slice(0, 180);
-    fail(response.status, response.headers.get("retry-after"), detail);
+    const message = typeof err === "string" ? err : typeof err?.message === "string" ? err.message : JSON.stringify(body).slice(0, 180);
+    fail(response.status, response.headers.get("retry-after"), `${message}${typeof err === "object" && err ? quotaDetail(err) : ""}`);
   }
   return body;
 };
 const timedFetch = (url: string, init: RequestInit) => fetch(url, { ...init, signal: AbortSignal.timeout(callTimeoutMs()) });
+
+/**
+ * Google RPC error details (`QuotaFailure.violations`, `RetryInfo.retryDelay`) as a short machine-readable suffix, so the
+ * classifier sees the quota id / model / limit / delay even when the human message is generic. No secret is in these fields.
+ */
+export function quotaDetail(error: Record<string, unknown>): string {
+  const details = Array.isArray(error.details) ? error.details as Array<Record<string, unknown>> : [];
+  const parts: string[] = [];
+  // OpenAI-style error identifiers (`type` / `code`: insufficient_quota, rate_limit_exceeded...) live outside the message.
+  for (const field of ["type", "code"] as const) {
+    const value = error[field];
+    if (typeof value === "string" && /^[a-z_]{3,48}$/.test(value)) parts.push(`${field}=${value}`);
+  }
+  for (const entry of details) {
+    for (const violation of Array.isArray(entry.violations) ? entry.violations as Array<Record<string, unknown>> : []) {
+      const model = violation.quotaDimensions && typeof violation.quotaDimensions === "object" ? (violation.quotaDimensions as Record<string, unknown>).model : undefined;
+      parts.push(`quota=${String(violation.quotaId ?? violation.quotaMetric ?? "?")}${typeof model === "string" ? ` model=${model}` : ""}${violation.quotaValue !== undefined ? ` quotaValue="${String(violation.quotaValue)}"` : ""}`);
+    }
+    if (typeof entry.retryDelay === "string") parts.push(`retryDelay: "${entry.retryDelay}"`);
+  }
+  return parts.length ? ` [${parts.join("; ")}]` : "";
+}
 
 export const liveContentKinds = ["openai", "gemini", "xai", "openrouter"] as const;
 export type LiveContentKind = (typeof liveContentKinds)[number];

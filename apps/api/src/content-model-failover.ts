@@ -42,7 +42,12 @@ export const modelCooldownMs = (error: ProviderError): number => {
 export const rotatesToNextAccount = (code: string) =>
   code === "PROVIDER_RATE_LIMITED" || code === "PROVIDER_QUOTA_EXHAUSTED" || code === "PROVIDER_AUTH_INVALID" || code === "PROVIDER_CAPABILITY_UNAVAILABLE" || code === "PROVIDER_SCHEMA_INVALID" || code === "PROVIDER_UNAVAILABLE" || code === "PROVIDER_TIMEOUT";
 
-export const isKeyLevelLimit = (error: ProviderError) => error.quotaScope === "account" || error.quotaScope === undefined;
+/**
+ * Only an explicit key-wide limit (billing / credits) cools the whole account. A quota without a known scope is treated as the
+ * model's own (Gemini quotas are per project AND model): benching one model costs at most one more call on the next model,
+ * while cooling the account would block every model that still has quota.
+ */
+export const isKeyLevelLimit = (error: ProviderError) => error.quotaScope === "account";
 
 export const formatRetryAt = (date: Date) => `${date.toISOString().replace("T", " ").slice(0, 19)} UTC`;
 

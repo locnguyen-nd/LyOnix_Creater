@@ -586,6 +586,8 @@ model WorkflowRun {
   backgroundSegments         Json?
   /// Hides one Auto production without deleting provider/render audit records or other runs in the project.
   deletedAt                  DateTime?
+  /// Render reliability: a retried run is claimed again no earlier than this (provider Retry-After / cooldown, else backoff).
+  notBefore                  DateTime?
   createdByUserId            String                    @db.Uuid
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt
@@ -599,6 +601,22 @@ model WorkflowRun {
   renderJobs                 RenderJob[]
 
   @@index([projectId, status])
+  @@index([status, notBefore])
+}
+
+/// Render reliability: liveness of the background worker processes (`workflow`, `audio`). Each process upserts its own row
+/// every few seconds; a kind with no row seen recently means that worker is not running (health + submit preflight).
+model WorkerHeartbeat {
+  /// `<kind>@<host>#<pid>`
+  id         String   @id
+  kind       String
+  host       String
+  pid        Int
+  startedAt  DateTime
+  lastSeenAt DateTime
+  info       Json?
+
+  @@index([kind, lastSeenAt])
 }
 
 model StepRun {

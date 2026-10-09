@@ -653,6 +653,29 @@ describe("WorkflowRunnerService", () => {
     expect(runs[0]).toMatchObject({ status: "failed", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED" } });
   });
 
+  it("render reliability: a rate-limited script call re-queues the run no earlier than the provider's retry time, and the claim only takes due runs", async () => {
+    const retryAt = new Date(Date.now() + 45_000).toISOString();
+    scriptGeneration.generate = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_RATE_LIMITED" as const, message: "Các model content đang bị giới hạn", retryAt }));
+    const before = Date.now();
+    await service.processNext();
+    expect(runs[0]).toMatchObject({ status: "draft", attempts: 2, lastError: { code: "PROVIDER_RATE_LIMITED", retryable: true } });
+    const wait = (runs[0] as any).notBefore.getTime() - before;
+    expect(wait).toBeGreaterThanOrEqual(44_000);
+    expect(wait).toBeLessThan(47_000);
+    expect(scriptGeneration.generate).toHaveBeenCalledTimes(1);
+    const claim = (prisma.workflowRun.findFirst as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0].where;
+    expect(claim.OR).toEqual([{ notBefore: null }, { notBefore: { lte: expect.any(Date) } }]);
+  });
+
+  it("render reliability: a provider wait beyond the auto-retry window (daily quota) fails now with the retry time instead of queueing for hours", async () => {
+    scriptGeneration.generate = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_QUOTA_EXHAUSTED" as const, message: "Hết quota ngày", retryAt: new Date(Date.now() + 22 * 3_600_000).toISOString() }));
+    await service.processNext();
+    expect(runs[0]).toMatchObject({ status: "failed", attempts: 1, lastError: { code: "PROVIDER_QUOTA_EXHAUSTED", retryable: true } });
+    expect((runs[0] as any).lastError.retryAt).toEqual(expect.any(String));
+    expect((runs[0] as any).lastError.message).toContain("Có thể thử lại sau");
+    expect(scriptGeneration.generate).toHaveBeenCalledTimes(1);
+  });
+
   it("respects a profile-level retryPolicy.maxAttempts override", async () => {
     prisma.automationProfileVersion.findUnique = vi.fn(async () => profileRow({ retryPolicy: { maxAttempts: 1 } }));
     scriptGeneration.generate = vi.fn(async () => ({ ok: false as const, code: "PROVIDER_TIMEOUT" as const, message: "timed out" }));

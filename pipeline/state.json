@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-08",
+  "updatedAt": "2026-10-09",
   "tasks": [
     {
       "id": "V00-05",
@@ -159,6 +159,17 @@
         "VE2E-97"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-08: tab Thư viện + Media trong Studio không hiển thị ảnh/video. Nguyên nhân gốc: URL xem trước cho trình duyệt (POST /media-assets/:id/delivery-tokens) được dựng từ PUBLIC_BASE_URL - địa chỉ dành cho provider (Creatomate), trong dev là tunnel trycloudflare đã chết -> mọi thumbnail/preview/audio lỗi (video error 4); khi PUBLIC_BASE_URL trống thì API trả 503. Phụ: chỉ prefetch 12 dòng thô đầu của thư viện (thường là audio/clip con), lỗi tải thư viện và lỗi token bị nuốt, LazyThumb không có fallback -> vùng trống. Đã sửa: issueToken có audience provider|browser (browser không cần PUBLIC_BASE_URL, trả thêm path), render vẫn dùng provider; web nạp URL qua API origin (studio/media-url.ts: browserApiUrl / deliveryUrlForBrowser, dùng cho Studio, Tư liệu, VideoMedia, kết quả render nội bộ); prefetch mọi ảnh/video gốc (thumbPrefetchIds, trần 120); trạng thái thư viện loading/ready/failed + Thử lại; tile lỗi có fallback + banner; preview giữa có loading/lỗi/chưa có media. UI: 2 nút ẩn/hiện thành nút 'Chỉnh sửa nội dung' (Kịch bản · Voice · Media, xanh dương) và 'Chỉnh sửa cảnh' (Inspector, hổ phách) có icon, trạng thái Ẩn/Hiện, hover + pop nhẹ; panel thu gọn để lại rail 56 px có icon + nhãn dọc; tab Kịch bản/Voice/Media thành tab công cụ lớn (icon, số liệu, màu xanh/tím/lục, chỉ báo trượt); tab Kịch bản thành danh sách cảnh bấm chọn; panel trái 340/380 px. Dark theme, không gradient, reduced-motion theo token. Spec .docs/specs/VE2E-99.md. code_done 2026-10-08: typecheck + build toàn repo xanh; test web 343 (+13), api 913 (+5 skip, +3), contracts 5, domain 426; providers 1 fail + media-worker 3 fail sẵn trên Windows (không đụng tới). Nghiệm thu Chrome dark 1440/1280/390: thư viện 5 video tải từ API origin, preview giữa phát, lỗi token/lỗi thư viện hiện đúng trạng thái, không cuộn ngang, console sạch. Nhánh feature/studio-media-library-ux từ dev 30d3ee1."
+    },
+    {
+      "id": "VE2E-150",
+      "title": "Render performance & reliability: đo thời gian từng bước, preflight, quota Gemini theo model, retry có backoff, audit template",
+      "group": "Làm mịn — Render",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-135"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-09 (render chậm + template chưa dùng được), chốt quyết định cùng ngày. Đo thật: job LyOnix trước khi sửa 306,5s (media 80s + chuỗi tìm đuôi nối tiếp 154,6s), job Creatomate của chủ dự án 1.839s (1.641s chờ: worker tắt, tunnel PUBLIC_BASE_URL chết, Gemini hết quota free 20 req/ngày/model và retry ngay 2 lần), sau khi sửa job LyOnix 220,3s; 3 bước chậm nhất đều là tìm/tải media (75,0 / 75,0 / 65,2s, chờ provider, chạm deadline 75s). Đã làm: stage timing ([timing] log + StepRun stage_timings/render_timings + media-worker stagesMs, report:timing, report:templates); WorkerHeartbeat + GET /system/workers; checkPublicBaseUrl (cú pháp, local, probe /health qua URL công khai) trước mọi render provider; quota Gemini theo account+model (model hết quota không khoá account, tự thử model khác, scope không rõ = model), lọc model không viết được kịch bản (antigravity/deep-research/image...), Interactions-only = capability; retry run dùng Retry-After/cooldown hoặc backoff mũ 20s..5m, chờ > 30 phút thì báo giờ thử lại, worker chỉ nhận run tới hạn (WorkflowRun.notBefore); preflight Auto (worker, media-worker, render, template, PUBLIC_BASE_URL, slot, số cảnh, content quota, voice, media) ở form + auto-setup + submit + retry, chặn trước khi tốn AI/TTS/media (PREFLIGHT_FAILED). UI: panel Kiểm tra hệ thống ở Tạo Video, cảnh báo worker + giờ tự thử lại ở Video tự động. Template: 1/8 LyOnix dùng được (white top caption, rollout 100% bật để test), 7 rollout 0%; 4 Creatomate cần PUBLIC_BASE_URL sống (render thật OK nhưng Creatomate trả 270x480); 0 Orshot. Migration 20261009100000_render_reliability. Spec .docs/specs/VE2E-150.md (ID đổi từ VE2E-136 vì dev đã dùng VE2E-136..149). code_done 2026-10-09: typecheck/build xanh; api 946 (+5 skip), providers 438 (+1 fail sẵn Windows), web 345, domain 426, contracts 5, media-worker 302 (+3 fail sẵn Windows). Chưa làm (chờ quyết): tối ưu tìm media (đuôi nối tiếp, deadline 75s, chờ TTS), preset veryfast, rollout 7 recipe. Nhánh feature/render-performance-template-fix từ dev 8b29abd."
     }
   ]
 }

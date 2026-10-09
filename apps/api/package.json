@@ -10,6 +10,8 @@
     "worker:workflow": "tsx src/workflow-worker-main.ts",
     "report:capacity": "tsx src/capacity-report-main.ts",
     "report:failures": "tsx src/failure-report-main.ts",
+    "report:timing": "tsx src/timing-report-main.ts",
+    "report:templates": "tsx src/template-audit-main.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
     "test": "vitest run",

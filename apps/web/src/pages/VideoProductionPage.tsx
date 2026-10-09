@@ -9,7 +9,7 @@ import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { SourceBadge } from "../studio/SourceBadge";
 import { STAGE_COLORS, STAGE_KEYS, currentStage, formatElapsed, stageOfStep, summarizeStages, type StageKey } from "../video-production-stages";
-import { getVideoProduction, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
+import { getVideoProduction, getWorkerHealth, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
 // Matches video-productions.service.ts's own retriableStatuses — "cancelled" is deliberately
@@ -45,6 +45,8 @@ export function VideoProductionPage() {
   // goes back to "draft" needs a fresh effect run, not just a state update inside the old one.
   const [refreshKey, setRefreshKey] = useState(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Render reliability: a run waiting in the queue says WHY when no workflow worker is running (instead of a silent wait).
+  const [workerProblem, setWorkerProblem] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -56,6 +58,9 @@ export function VideoProductionPage() {
           setRun(nextRun);
           setEvents(nextEvents);
           setNowMs(Date.now());
+          if (nextRun.status === "draft") {
+            void getWorkerHealth().then((health) => { if (!cancelled) setWorkerProblem(health.workflow.up ? null : health.problems[0] ?? null); }).catch(() => undefined);
+          } else setWorkerProblem(null);
           if (TERMINAL_STATUSES.has(nextRun.status) && pollTimer.current) {
             clearInterval(pollTimer.current);
             pollTimer.current = null;
@@ -135,7 +140,10 @@ export function VideoProductionPage() {
         ))}
       </div>
 
-      {run.lastError ? <Banner variant="danger">{run.lastError.message}</Banner> : null}
+      {run.status === "draft" && workerProblem ? <Banner variant="warn">{workerProblem}</Banner> : null}
+      {run.status === "draft" && run.lastError?.retryAt && Date.parse(run.lastError.retryAt) > nowMs ? (
+        <Banner variant="info">{t("videoProduction.retryScheduled", { time: new Date(run.lastError.retryAt).toLocaleTimeString(), reason: run.lastError.message })}</Banner>
+      ) : run.lastError ? <Banner variant="danger">{run.lastError.message}</Banner> : null}
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_380px]">
         <div className="min-w-0 rounded-xl border border-lyx-border bg-lyx-bg p-4">
