@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useConfirm } from "../components/feedback";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Banner, PageHeader } from "../components/chrome";
-import { BookmarkCheck, Bot, Captions, Clapperboard, FileText, Film, Languages, LayoutTemplate, Lightbulb, Link2, ListChecks, Mic, Palette, PenLine, Rocket, SlidersHorizontal, Sparkles, Timer, Tv } from "lucide-react";
+import { BookmarkCheck, Bot, Captions, Clapperboard, FileText, Film, Languages, LayoutTemplate, Lightbulb, Link2, ListChecks, Mic, Palette, PenLine, Rocket, SlidersHorizontal, Sparkles, Timer, Tv, UserRound } from "lucide-react";
 import { Button, Field, Select, TextArea, TextInput } from "../components/ui";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TemplatePreviewModal } from "../components/TemplatePreviewModal";
@@ -36,6 +36,7 @@ import type { BackgroundSegmentsSetting, CreationPreferenceOptions, ElevenLabsVo
 // Browser-safe subpaths (the bare `@lyonix/domain` barrel pulls in node:crypto - see its index.ts).
 import { resolveBackgroundSegmentRange } from "@lyonix/domain/background-segments";
 import { parseSelectedNews } from "@lyonix/domain/news";
+import { TARGET_PERSON_MAX_CHARS, targetPersonSubmitFields, targetPersonSummary, withTargetPersonDirection } from "../job-new/target-person";
 import { classifyIntakeUrl } from "@lyonix/domain/url-intake";
 import {
   AUTO_SOURCE_TYPES,
@@ -50,7 +51,8 @@ import {
 import { listCreatomateTemplates, listElevenLabsVoices, pinTemplateSnapshot } from "../studio/timeline-api";
 import { isTemplateOnlyRenderProvider, renderAccountOptionLabel } from "../studio/render-provider";
 import { ORSHOT_FORMATS, ORSHOT_SIZES, compactOrshotOptions } from "../studio/orshot-embed";
-import { setupAutoProfile, submitVideoProduction } from "../video-productions-api";
+import { checkAutoPreflight, setupAutoProfile, submitVideoProduction } from "../video-productions-api";
+import { ServerPreflightPanel, serverPreflightBlocks, type ServerPreflightState } from "../job-new/ServerPreflight";
 import { deleteJobNewDraft, getCreationPreferences, getJobNewDraft, resetCreationPreferences, saveCreationPreferences, saveJobNewDraft } from "../job-new/creation-api";
 import { DraftAutosaver, type DraftSaveStatus } from "../job-new/draft-autosave";
 import { DraftSaveControl } from "../job-new/DraftSaveControl";
@@ -178,6 +180,33 @@ export function JobNewPage() {
     { key: "template", ok: templateState.kind === "ok" },
   ] as const;
   const preflightReady = preflight.every((row) => row.ok);
+  // Render reliability: once the form names every account + template, the server checks what the browser cannot (workers running,
+  // template renderable, PUBLIC_BASE_URL reachable, content quota / cooldown, voice, media). Re-checked every 20 s (a worker may start).
+  const [serverPreflight, setServerPreflight] = useState<ServerPreflightState>({ status: "idle" });
+  const serverPreflightKey = form.entryMode === "auto" && preflightReady && hydrated
+    ? [form.contentAccountId, form.voiceAccountId, form.voiceId, form.mediaAccountId, form.renderAccountId, form.templateId, midpoint(form.sceneCountTarget)].join("|")
+    : "";
+  useEffect(() => {
+    if (!serverPreflightKey) {
+      setServerPreflight({ status: "idle" });
+      return undefined;
+    }
+    const [contentAccountId, voiceAccountId, voiceId, mediaAccountId, renderAccountId, externalTemplateId, sceneCount] = serverPreflightKey.split("|");
+    let cancelled = false;
+    const run = () => {
+      setServerPreflight((prev) => ({ status: "loading", previous: prev.status === "ready" ? prev.result : prev.status === "loading" ? prev.previous : null }));
+      void checkAutoPreflight({ contentAccountId: contentAccountId!, voiceAccountId: voiceAccountId!, voiceId: voiceId!, mediaAccountId: mediaAccountId!, renderAccountId: renderAccountId!, templateSnapshotId: "", externalTemplateId: externalTemplateId!, sceneCount: Number(sceneCount) })
+        .then((result) => { if (!cancelled) setServerPreflight({ status: "ready", result }); })
+        .catch(() => { if (!cancelled) setServerPreflight({ status: "failed" }); });
+    };
+    const debounce = setTimeout(run, 400);
+    const interval = setInterval(run, 20_000);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounce);
+      clearInterval(interval);
+    };
+  }, [serverPreflightKey]);
   const selected = contentAccounts.find((item) => item.id === form.contentAccountId);
   const selectedVoice = voices.find((voice) => voice.voiceId === form.voiceId);
   // Card status chips ("Bước N" -> "Xong"): display only, they never block anything themselves.
@@ -186,7 +215,7 @@ export function JobNewPage() {
     : form.autoSourceType === "topic" ? Boolean(form.topic.trim()) : form.autoSourceType === "raw_script" ? Boolean(form.autoRawScript.trim()) : Boolean(form.autoArticleUrl.trim());
   const videoDone = Boolean(form.channelId);
   const styleDone = templateState.kind === "ok" && Boolean(form.voiceId) && captionPresetCheck.ok;
-  const canSubmit = Boolean(form.contentAccountId) && (form.entryMode !== "auto" || preflightReady);
+  const canSubmit = Boolean(form.contentAccountId) && (form.entryMode !== "auto" || (preflightReady && !serverPreflightBlocks(serverPreflight)));
   const progressSteps = [
     { name: t("jobs.section.content.title"), accent: "blue" as const, done: contentDone },
     { name: t("jobs.section.video.title"), accent: "green" as const, done: videoDone },
@@ -675,6 +704,10 @@ export function JobNewPage() {
                 <TextInput form={FORM_ID} inputMode="url" placeholder={t("jobs.placeholder.articleUrl")} value={form.autoArticleUrl} onChange={(e) => update({ autoArticleUrl: e.target.value })} required />
               </Field>
             )}
+            {/* VE2E-151: optional target person - the highest-priority subject (over the selected news and the model). Draft only. */}
+            <Field label={t("jobs.targetPerson")} hint={t("jobs.targetPersonHint")} icon={<LabelIcon icon={<UserRound size={14} />} />}>
+              <TextInput form={FORM_ID} data-testid="target-person" maxLength={TARGET_PERSON_MAX_CHARS} placeholder={t("jobs.targetPersonPlaceholder")} value={form.targetPerson} onChange={(e) => update({ targetPerson: e.target.value })} />
+            </Field>
           </FormSection>
           {newsDrawer ? (
             <NewsDrawer initialQuery={newsDrawer.query} selectedId={selectedNews?.id ?? null} onUse={(item) => void pickNewsItem(item)} onClose={() => setNewsDrawer(null)} />
@@ -720,7 +753,7 @@ export function JobNewPage() {
                       durationSec: midpoint(values.durationTarget),
                       sceneCount: midpoint(values.sceneCountTarget),
                     });
-                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice));
+                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice), targetPersonSubmitFields(values));
                     await closeDraft();
                     navigate(`/video-productions/${submitted.id}`);
                   } catch (err) {
@@ -752,7 +785,9 @@ export function JobNewPage() {
                   await closeDraft();
                   try {
                     const targetHint = TARGET_HINT_BY_LOCALE[values.language](values.durationTarget.replace(/s$/, ""), values.sceneCountTarget);
-                    const direction = values.promptSpec.trim() ? `${values.promptSpec.slice(0, 450)} (${targetHint})` : targetHint;
+                    const baseDirection = values.promptSpec.trim() ? `${values.promptSpec.slice(0, 450)} (${targetHint})` : targetHint;
+                    // VE2E-151: the manual (Studio) script has no visualPlan lock: the chosen person goes into the direction instead.
+                    const direction = withTargetPersonDirection(baseDirection, values.targetPerson);
                     const generated = await api<ApiJob>(`/jobs/${job.id}/script/generate`, {
                       method: "POST",
                       headers: await csrfHeaders(),
@@ -981,6 +1016,7 @@ export function JobNewPage() {
               <SummaryRow accent="green" icon={<Languages size={13} />} label={t("jobs.language")} value={form.language.toUpperCase()} />
               <SummaryRow accent="green" icon={<Timer size={13} />} label={t("jobs.durationTarget")} value={form.durationTarget} />
               <SummaryRow accent="green" icon={<Film size={13} />} label={t("jobs.sceneCountTarget")} value={form.sceneCountTarget} />
+              {targetPersonSummary(form.targetPerson) ? <SummaryRow accent="green" icon={<UserRound size={13} />} label={t("jobs.targetPerson")} value={targetPersonSummary(form.targetPerson)!} /> : null}
               {form.entryMode === "auto" ? (
                 <>
                   <SummaryRow accent="violet" icon={<LayoutTemplate size={13} />} label={t("jobs.summaryLabel.template")} value={captionTemplate?.name ?? t("jobs.notChosen")} empty={!captionTemplate} />
@@ -1005,6 +1041,7 @@ export function JobNewPage() {
                     />
                   ))}
                 </ul>
+                <ServerPreflightPanel state={serverPreflight} />
               </div>
             ) : (
               <div className="flex flex-col gap-1.5 border-t border-lyx-border pt-3">

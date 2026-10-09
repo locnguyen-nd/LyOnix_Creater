@@ -6,6 +6,8 @@ import { WorkflowWorkerModule } from "./workflow-worker.module.js";
 import { WorkflowRunnerService } from "./workflow-runner.service.js";
 import { RenderJobsService } from "./render-jobs.service.js";
 import { resolveConcurrencyConfig } from "./concurrency-config.js";
+import { PrismaService } from "./prisma.service.js";
+import { startWorkerHeartbeat } from "./worker-health.js";
 
 config({ path: resolve(process.cwd(), ".env") });
 config({ path: resolve(process.cwd(), "../../.env") });
@@ -30,6 +32,8 @@ const bootstrap = async () => {
   console.info(
     `LyOnix video-production workflow worker started (PostgreSQL durable WorkflowRun queue; workflow=${concurrency.workflow}, voiceParallelism=${concurrency.voiceParallelism}, providers=${JSON.stringify(concurrency.providerLimits)})`,
   );
+  // Liveness for GET /system/workers and the submit preflight (a job is refused up front when no workflow worker is running).
+  const stopHeartbeat = startWorkerHeartbeat(app.get(PrismaService), "workflow", { concurrency: concurrency.workflow });
   const inflight = new Set<Promise<void>>();
   let stopping = false;
   const stop = () => { stopping = true; };
@@ -50,6 +54,7 @@ const bootstrap = async () => {
     }
   }
   while (inflight.size > 0) await Promise.allSettled([...inflight]);
+  stopHeartbeat();
   await app.close();
 };
 

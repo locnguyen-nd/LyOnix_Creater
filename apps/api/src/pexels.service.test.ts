@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaAssetVersionSummary } from "@lyonix/contracts";
+import { deriveSceneBrief } from "@lyonix/domain";
 import { PexelsService } from "./pexels.service.js";
 import { MediaService } from "./media.service.js";
 import * as secretCrypto from "./secret-crypto.js";
@@ -158,6 +159,38 @@ describe("PexelsService", () => {
       user: { name: "Jane Doe", url: "https://www.pexels.com/@jane-doe" },
       video_files: [{ quality: "hd", width: 1080, height: 1920, file_type: "video/mp4", link: "https://player.vimeo.com/pexels/7/hd.mp4" }],
     };
+
+    it("never sends an empty query (Pexels answers 400 'No query param given'): a scene brief without words makes no API call", async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-x", query: "   ", sceneBrief: { language: "ja", sceneId: "scene-x", phrases: ["", "  "], subject: null } as never });
+      expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("one query variant Pexels rejects (400) is skipped; the others still give the pool and the import succeeds", async () => {
+      const searched: string[] = [];
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes("/videos/search")) {
+          const query = decodeURIComponent(/query=([^&]*)/.exec(url)![1]!);
+          searched.push(query);
+          if (query.startsWith("bad")) return new Response(JSON.stringify({ status: 400, code: "Invalid query" }), { status: 400 });
+          return new Response(JSON.stringify({ videos: [videoDetail] }), { status: 200 });
+        }
+        if (url.includes("/videos/videos/")) return new Response(JSON.stringify(videoDetail), { status: 200 });
+        throw new Error(`unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      vi.spyOn(safeBinaryFetch, "fetchBinarySafely").mockResolvedValue({ ok: true, buffer: Buffer.from([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70]), mimeType: "video/mp4", finalUrl: "https://player.vimeo.com/pexels/7/hd.mp4" });
+      // a real brief whose on-screen text has a line break (like "悲しいお知らせ\nStray Kids"): that variant is rejected, the visual query is not
+      const brief = deriveSceneBrief({ language: "en", scenes: [{ sceneId: "scene-v", narration: "", screenText: "bad\nquery", visualQuery: "football stadium", durationHintMs: 5000 }] }, 0);
+      const outcome = await service.autoImportForScene(projectId, "user-1", "staff", { providerAccountId: "account-1", sceneId: "scene-v", query: "football stadium", sceneBrief: { ...brief, phrases: ["bad\nquery", ...brief.phrases] } });
+      expect(outcome).toMatchObject({ ok: true });
+      expect(searched).toContain("bad query"); // sent on one line, rejected, skipped
+      expect(searched.some((query) => query.includes("football"))).toBe(true);
+      expect(searched.every((query) => !/[\r\n]/.test(query))).toBe(true);
+    });
 
     it("prefers the first video result and tags the imported asset with the scene id", async () => {
       const fetchMock = vi.fn(async (input: string | URL | Request) => {

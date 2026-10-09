@@ -58,7 +58,7 @@ describe("generateScriptDraftV2", () => {
     const result = await generateScriptDraftV2("openai", "sk-test", "gpt-4o-mini", { sourceType: "topic", sourceText: "Messi", language: "vi", backgroundSegmentRange: { min: 2, max: 3 } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(result.draft.visualPlan?.segments.map((s) => s.sceneIds)).toEqual([["s01", "s02"], ["s03"]]);
-    expect(result.promptTemplateVersion).toBe("script-prompt.v2.3");
+    expect(result.promptTemplateVersion).toBe("script-prompt.v2.4");
     expect(result.diagnostics).toMatchObject({ visualPlan: { status: "ok", reason: null, invalidJaSegmentIds: ["g2"] }, schemaRejection: null, repaired: false });
   });
 

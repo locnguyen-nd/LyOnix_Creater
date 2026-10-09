@@ -124,11 +124,23 @@ const toVideoResult = (row: Record<string, unknown>): PexelsVideoResult => {
 
 export type PexelsSearchOptions = { page?: number; perPage?: number };
 
+/**
+ * A query Pexels accepts: Pexels answers 400 "Invalid query" to a line break (on-screen text such as "悲しいお知らせ\nStray Kids") and
+ * 400 "No query param given" to an empty or blank one. Whitespace runs collapse to one space; `""` = nothing searchable.
+ */
+export const normalizePexelsQuery = (query: string): string => query.replace(/\s+/g, " ").trim().slice(0, 200);
+
+const searchQueryParam = (query: string): string => {
+  const normalized = normalizePexelsQuery(query);
+  if (!normalized) throw new ProviderError("PROVIDER_SCHEMA_INVALID", "Pexels query is empty (nothing searchable)", false);
+  return encodeURIComponent(normalized);
+};
+
 /** Portrait photo search (`GET /v1/search`) — orientation is fixed to portrait, matching 9:16 short video. */
 export async function searchPexelsPhotos(apiKey: string, query: string, options: PexelsSearchOptions = {}): Promise<PexelsPhotoResult[]> {
   const page = options.page ?? 1;
   const perPage = Math.min(Math.max(options.perPage ?? 15, 1), 80);
-  const body = await call(`/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&page=${page}&per_page=${perPage}`, apiKey);
+  const body = await call(`/v1/search?query=${searchQueryParam(query)}&orientation=portrait&page=${page}&per_page=${perPage}`, apiKey);
   const photos = Array.isArray(body.photos) ? (body.photos as Array<Record<string, unknown>>) : [];
   return photos.map(toPhotoResult);
 }
@@ -137,7 +149,7 @@ export async function searchPexelsPhotos(apiKey: string, query: string, options:
 export async function searchPexelsVideos(apiKey: string, query: string, options: PexelsSearchOptions = {}): Promise<PexelsVideoResult[]> {
   const page = options.page ?? 1;
   const perPage = Math.min(Math.max(options.perPage ?? 15, 1), 80);
-  const body = await call(`/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&page=${page}&per_page=${perPage}`, apiKey, "https://api.pexels.com");
+  const body = await call(`/videos/search?query=${searchQueryParam(query)}&orientation=portrait&page=${page}&per_page=${perPage}`, apiKey, "https://api.pexels.com");
   const videos = Array.isArray(body.videos) ? (body.videos as Array<Record<string, unknown>>) : [];
   return videos.map(toVideoResult);
 }

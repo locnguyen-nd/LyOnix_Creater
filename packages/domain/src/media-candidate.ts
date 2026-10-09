@@ -81,12 +81,68 @@ export type VisionModerationDecision = (typeof visionModerationDecisions)[number
  * same call, so a caller can never accidentally treat "looks safe" as "fits the beat" or vice
  * versa. `sceneBeatRelevance` is `null` only when the response was malformed/unusable.
  */
+/**
+ * Person-focused shot description, asked in the SAME moderation call only when the video's subject is one person. It describes the
+ * frame (how many people, close-up, overlaid text, logo, news / quote card) and never who is shown: identity comes from metadata.
+ */
+export type VisionShotFindings = {
+  peopleCount: number;
+  /** One person is the clear main subject with the face visible (close-up / portrait / medium shot). */
+  closeUp: boolean;
+  textCoverage: "none" | "little" | "heavy";
+  /** Broadcaster / publisher / channel logo or watermark visible. */
+  logo: boolean;
+  /** News / article screenshot, TV news graphic, headline or quote card, meme, collage - not real footage / a photo of a person. */
+  newsCard: boolean;
+};
+
+/**
+ * Person-focused identity verdict, asked in the SAME moderation call only when the video is about one person: is the media the target
+ * person (`match`), visibly someone else (`different_person`), nobody (`no_person`) or not decidable (`uncertain`)? Metadata / hashtags
+ * alone never conclude the identity; a refusal or malformed answer leaves this absent (metadata ranking decides).
+ */
+export type VisionIdentityFindings = {
+  match: "match" | "different_person" | "uncertain" | "no_person";
+  confidence: number;
+};
+
+/**
+ * VE2E-152: how clean the media is for reuse (overlays somebody added, not things physically in the scene), asked in the SAME
+ * moderation call. On several frames (downloaded clip) the text area is the largest seen and `heavyTextFrames` / `watermarkFrames`
+ * count the sampled frames with heavy text (> 18%) / a watermark or logo.
+ */
+export type VisionCleanlinessFindings = {
+  /** 0..100 share of the frame covered by overlaid text (captions, subtitles, headlines, text stickers). */
+  textAreaPct: number;
+  textOverSubject: boolean;
+  subtitles: boolean;
+  logo: "none" | "small" | "large";
+  /** Platform watermark / username overlay / publisher banner. */
+  watermark: boolean;
+  lowerThird: boolean;
+  stickers: boolean;
+  frameTemplate: boolean;
+  splitScreen: boolean;
+  /** Social-app UI (progress bar, like / comment buttons) or a follow / subscribe call to action. */
+  socialUi: boolean;
+  largeOverlay: boolean;
+  heavyTextFrames?: number;
+  watermarkFrames?: number;
+  sampledFrames?: number;
+};
+
 export type VisionFindings = {
   decision: VisionModerationDecision;
   confidence: number;
   reasonCodes: string[];
   sceneBeatRelevance: number | null;
   safetyFindings: string[];
+  /** Present only when the person-focused shot fields were asked (and answered). */
+  shot?: VisionShotFindings;
+  /** Present only when the target-person identity check was asked (and answered). */
+  identity?: VisionIdentityFindings;
+  /** VE2E-152: present only when the cleanliness fields were asked (and answered). */
+  cleanliness?: VisionCleanlinessFindings;
   provider: string;
   model: string;
   operation: string;
@@ -126,6 +182,8 @@ export type MediaCandidate = {
   metadataScore: number;
   /** Optional short text signal available from the source's own metadata (title/alt/tags), used for keyword overlap scoring. Not present for every provider (e.g. Pexels video search has none). */
   descriptorText?: string | null;
+  /** VE2E-152: edit signals the platform itself reports (e.g. TikTok effect stickers -> `stickers_or_emoji`). */
+  editSignals?: string[];
   visionFindings: VisionFindings | null;
   /** Final combined 0..1 score after ranking (semantic/visual fit, continuity, quality, cost) - see `rankMediaCandidates`. */
   relevanceScore: number;

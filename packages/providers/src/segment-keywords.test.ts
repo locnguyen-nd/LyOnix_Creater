@@ -61,7 +61,7 @@ describe("VE2E-50 visualPlan handling", () => {
     const prompt = buildScriptV2PromptPackage({ sourceType: "topic", sourceText: "x", language: "ja" }).text;
     expect(prompt).toContain("2-4 words");
     expect(prompt).toContain("NEVER a camera direction");
-    expect(prompt).toContain("script-prompt.v2.3");
+    expect(prompt).toContain("script-prompt.v2.4");
   });
 });
 

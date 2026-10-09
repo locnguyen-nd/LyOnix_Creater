@@ -4,6 +4,7 @@ import {
   getPexelsPhoto,
   getPexelsVideo,
   isPexelsCdnUrl,
+  normalizePexelsQuery,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
   pickPexelsVideoFile,
@@ -38,6 +39,26 @@ const videoRow = {
     { quality: "uhd", width: 2160, height: 3840, file_type: "video/mp4", link: "https://videos.pexels.com/video-files/7/7-uhd.mp4" },
   ],
 };
+
+describe("Pexels search query", () => {
+  it("collapses line breaks (Pexels answers 400 'Invalid query' to them) and blank runs into one line", async () => {
+    expect(normalizePexelsQuery("悲しいお知らせ\nStray Kids フィリックス")).toBe("悲しいお知らせ Stray Kids フィリックス");
+    expect(normalizePexelsQuery("  line1\r\n	line2  ")).toBe("line1 line2");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ videos: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await searchPexelsVideos("key", "2026年10月8日\n急逝を発表");
+    const url = String((fetchMock.mock.calls[0] as unknown[])[0]);
+    expect(url).not.toContain("%0A");
+    expect(url).toContain(`query=${encodeURIComponent("2026年10月8日 急逝を発表")}&`);
+  });
+
+  it("never sends an empty / blank query (400 'No query param given')", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(searchPexelsPhotos("key", " \n ")).rejects.toMatchObject({ code: "PROVIDER_SCHEMA_INVALID" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("probePexelsAccount", () => {
   it("calls the cheap curated endpoint and returns verifiedAt", async () => {

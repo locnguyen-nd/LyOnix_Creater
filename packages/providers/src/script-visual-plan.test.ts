@@ -107,7 +107,7 @@ describe("prompt + schema (VE2E-38)", () => {
     expect(buildScriptV2PromptPackage({ sourceType: "topic", sourceText: "x", language: "ja", backgroundSegmentRange: { min: 5, max: 2 } }).text).toContain("into 3-5 background segments");
     const pkg = buildScriptV2PromptPackage({ sourceType: "topic", sourceText: "x", language: "ja" });
     expect(pkg.text).toContain("broad_en");
-    expect(pkg.promptTemplateVersion).toBe("script-prompt.v2.3");
+    expect(pkg.promptTemplateVersion).toBe("script-prompt.v2.4");
   });
 
   it("declares visualPlan as a required-but-nullable property (strict structured output compatible)", () => {

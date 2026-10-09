@@ -61,7 +61,41 @@ export type ErrorCode =
   // (Creatomate would synthesize + bill voice itself). CONFLICT = LyOnix refused to render;
   // FAILED = Creatomate-side TTS (ElevenLabs integration/quota) failed during the render.
   | "TEMPLATE_TTS_CONFLICT"
-  | "TEMPLATE_TTS_FAILED";
+  | "TEMPLATE_TTS_FAILED"
+  // Render reliability: an Auto job was refused before submit / retry because something it needs is not ready
+  // (worker down, render template / PUBLIC_BASE_URL / content model unavailable...). The message names the cause and the fix.
+  | "PREFLIGHT_FAILED";
+
+/** Render reliability: one check of the Auto preflight (`POST /video-productions/preflight`). `warn` never blocks. */
+export type PreflightCheckResponse = {
+  key: "worker" | "media_worker" | "render_account" | "template" | "public_base_url" | "scene_count" | "slots" | "content" | "voice" | "media";
+  ok: boolean;
+  severity: "block" | "warn";
+  message: string;
+  fix: string | null;
+};
+export type AutoPreflightResponse = { ok: boolean; checkedAt: string; checks: PreflightCheckResponse[] };
+export type AutoPreflightRequest = {
+  contentAccountId: string;
+  voiceAccountId: string;
+  voiceId: string;
+  mediaAccountId: string;
+  renderAccountId: string;
+  /** The pinned snapshot, or empty with `externalTemplateId` for the form's template before it is pinned. */
+  templateSnapshotId: string;
+  externalTemplateId?: string;
+  sceneCount?: number;
+};
+
+/** Render reliability: `GET /system/workers` - liveness of the background workers. */
+export type WorkerStateResponse = { up: boolean; lastSeenAt: string | null; ageMs: number | null };
+export type WorkerHealthResponse = {
+  checkedAt: string;
+  workflow: WorkerStateResponse;
+  audio: WorkerStateResponse;
+  mediaWorker: { up: boolean | null; consumers: number | null };
+  problems: string[];
+};
 
 export type ErrorEnvelope = {
   error: {
@@ -139,7 +173,18 @@ export type ScriptVisualSegmentResponse = {
 };
 
 /** VE2E-88 (additive): the video's main subject + aliases + anchor/exclude terms; absent for plans stored before VE2E-88. */
-export type ScriptVisualSubjectResponse = { main: string; aliases: string[]; mustInclude: string[]; mustExclude: string[] };
+export type ScriptVisualSubjectResponse = {
+  main: string;
+  aliases: string[];
+  mustInclude: string[];
+  mustExclude: string[];
+  /** VE2E-151: what the subject is; `person` = one specific person (person-focused script check + media ranking). Absent in older plans. */
+  kind?: "person" | "group" | "team" | "place" | "event" | "other";
+  /** VE2E-151: other named people the script mentions (context only). */
+  otherPeople?: string[];
+  /** VE2E-151: who named a person subject: `user` (create form) > `news` (selected news) > `model`. */
+  source?: "user" | "news" | "model";
+};
 
 export type ScriptVisualPlanResponse = { segments: ScriptVisualSegmentResponse[]; videoSubject?: ScriptVisualSubjectResponse };
 
@@ -164,6 +209,8 @@ export type ScriptDraftV2GenerationResponse = {
     visualPlan: { status: "ok" | "missing" | "rejected"; reason: string | null; detail?: string; invalidJaSegmentIds: string[]; /** VE2E-88: neither ja nor en usable (needs extract_keywords). */ unusableSegmentIds?: string[] };
     schemaRejection: string | null;
     repaired: boolean;
+    /** VE2E-151: person subject only - does the script stay on the person (one rewrite when it drifted). */
+    personFocus?: PersonScriptFocusDiagnostics;
   };
   providerPin: {
     accountId: string;
@@ -780,6 +827,13 @@ export type VideoProductionSubmitRequest = {
   source?: VideoProductionSourceInput;
   /** VE2E-40: background segment count for this run; omitted = `{ mode: "auto" }`. Persisted on the run (retry/resume reuse it). */
   backgroundSegments?: BackgroundSegmentsSetting;
+  /**
+   * VE2E-151: the person the video must be about, as typed on the create form ("Lee Felix / フィリックス (Stray Kids)": names / aliases,
+   * group / team in brackets; max 200 chars). Highest-priority target (over the selected news and the model). Persisted on the run.
+   */
+  targetPerson?: string;
+  /** VE2E-151: headline + excerpt of the selected news (max 800 chars): a person the model extracts that is named there is the `news` target. */
+  newsContext?: string;
 };
 
 /**
@@ -815,10 +869,30 @@ export type MediaPlanRequest = {
 export type QualityGateDiagnostics = {
   checks: Array<{ name: string; status: "ok" | "fixed" | "warning" | "failed"; detail?: string }>;
   fixes: Array<Record<string, unknown>>;
+  /** VE2E-151 person codes: `script_off_target` (script drifts off the person), `person_media_low_confidence` (too little media naming the person). */
   warnings: Array<{ code: string; sceneId?: string; detail: string }>;
   degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
   failure: { code: string; sceneId: string; reason: string } | null;
+  /** VE2E-151: person subject only - share of the duration with media naming the person. */
+  personMedia?: { onTargetShare: number; verifiedShare: number; genericShare: number; lowConfidence: boolean };
 };
+
+/** VE2E-151: script focus on the chosen person (stored with the script diagnostics). */
+export type PersonScriptFocusDiagnostics = {
+  ok: boolean;
+  name: string;
+  coverage: number;
+  hookNamesTarget: boolean;
+  offTargetSceneIds: string[];
+  dominantOther: string | null;
+  reasons: string[];
+  refocused: boolean;
+  /** Who named the person: user (create form) > news > model. */
+  source: "user" | "news" | "model";
+};
+
+/** VE2E-151: how a segment's source relates to the person: `verified` = named in metadata + a person seen by vision; `metadata` = named only; `generic` = stock / backdrop / placeholder. */
+export type PersonMatchLevel = "verified" | "metadata" | "generic";
 
 /** VE2E-54: total-duration check stored as the `duration_budget` StepRun outputRef. */
 export type DurationBudgetDiagnostics = {
@@ -865,7 +939,7 @@ export type MediaPlanSegmentDiagnostics = {
   /** VE2E-57: vision moderation skipped for this segment (job vision-call cap reached, or the vision model is cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: which search tier produced the source of a normal (non-degraded) segment (`ja` > `en` > `broad` > `pexels`). */
-  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
+  sourceTier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery" | "clip";
   /** VE2E-135 (L0): match score (0..1) of the prepared-library clip when `sourceTier` is `library`. */
   libraryScore?: number;
   /** VE2E-130 (CR-MEDIA-SLA §3.1): the segment fell to ladder level L4-L6 (other window of a clip of the job / stock image + Ken Burns / brand background); the job still renders. */
@@ -880,6 +954,53 @@ export type MediaPlanSegmentDiagnostics = {
   reusedWindow?: { startMs: number; durationMs: number } | null;
   /** VE2E-130: why the primary tiers (L0-L3) produced no source before the ladder degraded (per tier, e.g. `ja:apify_no_usable_candidate`). */
   degradeReason?: string | null;
+  /** VE2E-151: person subject only - identity evidence of the segment's source. */
+  person?: SegmentPersonDiagnostics;
+  /** VE2E-152: overlay / pre-edit verdict of the chosen source (absent when nothing was known about it). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
+};
+
+/** VE2E-152: how clean (reusable) the chosen source is, why candidates were dropped, and whether the pick is a fallback. */
+export type SegmentCleanlinessDiagnostics = {
+  /** `clean` (raw footage) > `acceptable` (small corner logo / a little text) > `penalized` (subtitles, headline, stickers...) > `reject`. */
+  tier: "clean" | "acceptable" | "penalized" | "reject";
+  cleanlinessScore: number;
+  /** 0..1 overlaid-text share of the frame, `null` when unknown. */
+  textAreaRatio: number | null;
+  logoDetected: boolean;
+  watermarkDetected: boolean;
+  subtitleDetected: boolean;
+  preEdited: boolean;
+  editSignals: string[];
+  method: "vision" | "shot" | "metadata" | "none";
+  /** No clean footage was usable: a medium candidate was taken (`message` says so). */
+  fallback: boolean;
+  /** `TEXT_HEAVY` | `BURNT_IN_SUBTITLES` | `LARGE_WATERMARK` | `PRE_EDITED_VIDEO` | `SOCIAL_UI_OVERLAY` | `NEWS_CARD` (a reject only). */
+  rejectionReason?: string;
+  /** Cleanliness rejections among this segment's candidates, by reason. */
+  rejected?: Record<string, number>;
+  message?: string;
+};
+
+/** VE2E-151: how sure the segment's source shows the target person, and how that was decided. */
+export type SegmentPersonDiagnostics = {
+  targetPerson: string;
+  /** Who named the target: `user` (create form) > `news` (selected news) > `model`. */
+  targetSource: "user" | "news" | "model";
+  match: PersonMatchLevel;
+  /** Ranking tier of the chosen source (`verified` > `strong_metadata` > `single_portrait` > `group` > `generic` > `rejected`); absent for reused / ladder sources. */
+  tier?: string;
+  /** 0..1: a vision verdict when there was one, else the metadata (capped at 0.75: metadata alone never concludes). */
+  identityConfidence: number;
+  verificationMethod: "vision" | "metadata" | "none";
+  /** Ranking hints (`close_up`, `group`, `identity_uncertain`, `wrong_person`, `impostor_risk`, ...). */
+  flags: string[];
+  /** Person-rule rejections among this segment's candidates (`person_wrong_person`, `person_news_card`, ...). */
+  rejected?: Record<string, number>;
+  /** Set when no source of the person was found: the main reason (the most frequent rejection, else the tiers' failure reason). */
+  rejectionReason?: string;
+  /** One person vs several in the chosen source (hook for a later face-crop task; unused by the render today). */
+  framing?: "single" | "group" | "unknown";
 };
 
 /** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
@@ -931,6 +1052,14 @@ export type MediaPlanApifyQuality = {
   downloader?: "yt-dlp" | "apify";
   ossFetchCode?: string;
   ossFetchMs?: number;
+  /** VE2E-151: person subject only - person ranking of the chosen candidate. */
+  person?: { identity: string; score: number; match: PersonMatchLevel; flags: string[]; tier: string; identityConfidence: number; verificationMethod: "vision" | "metadata" | "none"; framing: "single" | "group" | "unknown" };
+  /** VE2E-151: person-rule rejections in this search's pool (also kept when the tier found nothing). */
+  personRejected?: Record<string, number>;
+  /** VE2E-152: cleanliness of the chosen candidate (+ the pool's cleanliness rejections). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
+  /** VE2E-152: cleanliness of the downloaded clip's sampled frames (when `VISION_VIDEO_FRAMES=1`). */
+  frameCleanliness?: SegmentCleanlinessDiagnostics;
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
@@ -983,7 +1112,8 @@ export type VideoProductionResponse = {
   scriptDraftVersionId: string | null;
   renderJobId: string | null;
   resultUrl: string | null;
-  lastError: { code: string; message: string; stepKey?: string } | null;
+  /** `retryAt`: a transient failure re-queued the run no earlier than this (provider cooldown / backoff), or the earliest manual retry. */
+  lastError: { code: string; message: string; stepKey?: string; retryable?: boolean; retryAt?: string } | null;
   /** VE2E-40: the run's persisted background segment setting (legacy runs read as auto) and its resolved range. */
   backgroundSegments: BackgroundSegmentsResolvedResponse;
   /** VE2E-48: per-segment sourcing diagnostics (provider + fallback reason) of the latest media step; `null` before the media step ran. */
@@ -1415,6 +1545,8 @@ export type JobNewFormValues = {
   captionPresetId: string;
   /** VE2E-96: the picked news item (JSON of a NewsItemResponse), "" = none. Draft only, never a default. */
   selectedNews: string;
+  /** VE2E-151: the person the video is about, typed by the user (names / aliases, group in brackets); "" = none. Draft only, never a default. */
+  targetPerson: string;
 };
 
 /** `GET|PUT /me/drafts/:flowType`: the signed-in user's own in-progress form (never another user's). */

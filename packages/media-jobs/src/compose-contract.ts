@@ -170,7 +170,8 @@ export type VideoComposeSuccess = {
   output: ComposeOutputFile & { mimeType: "video/mp4"; durationMs: number; width: number; height: number; fps: number };
   thumbnail: ComposeOutputFile & { mimeType: "image/jpeg"; width: number; height: number };
   qc: ComposeQcReport;
-  metrics: { renderMs: number; cpuSeconds: number | null; x264Preset: string; x264Threads: number };
+  /** `stagesMs`: wall time of each worker stage in order (fonts, probe, overlays, audioMeasure, audioEncode, videoEncode, thumbnail, qc, finalize). */
+  metrics: { renderMs: number; cpuSeconds: number | null; x264Preset: string; x264Threads: number; stagesMs?: Record<string, number> };
   retentionClass: "working";
   expiresAt: string;
   tool: { profileVersion: typeof COMPOSE_PROFILE_VERSION; ffmpegVersion: string; recipe: ComposeRecipeRef };

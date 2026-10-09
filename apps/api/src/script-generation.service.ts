@@ -11,7 +11,7 @@ import {
   CONTENT_MODEL_RANKING_VERSION,
 } from "@lyonix/providers";
 import type { ErrorCode, ScriptDraftV2GenerationResponse } from "@lyonix/contracts";
-import type { NarrationBudget } from "@lyonix/domain";
+import type { NarrationBudget, TargetPersonInput } from "@lyonix/domain";
 import { SourcesService } from "./sources.service.js";
 import { ProviderAccountsService } from "./provider-accounts.service.js";
 import { decryptSecret } from "./secret-crypto.js";
@@ -25,11 +25,23 @@ export type GenerateScriptDraftInput = {
   backgroundSegmentRange?: { min: number; max: number } | null;
   /** VE2E-54: narration budget from the intake target (Auto passes it; absent = legacy prompt line). Internal only. */
   durationBudget?: NarrationBudget | null;
+  /** VE2E-151: the person typed on the create form (highest-priority target). Internal only. */
+  targetPerson?: TargetPersonInput | null;
+  /** VE2E-151: selected news headline + excerpt (a model person named there is the `news` target). Internal only. */
+  newsText?: string | null;
 };
 
 export type GenerateScriptDraftOutcome =
   | { ok: true; response: ScriptDraftV2GenerationResponse }
-  | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
+  | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean; /** Earliest time a content model / account is usable again (cooldown, Retry-After). */ retryAt?: string };
+
+/** Earliest retry moment of a failed content call: the soonest benched model, else the provider's own Retry-After. */
+export function earliestContentRetryAt(limited: ReadonlyArray<{ retryAt: Date }>, lastError: { retryAfterMs?: number | undefined } | null, now = new Date()): string | undefined {
+  const fromModels = limited.length ? Math.min(...limited.map((entry) => entry.retryAt.getTime())) : null;
+  const fromError = lastError?.retryAfterMs ? now.getTime() + lastError.retryAfterMs : null;
+  const at = fromModels ?? fromError;
+  return at && at > now.getTime() ? new Date(at).toISOString() : undefined;
+}
 
 /** VE2E-50: outcome of the dedicated keyword-extraction call. */
 export type SegmentKeywordsOutcome =
@@ -108,6 +120,8 @@ export class ScriptGenerationService {
         ...(input.direction ? { direction: input.direction } : {}),
         ...(input.backgroundSegmentRange ? { backgroundSegmentRange: input.backgroundSegmentRange } : {}),
         ...(input.durationBudget ? { durationBudget: input.durationBudget } : {}),
+        ...(input.targetPerson ? { targetPerson: input.targetPerson } : {}),
+        ...(input.newsText ? { newsText: input.newsText } : {}),
       }));
       limited.push(...result.limited);
       if (result.ok) {
@@ -122,8 +136,9 @@ export class ScriptGenerationService {
       if (result.error && !rotatesToNextAccount(result.error.code)) break;
     }
     const limitedMessage = describeLimitedModels(limited);
+    const retryAt = earliestContentRetryAt(limited, lastError);
     if (limitedMessage && (!lastError || lastError.code === "PROVIDER_RATE_LIMITED" || lastError.code === "PROVIDER_QUOTA_EXHAUSTED")) {
-      return { ok: false, code: lastError?.code ?? "PROVIDER_RATE_LIMITED", message: limitedMessage, status: 429, retryable: true };
+      return { ok: false, code: lastError?.code ?? "PROVIDER_RATE_LIMITED", message: limitedMessage, status: 429, retryable: true, ...(retryAt ? { retryAt } : {}) };
     }
     if (!lastError) return { ok: false, code: "PROVIDER_CAPABILITY_UNAVAILABLE", message: "Không có model khả dụng trên các tài khoản content được phép dùng", status: 503 };
     const error = lastError;
@@ -140,6 +155,7 @@ export class ScriptGenerationService {
         : providerErrorMessage[error.code] ?? "Nhà cung cấp từ chối generate",
       status: switchable ? 429 : 502,
       retryable: error.retryable,
+      ...(retryAt ? { retryAt } : {}),
     };
   }
 

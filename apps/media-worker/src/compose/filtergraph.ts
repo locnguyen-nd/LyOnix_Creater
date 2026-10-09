@@ -74,7 +74,22 @@ export type VideoGraphInput = {
   overlays: VideoGraphOverlays;
   /** Absolute fonts directory for libass, or null. */
   fontsDir: string | null;
+  /**
+   * Indexes of VIDEO scenes whose picture would stand still (a near-static source such as a photo-slideshow / text-card social clip,
+   * or a ranged clip shorter than its scene that holds its last frame). They get the freeze guard: a slow zoom, like a photo, so the
+   * render never fails QC_FREEZE because of the footage. Empty / absent = none.
+   */
+  staticScenes?: ReadonlySet<number>;
 };
+
+/** Zoom of the freeze guard: the same gentle range as a photo scene, alternating in / out so consecutive static scenes do not look alike. */
+export const STATIC_GUARD_INTENSITY = 0.1;
+export const staticGuardMotion = (index: number): { direction: "in" | "out"; intensity: number } => ({ direction: index % 2 === 0 ? "in" : "out", intensity: STATIC_GUARD_INTENSITY });
+
+/** A ranged video that is more than this much shorter than its scene would hold its last frame visibly (tpad clone): guard it. */
+export const HELD_FRAME_TOLERANCE_MS = 400;
+export const holdsLastFrame = (scene: ComposeScene, clipFrames: number): boolean =>
+  scene.media.kind === "video" && scene.media.sourceStartMs != null && scene.media.sourceDurationMs != null && scene.media.sourceDurationMs < (clipFrames * 1000) / FPS - HELD_FRAME_TOLERANCE_MS;
 
 export type VideoGraph = {
   /** Input options + `-i` for every scene, in scene order. */
@@ -105,7 +120,7 @@ export function pictureArea(recipe: RenderRecipe): { width: 1080; height: number
   return { width: 1080, height, y: Math.max(0, even((1920 * frame.centerYPct) / 100 - height / 2)), canvasColor: frame.canvasColor };
 }
 
-const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number, recipe: RenderRecipe, params: Record<string, string>): string => {
+const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number, recipe: RenderRecipe, params: Record<string, string>, staticGuard = false): string => {
   const area = pictureArea(recipe);
   const length = timeline.clipFrames;
   const seconds = length / FPS;
@@ -116,7 +131,7 @@ const sceneChain = (scene: ComposeScene, timeline: SceneTimeline, input: number,
   steps.push(`trim=end_frame=${length}`, "setpts=PTS-STARTPTS");
   // cover fit to the 9:16 canvas + BT.709 limited range (the output tags say so; untagged/BT.601/full-range sources are converted here)
   steps.push(`scale=${area.width}:${area.height}:force_original_aspect_ratio=increase:flags=bicubic:out_color_matrix=bt709:out_range=tv`, `crop=${area.width}:${area.height}`, "setsar=1");
-  const motion = motionFor(scene.media.kind, timeline.index, recipe, params);
+  const motion = motionFor(scene.media.kind, timeline.index, recipe, params) ?? (staticGuard ? staticGuardMotion(timeline.index) : null);
   if (motion) {
     const progress = `t/${seconds.toFixed(6)}`;
     const zoom = motion.direction === "in" ? `1+${motion.intensity}*${progress}` : `1+${motion.intensity}*(1-${progress})`;
@@ -155,7 +170,7 @@ export function buildVideoGraph(input: VideoGraphInput): VideoGraph {
       // a source shorter than its scene loops (a frozen frame for >1 s is a QC defect); the trim in the chain ends the loop
       inputArgs.push("-stream_loop", "-1", "-i", path);
     }
-    parts.push(sceneChain(scene, tl, index, recipe, params));
+    parts.push(sceneChain(scene, tl, index, recipe, params, scene.media.kind === "video" && (Boolean(input.staticScenes?.has(index)) || holdsLastFrame(scene, tl.clipFrames))));
   });
 
   let acc = "s0";

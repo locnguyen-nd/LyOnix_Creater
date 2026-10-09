@@ -5,7 +5,10 @@
  */
 import { api, csrfHeaders } from "./api";
 import type {
+  AutoPreflightRequest,
+  AutoPreflightResponse,
   BackgroundSegmentsSetting,
+  WorkerHealthResponse,
   QueueSummaryResponse,
   StudioContextResponse,
   VideoProductionListItemResponse,
@@ -35,6 +38,16 @@ export type AutoProfileSetupRequest = {
 
 export type AutoProfileSetupResponse = { projectId: string; automationProfileId: string };
 
+/** Render reliability: read-only server check of everything an Auto job needs (workers, template, PUBLIC_BASE_URL, quota...). */
+export async function checkAutoPreflight(input: AutoPreflightRequest): Promise<AutoPreflightResponse> {
+  return api<AutoPreflightResponse>("/video-productions/preflight", { method: "POST", headers: await csrfHeaders(), body: JSON.stringify(input) });
+}
+
+/** Render reliability: are the background workers running? */
+export async function getWorkerHealth(): Promise<WorkerHealthResponse> {
+  return api<WorkerHealthResponse>("/system/workers");
+}
+
 export async function setupAutoProfile(input: AutoProfileSetupRequest): Promise<AutoProfileSetupResponse> {
   return api<AutoProfileSetupResponse>("/video-productions/auto-setup", {
     method: "POST",
@@ -49,11 +62,13 @@ export async function submitVideoProduction(
   automationProfileId: string,
   source: VideoProductionSourceInput,
   backgroundSegments?: BackgroundSegmentsSetting,
+  /** VE2E-151: the typed target person and the selected news text (both optional). */
+  person: { targetPerson?: string; newsContext?: string } = {},
 ): Promise<VideoProductionSubmitResponse> {
   return api<VideoProductionSubmitResponse>("/video-productions", {
     method: "POST",
     headers: await csrfHeaders(),
-    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source, ...(backgroundSegments ? { backgroundSegments } : {}) }),
+    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source, ...(backgroundSegments ? { backgroundSegments } : {}), ...person }),
   });
 }
 

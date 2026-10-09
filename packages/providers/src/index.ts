@@ -102,8 +102,10 @@ export {
   generateContentStructuredV2,
   generateLiveStructured,
   generateVisionStructuredOnce,
+  classifyQuotaScope,
   isLiveContentKind,
   liveContentKinds,
+  quotaDetail,
   verifyContentKey,
   verifyOpenRouterKey,
   type LiveContentInput,
@@ -112,7 +114,7 @@ export {
   type OpenRouterVerifyResult,
   type VisionInputPart,
 } from "./live-content.js";
-export { CONTENT_MODEL_RANKING_VERSION, CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, resolveContentModel, rankContentModels, suggestedModelFromError } from "./content-models.js";
+export { CONTENT_MODEL_RANKING_VERSION, CURATED_CONTENT_MODELS, mergeContentModels, discoveredContentModels, normalizeModelId, isTextContentModel, isScriptCapableModel, resolveContentModel, rankContentModels, suggestedModelFromError } from "./content-models.js";
 export { classifyOpenRouterModels, type OpenRouterModelCapabilities, type OpenRouterRawModel } from "./openrouter-models.js";
 export {
   probeContentModel,
@@ -229,6 +231,7 @@ export {
 } from "./elevenlabs.js";
 export {
   probePexelsAccount,
+  normalizePexelsQuery,
   searchPexelsPhotos,
   searchPexelsVideos,
   getPexelsPhoto,

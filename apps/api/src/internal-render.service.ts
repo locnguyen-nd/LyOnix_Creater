@@ -20,6 +20,7 @@ import { MediaJobsGateway, type VideoComposer } from "./media-jobs.gateway.js";
 import { PrismaService } from "./prisma.service.js";
 import { resolveSceneBindingsForMapping, type SceneBindingForMapping } from "./timeline-render-mapping.js";
 import { selectSubtitlesForScenes } from "./subtitle-selection.js";
+import { StageRecorder } from "./stage-timing.js";
 import { checkTemplateRenderable, usableFallbackSnapshotIds, type ReadinessDeps } from "./template-readiness.js";
 
 /**
@@ -63,6 +64,28 @@ const LEASE_MS = 5 * 60_000;
 const PROGRESS_WRITE_EVERY_MS = 2_000;
 
 type JobRow = NonNullable<Awaited<ReturnType<PrismaService["renderJob"]["findUnique"]>>>;
+
+/**
+ * One finished compose -> `render_compose` (wall clock, API side), `render_transport` (wall minus the worker's own render time:
+ * RabbitMQ wait + delivery) and one `ffmpeg_<stage>` per media-worker stage (laid end to end from the worker's start).
+ */
+function recordComposeStages(timings: StageRecorder | undefined, startedAt: number, endedAt: number, result: Extract<VideoComposeResult, { ok: true }>): void {
+  if (!timings) return;
+  const workerMs = Math.max(0, Math.min(result.metrics.renderMs, endedAt - startedAt));
+  const transportMs = endedAt - startedAt - workerMs;
+  timings.add("render_compose", startedAt, endedAt, {
+    provider: "lyonix",
+    cache: result.reused ? "hit" : "miss",
+    detail: { ffmpegMs: result.metrics.renderMs, cpuSeconds: result.metrics.cpuSeconds, preset: result.metrics.x264Preset, threads: result.metrics.x264Threads, frames: Math.round((result.output.durationMs / 1000) * result.output.fps) },
+  });
+  timings.add("render_transport", startedAt, startedAt + transportMs, { provider: "lyonix" });
+  let cursor = startedAt + transportMs;
+  for (const [stage, ms] of Object.entries(result.metrics.stagesMs ?? {})) {
+    if (typeof ms !== "number" || ms < 0) continue;
+    timings.add(`ffmpeg_${stage}`, cursor, cursor + ms, { provider: "lyonix" });
+    cursor += ms;
+  }
+}
 type Outcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; retryable?: boolean };
 /** Internal-only: context loading reports codes that are a superset of the REST ones (RECIPE_NOT_FOUND ...); they end up in `lastError`, never in an HTTP envelope. */
 type ContextOutcome<T> = { ok: true; data: T } | { ok: false; code: string; message: string };
@@ -92,6 +115,8 @@ const isRenderable = (scene: SceneBindingForMapping): boolean => !scene.excluded
 @Injectable()
 export class InternalRenderService {
   private readonly inflight = new Map<string, Promise<void>>();
+  /** Stage timings of the render jobs this process is handling (persisted as the run's `render_timings` StepRun when the job ends here). */
+  private readonly renderTimings = new Map<string, StageRecorder>();
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -201,11 +226,43 @@ export class InternalRenderService {
    * the preparation of other jobs.
    */
   async processJob(job: JobRow): Promise<void> {
-    const payload = job.modificationsPayload as unknown as JobPayload;
-    const context = await this.loadContext(job, payload);
-    if (!context.ok) return this.failJob(job, context.code, context.message, null);
-    const decision = await this.decide(job, payload, context.data, null);
-    await this.applyDecision(job, payload, context.data, decision);
+    const timings = new StageRecorder("render", job.id);
+    this.renderTimings.set(job.id, timings);
+    // From the RenderJob row (written by the run's submit_render / Studio) to this worker claiming it.
+    timings.add("render_queue_wait", job.createdAt.getTime(), Date.now(), { provider: "lyonix" });
+    try {
+      const payload = job.modificationsPayload as unknown as JobPayload;
+      const context = await this.loadContext(job, payload);
+      if (!context.ok) return await this.failJob(job, context.code, context.message, null);
+      const decision = await this.decide(job, payload, context.data, null);
+      await this.applyDecision(job, payload, context.data, decision);
+    } finally {
+      // A launched compose finishes (and persists the timings) on its own; anything else ends here.
+      if (!this.inflight.has(job.id)) await this.persistTimings(job);
+    }
+  }
+
+  /** Writes the job's stage timings as the `render_timings` StepRun of its Auto run (Studio renders only log them). Best-effort. */
+  private async persistTimings(job: JobRow): Promise<void> {
+    const timings = this.renderTimings.get(job.id);
+    if (!timings) return;
+    this.renderTimings.delete(job.id);
+    if (!job.workflowRunId) return;
+    try {
+      const run = await this.prisma.workflowRun.findUnique({ where: { id: job.workflowRunId }, select: { attempts: true } });
+      if (!run) return;
+      const first = timings.events[0];
+      const startedAt = first ? new Date(first.startedAt) : new Date();
+      const endedAt = new Date();
+      const outputRef = { renderJobId: job.id, events: timings.events } as unknown as Prisma.InputJsonValue;
+      await this.prisma.stepRun.upsert({
+        where: { workflowRunId_stepKey_attempt: { workflowRunId: job.workflowRunId, stepKey: "render_timings", attempt: run.attempts } },
+        create: { workflowRunId: job.workflowRunId, stepKey: "render_timings", attempt: run.attempts, status: "succeeded", startedAt, endedAt, outputRef },
+        update: { status: "succeeded", startedAt, endedAt, outputRef },
+      });
+    } catch {
+      // timing must never fail a render
+    }
   }
 
   private async loadContext(job: JobRow, payload: JobPayload): Promise<ContextOutcome<Context>> {
@@ -308,8 +365,16 @@ export class InternalRenderService {
 
   private async startInternal(job: JobRow, payload: JobPayload, context: Context, reason: RenderRouteReason): Promise<void> {
     const renderable = context.scenes.filter(isRenderable);
+    const timings = this.renderTimings.get(job.id);
+    const prepareStartedAt = Date.now();
     const prepared = await this.prepareClips(job, renderable);
+    timings?.add("render_prepare_clips", prepareStartedAt, Date.now(), {
+      provider: "lyonix",
+      ok: prepared.ok,
+      ...(prepared.ok ? { cache: prepared.requested === 0 ? "n/a" : prepared.fromRegistry === prepared.requested ? "hit" : "miss", detail: { requested: prepared.requested, fromRegistry: prepared.fromRegistry, cutByWorker: prepared.requested - prepared.fromRegistry } } : { code: prepared.code }),
+    });
     if (!prepared.ok) return this.failJob(job, prepared.code, prepared.message, reason, prepared.retryable);
+    const planStartedAt = Date.now();
 
     const scenes = prepared.scenes;
     const assetIds = [...new Set(scenes.flatMap((scene) => [scene.mediaAssetVersionId, scene.audioMediaAssetVersionId]).filter((id): id is string => Boolean(id)))];
@@ -321,6 +386,7 @@ export class InternalRenderService {
 
     const recipeRef = { id: context.recipe.id, version: context.recipe.version };
     const composeJob: VideoComposeJobInput = { jobKey: buildComposeJobKey({ recipe: recipeRef, plan: built.plan }), recipe: recipeRef, plan: built.plan };
+    timings?.add("render_build_plan", planStartedAt, Date.now(), { provider: "lyonix", detail: { scenes: built.plan.scenes.length, totalFrames: built.plan.totalFrames } });
     const updated = await this.prisma.renderJob.updateMany({
       where: { id: job.id, status: "preparing_clips" },
       data: {
@@ -342,9 +408,9 @@ export class InternalRenderService {
   }
 
   /** Cuts/reframes the clips this render needs and re-points the scenes at the derivatives. Failures abort the render (never the full source). */
-  private async prepareClips(job: JobRow, renderable: SceneBindingForMapping[]): Promise<{ ok: true; scenes: SceneBindingForMapping[]; derivativeIds: string[] } | { ok: false; code: string; message: string; retryable?: boolean }> {
+  private async prepareClips(job: JobRow, renderable: SceneBindingForMapping[]): Promise<{ ok: true; scenes: SceneBindingForMapping[]; derivativeIds: string[]; requested: number; fromRegistry: number } | { ok: false; code: string; message: string; retryable?: boolean }> {
     const requests = this.clipRequests(renderable);
-    if (requests.length === 0) return { ok: true, scenes: renderable, derivativeIds: [] };
+    if (requests.length === 0) return { ok: true, scenes: renderable, derivativeIds: [], requested: 0, fromRegistry: 0 };
     if (!this.clipDerivatives) return { ok: false, code: "PROVIDER_NOT_CONFIGURED", message: "Media worker chưa được nối vào render — không cắt được clip" };
     let writes = Promise.resolve();
     const prepared = await this.clipDerivatives.prepare(
@@ -365,7 +431,13 @@ export class InternalRenderService {
     );
     if (!prepared.ok) return { ok: false, code: prepared.code, message: prepared.message, ...(prepared.retryable !== undefined ? { retryable: prepared.retryable } : {}) };
     const bySceneId = prepared.data.derivativeBySceneId;
-    return { ok: true, scenes: renderable.map((scene) => (bySceneId.has(scene.sceneId) ? { ...scene, mediaAssetVersionId: bySceneId.get(scene.sceneId)! } : scene)), derivativeIds: [...bySceneId.values()] };
+    return {
+      ok: true,
+      scenes: renderable.map((scene) => (bySceneId.has(scene.sceneId) ? { ...scene, mediaAssetVersionId: bySceneId.get(scene.sceneId)! } : scene)),
+      derivativeIds: [...bySceneId.values()],
+      requested: requests.length,
+      fromRegistry: (prepared.data.items ?? []).filter((item) => item.source === "registry").length,
+    };
   }
 
   private async captionSources(scenes: SceneBindingForMapping[]): Promise<Map<string, PlanCaptionSource>> {
@@ -396,18 +468,33 @@ export class InternalRenderService {
         .updateMany({ where: { id: job.id, status: { in: ["rendering", "verifying"] } }, data: { progress: Math.round(progress.percent), preparationLeaseUntil: new Date(now + LEASE_MS), ...(progress.stage === "qc" ? { status: "verifying" } : {}) } })
         .catch(() => undefined);
     };
-    let result: VideoComposeResult;
+    const timings = this.renderTimings.get(job.id);
+    const composeStartedAt = Date.now();
     try {
-      if (!this.composer) throw new MediaJobClientError("MEDIA_WORKER_NOT_CONFIGURED", "Media worker chưa được nối vào API");
-      result = await this.composer.composeVideo(composeJob, { onProgress });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Không gọi được render worker";
-      const code = error instanceof MediaJobClientError && error.code === "RESULT_TIMEOUT" ? "FFMPEG_TIMEOUT" : "INTERNAL";
-      await this.handleFailure(job.id, { code, message, qc: null });
-      return;
+      let result: VideoComposeResult;
+      try {
+        if (!this.composer) throw new MediaJobClientError("MEDIA_WORKER_NOT_CONFIGURED", "Media worker chưa được nối vào API");
+        result = await this.composer.composeVideo(composeJob, { onProgress });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Không gọi được render worker";
+        const code = error instanceof MediaJobClientError && error.code === "RESULT_TIMEOUT" ? "FFMPEG_TIMEOUT" : "INTERNAL";
+        timings?.add("render_compose", composeStartedAt, Date.now(), { provider: "lyonix", ok: false, code });
+        await this.handleFailure(job.id, { code, message, qc: null });
+        return;
+      }
+      const composeEndedAt = Date.now();
+      if (result.ok) {
+        recordComposeStages(timings, composeStartedAt, composeEndedAt, result);
+        const finalizeStartedAt = Date.now();
+        await this.complete(job.id, result);
+        timings?.add("render_finalize", finalizeStartedAt, Date.now(), { provider: "lyonix" });
+      } else {
+        timings?.add("render_compose", composeStartedAt, composeEndedAt, { provider: "lyonix", ok: false, code: result.error.code, detail: { attempts: result.error.attempts } });
+        await this.handleFailure(job.id, { code: result.error.code, message: result.error.message, qc: result.qc ?? null });
+      }
+    } finally {
+      await this.persistTimings(job);
     }
-    if (result.ok) await this.complete(job.id, result);
-    else await this.handleFailure(job.id, { code: result.error.code, message: result.error.message, qc: result.qc ?? null });
   }
 
   private async complete(jobId: string, result: Extract<VideoComposeResult, { ok: true }>): Promise<void> {

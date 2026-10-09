@@ -69,7 +69,7 @@ export async function startComposeConsumer(input: {
       const result = await processor.handle(body, (progress) => publish(message, VIDEO_COMPOSE_PROGRESS_TYPE, progress));
       log(
         result.ok
-          ? `video.compose ${result.jobKey} ok reused=${result.reused} bytes=${result.output.bytes} renderMs=${result.metrics.renderMs} cpu=${result.metrics.cpuSeconds ?? "n/a"}s qc=${result.qc.passed ? "pass" : "fail"}`
+          ? `video.compose ${result.jobKey} ok reused=${result.reused} bytes=${result.output.bytes} renderMs=${result.metrics.renderMs} cpu=${result.metrics.cpuSeconds ?? "n/a"}s qc=${result.qc.passed ? "pass" : "fail"} stagesMs=${JSON.stringify(result.metrics.stagesMs ?? {})}`
           : `video.compose ${result.jobKey} failed ${result.error.code}: ${result.error.message}`,
       );
       publish(message, VIDEO_COMPOSE_RESULT_TYPE, result);

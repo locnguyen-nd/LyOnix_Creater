@@ -8,7 +8,11 @@
  *
  * Pure logic, no I/O. The heuristic only runs when the video subject is known; without one nothing is
  * rejected (backward compatible with plans/data stored before VE2E-88).
+ *
+ * `kind` (person / group / team / place / event / other) and `otherPeople` are optional additions: `kind: "person"` turns on the
+ * person-focused script check and media ranking (`@lyonix/domain` person-target); plans stored before them simply have no kind.
  */
+import { parseSubjectKind, parseTargetPersonSource, type SubjectKind, type TargetPersonSource } from "@lyonix/domain";
 
 export type VideoSubjectV2 = {
   /** The video's main subject (proper name: person, team, story, place). */
@@ -18,6 +22,12 @@ export type VideoSubjectV2 = {
   mustInclude: string[];
   /** Terms that make a phrase off-subject (rival story, unrelated person). */
   mustExclude: string[];
+  /** What the main subject is; `person` = one specific person (person-focused rules). Absent in plans stored before it existed. */
+  kind?: SubjectKind;
+  /** Other named people the script mentions (context only, never the focus). */
+  otherPeople?: string[];
+  /** VE2E-151: who named a person subject - the user (create form) > the selected news > the model. Absent = the model. */
+  source?: TargetPersonSource;
 };
 
 export const SUBJECT_MAX_TEXT = 100;
@@ -61,11 +71,17 @@ export function parseVideoSubject(raw: unknown): VideoSubjectV2 | null {
   const main = typeof row.main === "string" ? row.main.trim() : "";
   if (!main || main.length > SUBJECT_MAX_TEXT) return null;
   const mustExclude = stringList(row.mustExclude ?? row.must_exclude, SUBJECT_MAX_TERMS);
+  const kind = parseSubjectKind(row.kind);
+  const otherPeople = stringList(row.otherPeople ?? row.other_people, SUBJECT_MAX_TERMS);
+  const source = parseTargetPersonSource(row.source);
   return {
     main,
     aliases: stringList(row.aliases, SUBJECT_MAX_TERMS),
     mustInclude: stringList(row.mustInclude ?? row.must_include, SUBJECT_MAX_TERMS),
     mustExclude,
+    ...(kind ? { kind } : {}),
+    ...(otherPeople.length ? { otherPeople } : {}),
+    ...(source ? { source } : {}),
   };
 }
 
@@ -120,6 +136,9 @@ export function subjectKeywordRuleLines(subject?: VideoSubjectV2 | null): string
     "SUBJECT RULE (hard): every searchable keyword (ja, en, broad_en) must stay on the video's MAIN SUBJECT. If the video is about player A, every keyword is about A (A's name, A's team, A's match, an event involving A); if it is a story about B, every keyword is about B. Put the subject's proper name (or an alias) inside each ja/en/broad_en phrase - never a generic phrase like \"stadium crowd\" or \"city street\" without the subject.",
     "broad_en is a WIDER topic but still tied to the subject (example: \"<subject name> match highlights\"), never an unrelated generic scene. mood_en is a generic background mood (example: \"city night timelapse\") used only as a last-resort backdrop, never to find the main clip.",
   ];
+  if (subject?.kind === "person") {
+    lines.push(`The subject is ONE person: put ${subject.main} (or an alias) in every ja/en/broad_en phrase and prefer phrases that find footage of that person alone (close-up, fancam, solo stage, interview), never a group or a news headline.`);
+  }
   if (subject) {
     lines.push(
       `Known subject: ${subject.main}${subject.aliases.length ? ` (aliases: ${subject.aliases.join(", ")})` : ""}.${subject.mustInclude.length ? ` Related anchor terms: ${subject.mustInclude.join(", ")}.` : ""}${subject.mustExclude.length ? ` Never use: ${subject.mustExclude.join(", ")}.` : ""}`,

@@ -52,12 +52,36 @@ import {
   candidateSubjectMatch,
   selectSocialCandidates,
   socialWindowOptionsFromEnv,
+  personMatchLevelOf,
+  personRejectionCounts,
+  visionTargetOf,
+  assessMediaCleanliness,
+  PERSON_VERIFY_MIN_CONFIDENCE,
   type MediaCandidate,
+  type RankedMediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
 import type { ApifyCandidateResponse, ApifyImportResponse, ApifySearchResponse, ErrorCode, MediaPlanApifyQuality, MediaPlanReframeCheck } from "@lyonix/contracts";
+
+/** VE2E-151: the person ranking of the chosen candidate (identity level, score, match level, hints) for the segment diagnostics. */
+export const personQualityOf = (ranked: readonly RankedMediaCandidate[], candidateId: string): MediaPlanApifyQuality["person"] | undefined => {
+  const person = ranked.find((entry) => entry.candidate.candidateId === candidateId)?.person;
+  return person
+    ? {
+        identity: person.identity.level,
+        score: Math.round(person.score * 1000) / 1000,
+        match: personMatchLevelOf(person),
+        flags: [...person.flags],
+        tier: person.tier,
+        identityConfidence: person.identityConfidence,
+        verificationMethod: person.verificationMethod,
+        framing: person.framingKind,
+      }
+    : undefined;
+};
 import { getSharedProviderLimiter, resolveConcurrencyConfig } from "./concurrency-config.js";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
+import { CLEANLINESS_FRAME_COUNT, CLEANLINESS_FRAME_MAX_WIDTH, chosenCleanlinessDiagnostics, cleanlinessCheckEnabled, cleanlinessDiagnosticsOf } from "./media-cleanliness-diagnostics.js";
 import { GrantsService } from "./grants.service.js";
 import { mediaRoot } from "./handoff-workspace.js";
 import { MediaService, sniffMediaMimeType } from "./media.service.js";
@@ -548,7 +572,10 @@ export class ApifyService {
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    // VE2E-151: a person subject also gets the shot description (people / close-up / text / logo / news card) in the same call.
+    // The SAME call also checks the identity against the target person (match / different person / uncertain / nobody).
+    // VE2E-152: the same call also rates how clean the media is (overlaid text, logo, watermark, subtitles, edit layout).
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}), ...(cleanlinessCheckEnabled() ? { cleanliness: true } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
@@ -574,14 +601,25 @@ export class ApifyService {
    * budgeted pipeline as the cover-frame pass. Opt-in (`VISION_VIDEO_FRAMES=1`). Only an explicit `rejected` decision blocks the
    * clip; everything else (flag off, no vision account/budget/frames, worker down) is `unchecked` and never fails sourcing.
    */
-  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string): Promise<"accepted" | "rejected" | "unchecked"> {
+  private async verifyVideoFrames(asset: AutoImportedAsset, candidate: MediaCandidate, brief: SceneBrief, userId: string, role: "admin" | "staff", usedExternalIds: ReadonlySet<string>, budget: VisionBudget, scopeKey: string, quality?: MediaPlanApifyQuality): Promise<"accepted" | "rejected" | "unchecked"> {
     if (!visionVideoFramesEnabled() || !this.videoFrames || asset.kind !== "video") return "unchecked";
     try {
+      // VE2E-152: 5 low-res frames (start / 25% / 50% / 75% / end) - enough to tell a captioned / watermarked edit from raw footage.
       const moderated = await this.moderatePool([candidate], brief, userId, role, usedExternalIds, budget, `${scopeKey}:frames`, async () => {
-        const outcome = await this.videoFrames!.framesForAsset(asset.id);
+        const outcome = await this.videoFrames!.framesForAsset(asset.id, { frameCount: CLEANLINESS_FRAME_COUNT, maxWidth: CLEANLINESS_FRAME_MAX_WIDTH });
         return outcome.ok ? outcome.frames : [];
       });
+      const frameCleanliness = moderated[0]?.visionFindings?.cleanliness;
+      if (frameCleanliness) {
+        const verdict = assessMediaCleanliness({ vision: frameCleanliness, text: candidate.descriptorText ?? null, platformSignals: candidate.editSignals ?? [] });
+        if (quality) quality.frameCleanliness = cleanlinessDiagnosticsOf(verdict, false);
+        // >= 2 frames with heavy text / watermark, continuous subtitles, social UI, a finished edit: drop it (the next candidate is tried).
+        if (verdict.tier === "reject") return "rejected";
+      }
       const decision = moderated[0]?.moderationDecision ?? null;
+      // VE2E-151: frames of the downloaded clip that show a different person than the target reject it like an unsafe clip.
+      const identity = moderated[0]?.visionFindings?.identity;
+      if (brief.person && identity?.match === "different_person" && identity.confidence >= PERSON_VERIFY_MIN_CONFIDENCE) return "rejected";
       return decision === "rejected" ? "rejected" : decision === "accepted" ? "accepted" : "unchecked";
     } catch {
       return "unchecked";
@@ -790,7 +828,7 @@ export class ApifyService {
     const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang, limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
     quality.searchReused = searched.reused;
     if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
-    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}) };
+    const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}), ...(input.brief.person ? { person: input.brief.person } : {}) };
     /** Importable (or, in phase 1, downloadable-later) candidates that pass the dataset-evidence filter, best first. */
     const shortlist = (results: ApifyCandidateResult[]): ApifyCandidateResult[] => {
       const wantedType = input.mediaType === undefined ? null : input.mediaType === "image" ? "photo" : "video";
@@ -833,6 +871,7 @@ export class ApifyService {
       pool = onSubject;
     }
     let ranked = rankMediaCandidates(pool, input.brief, { usedExternalIds: input.usedExternalIds });
+    if (input.brief.person) quality.personRejected = personRejectionCounts(ranked.map((entry) => entry.person));
     let phase2Failure = "";
     let decision: Extract<ReturnType<typeof decideMediaSelection>, { decision: "auto_select" }> | null = null;
     let toImport: ApifyCandidateResult | null = null;
@@ -846,13 +885,17 @@ export class ApifyService {
       const chosen = byCandidateId.get(next.chosen.candidateId);
       if (!chosen) return fail("apify_no_usable_candidate");
       const id = next.chosen.externalId;
+      const person = personQualityOf(next.ranked, next.chosen.candidateId);
+      if (person) quality.person = person;
+      const cleanliness = chosenCleanlinessDiagnostics(next.ranked, next.chosen.candidateId);
+      if (cleanliness) quality.cleanliness = cleanliness;
       // Reserve synchronously (no await since the ranking above) so a concurrently sourced segment cannot pick the same clip.
       input.usedExternalIds.add(id);
       const library = await this.findLibraryAsset(projectId, input.platform, id);
       if (library) {
         quality.reusedLibraryAsset = true;
         job.usage.libraryReuses += 1;
-        quality.frameCheck = await this.verifyVideoFrames(library, next.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+        quality.frameCheck = await this.verifyVideoFrames(library, next.chosen, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId, quality);
         if (quality.frameCheck === "rejected") return fail("apify_frames_rejected"); // the id stays reserved: this segment never re-picks the clip
         if ((await this.reframeCheck(library, input, job, quality)) === "reject" && !input.keepOverlayFlagged) return fail("apify_overlay_unavoidable"); // Auto: swap source (VE2E-67)
         return { ok: true, data: { asset: library, externalId: id, ledgerId: `${next.chosen.source}:${id}`, provenance: next.chosen.provenance.apify ?? null, platform: input.platform, quality } };
@@ -905,7 +948,7 @@ export class ApifyService {
       release();
       return fail(`apify_import_failed:${imported.code}:${String((imported as { message?: string }).message ?? "").slice(0, 120)}`);
     }
-    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId);
+    quality.frameCheck = await this.verifyVideoFrames(imported.data.asset, candidate, input.brief, userId, role, input.usedExternalIds, job.vision, input.sceneId, quality);
     if (quality.frameCheck === "rejected") {
       // Unbind the rejected clip from its scene so a retry never reuses it through the library shortcut; the video id stays reserved.
       await this.media.assignScene(imported.data.asset.id, userId, role, null).catch(() => undefined);

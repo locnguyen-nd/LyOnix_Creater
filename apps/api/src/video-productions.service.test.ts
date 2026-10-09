@@ -535,6 +535,42 @@ describe("VideoProductionsService", () => {
       expect(prisma.workflowRun.create).toHaveBeenCalledTimes(1);
     });
 
+    describe("render reliability: full Auto preflight", () => {
+      const blocked = { ok: false, checkedAt: "", checks: [{ key: "worker", ok: false, severity: "block", message: "Worker xử lý video (apps/worker) không chạy", fix: "Chạy apps/worker" }] };
+      const ready = { ok: true, checkedAt: "", checks: [{ key: "worker", ok: true, severity: "block", message: "ok", fix: null }] };
+      let check: ReturnType<typeof vi.fn>;
+      beforeEach(() => {
+        check = vi.fn(async () => blocked);
+        service = new VideoProductionsService(prisma, grants, sources as SourcesService, automationProfiles as AutomationProfilesService, undefined, { check } as never);
+      });
+
+      it("a stopped worker refuses setup and submit BEFORE any project, source or run (no AI / TTS / media spent)", async () => {
+        expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "PREFLIGHT_FAILED", status: 409, message: expect.stringContaining("apps/worker") });
+        expect(createdProjects).toHaveLength(0);
+        expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, source: { type: "topic", topic: "x" } })).toMatchObject({ ok: false, code: "PREFLIGHT_FAILED" });
+        expect(sources.create).not.toHaveBeenCalled();
+        expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+        expect(check).toHaveBeenCalledWith(userId, "staff", expect.objectContaining({ contentAccountId: expect.any(String), templateSnapshotId: expect.any(String) }));
+      });
+
+      it("a manual retry into a stopped worker / active cooldown is refused; once ready the run is re-queued", async () => {
+        const run = { id: "run-x", mode: "auto", projectId, createdByUserId: userId, status: "failed", deletedAt: null, automationProfileVersionId: automationProfileId };
+        prisma.workflowRun.findUnique = vi.fn(async () => run);
+        expect(await service.retry("run-x", userId, "staff")).toMatchObject({ ok: false, code: "PREFLIGHT_FAILED" });
+        expect(prisma.workflowRun.updateMany).not.toHaveBeenCalled();
+        check.mockResolvedValue(ready);
+        prisma.workflowRun.updateMany = vi.fn(async () => ({ count: 1 }));
+        expect(await service.retry("run-x", userId, "staff")).toMatchObject({ ok: true });
+        expect(prisma.workflowRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "draft", notBefore: null }) }));
+      });
+
+      it("ready -> the submit creates the run as before", async () => {
+        check.mockResolvedValue(ready);
+        expect(await service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId })).toMatchObject({ ok: true });
+        expect(prisma.workflowRun.create).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it("a provider template only needs its own, usable account", async () => {
       snaps = [{ id: "snap-1", providerAccountId: "render-acc", engine: "creatomate", rolloutPercent: 0, fallbackSnapshotIds: [] }];
       expect(await service.setupAutoProfile(userId, "staff", validInput)).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("chưa sẵn sàng") });

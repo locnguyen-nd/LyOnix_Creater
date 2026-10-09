@@ -7,7 +7,11 @@
  *
  * Every reject carries a machine-readable reason so the diagnostics can say why nothing passed
  * (and the caller falls back to Pexels instead of taking a foreign clip).
+ *
+ * Person mode (`ctx.person`): the alias bonus is replaced by the person identity (full name > short name + group/team > short name)
+ * and news / quote-card / group posts lose score while close-ups / fancams gain (ranking only: the vision pass still decides).
  */
+import { matchPersonIdentity, personMetadataFlags, type PersonTarget } from "./person-target.js";
 
 /** GeoNames id of Japan as reported in `locationMeta.countryCode` by the TikTok Actor. */
 export const JAPAN_GEONAMES_ID = "1861060";
@@ -54,12 +58,16 @@ export type SocialFilterContext = {
   tier?: SocialFilterTier;
   /** VE2E-131: proper names/aliases of the video's main subject; a caption/hashtag hit adds {@link SUBJECT_ALIAS_BONUS} to the score. */
   subjectAliases?: readonly string[];
+  /** The subject is one person: identity-based bonus and news / text-card / group penalties instead of the plain alias bonus. */
+  person?: PersonTarget;
 };
 
 export type SocialFilterTier = "ja" | "en";
 /** Share of the segment duration a source must cover (the rest is filled by a second source / the ladder; never looped). */
 export const MIN_DURATION_SHARE = 0.6;
 export const SUBJECT_ALIAS_BONUS = 0.3;
+/** Person mode score terms (same scale as the 0..1 overlap/language/location/fit terms). */
+export const PERSON_SOCIAL_SCORE = { identity: 0.4, news: 0.2, textCard: 0.3, group: 0.12, otherPerson: 0.15, closeUp: 0.08 } as const;
 
 const compact = (value: string) => value.toLowerCase().replace(/[\s#_\-]+/g, "");
 
@@ -143,9 +151,25 @@ export function evaluateSocialCandidate(signals: SocialCandidateSignals, ctx: So
   const duration = signals.durationSeconds!;
   // Prefer a source comfortably longer than the segment (room for a clean window), not an endless one.
   const fit = ctx.minDurationSeconds > 0 ? Math.min(1, duration / (ctx.minDurationSeconds * 1.5)) : 1;
-  const alias = ctx.subjectAliases?.length && matchesSubjectAlias(ctx.subjectAliases, signals.text, signals.hashtags) ? SUBJECT_ALIAS_BONUS : 0;
+  const alias = ctx.person ? personSocialTerm(ctx.person, signals) : ctx.subjectAliases?.length && matchesSubjectAlias(ctx.subjectAliases, signals.text, signals.hashtags) ? SUBJECT_ALIAS_BONUS : 0;
   const score = overlap * 0.5 + (lang === "ja" ? 0.2 : 0) + (jp ? 0.15 : 0) + fit * 0.15 + alias;
   return { ok: true, score: Math.round(score * 1000) / 1000, overlap };
+}
+
+/** Person-mode score term of a social post: identity bonus minus the news / text-card / group / other-person penalties, plus a close-up bonus. */
+export function personSocialTerm(person: PersonTarget, signals: Pick<SocialCandidateSignals, "text" | "hashtags">): number {
+  const meta = { text: `${signals.text} ${signals.hashtags.map((tag) => `#${tag.replace(/^#/, "")}`).join(" ")}` };
+  const identity = matchPersonIdentity(person, meta);
+  const flags = personMetadataFlags(person, meta);
+  const s = PERSON_SOCIAL_SCORE;
+  return (
+    s.identity * identity.score -
+    (flags.includes("news") ? s.news : 0) -
+    (flags.includes("text_card") ? s.textCard : 0) -
+    (flags.includes("group") ? s.group : 0) -
+    (flags.includes("other_person") ? s.otherPerson : 0) +
+    (flags.includes("close_up") ? s.closeUp : 0)
+  );
 }
 
 export type SocialSelection<T> = {

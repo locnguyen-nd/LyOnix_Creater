@@ -36,6 +36,12 @@ import {
   subjectShareTargetFromEnv,
   subjectTierKeywords,
   anchorKeywordToSubject,
+  personTargetOfProfile,
+  stripPersonNames,
+  METADATA_IDENTITY_CAP,
+  type MediaPlanVideoSubject,
+  type PersonMatchLevel,
+  type PersonTarget,
   type ClipWindow,
   type DegradedTier,
   type KenBurnsPlan,
@@ -57,10 +63,12 @@ import type {
   MediaPlanResponse,
   MediaPlanSegmentDiagnostics,
   ScriptVisualPlanResponse,
+  SegmentCleanlinessDiagnostics,
+  SegmentPersonDiagnostics,
   TimelineSceneBindingInput,
   TimelineSegmentInput,
 } from "@lyonix/contracts";
-import { ProviderError, isValidJaSearchKeyword, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
+import { ProviderError, isValidJaSearchKeyword, normalizePexelsQuery, normalizeScriptVisualPlanV2 } from "@lyonix/providers";
 import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { createHash, randomUUID } from "node:crypto";
@@ -112,7 +120,7 @@ export type SegmentSource = {
   /** VE2E-57: vision moderation was skipped for this segment (budget spent or model cooling down); metadata-only ranking decided. */
   visionSkipped?: "vision_skipped_budget" | "vision_skipped_quota";
   /** VE2E-130: search tier that produced this (non-degraded) source. */
-  tier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery";
+  tier?: "ja" | "en" | "broad" | "pexels" | "library" | "shorts" | "gallery" | "clip";
   /** VE2E-135 (L0): match score of a prepared-library clip (`tier: "library"`). */
   libraryScore?: number;
   /** VE2E-130: ladder level L4-L6 (flagged `quality_degraded`); absent = a normal source. */
@@ -125,6 +133,20 @@ export type SegmentSource = {
   placeholder?: boolean;
   /** VE2E-130: why the primary tiers found nothing (only set on degraded sources). */
   degradeReason?: string | null;
+  /** VE2E-151 (person subject only): identity evidence of the source (verified by vision / named in metadata / generic). */
+  personEvidence?: PersonEvidence;
+  /** VE2E-152: overlay / pre-edit verdict of the chosen candidate (`fallback` = no clean footage was usable). */
+  cleanliness?: SegmentCleanlinessDiagnostics;
+};
+
+/** VE2E-151: how sure a person subject's source shows the person, and how that was decided (feeds `SegmentPersonDiagnostics`). */
+export type PersonEvidence = {
+  match: PersonMatchLevel;
+  identityConfidence: number;
+  verificationMethod: "vision" | "metadata" | "none";
+  tier?: string;
+  flags: string[];
+  framing?: "single" | "group" | "unknown";
 };
 
 export type SourcedSegment = { segment: PlannedSegment; source: SegmentSource | null; errorCode: string | null };
@@ -146,7 +168,7 @@ export class SegmentSourceLedger {
   kenBurnsCount = 0;
   /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
   readonly authors = new Set<string>();
-  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[] }>();
+  readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[]; /** VE2E-136: normalised subjects of the segments that took a window of this clip (same-subject segments may take another window instead of a new search). Lost in the dev merge of VE2E-136 + VE2E-147, restored. */ subjects: Set<string>; /** VE2E-151: person evidence of the segment that chose this clip (inherited by a reused window). */ personEvidence?: PersonEvidence }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
     if (source.apifyProvenance?.author) this.authors.add(source.apifyProvenance.author);
@@ -257,7 +279,7 @@ export function claimSameSubjectWindow(ledger: SegmentSourceLedger, segment: Pla
   if (!pick || !pick.full) return null;
   const clip = ledger.clips.get(pick.clipId)!;
   clip.windows.push({ startMs: pick.startMs, endMs: pick.startMs + pick.durationMs });
-  return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), tier: "clip", window: { startMs: pick.startMs, durationMs: pick.durationMs } };
+  return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), tier: "clip", window: { startMs: pick.startMs, durationMs: pick.durationMs }, ...(clip.personEvidence ? { personEvidence: clip.personEvidence } : {}) };
 }
 
 /** L4 bookkeeping: remember a chosen video clip and the window of it this segment occupies, so another segment can use a different one. */
@@ -271,19 +293,110 @@ const registerClipWindow = (ledger: SegmentSourceLedger, source: SegmentSource, 
   clip.windows.push(window);
   const subject = normalizeSubjectKey(segment.subject);
   if (subject) clip.subjects.add(subject);
+  if (source.personEvidence && (!clip.personEvidence || PERSON_MATCH_RANK[source.personEvidence.match] > PERSON_MATCH_RANK[clip.personEvidence.match])) clip.personEvidence = source.personEvidence;
   ledger.clips.set(source.mediaAssetVersionId, clip);
 };
 
+const PERSON_MATCH_RANK: Record<PersonMatchLevel, number> = { generic: 0, metadata: 1, verified: 2 };
+
+/** VE2E-151: an Apify candidate's person ranking as segment evidence. */
+const personEvidenceOf = (person: NonNullable<MediaPlanApifyQuality["person"]>): PersonEvidence => ({
+  match: person.match,
+  identityConfidence: person.identityConfidence,
+  verificationMethod: person.verificationMethod,
+  tier: person.tier,
+  flags: [...person.flags],
+  framing: person.framing,
+});
+
+/** VE2E-151: a social (Shorts / Pinterest) pick is ranked on metadata only - never more than {@link METADATA_IDENTITY_CAP}. */
+const socialPersonEvidence = (identity: { level: string; score: number }): PersonEvidence =>
+  identity.score > 0
+    ? { match: "metadata", identityConfidence: Math.round(METADATA_IDENTITY_CAP * identity.score * 1000) / 1000, verificationMethod: "metadata", flags: [`identity_${identity.level}`] }
+    : GENERIC_EVIDENCE;
+
+const GENERIC_EVIDENCE: PersonEvidence = { match: "generic", identityConfidence: 0, verificationMethod: "none", flags: ["generic"] };
+
+/**
+ * VE2E-151: person evidence of a segment's source when the subject is one person (`undefined` otherwise). A tier that ranked the
+ * candidate (Apify, social) already set it; library / reused clips passed the name gate earlier (metadata, unknown strength); Pexels,
+ * stock images and the brand background never show the real person (generic); a reused window keeps the evidence of its clip.
+ */
+export function withPersonEvidence(segment: PlannedSegment, source: SegmentSource): SegmentSource {
+  if (source.personEvidence || !personTargetOfProfile(subjectProfileOf(segment))) return source;
+  const generic = source.provider === "pexels" || source.degraded === "stock_image" || source.degraded === "brand_background" || source.placeholder;
+  if (generic) return { ...source, personEvidence: GENERIC_EVIDENCE };
+  if (source.degraded === "reuse_window" || source.tier === "clip") return source; // the clip's own evidence was copied when the window was claimed
+  return source.provider === "apify" || source.provider === "social" || source.tier === "library"
+    ? { ...source, personEvidence: { match: "metadata", identityConfidence: 0.5, verificationMethod: "metadata", flags: [] } }
+    : source;
+}
+
+/** VE2E-151: the per-segment person diagnostics (target, who named it, identity evidence, person-rule rejections, why nothing matched). */
+export function segmentPersonDiagnostics(target: PersonTarget, source: SegmentSource | null, errorCode: string | null): SegmentPersonDiagnostics {
+  const evidence = source?.personEvidence;
+  const rejected = source?.apifyQuality?.personRejected;
+  const match = evidence?.match ?? "generic";
+  const mostFrequent = rejected ? Object.entries(rejected).sort((a, b) => b[1] - a[1])[0]?.[0] : undefined;
+  return {
+    targetPerson: target.name,
+    targetSource: target.source,
+    match,
+    ...(evidence?.tier ? { tier: evidence.tier } : {}),
+    identityConfidence: evidence?.identityConfidence ?? 0,
+    verificationMethod: evidence?.verificationMethod ?? "none",
+    flags: [...(evidence?.flags ?? [])],
+    ...(rejected && Object.keys(rejected).length > 0 ? { rejected: { ...rejected } } : {}),
+    ...(match === "generic" ? { rejectionReason: mostFrequent ?? source?.fallbackReason ?? source?.degradeReason ?? errorCode ?? "no_person_source" } : {}),
+    ...(evidence?.framing ? { framing: evidence.framing } : {}),
+  };
+}
+
+/**
+ * VE2E-151: Pexels (stock) never has the real person, so for a person subject its queries are the BACKDROP of the segment - the
+ * en / broad keyword with the person's names and group/team removed, then the mood phrase. A "<name> close up" query would return a
+ * stranger's face presented as the person. `null` = not a person subject (unchanged queries).
+ */
+export function personBackdropQueries(segment: PlannedSegment): string[] | null {
+  const person = personTargetOfProfile(subjectProfileOf(segment));
+  if (!person) return null;
+  const keywords = parseSegmentKeywords(segment.keywords);
+  const stripped = [keywords.en[0], keywords.broad[0]]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => stripPersonNames(value, person))
+    .filter((value) => value.split(/\s+/).filter(Boolean).length >= 2);
+  return [...new Set([...stripped, keywords.mood].filter((value): value is string => Boolean(value?.trim())).map(normalizePexelsQuery))].slice(0, 2);
+}
+
 /** Primary Pexels tier queries (en, broad), both anchored on the video subject; empty = keep the brief's own phrase. At most 2 tries. */
 const pexelsSubjectQueries = (segment: PlannedSegment): string[] => {
+  const backdrop = personBackdropQueries(segment);
+  if (backdrop) return backdrop;
   const profile = subjectProfileOf(segment);
   if (subjectNames(profile).length === 0) return [];
   const keywords = parseSegmentKeywords(segment.keywords);
   return [...new Set([keywords.en[0], keywords.broad[0], profile.subject].filter((value): value is string => Boolean(value)).map((value) => anchorKeywordToSubject(value, profile, "en")))].slice(0, 2);
 };
 
+const searchable = (value: string | null | undefined): value is string => typeof value === "string" && value.trim().length > 0;
+
+/**
+ * Pexels queries of one segment, never empty strings: the caller's subject-bound queries, else the first non-empty of the brief's
+ * phrases, the segment scenes' visual queries, its en / broad keywords, mood and subject. `[]` = nothing searchable (skip the tier).
+ */
+export function pexelsQueriesFor(given: readonly string[] | undefined, phrases: readonly string[], script: MediaPlanScript, segment: PlannedSegment): string[] {
+  const explicit = (given ?? []).map(normalizePexelsQuery).filter(searchable);
+  if (explicit.length > 0) return explicit;
+  const keywords = parseSegmentKeywords(segment.keywords);
+  const sceneQueries = segment.sceneIds.map((sceneId) => script.scenes.find((scene) => scene.sceneId === sceneId)?.visualQuery);
+  const fallback = [...phrases, ...sceneQueries, ...keywords.en, ...keywords.broad, keywords.mood, segment.subject].find(searchable);
+  return fallback ? [normalizePexelsQuery(fallback)] : [];
+}
+
 /** L5 stock-photo queries: subject-bound keywords first (en, broad, subject), the generic `mood` only as the last resort; at most 2 tries (Pexels is fast but metered). */
 const stockImageQueries = (segment: PlannedSegment): string[] => {
+  const backdrop = personBackdropQueries(segment);
+  if (backdrop && backdrop.length > 0) return backdrop;
   const keywords = parseSegmentKeywords(segment.keywords);
   const profile = subjectProfileOf(segment);
   const bound = [keywords.en[0], keywords.broad[0], segment.subject?.trim()].filter((value): value is string => Boolean(value)).map((value) => anchorKeywordToSubject(value, profile, "en"));
@@ -375,10 +488,11 @@ export class MediaPlanService {
     }
   }
 
-  planSegments(script: MediaPlanScript, range: { min: number; max: number } | null): PlannedSegment[] {
+  /** `videoSubject` (VE2E-151): an explicit subject (the resolved target person) that binds the segments even without a visualPlan. */
+  planSegments(script: MediaPlanScript, range: { min: number; max: number } | null, videoSubject?: MediaPlanVideoSubject | null): PlannedSegment[] {
     const scenes: MediaPlanScene[] = script.scenes.map((scene) => ({ sceneId: scene.sceneId, durationMs: sceneDuration(scene) }));
     // VE2E-88/89: weighted allocation so the main subject gets its share (env SUBJECT_SHARE_TARGET, default 0.6).
-    return planBackgroundSegments(scenes, script.visualPlan, range, { subjectShareTarget: subjectShareTargetFromEnv() });
+    return planBackgroundSegments(scenes, script.visualPlan, range, { subjectShareTarget: subjectShareTargetFromEnv(), ...(videoSubject ? { videoSubject } : {}) });
   }
 
   /**
@@ -507,6 +621,8 @@ export class MediaPlanService {
           tier: input.tier,
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
           apifyQuality: attempt.data.quality,
+          ...(attempt.data.quality?.person ? { personEvidence: personEvidenceOf(attempt.data.quality.person) } : {}),
+          ...(attempt.data.quality?.frameCleanliness ?? attempt.data.quality?.cleanliness ? { cleanliness: (attempt.data.quality.frameCleanliness ?? attempt.data.quality.cleanliness)! } : {}),
         },
       };
     } catch (error) {
@@ -539,6 +655,7 @@ export class MediaPlanService {
         subjectAliases: subjectNames(subjectProfileOf(input.segment)),
         keywords: [...keywords.ja, ...keywords.en],
         sceneId: input.segment.sceneIds[0]!,
+        person: personTargetOfProfile(subjectProfileOf(input.segment)),
       });
       if (!attempt.ok) return { reason: attempt.reason };
       const asset = attempt.data.asset;
@@ -555,6 +672,7 @@ export class MediaPlanService {
           sourcing: attempt.data.reused ? "reused" : "imported",
           provider: "social",
           tier: input.tier,
+          ...(attempt.data.personIdentity ? { personEvidence: socialPersonEvidence(attempt.data.personIdentity) } : {}),
         },
       };
     } catch {
@@ -573,14 +691,18 @@ export class MediaPlanService {
     input: { script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; job?: ApifyJobContext; pexelsAccountId: string; mediaType?: "video" | "image"; queries?: string[] },
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const brief = this.segmentBrief(input.script, input.segment, input.ledger);
-    const firstScene = input.script.scenes.find((scene) => scene.sceneId === input.segment.sceneIds[0]);
     const excluded = new Set<string>();
-    const queries = input.queries && input.queries.length > 0 ? input.queries : [brief.phrases[0] ?? firstScene?.visualQuery ?? ""];
+    const queries = pexelsQueriesFor(input.queries, brief.phrases, input.script, input.segment);
+    // Pexels answers an empty query with 400 ("No query param given"): never send one - the segment simply has no searchable words.
+    if (queries.length === 0) {
+      if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${input.segment.segmentId}: skipped, no searchable keyword (never sends an empty query)`);
+      return { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Không có từ khoá để tìm trên Pexels (no_query)", status: 422 };
+    }
     const mediaType = input.mediaType ?? input.segment.visualKind;
     let last: MediaPlanOutcome<SegmentSource> = { ok: false, code: "MEDIA_RELEVANCE_BELOW_THRESHOLD", message: "Pexels không có nguồn phù hợp.", status: 422 };
     for (const query of queries) {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const sceneBrief = input.queries ? { ...brief, phrases: [query, ...brief.phrases.filter((phrase) => phrase !== query)].slice(0, MAX_QUERY_VARIANTS) } : brief;
+        const sceneBrief = input.queries ? { ...brief, phrases: brief.person ? [query] : [query, ...brief.phrases.filter((phrase) => phrase !== query)].slice(0, MAX_QUERY_VARIANTS) } : brief;
         const outcome = await getSharedProviderLimiter().run("pexels", () => this.pexels.autoImportForScene(projectId, userId, role, {
           providerAccountId: input.pexelsAccountId,
           sceneId: input.segment.sceneIds[0]!,
@@ -602,7 +724,8 @@ export class MediaPlanService {
           continue;
         }
         input.ledger.apifyPlainIds.add(externalId); // claim (live set), same tick as the check above
-        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels" } };
+        const cleanliness = outcome.data.cleanliness;
+        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels", ...(cleanliness ? { cleanliness } : {}) } };
       }
     }
     return last;
@@ -763,7 +886,7 @@ export class MediaPlanService {
     if (pick) {
       const clip = ledger.clips.get(pick.clipId)!;
       clip.windows.push({ startMs: pick.startMs, endMs: pick.startMs + pick.durationMs });
-      return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), degraded: "reuse_window", window: { startMs: pick.startMs, durationMs: pick.durationMs }, degradeReason: reason };
+      return { mediaAssetVersionId: pick.clipId, kind: "video", durationMs: clip.durationMs, externalId: null, sourcing: "reused", ...(clip.provider ? { provider: clip.provider } : {}), degraded: "reuse_window", window: { startMs: pick.startMs, durationMs: pick.durationMs }, degradeReason: reason, ...(clip.personEvidence ? { personEvidence: clip.personEvidence } : {}) };
     }
     // L5
     const pexelsAccountId = await this.resolvePexelsAccountId(userId, role, input.providerAccountId);
@@ -926,6 +1049,8 @@ export class MediaPlanService {
       }
       const visionSkip = job.vision.skipReasonFor(segment.sceneIds[0] ?? "");
       if (source && visionSkip) source = { ...source, visionSkipped: visionSkip };
+      if (source) source = withPersonEvidence(segment, source);
+      if (source?.cleanliness?.fallback && process.env.NODE_ENV !== "test") console.info(`[media] ${segment.segmentId}: ${source.cleanliness.message} (${source.cleanliness.tier}${source.cleanliness.editSignals.length ? `: ${source.cleanliness.editSignals.join(", ")}` : ""})`);
       if (source) {
         input.ledger.add(source);
         registerClipWindow(input.ledger, source, segment, segmentSceneDurations(segment));
@@ -977,6 +1102,7 @@ export class MediaPlanService {
           } catch {
             source = null;
           }
+          if (source) source = withPersonEvidence(segment, source);
           if (source) input.ledger.add(source);
           results[index] = [{ segment, source, errorCode: source ? null : "MEDIA_PLACEHOLDER_UNAVAILABLE" }];
         }
@@ -1059,6 +1185,8 @@ export class MediaPlanService {
               ...(source.degradeReason ? { degradeReason: source.degradeReason } : {}),
             }
           : {}),
+        ...(personTargetOfProfile(subjectProfileOf(segment)) ? { person: segmentPersonDiagnostics(personTargetOfProfile(subjectProfileOf(segment))!, source ?? null, errorCode) } : {}),
+        ...(source?.cleanliness ? { cleanliness: { ...source.cleanliness } } : {}),
       });
     }
     return {

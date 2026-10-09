@@ -17,6 +17,7 @@ import {
   isLiveContentKind,
   pexelsPhotoToMediaCandidate,
   pexelsVideoToMediaCandidate,
+  normalizePexelsQuery,
   pickPexelsVideoFile,
   searchPexelsPhotos,
   searchPexelsVideos,
@@ -30,10 +31,13 @@ import {
   deriveSceneBrief,
   detectScriptLanguageHeuristic,
   rankMediaCandidates,
+  visionTargetOf,
   type MediaCandidate,
   type SceneBrief,
 } from "@lyonix/domain";
 import { VisionBudget, moderatePoolWithBudget, resolveVisionModels, type ModelAvailability } from "./vision-budget.js";
+import type { SegmentCleanlinessDiagnostics } from "@lyonix/contracts";
+import { chosenCleanlinessDiagnostics, cleanlinessCheckEnabled } from "./media-cleanliness-diagnostics.js";
 import type {
   ErrorCode,
   MediaAssetKind,
@@ -115,6 +119,11 @@ export type AutoImportForSceneInput = {
   visionBudget?: VisionBudget;
   /** Template-aware sourcing: `image` = photos only, `video` = videos only (no cross-kind fallback). Omitted = legacy (video, else photo). */
   mediaType?: "video" | "image";
+};
+
+/** Operational trace of each Pexels search (the query is the stock-search keyword, never a secret); silent under tests. */
+const logPexelsSearch = (type: PexelsMediaType, query: string, results: number) => {
+  if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${type} search "${query.slice(0, 80)}" -> ${results} result(s)`);
 };
 
 @Injectable()
@@ -291,14 +300,21 @@ export class PexelsService {
         if (type === "video") {
           const videos = await searchPexelsVideos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
           candidates.push(...videos.map((v) => pexelsVideoToMediaCandidate(v, { query: variant, providerAccountId: accountId, queriedAt })));
+          logPexelsSearch(type, variant, videos.length);
         } else {
           const photos = await searchPexelsPhotos(apiKey, variant, { perPage: MEDIA_SEARCH_POOL_SIZE });
           candidates.push(...photos.map((p) => pexelsPhotoToMediaCandidate(p, { query: variant, providerAccountId: accountId, queriedAt })));
+          logPexelsSearch(type, variant, photos.length);
         }
       } catch (error) {
         await this.providerAccounts.releaseContentRequestSlot(accountId, "visual").catch(() => undefined);
         if (error instanceof ProviderError && error.code === "PROVIDER_RATE_LIMITED") {
           await this.providerAccounts.cooldownContentAccount(accountId, error.retryAfterMs, new Date(), "visual").catch(() => undefined);
+        }
+        // One variant Pexels rejects (400) must not discard the pool the other variants already found.
+        if (error instanceof ProviderError && error.code === "PROVIDER_SCHEMA_INVALID") {
+          if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${type} search "${variant.slice(0, 80)}" rejected by Pexels (skipped)`);
+          continue;
         }
         return { ok: false, error };
       }
@@ -323,7 +339,8 @@ export class PexelsService {
     const accounts = await this.providerAccounts.contentGenerationCandidates(userId, role);
     const account = accounts.find((a) => a.role === "content" && isLiveContentKind(a.provider) && (a.isFake ? process.env.NODE_ENV === "test" : a.status === "verified"));
     if (!account) return pool;
-    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions };
+    // VE2E-151: a person subject also gets the shot description (a stock close-up of a stranger is an impostor risk).
+    const sceneContext: VisionModerationSceneContext = { beat: brief.beat, entities: brief.entities, action: brief.action, setting: brief.setting, mood: brief.mood, exclusions: brief.exclusions, ...(brief.person ? { personShot: true, targetPerson: visionTargetOf(brief.person) } : {}), ...(cleanlinessCheckEnabled() ? { cleanliness: true } : {}) };
     const models = resolveVisionModels(account.model, account.availableModels, account.visionModel);
     return moderatePoolWithBudget({
       pool,
@@ -354,7 +371,7 @@ export class PexelsService {
    * trusted background `WorkflowRunnerService`, not exposed as its own HTTP endpoint (callers
    * needing manual pick-from-results control should keep using `search()` + `import()`).
    */
-  async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string }>> {
+  async autoImportForScene(projectId: string, userId: string, role: "admin" | "staff", input: AutoImportForSceneInput): Promise<PexelsOutcome<PexelsImportResponse & { externalId: string; /** VE2E-152 */ cleanliness?: SegmentCleanlinessDiagnostics }>> {
     if (!(await this.assertProjectAccess(projectId, userId, role))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy dự án", status: 404 };
     const account = await this.usableAccount(input.providerAccountId);
     if (!account.ok) return account;
@@ -368,7 +385,12 @@ export class PexelsService {
       { language: detectScriptLanguageHeuristic(trimmedQuery), scenes: [{ sceneId: input.sceneId, narration: "", screenText: "", visualQuery: trimmedQuery, durationHintMs: 5000 }] },
       0,
     );
-    const variants = buildBoundedQueryVariants(brief);
+    // Pexels rejects an empty query with 400: blank variants are dropped, and no search is made when nothing searchable is left.
+    // Line breaks (on-screen text) make Pexels answer 400 "Invalid query": every variant is normalized to one line first.
+    const briefVariants = [...new Set(buildBoundedQueryVariants(brief).map(normalizePexelsQuery).filter(Boolean))];
+    const fallbackVariant = normalizePexelsQuery(trimmedQuery);
+    const variants = briefVariants.length > 0 ? briefVariants : fallbackVariant ? [fallbackVariant] : [];
+    if (variants.length === 0) return { ok: false, code: "VALIDATION_FAILED", message: "Không có từ khoá để tìm trên Pexels cho cảnh này" };
     const queriedAt = new Date().toISOString();
     const usedExternalIds = new Set(input.usedExternalIds ?? []);
 
@@ -422,6 +444,7 @@ export class PexelsService {
     });
     if (!imported.ok) return imported;
     // `externalId` is internal-only (this method is never exposed as its own HTTP endpoint) - lets `WorkflowRunnerService` track cross-scene continuity without re-deriving it from the registered asset (which is identified by checksum, not the provider's external id).
-    return { ok: true, data: { asset: imported.data.asset, externalId: decision.chosen.externalId } };
+    const cleanliness = chosenCleanlinessDiagnostics(ranked, decision.chosen.candidateId);
+    return { ok: true, data: { asset: imported.data.asset, externalId: decision.chosen.externalId, ...(cleanliness ? { cleanliness } : {}) } };
   }
 }
