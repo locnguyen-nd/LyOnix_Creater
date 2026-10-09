@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 import { Banner, PageHeader, StatusPill } from "../components/chrome";
 import { QueueBadge } from "../components/QueueStatus";
+import { RunResultPlayer } from "../components/RunResultPlayer";
 import { Button } from "../components/ui";
 import { ApiError } from "../api";
 import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventResponse } from "@lyonix/contracts";
@@ -199,13 +200,7 @@ export function VideoProductionPage() {
           <div className="rounded-xl border border-lyx-border bg-lyx-bg p-4">
             <p className="mb-3 text-[11px] font-bold uppercase tracking-wide text-lyx-fg-subtle">{t("videoProduction.reviewTitle")}</p>
             {isDone && run.resultUrl ? (
-              <>
-                <video className="mb-3 max-h-[420px] w-full rounded-[6px] bg-black" src={run.resultUrl} controls />
-                <div className="flex gap-3">
-                  <a className="underline text-[12.5px]" href={run.resultUrl} target="_blank" rel="noreferrer">{t("videoProduction.openResult")}</a>
-                  <a className="underline text-[12.5px]" href={run.resultUrl} download>{t("videoProduction.download")}</a>
-                </div>
-              </>
+              <RunResultPlayer resultUrl={run.resultUrl} />
             ) : (
               <div className="flex h-[240px] w-full items-center justify-center rounded-[6px] bg-lyx-bg-muted px-4 text-center text-[12px] text-lyx-fg-muted">{t("videoProduction.resultPending")}</div>
             )}
