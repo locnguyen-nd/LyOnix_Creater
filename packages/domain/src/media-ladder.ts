@@ -132,6 +132,56 @@ export function raceByPriority<T>(tasks: ReadonlyArray<() => Promise<T | null>>,
   });
 }
 
+/**
+ * How the PAID (Apify) search tiers of one segment are scheduled. `race` (default) starts ja / en / broad at once: fastest, but at least two of
+ * the three paid searches are wasted whenever one tier wins. `sequential` starts a paid tier only after every higher-priority tier settled
+ * without a value. `cheap_first` also waits for the free social tiers (YouTube Shorts / Pinterest) and skips the paid tiers when one of them
+ * already has a clip. Free tiers (Pexels, shorts, gallery) always start immediately in every mode; Pexels stays the last resort.
+ */
+export type TierMode = "race" | "sequential" | "cheap_first";
+export const TIER_MODES: readonly TierMode[] = ["race", "sequential", "cheap_first"];
+
+/** Env `MEDIA_TIER_MODE`; empty or unknown = `race` (the behaviour before this switch existed). */
+export const mediaTierMode = (env: Record<string, string | undefined> = process.env): TierMode => {
+  const raw = env.MEDIA_TIER_MODE?.trim().toLowerCase();
+  return (TIER_MODES as readonly string[]).includes(raw ?? "") ? (raw as TierMode) : "race";
+};
+
+/** One tier of the race, in priority order. `paid`: a call that costs money (Apify). `social`: a free open-source tier (shorts / gallery). */
+export type TierSpec = { name: string; paid: boolean; social: boolean };
+
+/**
+ * Wraps the tier tasks (same order as `specs`) so the paid ones wait for their turn. The returned tasks go to `raceByPriority` unchanged: it
+ * still owns priority and the deadline, a task that is skipped simply answers `null`. `race` returns the tasks as they are.
+ * A paid tier that would only start after `deadlineMs` (counted from this call) is skipped: the race is over by then, so the money would be wasted.
+ */
+export function gateTiers<T>(mode: TierMode, specs: readonly TierSpec[], runs: ReadonlyArray<() => Promise<T | null>>, deadlineMs?: number, now: () => number = Date.now): Array<() => Promise<T | null>> {
+  if (mode === "race") return [...runs];
+  const startedAt = now();
+  const settled = specs.map(() => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  });
+  const hasValue = specs.map(() => false);
+  return runs.map((run, index) => async () => {
+    try {
+      if (specs[index]!.paid) {
+        const waitFor = specs.flatMap((spec, other) => (other < index || (mode === "cheap_first" && spec.social) ? [other] : []));
+        await Promise.all(waitFor.map((other) => settled[other]!.promise));
+        const better = hasValue.some((has, other) => has && (other < index || (mode === "cheap_first" && specs[other]!.social)));
+        if (better) return null;
+        if (deadlineMs !== undefined && now() - startedAt >= deadlineMs) return null;
+      }
+      const value = await run();
+      if (value !== null && value !== undefined) hasValue[index] = true;
+      return value;
+    } finally {
+      settled[index]!.resolve();
+    }
+  });
+}
+
 export type ClipWindow = { startMs: number; endMs: number };
 export type FreeWindowClip = { id: string; durationMs: number; usedWindows: readonly ClipWindow[]; startGuardMs?: number; endGuardMs?: number };
 export type FreeWindowPick = { clipId: string; startMs: number; durationMs: number; full: boolean };

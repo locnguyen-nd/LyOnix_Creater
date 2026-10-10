@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { findFreeWindow, kenBurnsFor, mediaSegmentDeadlineMs, parseSegmentKeywords, raceByPriority, segmentTierKeywords } from "./media-ladder.js";
+import { findFreeWindow, gateTiers, kenBurnsFor, mediaSegmentDeadlineMs, mediaTierMode, parseSegmentKeywords, raceByPriority, segmentTierKeywords } from "./media-ladder.js";
 
 const later = <T>(ms: number, value: T | null) => () => new Promise<T | null>((resolve) => setTimeout(() => resolve(value), ms));
 const fails = (ms: number) => () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error("boom")), ms));
@@ -93,5 +93,107 @@ describe("kenBurnsFor (L5)", () => {
     expect(kenBurnsFor(0, 4_200)).toEqual({ zoomFrom: 1, zoomTo: 1.15, fromX: 0.5, fromY: 0.5, toX: 0.5, toY: 0.5, durationMs: 4_200 });
     expect(kenBurnsFor(4, 1000).zoomTo).toBe(kenBurnsFor(0, 1000).zoomTo);
     expect(kenBurnsFor(1, 1000).zoomFrom).toBeGreaterThan(kenBurnsFor(1, 1000).zoomTo);
+  });
+});
+
+describe("mediaTierMode", () => {
+  it("defaults to race and ignores anything unknown", () => {
+    expect(mediaTierMode({})).toBe("race");
+    expect(mediaTierMode({ MEDIA_TIER_MODE: "" })).toBe("race");
+    expect(mediaTierMode({ MEDIA_TIER_MODE: "bogus" })).toBe("race");
+    expect(mediaTierMode({ MEDIA_TIER_MODE: " Sequential " })).toBe("sequential");
+    expect(mediaTierMode({ MEDIA_TIER_MODE: "cheap_first" })).toBe("cheap_first");
+  });
+});
+
+describe("gateTiers", () => {
+  const specs = [
+    { name: "ja", paid: true, social: false },
+    { name: "en", paid: true, social: false },
+    { name: "shorts", paid: false, social: true },
+    { name: "broad", paid: true, social: false },
+    { name: "pexels", paid: false, social: false },
+  ];
+  /** Runs the tiers through gateTiers + raceByPriority; `calls` lists the tiers that really ran. */
+  const run = async (mode: "race" | "sequential" | "cheap_first", answers: Record<string, string | null>, deadline = 1000, delays: Record<string, number> = {}) => {
+    const calls: string[] = [];
+    const tasks = specs.map((spec) => async () => {
+      calls.push(spec.name);
+      await new Promise((resolve) => setTimeout(resolve, delays[spec.name] ?? 5));
+      return answers[spec.name] ?? null;
+    });
+    const winner = await raceByPriority(gateTiers(mode, specs, tasks, deadline), deadline);
+    await new Promise((resolve) => setTimeout(resolve, 60)); // let gated tasks that were skipped settle
+    return { winner: winner?.value ?? null, calls };
+  };
+
+  it("race starts every tier at once (the old behaviour)", async () => {
+    const out = await run("race", { ja: "ja-clip", en: "en-clip", pexels: "stock" });
+    expect(out.winner).toBe("ja-clip");
+    expect([...out.calls].sort()).toEqual(["broad", "en", "ja", "pexels", "shorts"]);
+  });
+
+  it("sequential: a winning ja pays for nothing else; the free tiers still start at once", async () => {
+    const out = await run("sequential", { ja: "ja-clip", en: "en-clip" });
+    expect(out.winner).toBe("ja-clip");
+    expect(out.calls).toContain("shorts");
+    expect(out.calls).toContain("pexels");
+    expect(out.calls).not.toContain("en");
+    expect(out.calls).not.toContain("broad");
+  });
+
+  it("sequential: a paid tier runs only after the better ones came back empty", async () => {
+    const out = await run("sequential", { en: "en-clip" });
+    expect(out.winner).toBe("en-clip");
+    expect(out.calls.indexOf("ja")).toBeLessThan(out.calls.indexOf("en"));
+    expect(out.calls).not.toContain("broad");
+  });
+
+  it("sequential: falls down to the last paid tier, then Pexels, when every search is empty", async () => {
+    expect((await run("sequential", { pexels: "stock" })).winner).toBe("stock");
+    expect((await run("sequential", { broad: "broad-clip", pexels: "stock" })).winner).toBe("broad-clip");
+    expect((await run("sequential", {})).winner).toBeNull();
+  });
+
+  it("sequential: a free tier ranked above a paid one (shorts above broad) spares that paid search", async () => {
+    const out = await run("sequential", { shorts: "short-clip" });
+    expect(out.winner).toBe("short-clip");
+    expect(out.calls).not.toContain("broad");
+    expect(out.calls).toContain("ja");
+    expect(out.calls).toContain("en");
+  });
+
+  it("cheap_first: a free social clip means no paid search at all", async () => {
+    const out = await run("cheap_first", { shorts: "short-clip", ja: "ja-clip" });
+    expect(out.winner).toBe("short-clip");
+    expect(out.calls.filter((name) => ["ja", "en", "broad"].includes(name))).toEqual([]);
+  });
+
+  it("cheap_first: with no social clip it falls back to the paid tiers one at a time", async () => {
+    const out = await run("cheap_first", { en: "en-clip" });
+    expect(out.winner).toBe("en-clip");
+    expect(out.calls.indexOf("ja")).toBeLessThan(out.calls.indexOf("en"));
+    expect(out.calls).not.toContain("broad");
+  });
+
+  it("a tier that throws counts as empty and never blocks the next paid tier", async () => {
+    const tasks = [
+      async () => { throw new Error("boom"); },
+      async () => "en-clip",
+    ];
+    const winner = await raceByPriority(gateTiers("sequential", [{ name: "ja", paid: true, social: false }, { name: "en", paid: true, social: false }], tasks, 1000), 1000);
+    expect(winner?.value).toBe("en-clip");
+  });
+
+  it("never starts a paid search once the deadline has passed (the race is over, the money would be wasted)", async () => {
+    const calls: string[] = [];
+    let clock = 0;
+    const tasks = [
+      async () => { calls.push("ja"); clock = 500; return null; },
+      async () => { calls.push("en"); return "en-clip"; },
+    ];
+    const gated = gateTiers("sequential", [{ name: "ja", paid: true, social: false }, { name: "en", paid: true, social: false }], tasks, 400, () => clock);
+    await Promise.all(gated.map((task) => task()));
+    expect(calls).toEqual(["ja"]);
   });
 });

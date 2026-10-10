@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaAssetVersionSummary } from "@lyonix/contracts";
 import type { ApifyDeps } from "@lyonix/providers";
 import { deriveSceneBrief } from "@lyonix/domain";
-import { ApifyJobContext, ApifyService } from "./apify.service.js";
+import { ApifyJobContext, ApifyService, apifySearchLimit } from "./apify.service.js";
 import { createProviderLimiter, resolveConcurrencyConfig, setSharedProviderLimiter } from "./concurrency-config.js";
 import type { MediaService } from "./media.service.js";
 import { encryptSecret } from "./secret-crypto.js";
@@ -248,6 +248,24 @@ describe("ApifyService quality/cost - VE2E-51", () => {
       service.apifyDeps = stub;
       await service.autoImportForSegment(projectId, "u1", "staff", account(), auto());
       expect(stub.runs[0]!.body.resultsPerPage).toBe(20);
+    });
+
+    it("APIFY_SEARCH_LIMIT lowers the results asked per run (cheaper search), within 3..20", async () => {
+      expect(apifySearchLimit({})).toBe(20);
+      expect(apifySearchLimit({ APIFY_SEARCH_LIMIT: "" })).toBe(20);
+      expect(apifySearchLimit({ APIFY_SEARCH_LIMIT: "abc" })).toBe(20);
+      expect(apifySearchLimit({ APIFY_SEARCH_LIMIT: "1" })).toBe(20);
+      expect(apifySearchLimit({ APIFY_SEARCH_LIMIT: "50" })).toBe(20);
+      expect(apifySearchLimit({ APIFY_SEARCH_LIMIT: "8" })).toBe(8);
+      process.env.APIFY_SEARCH_LIMIT = "8";
+      try {
+        const stub = apifyStub({ "東京 夜景": [item("1")] });
+        service.apifyDeps = stub;
+        await service.autoImportForSegment(projectId, "u1", "staff", account(), auto());
+        expect(stub.runs[0]!.body.resultsPerPage).toBe(8);
+      } finally {
+        delete process.env.APIFY_SEARCH_LIMIT;
+      }
     });
 
     it("the shared apify limiter wraps each Actor call (cap 1 serialises two searches) and an outer wrap cannot deadlock it", async () => {
