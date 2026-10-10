@@ -409,6 +409,23 @@ export * from "./template-lint.js";
 export { NEWS_SOURCE_ADAPTERS, NEWS_FEED_LIMITS, NewsFeedError, fetchNewsFeedDocument, type NewsFetch, type NewsFetchResponse, type NewsSourceAdapter, type NewsSourceFeed } from "./news-source.js";
 export { YAHOO_JAPAN_NEWS_SOURCE } from "./news-yahoo-japan.js";
 export { parseRssItems, decodeXmlEntities, type RssItem } from "./news-rss.js";
+export {
+  TIKTOK_OEMBED_ENDPOINT,
+  TrendImportError,
+  YAHOO_TREND_CATEGORIES,
+  apifyTikTokTrendRunner,
+  buildTikTokTrendInput,
+  collectTikTokTrends,
+  collectYahooTrends,
+  fetchTikTokOembed,
+  manualTikTokItem,
+  normalizeTikTokTrendItem,
+  yahooTrendItem,
+  type TikTokOembed,
+  type TikTokTrendQuery,
+  type TikTokTrendRunner,
+  type TrendSourceOutcome,
+} from "./trend-sources.js";
 /** VE2E-96: URL intake - transcript providers (TikTok subtitles / media, speech-to-text) and the source rewrite. */
 export { TranscriptError, withTranscriptRetry, type SpeechToTextInput, type SpeechToTextProvider, type SpeechToTextResult, type SubtitleTrack, type TikTokVideoInfo, type TranscriptDownload, type TranscriptErrorCode, type TranscriptErrorDetail, type TranscriptSourceDiagnostics, type VideoTranscriptSource } from "./transcript-source.js";
 export { ApifyTikTokTranscriptSource, TIKTOK_MEDIA_FIELDS, TIKTOK_MEDIA_HOSTS, TIKTOK_SUBTITLE_HOSTS, buildTikTokTranscriptInput, normalizeTikTokLanguage, parseTikTokTranscriptItem } from "./tiktok-apify-source.js";

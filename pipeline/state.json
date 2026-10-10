@@ -192,6 +192,17 @@
         "VE2E-151"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-09: không ưu tiên video người khác đã edit sẵn. assessMediaCleanliness (domain): text <=8% clean, 8-18% acceptable, 18-30% penalized, >30% reject TEXT_HEAVY; chữ đè chủ thể tụt 1 bậc; logo nhỏ <=3% trừ nhẹ, logo lớn LARGE_WATERMARK; watermark/username/subtitle/headline/sticker/khung/chia màn hình = penalized; UI mạng xã hội SOCIAL_UI_OVERLAY, card tin NEWS_CARD, >=3 tín hiệu edit PRE_EDITED_VIDEO = reject; >=2 trên 5 frame nhiều chữ = TEXT_HEAVY. Bằng chứng: vision cleanliness trong CÙNG lời gọi (cover; 5 frame 384px khi VISION_VIDEO_FRAMES=1), shot VE2E-151, hashtag edit, TikTok effectStickers; metadata không bao giờ tự reject. Ranking: person tier > footage sạch > một chủ thể > chuyển động > chất lượng > chữ/logo > tỉ lệ; reject không tự chọn (allowCleanlinessRejects); fallback ghi 'Không đủ footage sạch, đang dùng media có overlay nhẹ.' (log, diagnostics, quality gate media_overlay_fallback, banner). Diagnostics mediaSourcing[].cleanliness. MEDIA_CLEANLINESS=0 tắt trường vision. Spec .docs/specs/VE2E-152.md."
+    },
+    {
+      "id": "VE2E-158",
+      "title": "Trend Radar: tìm chủ đề tiếng Nhật đang được quan tâm (tin tức / TikTok / URL), điểm có giải thích, thông báo, chuyển sang Tạo video",
+      "group": "Nội dung — Khám phá",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-96"
+      ],
+      "note": "Chủ dự án yêu cầu 2026-10-10. Yahoo!ニュース RSS tắt: chỉ chạy khi NEWS_SOURCES có yahoo_jp (bên vận hành xác nhận quyền), UI 'Chưa xác nhận quyền sử dụng' + link điều khoản, nút Admin không thay xác nhận. TikTok Apify chỉ fixture (hết quota), lỗi quota dừng riêng nguồn đó; URL TikTok nhập tay qua oEmbed (đã gọi thật 1 lần: title/author/thumbnail, không số liệu). Score 0-100 có lý do, tăng trưởng chỉ khi >=2 lần đo ('Chưa đủ dữ liệu để xác nhận mức độ tăng trưởng'), 'Chưa có số liệu tương tác'. Lịch dùng @nestjs/schedule (TREND_RADAR_SCHEDULER=0 tắt), advisory lock + 60s cooldown + RUN_ABANDONED 30 phút, partial khi một nguồn lỗi. Gemini 1 lời gọi/phân tích, tự động chỉ Hot tối đa 5/ngày (server từ chối >5), tổng/ngày/model, quota giữ dữ liệu + retryAt. Notification (userId, dedupeKey) unique, chuông header, browser notification chỉ khi bật. Tạo video: trùng job 60 ngày, góc AI + người phụ trách, /jobs/new?trend=&angle= điền chủ đề + nguồn + ja, gắn job/run sau khi tạo. Migration 20261010120000 + 20261010130000 (local đã áp dụng; server áp dụng qua prisma:deploy khi api khởi động). Spec .docs/specs/VE2E-158.md."
     }
   ]
 }

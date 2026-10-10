@@ -21,6 +21,7 @@ import { TemplateGalleryPage } from "./pages/TemplateGalleryPage";
 import { TiktokOauthCallbackPage } from "./pages/TiktokOauthCallbackPage";
 import { VideoProductionPage } from "./pages/VideoProductionPage";
 import { VideoProductionsPage } from "./pages/VideoProductionsPage";
+import { TrendRadarPage } from "./trend-radar/TrendRadarPage";
 import { useSession } from "./session";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -79,6 +80,7 @@ export function App() {
         <Route path="video-productions" element={<VideoProductionsPage />} />
         <Route path="video-productions/:id" element={<VideoProductionPage />} />
         <Route path="video-productions/:id/studio" element={<StudioProPage />} />
+        <Route path="trend-radar" element={<TrendRadarPage />} />
         <Route path="assets" element={<AssetsPage />} />
         <Route path="library" element={<Navigate to="/jobs" replace />} />
         <Route path="settings" element={<SettingsPage />} />

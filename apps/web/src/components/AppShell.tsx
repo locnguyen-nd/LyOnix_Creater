@@ -7,6 +7,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Radar,
   Search,
   Settings,
   Sun,
@@ -22,6 +23,7 @@ import { useMe, useSession } from "../session";
 import { applyTheme, readTheme } from "../theme";
 import type { ThemePref } from "../studio/types";
 import { ChannelAvatar } from "./chrome";
+import { NotificationBell } from "./NotificationBell";
 import { TabIndicator, useTabIndicator } from "./motion";
 import { Select } from "./ui";
 
@@ -117,6 +119,8 @@ export function AppShell() {
         <Item to="/jobs" icon={Clapperboard} label={t("nav.jobs")} collapsed={compact} indicated={indicated} />
         {/* VE2E-22: an Auto submit provisions its own throwaway Project (no ProductionRequest row), so it never appears in /jobs above - without this entry a submitted run had no way to be found again after navigating away. */}
         <Item to="/video-productions" icon={Video} label={t("nav.videoProductions")} collapsed={compact} indicated={indicated} />
+        {/* VE2E-158: Japanese topics worth a video (news / TikTok / pasted URLs), explained score, hand-over to the create-video page. */}
+        <Item to="/trend-radar" icon={Radar} label={t("nav.trendRadar")} collapsed={compact} indicated={indicated} />
         <Item to="/assets" icon={Folder} label={t("nav.assets")} collapsed={compact} indicated={indicated} />
         {compact ? <div className="my-2 h-px bg-lyx-border" /> : <p className="mb-1.5 mt-4 px-2.5 text-[10.5px] font-bold uppercase tracking-wider text-lyx-fg-subtle">{t("nav.groupSystem")}</p>}
         <Item to="/settings" icon={Settings} label={t("nav.settings")} collapsed={compact} indicated={indicated} />
@@ -163,6 +167,7 @@ export function AppShell() {
           />
         </form>
         <div className="flex items-center gap-2">
+          <NotificationBell />
           <Select
             aria-label={t("login.locale")}
             value={i18n.language}

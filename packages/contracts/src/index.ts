@@ -1731,3 +1731,188 @@ export type UrlIntakeRewriteRequest = {
   language?: UiLocale;
   durationSec?: number;
 };
+
+// ---------------------------------------------------------------------------------------------------------------- VE2E-158 Trend Radar
+// Same shapes as `@lyonix/domain/trend-radar` / `trend-analysis` (which own the rules).
+
+export type TrendProviderIdResponse = "yahoo_news" | "tiktok" | "manual";
+export type TrendRunStatusResponse = "pending" | "running" | "completed" | "partial" | "failed";
+export type TrendSourceStatusResponse = "ok" | "partial" | "failed" | "quota_exhausted" | "not_connected" | "rights_unconfirmed" | "disabled";
+export type TrendBandResponse = "hot" | "rising" | "review" | "low";
+export type TrendStatusResponse = "new" | "reviewed" | "approved" | "rejected" | "used";
+
+export type TrendMetricsResponse = { views: number | null; likes: number | null; comments: number | null; shares: number | null; measuredAt: string };
+
+export type TrendRunSourceResponse = {
+  provider: TrendProviderIdResponse;
+  status: TrendSourceStatusResponse;
+  fetched: number;
+  new: number;
+  duplicates: number;
+  units: Array<{ unit: string; ok: boolean; count: number; error: { code: string; message: string } | null }>;
+  error: { code: string; message: string } | null;
+  durationMs: number;
+};
+
+export type TrendRunResponse = {
+  id: string;
+  trigger: "manual" | "schedule";
+  status: TrendRunStatusResponse;
+  requestedByUserId: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  sources: TrendRunSourceResponse[];
+  fetchedCount: number;
+  newCount: number;
+  duplicateCount: number;
+  clusterCount: number;
+  notifiedCount: number;
+  analysedCount: number;
+  error: { code: string; message: string } | null;
+};
+
+export type TrendItemResponse = {
+  id: string;
+  provider: TrendProviderIdResponse;
+  sourceId: string;
+  url: string;
+  title: string;
+  author: string | null;
+  publisher: string | null;
+  excerpt: string | null;
+  thumbnailUrl: string | null;
+  hashtags: string[];
+  category: string | null;
+  publishedAt: string | null;
+  collectedAt: string;
+  metrics: TrendMetricsResponse | null;
+  completeness: "headline_only" | "headline_excerpt" | "embed_metadata" | "with_metrics" | "user_supplied";
+};
+
+export type TrendScoreComponentResponse = { key: string; points: number; max: number; reason: string };
+export type TrendAssignmentResponse = { userId: string; displayName: string; angleIndex: number | null; angleTitle: string | null; createdAt: string };
+export type TrendProductionRefResponse = { kind: "job" | "video_production"; id: string; at: string; byUserId: string; angleIndex: number | null };
+
+export type TrendAnalysisResponse = {
+  titleJa: string;
+  titleVi: string;
+  summaryVi: string;
+  summaryJa: string;
+  mainTopic: string;
+  category: string;
+  whyInteresting: string;
+  facts: string[];
+  angles: Array<{ title: string; approach: string }>;
+  hooksJa: string[];
+  suggestedTitleJa: string;
+  captionJa: string;
+  hashtags: string[];
+  reliability: { level: "high" | "medium" | "low"; reason: string };
+  warnings: string[];
+  dataNote: string;
+};
+
+export type TrendClusterResponse = {
+  id: string;
+  title: string;
+  category: string | null;
+  status: TrendStatusResponse;
+  saved: boolean;
+  score: number;
+  band: TrendBandResponse;
+  components: TrendScoreComponentResponse[];
+  notes: string[];
+  itemCount: number;
+  providers: TrendProviderIdResponse[];
+  firstSeenAt: string;
+  lastSeenAt: string;
+  latestPublishedAt: string | null;
+  hashtags: string[];
+  /** Best real metrics among the topic's items; null = no source reported any. */
+  metrics: TrendMetricsResponse | null;
+  summaryVi: string | null;
+  analysisStatus: "none" | "done" | "failed" | "quota" | "limit" | "not_configured";
+  assignments: TrendAssignmentResponse[];
+  productionRefs: TrendProductionRefResponse[];
+  topItems: TrendItemResponse[];
+};
+
+export type TrendClusterDetailResponse = TrendClusterResponse & {
+  items: TrendItemResponse[];
+  analysis: TrendAnalysisResponse | null;
+  analysisError: string | null;
+  analysisModel: string | null;
+  analyzedAt: string | null;
+  history: Array<{ measuredAt: string; itemCount: number; score: number }>;
+};
+
+export type TrendClusterListResponse = { items: TrendClusterResponse[]; total: number };
+
+export type TrendSourceViewResponse = {
+  provider: TrendProviderIdResponse;
+  label: string;
+  enabled: boolean;
+  /** Can run now (enabled + rights / account in order). */
+  runnable: boolean;
+  state: TrendSourceStatusResponse | "never_run";
+  message: string | null;
+  termsUrl: string | null;
+  lastRunAt: string | null;
+};
+
+export type TrendOverviewResponse = {
+  newToday: number;
+  hot: number;
+  rising: number;
+  review: number;
+  activeSources: number;
+  lastRun: TrendRunResponse | null;
+  nextRunAt: string | null;
+  scheduleEnabled: boolean;
+  intervalMinutes: number;
+  sources: TrendSourceViewResponse[];
+  problems: Array<{ provider: TrendProviderIdResponse; code: string; message: string }>;
+};
+
+export type TrendRadarConfigResponse = {
+  yahooEnabled: boolean;
+  /** Rights to use Yahoo! JAPAN RSS confirmed by the operator (deployment config) - an admin toggle is never that confirmation. */
+  yahooRightsConfirmed: boolean;
+  yahooTermsUrl: string;
+  yahooCategories: string[];
+  yahooAvailableCategories: string[];
+  tiktokEnabled: boolean;
+  tiktokAccountId: string | null;
+  tiktokAccounts: Array<{ id: string; name: string; status: string; enabled: boolean; scope: string }>;
+  keywords: string[];
+  hashtags: string[];
+  categories: string[];
+  windowHours: number;
+  scheduleEnabled: boolean;
+  intervalMinutes: number;
+  thresholds: { hot: number; rising: number; review: number };
+  notifyMinScore: number;
+  tiktokMaxQueries: number;
+  tiktokResultsPerQuery: number;
+  tiktokMinViews: number;
+  analysisAccountId: string | null;
+  analysisAccounts: Array<{ id: string; name: string; provider: string; model: string }>;
+  autoAnalysisPerDay: number;
+  analysisPerDay: number;
+  analysisUsageToday: { model: string | null; auto: number; manual: number; failures: number };
+  updatedAt: string;
+};
+
+export type TrendRadarConfigUpdateRequest = Partial<Omit<TrendRadarConfigResponse, "yahooRightsConfirmed" | "yahooTermsUrl" | "yahooAvailableCategories" | "tiktokAccounts" | "analysisAccounts" | "analysisUsageToday" | "updatedAt">>;
+
+export type TrendDuplicateResponse = { kind: "job" | "video_production" | "script"; id: string; title: string; similarity: number; reason: "same_source" | "similar_title"; createdAt: string; link: string | null };
+
+export type TrendAnalyzeResponse = { status: "done" | "failed" | "quota" | "limit" | "not_configured"; message: string | null; retryAt: string | null; cluster: TrendClusterDetailResponse };
+
+export type TrendImportResponse = { cluster: TrendClusterDetailResponse; created: boolean; warning: string | null };
+
+export type TrendAssigneeResponse = { id: string; displayName: string; role: string };
+
+export type NotificationResponse = { id: string; kind: string; title: string; body: string | null; link: string | null; data: Record<string, unknown> | null; readAt: string | null; createdAt: string };
+export type NotificationListResponse = { items: NotificationResponse[]; unread: number };
