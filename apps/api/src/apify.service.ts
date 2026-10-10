@@ -545,6 +545,28 @@ export class ApifyService {
    * VE2E-46: the project's verified Apify account visible to this user (org-scoped, or the user's own personal one;
    * admins see all), or `null`. Same visibility rules as `GET /provider-accounts`.
    */
+  /** Every usable Apify account of the user, oldest first (a quota-exhausted account is skipped for the next one). */
+  async findAccountsForUser(userId: string, role: "admin" | "staff"): Promise<Array<{ id: string; encryptedSecret: string }>> {
+    const rows = await this.prisma.providerAccount.findMany({
+      where: {
+        provider: "apify",
+        role: "visual",
+        deletedAt: null,
+        enabled: true,
+        ...(process.env.NODE_ENV === "test" ? {} : { status: "verified", isFake: false }),
+        ...(role === "admin" ? {} : { OR: [{ scope: "organization" }, { scope: "personal", ownerUserId: userId }] }),
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+    const out: Array<{ id: string; encryptedSecret: string }> = [];
+    for (const row of rows) {
+      const usable = await this.usableAccount(row.id);
+      if (usable.ok) out.push(usable.data);
+    }
+    return out;
+  }
+
   async findAccountForUser(userId: string, role: "admin" | "staff"): Promise<{ id: string; encryptedSecret: string } | null> {
     const row = await this.prisma.providerAccount.findFirst({
       where: {
@@ -619,6 +641,7 @@ export class ApifyService {
       const decision = moderated[0]?.moderationDecision ?? null;
       // VE2E-151: frames of the downloaded clip that show a different person than the target reject it like an unsafe clip.
       const identity = moderated[0]?.visionFindings?.identity;
+      if (brief.person && identity && quality) quality.frameIdentity = { match: identity.match, confidence: identity.confidence };
       if (brief.person && identity?.match === "different_person" && identity.confidence >= PERSON_VERIFY_MIN_CONFIDENCE) return "rejected";
       return decision === "rejected" ? "rejected" : decision === "accepted" ? "accepted" : "unchecked";
     } catch {

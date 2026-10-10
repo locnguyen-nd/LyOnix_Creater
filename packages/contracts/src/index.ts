@@ -64,7 +64,13 @@ export type ErrorCode =
   | "TEMPLATE_TTS_FAILED"
   // Render reliability: an Auto job was refused before submit / retry because something it needs is not ready
   // (worker down, render template / PUBLIC_BASE_URL / content model unavailable...). The message names the cause and the fix.
-  | "PREFLIGHT_FAILED";
+  | "PREFLIGHT_FAILED"
+  /** Strict person media mode: not enough footage of the target person to build the video (render blocked, never filled with generic footage). */
+  | "PERSON_MEDIA_INSUFFICIENT"
+  /** A required template modification (e.g. `Image-7.source`) has no source of its kind - blocked before the render, scene + slot named. */
+  | "TEMPLATE_REQUIRED_ASSET_MISSING"
+  /** A fixed-slot template cannot show this many scenes - blocked right after the script, before any paid voice / media work. */
+  | "TEMPLATE_SCENE_COUNT_UNSUPPORTED";
 
 /** Render reliability: one check of the Auto preflight (`POST /video-productions/preflight`). `warn` never blocks. */
 export type PreflightCheckResponse = {
@@ -873,8 +879,46 @@ export type QualityGateDiagnostics = {
   warnings: Array<{ code: string; sceneId?: string; detail: string }>;
   degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
   failure: { code: string; sceneId: string; reason: string } | null;
-  /** VE2E-151: person subject only - share of the duration with media naming the person. */
-  personMedia?: { onTargetShare: number; verifiedShare: number; genericShare: number; lowConfidence: boolean };
+  /** VE2E-151: person subject only - share of the duration with media naming the person, plus the per-scene coverage (strict mode). */
+  personMedia?: {
+    onTargetShare: number;
+    verifiedShare: number;
+    genericShare: number;
+    lowConfidence: boolean;
+    strict?: boolean;
+    coverage?: PersonCoverageDiagnostics;
+  };
+};
+
+/** Strict person media mode: per-scene mapping + the pre-render coverage check ("Đúng người: 8/12 cảnh (67%)"). */
+export type PersonCoverageDiagnostics = {
+  totalScenes: number;
+  exactPersonSceneCount: number;
+  personSceneCount: number;
+  contextSceneCount: number;
+  genericSceneCount: number;
+  personCoverageRatio: number;
+  consecutiveGenericMax: number;
+  minCoverage: number;
+  ok: boolean;
+  /** `first_scene_not_person` | `first_three_scenes` | `coverage_below_threshold` | `consecutive_non_person` | `generic_majority`. */
+  reasons: string[];
+  scenes: Array<{ sceneId: string; targetPerson: string; mediaRole: "person_primary" | "person_support" | "context" | "generic"; identityConfidence: number; verificationMethod: "vision" | "metadata" | "none" }>;
+};
+
+/** Template slot preflight of an Auto run (`template_slot_preflight` StepRun): what was missing, what the fallback filled, what is left. */
+export type TemplateSlotPreflightDiagnostics = {
+  applies: boolean;
+  sceneCount: number;
+  /** Scene media slots of the template (`Image-N` / `Video-N`); `maxScenes` null = the template is re-composed for any count. */
+  sceneSlots: number;
+  maxScenes: number | null;
+  mode: "scaled" | "pages" | "fixed";
+  issues: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video"; actualKind: "image" | "video" | null }>;
+  fixes: Array<{ sceneId: string; slotKey: string; kind: "image" | "video"; fallback: string; mediaAssetVersionId: string }>;
+  unresolved: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video"; actualKind: "image" | "video" | null }>;
+  /** Set when the run was blocked (`TEMPLATE_REQUIRED_ASSET_MISSING` / `TEMPLATE_SCENE_COUNT_UNSUPPORTED`). */
+  blocked?: { code: string; message: string };
 };
 
 /** VE2E-151: script focus on the chosen person (stored with the script diagnostics). */
@@ -1001,6 +1045,10 @@ export type SegmentPersonDiagnostics = {
   rejectionReason?: string;
   /** One person vs several in the chosen source (hook for a later face-crop task; unused by the render today). */
   framing?: "single" | "group" | "unknown";
+  /** Role of the source for the person: `person_primary` > `person_support` > `context` > `generic`. */
+  mediaRole?: "person_primary" | "person_support" | "context" | "generic";
+  /** Strict person media mode was on for this video. */
+  strict?: boolean;
 };
 
 /** VE2E-57: vision-moderation requests of one job (also in the `run_usage` ledger as step `vision_moderation`). */
@@ -1060,6 +1108,8 @@ export type MediaPlanApifyQuality = {
   cleanliness?: SegmentCleanlinessDiagnostics;
   /** VE2E-152: cleanliness of the downloaded clip's sampled frames (when `VISION_VIDEO_FRAMES=1`). */
   frameCleanliness?: SegmentCleanlinessDiagnostics;
+  /** Identity verdict on the downloaded clip's 5 sampled frames (`VISION_VIDEO_FRAMES=1`): `uncertain` lowers the evidence strongly. */
+  frameIdentity?: { match: "match" | "different_person" | "uncertain" | "no_person"; confidence: number };
 };
 
 /** VE2E-51: Apify spend of one job (all segments): Actor runs, run seconds, USD from `run.usageTotalUsd` (null when Apify reported none). */
@@ -1126,6 +1176,8 @@ export type VideoProductionResponse = {
   durationBudget: DurationBudgetDiagnostics | null;
   /** VE2E-85: pre-render quality gate result (`quality_gate` StepRun outputRef); `null` before the gate ran or when QUALITY_GATE is off. */
   qualityGate?: QualityGateDiagnostics | null;
+  /** Template slot preflight (`template_slot_preflight` StepRun): missing required slots, fallbacks, block reason; `null` when not run. */
+  templateSlots?: TemplateSlotPreflightDiagnostics | null;
   /** VE2E-62: workflow queue state (`queuePosition` is set only while the run is `draft`, i.e. waiting for a worker slot). */
   queue: QueueStateFields;
   createdAt: string;

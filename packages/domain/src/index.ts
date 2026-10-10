@@ -390,6 +390,39 @@ export {
 } from "./social-cookies.js";
 export { selectSocialSearchItems, type SocialSearchCandidate, type SocialSearchRejectReason, type SocialSearchSelection } from "./social-search-select.js";
 export {
+  sceneMediaSlots,
+  templateSceneCapacity,
+  preflightTemplateSceneCount,
+  preflightTemplateSlots,
+  describeTemplateSlotIssues,
+  type TemplateSlotLike,
+  type SceneMediaSlot,
+  type TemplateSceneCapacity,
+  type TemplateSceneCountCheck,
+  type TemplateSlotScene,
+  type TemplateSlotIssue,
+  type TemplateSlotPreflight,
+} from "./template-slot-preflight.js";
+export {
+  PERSON_MEDIA_ROLES,
+  STRICT_PERSON_MIN_COVERAGE,
+  STRICT_PERSON_FIRST_THREE_MIN,
+  STRICT_PERSON_MAX_CONSECUTIVE_NON_PERSON,
+  PERSON_PRIMARY_MIN_CONFIDENCE,
+  PERSON_MEDIA_INSUFFICIENT_MESSAGE,
+  strictPersonMinCoverageFromEnv,
+  strictPersonModeFor,
+  personMediaRoleOf,
+  isPersonRole,
+  assessPersonCoveragePreflight,
+  personCoverageSummary,
+  type PersonMediaRole,
+  type PersonEvidenceLike,
+  type PersonCoverageScene,
+  type PersonCoverageReason,
+  type PersonCoverageReport,
+} from "./person-coverage.js";
+export {
   assessMediaCleanliness,
   metadataEditSignals,
   cleanlinessRejectionCounts,

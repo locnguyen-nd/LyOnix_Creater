@@ -157,9 +157,20 @@ export type VisualPlanRejectionReason =
   | "keywords_invalid"
   | "style_hints_invalid";
 
+/**
+ * `subjectOnly` (VE2E-151): the segments were rejected but the `videoSubject` is usable - the plan is `{ segments: [], videoSubject }` so
+ * the person / subject rules still apply (Gemini often rejects the strict schema and the free-form reply has broken segments).
+ */
 export type VisualPlanDiagnosis =
   | { plan: ScriptVisualPlanV2; reason: null }
-  | { plan: null; reason: VisualPlanRejectionReason; detail?: string };
+  | { plan: null; reason: VisualPlanRejectionReason; detail?: string }
+  | { plan: ScriptVisualPlanV2; reason: VisualPlanRejectionReason; detail?: string; subjectOnly: true };
+
+/** A segment id as models write it without the strict schema: `segmentId`, `segment_id` or `id`, a string or a number. */
+const rawSegmentId = (row: Record<string, unknown>): unknown => {
+  const value = row.segmentId ?? row.segment_id ?? row.id;
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : value;
+};
 
 /**
  * Validates/normalizes a raw `visualPlan` against the script's FINAL scene ids.
@@ -179,11 +190,15 @@ export function diagnoseScriptVisualPlanV2(
   finalSceneIds: readonly string[],
   resolveSceneIds: (rawSceneId: string) => readonly string[] = (id) => [id],
 ): VisualPlanDiagnosis {
-  const reject = (reason: VisualPlanRejectionReason, detail?: string): VisualPlanDiagnosis => ({ plan: null, reason, ...(detail ? { detail } : {}) });
-  if (raw === undefined) return reject("absent");
-  if (raw === null) return reject("null");
+  const plainReject = (reason: VisualPlanRejectionReason, detail?: string): VisualPlanDiagnosis => ({ plan: null, reason, ...(detail ? { detail } : {}) });
+  if (raw === undefined) return plainReject("absent");
+  if (raw === null) return plainReject("null");
   const root = asRecord(raw);
-  if (!root) return reject("not_object");
+  if (!root) return plainReject("not_object");
+  // VE2E-151: the subject survives broken segments (subject-only plan), so person / subject rules still apply.
+  const salvagedSubject = parseVideoSubject(root.videoSubject ?? root.video_subject);
+  const reject = (reason: VisualPlanRejectionReason, detail?: string): VisualPlanDiagnosis =>
+    salvagedSubject ? { plan: { segments: [], videoSubject: salvagedSubject }, reason, ...(detail ? { detail } : {}), subjectOnly: true } : plainReject(reason, detail);
   if (!Array.isArray(root.segments)) return reject("segments_missing");
   const rawSegments = root.segments;
   if (rawSegments.length === 0 || rawSegments.length > VISUAL_PLAN_MAX_SEGMENTS) return reject("segment_count", String(rawSegments.length));
@@ -194,12 +209,13 @@ export function diagnoseScriptVisualPlanV2(
   for (const item of rawSegments) {
     const row = asRecord(item);
     if (!row) return reject("segment_not_object");
-    const segmentId = boundedText(row.segmentId, MAX_ID);
+    const segmentId = boundedText(rawSegmentId(row), MAX_ID);
     if (!segmentId || seenSegmentIds.has(segmentId)) return reject("segment_id_invalid", segmentId ?? undefined);
     seenSegmentIds.add(segmentId);
-    if (!Array.isArray(row.sceneIds) || row.sceneIds.length === 0) return reject("scene_ids_invalid", segmentId);
+    const rawSceneIds = row.sceneIds ?? row.scene_ids;
+    if (!Array.isArray(rawSceneIds) || rawSceneIds.length === 0) return reject("scene_ids_invalid", segmentId);
     const sceneIds: string[] = [];
-    for (const rawId of row.sceneIds) {
+    for (const rawId of rawSceneIds) {
       if (typeof rawId !== "string") return reject("scene_ids_invalid", segmentId);
       const resolved = resolveSceneIds(rawId.trim());
       if (resolved.length === 0) return reject("scene_id_unknown", `${segmentId}:${rawId}`);
@@ -230,7 +246,7 @@ export function diagnoseScriptVisualPlanV2(
       ...(broadTier.list.length ? { broadEn: broadTier.list } : {}),
       ...(moodEn ? { moodEn } : {}),
     };
-    const hintsRow = asRecord(row.styleHints);
+    const hintsRow = asRecord(row.styleHints ?? row.style_hints);
     if (!hintsRow) return reject("style_hints_invalid", segmentId);
     const hints = styleHintKeys.map((key) => boundedText(hintsRow[key], MAX_HINT));
     if (hints.some((value) => value === null)) return reject("style_hints_invalid", segmentId);
@@ -238,8 +254,7 @@ export function diagnoseScriptVisualPlanV2(
     segments.push({ segmentId, sceneIds, subject, priority, keywords, styleHints: { setting: setting!, timeOfDay: timeOfDay!, lighting: lighting!, palette: palette! } });
   }
   if (expectedNextIndex !== finalSceneIds.length) return reject("scenes_not_fully_covered", `${expectedNextIndex}/${finalSceneIds.length}`);
-  const videoSubject = parseVideoSubject(root.videoSubject);
-  return { plan: { segments, ...(videoSubject ? { videoSubject } : {}) }, reason: null };
+  return { plan: { segments, ...(salvagedSubject ? { videoSubject: salvagedSubject } : {}) }, reason: null };
 }
 
 export function normalizeScriptVisualPlanV2(

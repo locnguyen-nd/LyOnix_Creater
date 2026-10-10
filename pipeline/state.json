@@ -192,6 +192,28 @@
         "VE2E-151"
       ],
       "note": "Chủ dự án yêu cầu 2026-10-09: không ưu tiên video người khác đã edit sẵn. assessMediaCleanliness (domain): text <=8% clean, 8-18% acceptable, 18-30% penalized, >30% reject TEXT_HEAVY; chữ đè chủ thể tụt 1 bậc; logo nhỏ <=3% trừ nhẹ, logo lớn LARGE_WATERMARK; watermark/username/subtitle/headline/sticker/khung/chia màn hình = penalized; UI mạng xã hội SOCIAL_UI_OVERLAY, card tin NEWS_CARD, >=3 tín hiệu edit PRE_EDITED_VIDEO = reject; >=2 trên 5 frame nhiều chữ = TEXT_HEAVY. Bằng chứng: vision cleanliness trong CÙNG lời gọi (cover; 5 frame 384px khi VISION_VIDEO_FRAMES=1), shot VE2E-151, hashtag edit, TikTok effectStickers; metadata không bao giờ tự reject. Ranking: person tier > footage sạch > một chủ thể > chuyển động > chất lượng > chữ/logo > tỉ lệ; reject không tự chọn (allowCleanlinessRejects); fallback ghi 'Không đủ footage sạch, đang dùng media có overlay nhẹ.' (log, diagnostics, quality gate media_overlay_fallback, banner). Diagnostics mediaSourcing[].cleanliness. MEDIA_CLEANLINESS=0 tắt trường vision. Spec .docs/specs/VE2E-152.md."
+    },
+    {
+      "id": "VE2E-153",
+      "title": "Strict person media mode: bắt buộc độ phủ media đúng người, chặn render khi thiếu",
+      "group": "Làm mịn — Media",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-152"
+      ],
+      "note": "Sự cố 2026-10-09: run 6b4ecb5e (佐々木朗希) 0/10 cảnh đúng người, 9 đoạn Pexels chung (điện thoại, đường phố). Gốc: Gemini từ chối structured schema ở mọi run (visualPlan segment_id_invalid -> mất videoSubject), extract_keywords không nhận chủ thể, Apify hết quota, Pexels rơi về visualQuery. Sửa: parser visualPlan chịu alias + subject-only plan; extract_keywords nhận/trả videoSubject; STRICT_PERSON_MEDIA_MODE (user target, hoặc tiêu đề + cảnh 1 nêu tên): tier context, generic không liên quan bị loại, Pexels chỉ context (mustInclude); preflight cảnh 1 + 2/3 cảnh đầu + >= 65% cảnh đúng người + không 2 cảnh bối cảnh liên tiếp, thiếu -> PERSON_MEDIA_INSUFFICIENT (chặn render); 5 frame uncertain -> person_support; diagnostics personMedia.coverage + mediaRole từng cảnh; UI 'Đúng người: x/y cảnh (z%)'. Chưa commit. Spec .docs/specs/VE2E-153.md."
+    },
+    {
+      "id": "VE2E-154",
+      "title": "Preflight slot template (Image-N/Video-N), fallback đúng loại, nhiều account Apify, chẩn đoán trang job",
+      "group": "Làm mịn — Render",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "VE2E-153"
+      ],
+      "note": "Sự cố run 19db79bb: Image-7/Image-10.source rỗng vì claimSameSubjectWindow/L4 giao cửa sổ video cho đoạn ảnh (cảnh 4, 10) + gán slot theo hàng đợi cùng loại. Sửa: không giao video cho slot ảnh; fallback ảnh = frame tĩnh clip của job (ưu tiên clip đúng người) > stock/context > nền thương hiệu; preflightTemplateSceneCount ngay sau kịch bản (TEMPLATE_SCENE_COUNT_UNSUPPORTED / TEMPLATE_REQUIRED_ASSET_MISSING trước TTS/media); ensureTemplateSlots sau media (fallback hoặc chặn kèm cảnh + slot, step template_slot_preflight); Apify hết quota -> thử account kế tiếp, hết -> apify_quota_exhausted_all_accounts; ngưỡng độ phủ người strict 60%; trang job: đúng người / bối cảnh / generic, slot thiếu, provider lỗi. Chưa commit. Spec .docs/specs/VE2E-154.md."
     }
   ]
 }

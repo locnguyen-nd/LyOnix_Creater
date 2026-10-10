@@ -10,7 +10,7 @@ import type { VideoProductionResponse, WorkflowRunStatus, WorkflowStepEventRespo
 import { SourceBadge } from "../studio/SourceBadge";
 import { STAGE_COLORS, STAGE_KEYS, currentStage, formatElapsed, stageOfStep, summarizeStages, type StageKey } from "../video-production-stages";
 import { getVideoProduction, getWorkerHealth, listVideoProductionEvents, retryVideoProduction } from "../video-productions-api";
-import { overlayFallbackWarnings, personFocusWarnings } from "../person-focus";
+import { overlayFallbackWarnings, personCoverageLines, personFocusWarnings, providerFailureLines, templateSlotLines } from "../person-focus";
 
 const TERMINAL_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
 // Matches video-productions.service.ts's own retriableStatuses — "cancelled" is deliberately
@@ -99,6 +99,9 @@ export function VideoProductionPage() {
   // VE2E-151: the person-focus warnings of the quality gate (script drifts off the person / too little media naming the person).
   const personWarnings = personFocusWarnings(run.qualityGate);
   const overlayWarnings = overlayFallbackWarnings(run.qualityGate);
+  const coverage = personCoverageLines(run.qualityGate);
+  const templateSlots = templateSlotLines(run.templateSlots);
+  const providerFailures = providerFailureLines(run.mediaSourcing);
   const canOpenStudio = Boolean(run.scriptDraftVersionId);
   const isDone = run.status === "completed" && Boolean(run.resultUrl);
   const stages = summarizeStages(events, run, nowMs);
@@ -152,6 +155,26 @@ export function VideoProductionPage() {
         <Banner variant="warn">
           <span className="block font-semibold" data-testid="person-focus-warning">{t("videoProduction.personFocusTitle")}</span>
           {personWarnings.map((warning) => <span key={warning.code} className="block">{warning.detail}</span>)}
+        </Banner>
+      ) : null}
+      {coverage ? (
+        <Banner variant={coverage.ok ? "info" : "warn"}>
+          <span className="block font-semibold" data-testid="person-coverage">{t("videoProduction.personCoverage", { count: coverage.person.count, total: coverage.person.total, percent: coverage.person.percent })}</span>
+          <span className="block">{t("videoProduction.contextCoverage", { count: coverage.context.count, total: coverage.context.total })}</span>
+          <span className="block">{t("videoProduction.genericScenes", { count: coverage.generic })}</span>
+          {!coverage.ok && coverage.strict ? <span className="block">{t("videoProduction.personCoverageBlocked")}</span> : null}
+        </Banner>
+      ) : null}
+      {templateSlots ? (
+        <Banner variant={templateSlots.missing.length ? "danger" : "info"}>
+          {templateSlots.missing.length ? <span className="block font-semibold" data-testid="template-slots-missing">{t("videoProduction.templateSlotsMissing", { slots: templateSlots.missing.join("; ") })}</span> : null}
+          {templateSlots.fixed.length ? <span className="block">{t("videoProduction.templateSlotsFixed", { slots: templateSlots.fixed.join("; ") })}</span> : null}
+        </Banner>
+      ) : null}
+      {providerFailures.length > 0 ? (
+        <Banner variant="warn">
+          <span className="block font-semibold" data-testid="provider-failures">{t("videoProduction.providerFailures")}</span>
+          {providerFailures.map((line) => <span key={line} className="block">{line}</span>)}
         </Banner>
       ) : null}
       {overlayWarnings.length > 0 ? (

@@ -9,6 +9,7 @@ import { checkDurationBand, type DurationBandCheck } from "./duration-budget.js"
 import { findFreeWindow, type ClipWindow } from "./media-ladder.js";
 import { assessPersonMediaCoverage, PERSON_MEDIA_MIN_SHARE, type PersonMatchLevel, type PersonMediaCoverage, type ScriptPersonFocus } from "./person-target.js";
 import { CLEANLINESS_FALLBACK_MESSAGE } from "./media-cleanliness.js";
+import { assessPersonCoveragePreflight, personCoverageSummary, PERSON_MEDIA_INSUFFICIENT_MESSAGE, STRICT_PERSON_MIN_COVERAGE, type PersonCoverageReport, type PersonMediaRole } from "./person-coverage.js";
 
 export const QUALITY_GATE_DEFAULT_REPEAT_WINDOW = 3;
 export const QUALITY_GATE_DEFAULT_MIN_SHORT_SIDE_PX = 480;
@@ -34,6 +35,10 @@ export type QualityGateScene = {
   personMatch?: PersonMatchLevel | null;
   /** VE2E-152: the scene's source is a medium (overlay) candidate taken because no clean footage was usable. */
   cleanlinessFallback?: boolean;
+  /** Person mode: the role of the scene's source and how sure it shows the person (scene mapping, coverage preflight). */
+  mediaRole?: PersonMediaRole;
+  identityConfidence?: number;
+  verificationMethod?: "vision" | "metadata" | "none";
 };
 
 export type QualityGateAsset = { id: string; kind: "video" | "image"; durationMs: number | null; widthPx: number | null; heightPx: number | null };
@@ -58,10 +63,10 @@ export type QualityGateWarning = {
   detail: string;
 };
 
-export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid" | "script_person_focus" | "person_media" | "media_cleanliness";
+export type QualityGateCheckName = "repeat_scenes" | "duration_band" | "subtitle_lines" | "min_resolution" | "source_degraded" | "range_valid" | "script_person_focus" | "person_media" | "media_cleanliness" | "person_coverage";
 export type QualityGateCheck = { name: QualityGateCheckName; status: "ok" | "fixed" | "warning" | "failed"; detail?: string };
 
-export type QualityGateFailure = { code: "invalid_range" | "person_low_confidence"; sceneId: string; reason: string };
+export type QualityGateFailure = { code: "invalid_range" | "person_low_confidence" | "person_media_insufficient"; sceneId: string; reason: string };
 
 export type QualityGateResult = {
   enabled: boolean;
@@ -73,8 +78,8 @@ export type QualityGateResult = {
   duration: DurationBandCheck | null;
   degraded: { count: number; sceneIds: string[]; tiers: Record<string, number> };
   failure: QualityGateFailure | null;
-  /** Person mode only: share of the duration showing media that names the person. */
-  personMedia?: PersonMediaCoverage;
+  /** Person mode only: share of the duration showing media that names the person, plus the per-scene coverage report. */
+  personMedia?: PersonMediaCoverage & { coverage?: PersonCoverageReport; strict?: boolean };
 };
 
 export function qualityGateConfigFromEnv(env: Record<string, string | undefined> = process.env): QualityGateConfig {
@@ -132,8 +137,11 @@ export function runQualityGate(input: {
   assets: readonly QualityGateAsset[];
   targetSec: number;
   config?: Partial<QualityGateConfig>;
-  /** Person mode (the subject is one person): the script focus check (computed by the caller from the script) turns on the person checks. */
-  person?: { focus: ScriptPersonFocus | null; name: string } | null;
+  /**
+   * Person mode (the subject is one person): the script focus check (computed by the caller from the script) turns on the person checks.
+   * `strict` (strict person media mode): the per-scene coverage rules BLOCK the render (`person_media_insufficient`) when not met.
+   */
+  person?: { focus: ScriptPersonFocus | null; name: string; strict?: boolean; minCoverage?: number } | null;
 }): QualityGateResult {
   const config: QualityGateConfig = { ...qualityGateConfigFromEnv({}), ...input.config };
   const scenes = input.scenes.map((scene) => ({ ...scene }));
@@ -263,7 +271,7 @@ export function runQualityGate(input: {
   if (scenes.some((scene) => scene.cleanlinessFallback !== undefined)) checks.push({ name: "media_cleanliness", status: overlayScenes.length ? "warning" : "ok", ...(overlayScenes.length ? { detail: `${overlayScenes.length} cảnh dùng media có overlay nhẹ` } : {}) });
 
   // (6) person mode: the script stays on the person, and most of the video shows media naming the person (not stock / a placeholder).
-  let personMedia: PersonMediaCoverage | undefined;
+  let personMedia: (PersonMediaCoverage & { coverage?: PersonCoverageReport; strict?: boolean }) | undefined;
   let personFailure: QualityGateFailure | null = null;
   if (input.person) {
     const name = input.person.name;
@@ -279,6 +287,20 @@ export function runQualityGate(input: {
       if (config.personStrict) personFailure = { code: "person_low_confidence", sceneId: scenes[0]?.sceneId ?? "", reason: `Không đủ media chắc chắn là ${name} (${detail}); PERSON_FOCUS_STRICT=1 chặn render` };
     }
     checks.push({ name: "person_media", status: personFailure ? "failed" : personMedia.lowConfidence ? "warning" : "ok", detail });
+    // Per-scene coverage (scene mapping): always reported for a person video; it blocks the render only in strict person mode.
+    const coverage = assessPersonCoveragePreflight(
+      scenes.map((scene) => ({ sceneId: scene.sceneId, targetPerson: name, mediaRole: scene.mediaRole ?? "generic", identityConfidence: scene.identityConfidence ?? 0, verificationMethod: scene.verificationMethod ?? "none" })),
+      input.person.minCoverage ?? STRICT_PERSON_MIN_COVERAGE,
+    );
+    const strict = Boolean(input.person.strict);
+    personMedia = { ...personMedia, coverage, strict };
+    const summary = personCoverageSummary(coverage);
+    if (strict && !coverage.ok) {
+      personFailure = { code: "person_media_insufficient", sceneId: scenes[0]?.sceneId ?? "", reason: `${PERSON_MEDIA_INSUFFICIENT_MESSAGE} ${summary}; ${coverage.reasons.join(", ")} (tối thiểu ${Math.round(coverage.minCoverage * 100)}%, cảnh 1 và 2/3 cảnh đầu phải đúng người, không 2 cảnh bối cảnh liên tiếp)` };
+    } else if (!coverage.ok && !personMedia.lowConfidence) {
+      warnings.push({ code: "person_media_low_confidence", detail: `${summary}; ${coverage.reasons.join(", ")}` });
+    }
+    checks.push({ name: "person_coverage", status: strict && !coverage.ok ? "failed" : coverage.ok ? "ok" : "warning", detail: `${summary}${strict ? " (strict)" : ""}` });
   }
 
   return { enabled: true, checks, fixes, warnings, scenes, duration, degraded: { count: degradedScenes.length, sceneIds: degradedScenes.map((scene) => scene.sceneId), tiers }, failure: personFailure, ...(personMedia ? { personMedia } : {}) };

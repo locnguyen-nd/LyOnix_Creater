@@ -50,16 +50,18 @@ export type SegmentKeywords = {
   otherPeople?: string[];
   /** `videoSubject.source`: who named a person subject (user > news > model). */
   targetSource?: string;
+  /** Strict person media mode for this video (the runner decides; see `person-coverage.ts`). */
+  personStrict?: boolean;
 };
 
-export type MediaPlanVideoSubject = { main: string; aliases?: string[]; mustInclude?: string[]; mustExclude?: string[]; kind?: string; otherPeople?: string[]; source?: string };
+export type MediaPlanVideoSubject = { main: string; aliases?: string[]; mustInclude?: string[]; mustExclude?: string[]; kind?: string; otherPeople?: string[]; source?: string; strict?: boolean };
 
 export type MediaPlanVisualSegment = {
   segmentId: string;
   sceneIds: string[];
   subject: string;
   priority: number;
-  keywords: Omit<SegmentKeywords, "subject" | "aliases" | "mustInclude" | "mustExclude" | "subjectKind" | "otherPeople" | "targetSource">;
+  keywords: Omit<SegmentKeywords, "subject" | "aliases" | "mustInclude" | "mustExclude" | "subjectKind" | "otherPeople" | "targetSource" | "personStrict">;
 };
 
 export type PlannedSegment = {
@@ -140,6 +142,7 @@ const plannedKeywords = (segment: MediaPlanVisualSegment, videoSubject: MediaPla
     ...(videoSubject?.kind ? { subjectKind: videoSubject.kind } : {}),
     ...(videoSubject?.otherPeople?.length ? { otherPeople: [...videoSubject.otherPeople] } : {}),
     ...(videoSubject?.source ? { targetSource: videoSubject.source } : {}),
+    ...(videoSubject?.strict ? { personStrict: true } : {}),
   };
 };
 
@@ -306,11 +309,13 @@ export function planBackgroundSegments(
   }
   const count = chooseFallbackSegmentCount(sum([...durations.values()]), scenes.length, range);
   // VE2E-151: an explicit subject (the user's target person) still binds the fallback segments (no visualPlan keywords: the subject only).
-  const subjectOnly = options.videoSubject?.main ? plannedKeywords({ segmentId: "", sceneIds: [], subject: "", priority: 1, keywords: { ja: "", en: "" } }, options.videoSubject) : null;
+  // A subject-only plan (segments rejected, videoSubject kept) binds the fallback segments the same way.
+  const fallbackSubject = options.videoSubject?.main ? options.videoSubject : visualPlan?.videoSubject?.main ? visualPlan.videoSubject : null;
+  const subjectOnly = fallbackSubject ? plannedKeywords({ segmentId: "", sceneIds: [], subject: "", priority: 1, keywords: { ja: "", en: "" } }, fallbackSubject) : null;
   return groupScenesByDuration(scenes, count).map((group, index) => ({
     segmentId: `seg-${index + 1}`,
     sceneIds: group.map((scene) => scene.sceneId),
-    subject: subjectOnly ? options.videoSubject!.main : null,
+    subject: subjectOnly ? fallbackSubject!.main : null,
     priority: subjectOnly ? 1 : null,
     keywords: subjectOnly ? { ...subjectOnly } : null,
     durationMs: sum(group.map((scene) => Math.max(0, scene.durationMs))),

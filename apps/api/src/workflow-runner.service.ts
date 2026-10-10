@@ -44,6 +44,15 @@ import {
   assessScriptPersonFocus,
   personTargetOf,
   resolveTargetPerson,
+  subjectProfileOf,
+  strictPersonModeFor,
+  strictPersonMinCoverageFromEnv,
+  personMediaRoleOf,
+  preflightTemplateSceneCount,
+  preflightTemplateSlots,
+  describeTemplateSlotIssues,
+  type TemplateSlotIssue,
+  type MediaPlanVideoSubject,
   type PersonTarget,
   type QualityGateAsset,
   type QualityGateResult,
@@ -68,7 +77,7 @@ import { getSharedProviderLimiter, mapBounded, resolveConcurrencyConfig } from "
 import { StageRecorder, type StageCache } from "./stage-timing.js";
 import { formatRetryClock, msUntil, planRunRetry } from "./run-retry.js";
 import { readTargetPersonIntake, type TargetPersonIntake } from "./target-person-intake.js";
-import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
+import { MediaPlanService, SegmentSourceLedger, applyExtractedKeywords, applySubjectToSegments, providerFailureSummary, segmentNarration, segmentsNeedingKeywords, type MediaPlanScript, type SourcedSegment } from "./media-plan.service.js";
 import { countTemplateSceneSlots } from "@lyonix/providers";
 import { fixedSlotPathApplies } from "./render-mode.js";
 import { PrismaService } from "./prisma.service.js";
@@ -150,7 +159,7 @@ const retryAfterOf = (error: unknown): number | null => {
 };
 
 const BLOCKED_CODES = new Set(["PROVIDER_NOT_CONFIGURED", "PROVIDER_CAPABILITY_UNAVAILABLE", "PROVIDER_AUTH_INVALID", "SSRF_BLOCKED"]);
-const NEEDS_INPUT_CODES = new Set(["VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN", "MEDIA_RELEVANCE_BELOW_THRESHOLD", "MEDIA_RELEVANCE_UNVERIFIED", "MEDIA_RIGHTS_UNRESOLVED"]);
+const NEEDS_INPUT_CODES = new Set(["PERSON_MEDIA_INSUFFICIENT", "TEMPLATE_REQUIRED_ASSET_MISSING", "TEMPLATE_SCENE_COUNT_UNSUPPORTED", "VALIDATION_FAILED", "PROVIDER_SCHEMA_INVALID", "PROVIDER_CONTENT_REFUSED", "INVALID_STATE", "VERSION_CONFLICT", "NOT_FOUND", "FORBIDDEN", "MEDIA_RELEVANCE_BELOW_THRESHOLD", "MEDIA_RELEVANCE_UNVERIFIED", "MEDIA_RIGHTS_UNRESOLVED"]);
 /** Everything else (PROVIDER_RATE_LIMITED/PROVIDER_QUOTA_EXHAUSTED/PROVIDER_TIMEOUT/PROVIDER_UNAVAILABLE/PROVIDER_SUBMIT_UNKNOWN, and any unexpected thrown error) is treated as transient and bounded-retried — never an infinite loop since `attempts` is capped. */
 const classify = (code: string): "blocked_provider" | "needs_input" | "retry" => {
   if (BLOCKED_CODES.has(code)) return "blocked_provider";
@@ -220,9 +229,16 @@ const workflowRecoveryMaxAttempts = () => Math.floor(envMs("WORKFLOW_RECOVERY_MA
  * VE2E-151: the quality gate's person input when the video is about one person: the target by precedence (the run's typed person >
  * the selected news > the script's own subject), `null` for any other subject.
  */
-export const personGateInput = (script: MediaPlanScript, title: string | null, intake: TargetPersonIntake = { user: null, newsText: null }): { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }> } | null => {
-  const target = personTargetOf(resolveTargetPerson({ user: intake.user, newsText: intake.newsText, model: script.visualPlan?.videoSubject }));
-  return target ? { target, title, scenes: script.scenes.map((scene) => ({ sceneId: scene.sceneId, narration: scene.narration, screenText: scene.screenText })) } : null;
+export const personGateInput = (
+  script: MediaPlanScript,
+  title: string | null,
+  intake: TargetPersonIntake = { user: null, newsText: null },
+  extractedSubject: MediaPlanVideoSubject | null = null,
+): { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }>; strict: boolean } | null => {
+  const target = personTargetOf(resolveTargetPerson({ user: intake.user, newsText: intake.newsText, model: script.visualPlan?.videoSubject ?? extractedSubject }));
+  if (!target) return null;
+  const scenes = script.scenes.map((scene) => ({ sceneId: scene.sceneId, narration: scene.narration, screenText: scene.screenText }));
+  return { target, title, scenes, strict: strictPersonModeFor(target, { title, scenes }, process.env) };
 };
 
 @Injectable()
@@ -516,7 +532,17 @@ export class WorkflowRunnerService {
    */
   private async extractMissingKeywords(
     run: WorkflowRunRow,
-    ctx: { userId: string; role: "admin" | "staff"; contentAccountId: string; script: MediaPlanScript; title: string; segments: PlannedSegment[] },
+    ctx: {
+      userId: string;
+      role: "admin" | "staff";
+      contentAccountId: string;
+      script: MediaPlanScript;
+      title: string;
+      segments: PlannedSegment[];
+      /** VE2E-151: the typed person / news text, and where a subject the extraction names is kept for the later plan passes and the gate. */
+      personIntake?: TargetPersonIntake;
+      subjectHolder?: { extracted: MediaPlanVideoSubject | null };
+    },
   ): Promise<void> {
     const needing = segmentsNeedingKeywords(ctx.segments);
     if (needing.length === 0) {
@@ -526,6 +552,10 @@ export class WorkflowRunnerService {
     }
     if (!(await this.mediaPlans.apifyAvailable(ctx.userId, ctx.role))) return;
     const requested = needing.map((segment) => segment.segmentId);
+    const knownProfile = ctx.segments.map((segment) => subjectProfileOf(segment)).find((profile) => profile.subject);
+    const knownSubject = knownProfile?.subject
+      ? { main: knownProfile.subject, aliases: knownProfile.aliases, mustInclude: knownProfile.mustInclude, mustExclude: knownProfile.mustExclude, ...(knownProfile.kind ? { kind: knownProfile.kind } : {}), ...(knownProfile.otherPeople ? { otherPeople: knownProfile.otherPeople } : {}) }
+      : null;
     try {
       const outcome = await this.recordStep(
         run,
@@ -536,6 +566,8 @@ export class WorkflowRunnerService {
             providerAccountId: ctx.contentAccountId,
             language: ctx.script.language,
             title: ctx.title,
+            // VE2E-151: the known subject keeps the keywords on it (it was never passed before); none known -> the call names it.
+            ...(knownSubject ? { subject: knownSubject } : {}),
             segments: needing.map((segment) => ({ segmentId: segment.segmentId, narration: segmentNarration(ctx.script, segment) })),
           });
           if (!result.ok) throw new WorkflowStepFailure(result.code, result.message);
@@ -543,11 +575,78 @@ export class WorkflowRunnerService {
         }),
       );
       applyExtractedKeywords(ctx.segments, outcome.keywords);
+      // VE2E-151: the subject the extraction named binds every segment (a person target is resolved with the typed person / news first).
+      if (!knownSubject && outcome.videoSubject?.main) {
+        const named = outcome.videoSubject as MediaPlanVideoSubject;
+        const resolved = resolveTargetPerson({ user: ctx.personIntake?.user ?? null, newsText: ctx.personIntake?.newsText ?? null, model: named });
+        const person = resolved ? personTargetOf(resolved) : null;
+        const strict = person ? strictPersonModeFor(person, { title: ctx.title, scenes: ctx.script.scenes }, process.env) : false;
+        const subject: MediaPlanVideoSubject = resolved ? { ...resolved, ...(strict ? { strict: true } : {}) } : named;
+        applySubjectToSegments(ctx.segments, subject);
+        if (ctx.subjectHolder) ctx.subjectHolder.extracted = subject;
+      }
       await this.appendRunUsage(run, { step: "extract_keywords", kind: "content", provider: outcome.provider, modelId: outcome.modelId, inputTokens: outcome.usage.inputTokens, outputTokens: outcome.usage.outputTokens, costAmount: outcome.usage.costAmount, costCurrency: outcome.usage.costCurrency, at: new Date().toISOString() });
       await this.saveStepDiagnostics(run, "keyword_extraction_diagnostics", { requested, extracted: Object.keys(outcome.keywords), rejected: outcome.rejectedSegmentIds, modelId: outcome.modelId });
     } catch (error) {
       await this.saveStepDiagnostics(run, "keyword_extraction_diagnostics", { requested, extracted: [], failed: error instanceof Error ? error.message.slice(0, 200) : "error", reason: "no_ja_keywords" });
     }
+  }
+
+  /**
+   * Template slot preflight (fixed-slot path only - a re-composed template has no positional slot to miss): scene N must carry the kind
+   * its `Image-N` / `Video-N` slot expects. A mismatch is fixed with a valid fallback of the right kind (`resolveSlotFallback`); what
+   * cannot be fixed stops the run here with the scene + slot (`TEMPLATE_REQUIRED_ASSET_MISSING`) - never an empty `Image-N.source` sent
+   * to the render. Records the `template_slot_preflight` StepRun (shown on the job page).
+   */
+  private async ensureTemplateSlots(
+    run: WorkflowRunRow,
+    ctx: {
+      userId: string;
+      role: "admin" | "staff";
+      providerAccountId: string;
+      planScript: MediaPlanScript;
+      sourced: SourcedSegment[];
+      mediaPlan: ReturnType<MediaPlanService["buildBindings"]>;
+      slots: AutoTemplateSlot[];
+      sceneCompositions: number;
+      orshotPages: number | null;
+      ledger: SegmentSourceLedger;
+    },
+  ): Promise<ReturnType<MediaPlanService["buildBindings"]>> {
+    const sceneRows = (plan: ReturnType<MediaPlanService["buildBindings"]>) =>
+      plan.scenes.map((scene, index) => ({ sceneId: scene.sceneId, orderIndex: index, visualKind: scene.mediaKind, mediaAssetVersionId: scene.mediaAssetVersionId }));
+    const rows = sceneRows(ctx.mediaPlan);
+    const fixed = ctx.orshotPages === null && fixedSlotPathApplies({
+      slotCount: ctx.sceneCompositions,
+      includedSceneCount: rows.length,
+      imageSceneCount: rows.filter((row) => row.visualKind === "image").length,
+      templateImageSlots: ctx.slots.filter((slot) => slot.kind === "image").length,
+    });
+    const capacity = { sceneSlots: new Set(ctx.slots.map((slot) => /^(?:Image|Video)-(\d+)\.source$/.exec(slot.key)?.[1]).filter(Boolean)).size };
+    const base = { sceneCount: rows.length, sceneSlots: capacity.sceneSlots, maxScenes: ctx.sceneCompositions > 0 ? null : capacity.sceneSlots || null, mode: (ctx.sceneCompositions > 0 ? "scaled" : "fixed") as "scaled" | "fixed" };
+    if (!fixed) {
+      await this.saveStepDiagnostics(run, "template_slot_preflight", { applies: false, ...base, issues: [], fixes: [], unresolved: [] });
+      return ctx.mediaPlan;
+    }
+    const first = preflightTemplateSlots(ctx.slots, rows);
+    const fixes: Array<{ sceneId: string; slotKey: string; kind: "image" | "video"; fallback: string; mediaAssetVersionId: string }> = [];
+    const handled = new Set<SourcedSegment>();
+    for (const issue of first.issues) {
+      const piece = ctx.sourced.find((entry) => entry.segment.sceneIds.includes(issue.sceneId));
+      if (!piece || handled.has(piece)) continue;
+      handled.add(piece);
+      const fallback = await this.mediaPlans.resolveSlotFallback(run.projectId, ctx.userId, ctx.role, { providerAccountId: ctx.providerAccountId, script: ctx.planScript, segment: piece.segment, ledger: ctx.ledger, expectedKind: issue.expectedKind });
+      if (!fallback) continue;
+      piece.source = fallback;
+      piece.errorCode = null;
+      fixes.push({ sceneId: issue.sceneId, slotKey: issue.slotKey, kind: fallback.kind, fallback: fallback.placeholder ? "brand_background" : fallback.degraded ?? fallback.tier ?? fallback.provider ?? "source", mediaAssetVersionId: fallback.mediaAssetVersionId });
+    }
+    const plan = fixes.length > 0 ? this.mediaPlans.buildBindings(ctx.planScript, ctx.sourced) : ctx.mediaPlan;
+    const unresolved: TemplateSlotIssue[] = fixes.length > 0 ? preflightTemplateSlots(ctx.slots, sceneRows(plan)).issues : first.issues;
+    const blocked = unresolved.length > 0 ? { code: "TEMPLATE_REQUIRED_ASSET_MISSING", message: `Template thiếu asset cho slot bắt buộc: ${describeTemplateSlotIssues(unresolved)}` } : null;
+    await this.saveStepDiagnostics(run, "template_slot_preflight", { applies: true, ...base, issues: first.issues, fixes, unresolved, ...(blocked ? { blocked } : {}) });
+    if (blocked) throw new WorkflowStepFailure("TEMPLATE_REQUIRED_ASSET_MISSING", blocked.message);
+    return plan;
   }
 
   /**
@@ -564,7 +663,7 @@ export class WorkflowRunnerService {
       durationByScene: Map<string, number>;
       targetSec: number;
       /** VE2E-151: the subject is one person - the gate also checks the script focus and the share of media naming the person. */
-      person?: { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }> } | null;
+      person?: { target: PersonTarget; title: string | null; scenes: Array<{ sceneId: string; narration: string; screenText: string }>; strict?: boolean } | null;
     },
   ): Promise<void> {
     const config = qualityGateConfigFromEnv();
@@ -573,6 +672,7 @@ export class WorkflowRunnerService {
     try {
       const degradedBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.degraded ?? null] as const));
       const personMatchBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.personEvidence?.match ?? null] as const));
+      const personEvidenceBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.personEvidence ?? null] as const));
       const cleanlinessBySegment = new Map(ctx.sourced.map((piece) => [piece.segment.segmentId, piece.source?.cleanliness] as const));
       const sourceByAsset = new Map(ctx.sourced.flatMap((piece) => (piece.source ? [[piece.source.mediaAssetVersionId, piece.source] as const] : [])));
       let dims = new Map<string, { widthPx: number | null; heightPx: number | null }>();
@@ -594,9 +694,18 @@ export class WorkflowRunnerService {
         narration: ctx.narrationByScene.get(scene.sceneId) ?? "",
         degradedTier: scene.segmentId ? degradedBySegment.get(scene.segmentId) ?? null : null,
         ...(ctx.person ? { personMatch: scene.segmentId ? personMatchBySegment.get(scene.segmentId) ?? null : null } : {}),
+        // Scene mapping: role of the scene's source for the person + how sure it shows the person (coverage preflight).
+        ...(ctx.person
+          ? (() => {
+              const evidence = scene.segmentId ? personEvidenceBySegment.get(scene.segmentId) ?? null : null;
+              return { mediaRole: personMediaRoleOf(evidence), identityConfidence: evidence?.identityConfidence ?? 0, verificationMethod: evidence?.verificationMethod ?? ("none" as const) };
+            })()
+          : {}),
         ...(scene.segmentId && cleanlinessBySegment.get(scene.segmentId) ? { cleanlinessFallback: cleanlinessBySegment.get(scene.segmentId)!.fallback } : {}),
       }));
-      const person = ctx.person ? { name: ctx.person.target.name, focus: assessScriptPersonFocus(ctx.person.target, { title: ctx.person.title, scenes: ctx.person.scenes }) } : null;
+      const person = ctx.person
+        ? { name: ctx.person.target.name, focus: assessScriptPersonFocus(ctx.person.target, { title: ctx.person.title, scenes: ctx.person.scenes }), strict: Boolean(ctx.person.strict), minCoverage: strictPersonMinCoverageFromEnv(process.env) }
+        : null;
       result = runQualityGate({ scenes, assets, targetSec: ctx.targetSec, config, person });
     } catch {
       return;
@@ -617,6 +726,11 @@ export class WorkflowRunnerService {
       }
     }
     await this.saveStepDiagnostics(run, "quality_gate", { checks: result.checks, fixes: result.fixes, warnings: result.warnings, degraded: result.degraded, failure: result.failure, ...(result.personMedia ? { personMedia: result.personMedia } : {}) });
+    // Strict person media mode: not enough footage of the person -> the render is blocked with its own code (never a generic timeline).
+    if (result.failure?.code === "person_media_insufficient") {
+      const failed = providerFailureSummary(ctx.sourced);
+      throw new WorkflowStepFailure("PERSON_MEDIA_INSUFFICIENT", `${result.failure.reason}${failed.length ? `. Thiếu nguồn media đúng người: ${failed.join("; ")}` : ""}`);
+    }
     if (result.failure) throw new WorkflowStepFailure("VALIDATION_FAILED", `Cổng chất lượng: ${result.failure.reason}`);
   }
 
@@ -837,6 +951,16 @@ ${correction.direction}`,
     if (orshotPages !== null && approved.scenes.length > orshotPages) {
       throw new WorkflowStepFailure("VALIDATION_FAILED", `Template Orshot chỉ có ${orshotPages} page nhưng kịch bản có ${approved.scenes.length} cảnh. Rút xuống tối đa ${orshotPages} cảnh hoặc chọn template nhiều page hơn.`);
     }
+    // A fixed-slot template (no Scene compositions to re-compose) cannot show more scenes than slots, and a required slot past the last
+    // scene can never be filled: blocked HERE, before any paid voice / media work, instead of at the timeline step.
+    const sceneCountCheck = preflightTemplateSceneCount({ slots, sceneCompositions: countTemplateSceneSlots(snapshot.rawTemplate), orshotPages, sceneCount: approved.scenes.length });
+    if (!sceneCountCheck.ok) {
+      await this.saveStepDiagnostics(run, "template_slot_preflight", {
+        applies: true, sceneCount: approved.scenes.length, sceneSlots: sceneCountCheck.capacity.sceneSlots, maxScenes: sceneCountCheck.capacity.maxScenes, mode: sceneCountCheck.capacity.mode,
+        issues: [], fixes: [], unresolved: [], blocked: { code: sceneCountCheck.code, message: sceneCountCheck.message },
+      });
+      throw new WorkflowStepFailure(sceneCountCheck.code, sceneCountCheck.message);
+    }
 
     // --- 4+5. VE2E-133: voice (TTS) and media sourcing run IN PARALLEL ---
     // Sourcing starts right after the approved script, planned with `durationHintMs` (or the real duration of an audio reused on
@@ -881,9 +1005,18 @@ ${correction.direction}`,
       visualPlan: approved.visualPlan ?? null,
     });
     // VE2E-151: the resolved target person also binds plans without a visualPlan (fallback segments get the person as their subject).
-    const targetSubject = resolveTargetPerson({ user: personIntake.user, newsText: personIntake.newsText, model: approved.visualPlan?.videoSubject });
+    // VE2E-151: a subject the keyword extraction names (no / broken visualPlan) is kept here for the post-TTS plan pass and the gate.
+    const subjectHolder: { extracted: MediaPlanVideoSubject | null } = { extracted: null };
+    const targetSubject = (): MediaPlanVideoSubject | null => {
+      const resolved = resolveTargetPerson({ user: personIntake.user, newsText: personIntake.newsText, model: approved.visualPlan?.videoSubject ?? subjectHolder.extracted });
+      if (!resolved) return subjectHolder.extracted;
+      // Strict person media mode (typed target, or a person the title names and the script stays on): generic stock is out of the ranking.
+      const person = personTargetOf(resolved);
+      const strict = person ? strictPersonModeFor(person, { title: approved.title ?? null, scenes: approved.scenes.map((scene: { sceneId: string; narration?: string; screenText?: string }) => ({ sceneId: scene.sceneId, narration: scene.narration ?? "", screenText: scene.screenText ?? "" })) }, process.env) : false;
+      return { ...resolved, ...(strict ? { strict: true } : {}) };
+    };
     const planFor = (script: MediaPlanScript): PlannedSegment[] => {
-      let segments = this.mediaPlans.planSegments(script, backgroundSegmentRange, targetSubject);
+      let segments = this.mediaPlans.planSegments(script, backgroundSegmentRange, targetSubject());
       if (kindByScene) {
         const durations = new Map(script.scenes.map((scene) => [scene.sceneId, Math.max(1, Math.round(scene.voiceDurationMs ?? scene.durationHintMs))] as const));
         segments = splitSegmentsByVisualKind(segments, kindByScene, durations);
@@ -909,7 +1042,7 @@ ${correction.direction}`,
         // VE2E-130: the media step never fails the job; a segment without a source falls down L4 -> L5 -> L6 (quality_degraded).
         guaranteeSource: true,
         // VE2E-50: ONE keyword-extraction call for all segments that need a new source, before the concurrent sourcing starts.
-        beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script, title: approved.title, segments: pending }),
+        beforeSourcing: (pending) => this.extractMissingKeywords(run, { userId, role, contentAccountId: contentConfig.providerAccountId, script, title: approved.title, segments: pending, personIntake, subjectHolder }),
         runImport: (segment, task) =>
           this.recordStep(
             run,
@@ -1053,8 +1186,24 @@ ${correction.direction}`,
       await this.saveMediaSourcingDiagnostics(run, this.mediaPlans.buildBindings(planScript, sourced).diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
       throw sourcing.failure.error;
     }
-    const mediaPlan = this.mediaPlans.buildBindings(planScript, sourced);
-    await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
+    // Template slot preflight (fixed-slot path): every required Image-N / Video-N gets a source of its kind (fallback: a still of a job
+    // clip / stock / brand background for an image, another window for a video) BEFORE the gate and the render; what is left blocks here.
+    // The sourcing diagnostics are kept even when the slot preflight blocks the run (they explain why).
+    const sourcedPlan = this.mediaPlans.buildBindings(planScript, sourced);
+    await this.saveMediaSourcingDiagnostics(run, sourcedPlan.diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
+    const mediaPlan = await this.ensureTemplateSlots(run, {
+      userId,
+      role,
+      providerAccountId: mediaConfig.providerAccountId,
+      planScript,
+      sourced,
+      mediaPlan: sourcedPlan,
+      slots,
+      sceneCompositions: countTemplateSceneSlots(snapshot.rawTemplate),
+      orshotPages,
+      ledger,
+    });
+    if (mediaPlan !== sourcedPlan) await this.saveMediaSourcingDiagnostics(run, mediaPlan.diagnostics, sourcing.apifyUsage, sourcing.visionUsage);
     if (sourcing.visionUsage) {
       await this.appendRunUsage(run, { step: "vision_moderation", kind: "content", provider: null, modelId: sourcing.visionUsage.modelId, inputTokens: null, outputTokens: null, costAmount: null, costCurrency: null, calls: sourcing.visionUsage.calls, at: new Date().toISOString() });
     }
@@ -1065,7 +1214,7 @@ ${correction.direction}`,
       narrationByScene: new Map(approved.scenes.map((scene: { sceneId: string; narration?: string }) => [scene.sceneId, scene.narration ?? ""] as const)),
       durationByScene,
       targetSec: profile.durationSec,
-      person: personGateInput(planScript, approved.title ?? null, personIntake),
+      person: personGateInput(planScript, approved.title ?? null, personIntake, subjectHolder.extracted),
     });
     const mediaByScene = new Map(mediaPlan.scenes.filter((scene) => scene.mediaAssetVersionId && scene.mediaKind).map((scene) => [scene.sceneId, { id: scene.mediaAssetVersionId!, kind: scene.mediaKind! }]));
     const planByScene = new Map(mediaPlan.scenes.map((scene) => [scene.sceneId, scene]));
@@ -1097,8 +1246,9 @@ ${correction.direction}`,
     });
     const built = fixedSlots || orshotPages !== null ? buildAutoRenderAssignments(slots, sceneMedia, extraText) : ({ ok: true, assignments: [] } as const);
     if (!built.ok) {
-      const detail = built.reason === "missing_required_slot" ? `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}` : "Không có scene nào để dựng timeline";
-      throw new WorkflowStepFailure("VALIDATION_FAILED", detail);
+      // Last guard only (ensureTemplateSlots fills / blocks earlier): never reached with a scene whose kind does not fit its slot.
+      if (built.reason === "missing_required_slot") throw new WorkflowStepFailure("TEMPLATE_REQUIRED_ASSET_MISSING", `Template thiếu asset cho modification bắt buộc: ${built.missingKeys.join(", ")}`);
+      throw new WorkflowStepFailure("VALIDATION_FAILED", "Không có scene nào để dựng timeline");
     }
     // VE2E-42 (CR-JP-ONESHOT-MEDIA §8): Auto's bindings become a real, auto-approved TimelineVersion
     // so "Mở trong Studio" on this run shows exactly what was rendered, and the render goes through

@@ -49,6 +49,8 @@ export type SegmentKeywordsOutcome =
       ok: true;
       keywords: Record<string, { ja: string; en: string; jaAll?: string[]; enAll?: string[]; broadEn?: string[]; moodEn?: string }>;
       rejectedSegmentIds: string[];
+      /** VE2E-151: the subject the model named (asked only when the caller passed none). */
+      videoSubject?: VideoSubjectV2;
       usage: { inputTokens: number | null; outputTokens: number | null; costAmount: string | null; costCurrency: string | null; providerRequestId: string | null };
       modelId: string;
       provider: string;
@@ -206,6 +208,7 @@ export class ScriptGenerationService {
           ok: true,
           keywords: value.keywords,
           rejectedSegmentIds: value.rejectedSegmentIds,
+          ...(value.videoSubject ? { videoSubject: value.videoSubject } : {}),
           usage: { inputTokens: value.usage.inputTokens, outputTokens: value.usage.outputTokens, costAmount: value.usage.cost.amount, costCurrency: value.usage.cost.currency, providerRequestId: value.usage.providerRequestId },
           modelId: value.modelId,
           provider: account.provider,

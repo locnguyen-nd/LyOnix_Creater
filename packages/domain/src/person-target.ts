@@ -37,10 +37,12 @@ export type PersonTarget = {
   others: string[];
   /** Who named the target: the user (typed on the create form), the selected news, or the model. */
   source: TargetPersonSource;
+  /** Strict person media mode (see `person-coverage.ts`): generic unrelated media is rejected, stock is context only. */
+  strict?: boolean;
 };
 
 export type PersonSubjectInput =
-  | { kind?: unknown; main?: unknown; aliases?: unknown; mustInclude?: unknown; mustExclude?: unknown; otherPeople?: unknown; source?: unknown }
+  | { kind?: unknown; main?: unknown; aliases?: unknown; mustInclude?: unknown; mustExclude?: unknown; otherPeople?: unknown; source?: unknown; strict?: unknown }
   | null
   | undefined;
 
@@ -115,6 +117,7 @@ export function personTargetOf(subject: PersonSubjectInput): PersonTarget | null
     exclude: strings(subject.mustExclude).slice(0, MAX_NAMES),
     others: others.slice(0, MAX_NAMES),
     source: parseTargetPersonSource(subject.source) ?? "model",
+    ...(subject.strict === true ? { strict: true } : {}),
   };
 }
 
@@ -265,7 +268,7 @@ export function matchPersonIdentity(target: PersonTarget, meta: PersonMeta): Per
   return result("none", PERSON_IDENTITY_SCORES.none);
 }
 
-export type PersonMediaFlag = "news" | "text_card" | "group" | "close_up" | "slideshow" | "other_person" | "generic" | "impostor_risk" | "identity_uncertain" | "wrong_person";
+export type PersonMediaFlag = "news" | "text_card" | "group" | "close_up" | "slideshow" | "other_person" | "generic" | "context" | "impostor_risk" | "identity_uncertain" | "wrong_person";
 
 /** News / publisher posts: usually a headline card or lower-third over the footage. A press conference itself is NOT flagged (real footage of the person). */
 const NEWS = /(?:^|[^a-z])(?:news|breaking|headlines?|tin tuc|bao chi)(?:[^a-z]|$)|ニュース|速報|報道|新聞|記事/u;
@@ -301,18 +304,20 @@ export const PERSON_SCORE_WEIGHTS = { cleanTier: 0.3, framing: 0.2, motion: 0.15
  *  strong_metadata - the full name in the candidate's own metadata, not contradicted or doubted by vision,
  *  single_portrait - weaker evidence of ONE person (short name + group, short name, uploader, or a full name vision could not confirm),
  *  group           - names the person but shows several people (group photo, members post, another person tagged) or is a news post,
- *  generic         - does not name the person (stock / backdrop context),
+ *  context         - does not name the person but is directly related context (the person's team / group / event / occupation),
+ *  generic         - does not name the person, unrelated stock / backdrop (rejected in strict person mode),
  *  rejected        - another person (vision), a news / quote card, nobody in a frame that claims the person, a stranger's close-up.
  */
-export const PERSON_TIERS = ["rejected", "generic", "group", "single_portrait", "strong_metadata", "verified"] as const;
+export const PERSON_TIERS = ["rejected", "generic", "context", "group", "single_portrait", "strong_metadata", "verified"] as const;
 export type PersonTier = (typeof PERSON_TIERS)[number];
 /** Combined-score band of each tier: a lower tier can never outrank a higher one. `generic` stays above the 0.45 auto-pick threshold, `rejected` below. */
 export const PERSON_TIER_BANDS: Record<PersonTier, readonly [number, number]> = {
   verified: [0.88, 1],
   strong_metadata: [0.76, 0.88],
   single_portrait: [0.64, 0.76],
-  group: [0.55, 0.64],
-  generic: [0.46, 0.55],
+  group: [0.57, 0.64],
+  context: [0.51, 0.57],
+  generic: [0.46, 0.51],
   rejected: [0, 0.3],
 };
 /** A vision identity verdict counts from this confidence on; below it is treated as uncertain. */
@@ -321,7 +326,7 @@ export const PERSON_VERIFY_MIN_CONFIDENCE = 0.6;
 export const METADATA_IDENTITY_CAP = 0.75;
 
 export type PersonVerificationMethod = "vision" | "metadata" | "none";
-export type PersonRejectionReason = "person_wrong_person" | "person_news_card" | "person_not_visible" | "person_text_card" | "person_impostor_risk";
+export type PersonRejectionReason = "person_wrong_person" | "person_news_card" | "person_not_visible" | "person_text_card" | "person_impostor_risk" | "person_generic_unrelated";
 
 export type PersonCandidateScore = {
   identity: PersonIdentity;
@@ -368,6 +373,8 @@ export function scorePersonCandidate(
     /** 0..1 resolution / visual quality and aspect / crop safety (vertical fit). */
     visual?: number;
     aspect?: number;
+    /** The search query that found the candidate (a stock search made from the person's team / group is context). */
+    query?: string | null;
   },
 ): PersonCandidateScore {
   const identity = matchPersonIdentity(target, input);
@@ -434,8 +441,21 @@ export function scorePersonCandidate(
     tier = "rejected"; // a quote / meme / lyric card by its metadata: last resort only (vision may still clear it)
     rejectionReason = "person_text_card";
   } else if (!named) {
-    tier = flags.includes("impostor_risk") ? "rejected" : "generic";
-    if (tier === "rejected") rejectionReason = "person_impostor_risk";
+    // Directly related context: the candidate (or the stock search that found it) names the person's team / group / event / occupation.
+    const related = target.context.length > 0 && anyIn(`${input.text ?? ""} ${input.query ?? ""}`, target.context, false);
+    if (related) flags.push("context");
+    if (flags.includes("impostor_risk")) {
+      tier = "rejected";
+      rejectionReason = "person_impostor_risk";
+    } else if (related) {
+      tier = "context";
+    } else if (target.strict) {
+      tier = "rejected"; // strict person mode: unrelated generic footage never fills a video about one person
+      rejectionReason = "person_generic_unrelated";
+      hardReject = true;
+    } else {
+      tier = "generic";
+    }
   } else if (group || flags.includes("news")) {
     tier = "group";
   } else if (verdict?.match === "match" && sure) {
@@ -486,7 +506,7 @@ export const visionTargetOf = (target: PersonTarget): { name: string; aliases: s
 /** verified = vision confirmed the person; metadata = named in the candidate's metadata (not rejected); generic = stock / backdrop / rejected. */
 export type PersonMatchLevel = "verified" | "metadata" | "generic";
 
-export const personMatchLevelOf = (score: Pick<PersonCandidateScore, "identity" | "tier">): PersonMatchLevel =>
+export const personMatchLevelOf = (score: Pick<PersonCandidateScore, "identity" | "tier">): PersonMatchLevel => // context counts as generic: it does not show the person
   score.tier === "verified" ? "verified" : score.identity.score > 0 && score.tier !== "rejected" ? "metadata" : "generic";
 
 /** Rejection reasons of a ranked pool (person mode), for the segment diagnostics. */

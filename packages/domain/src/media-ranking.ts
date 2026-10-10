@@ -421,6 +421,7 @@ export function rankMediaCandidates(
             ...(hasCleanliness ? { textLogo: cleanliness.cleanlinessScore } : {}),
             visual: qualityScore,
             aspect: continuityScore,
+            query: candidate.provenance?.query ?? null,
           })
         : null;
       // Non-person ranking keeps its score, scaled by the cleanliness tier (no evidence = clean = unchanged).

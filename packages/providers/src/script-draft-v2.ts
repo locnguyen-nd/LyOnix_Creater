@@ -188,6 +188,8 @@ export type VisualPlanParseDiagnostics = {
   invalidJaSegmentIds: string[];
   /** VE2E-88: segments with neither a usable ja nor a usable en phrase (these need the extract_keywords call; en alone is enough for Apify). Optional for older diagnostics. */
   unusableSegmentIds?: string[];
+  /** VE2E-151: the segments were rejected but the videoSubject was kept (subject-only plan, `segments: []`). */
+  subjectOnly?: boolean;
 };
 
 export function parseScriptDraftV2(value: unknown, language: ContentLanguageV2): ScriptDraftV2 | null {
@@ -236,15 +238,26 @@ export function parseScriptDraftV2WithDiagnostics(value: unknown, language: Cont
   let visualPlan: ScriptVisualPlanV2 | null = null;
   let planDiagnostics: VisualPlanParseDiagnostics = none;
   if (finalScenes.length) {
+    // Without the strict schema models also write `visual_plan`, or put `videoSubject` next to the scenes instead of inside the plan.
+    const rawPlan = nested.visualPlan ?? nested.visual_plan;
+    const looseSubject = nested.videoSubject ?? nested.video_subject;
+    const planRecord = asRecord(rawPlan);
+    const planInput = looseSubject !== undefined && !(planRecord && (planRecord.videoSubject ?? planRecord.video_subject))
+      ? { ...(planRecord ?? {}), videoSubject: looseSubject }
+      : rawPlan;
     const diagnosis = diagnoseScriptVisualPlanV2(
-      nested.visualPlan,
+      planInput,
       finalScenes.map((scene) => scene.sceneId),
       (rawId) => {
         const uniqueId = uniqueIdByRawId.get(rawId);
         return uniqueId ? childrenById.get(uniqueId) ?? [] : [];
       },
     );
-    if (diagnosis.plan) {
+    if (diagnosis.plan && diagnosis.reason !== null) {
+      // Segments rejected, subject kept: the script still knows who / what it is about.
+      visualPlan = diagnosis.plan;
+      planDiagnostics = { status: "rejected", reason: diagnosis.reason, ...(diagnosis.detail ? { detail: diagnosis.detail } : {}), invalidJaSegmentIds: [], subjectOnly: true };
+    } else if (diagnosis.plan) {
       const sanitized = sanitizeVisualPlanKeywords(diagnosis.plan);
       visualPlan = sanitized.plan;
       planDiagnostics = { status: "ok", reason: null, invalidJaSegmentIds: sanitized.invalidJaSegmentIds, unusableSegmentIds: sanitized.unusableSegmentIds };

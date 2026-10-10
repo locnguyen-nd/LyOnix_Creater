@@ -25,7 +25,7 @@ import {
   sanitizeCaptionStyleOptionValues,
   type BackgroundSegmentCountBounds,
 } from "@lyonix/domain";
-import type { DurationBudgetDiagnostics, QualityGateDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
+import type { DurationBudgetDiagnostics, QualityGateDiagnostics, TemplateSlotPreflightDiagnostics, ErrorCode, MediaPlanApifyUsage, MediaPlanSegmentDiagnostics, MediaPlanVisionUsage, VideoProductionListItemResponse, VideoProductionResponse, VideoProductionSubmitRequest, VideoProductionSubmitResponse, WorkflowStepEventResponse } from "@lyonix/contracts";
 import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { AutoPreflightService } from "./auto-preflight.service.js";
@@ -461,6 +461,9 @@ export class VideoProductionsService {
     const gateSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "quality_gate" }, orderBy: [{ attempt: "desc" }], take: 1 });
     const gateOutput = gateSteps?.[0]?.outputRef as Record<string, unknown> | null | undefined;
     const qualityGate = gateOutput && Array.isArray(gateOutput.checks) ? (gateOutput as unknown as QualityGateDiagnostics) : null;
+    const slotSteps = await this.prisma.stepRun.findMany({ where: { workflowRunId: run.id, stepKey: "template_slot_preflight" }, orderBy: [{ attempt: "desc" }], take: 1 });
+    const slotOutput = slotSteps?.[0]?.outputRef as Record<string, unknown> | null | undefined;
+    const templateSlots = slotOutput && Array.isArray(slotOutput.issues) ? (slotOutput as unknown as TemplateSlotPreflightDiagnostics) : null;
     return {
       ok: true,
       data: {
@@ -480,6 +483,7 @@ export class VideoProductionsService {
         visionUsage,
         durationBudget,
         qualityGate,
+        templateSlots,
         queue: (await this.queueStatus.workflowQueueStates([run])).get(run.id)!,
         createdAt: run.createdAt.toISOString(),
         updatedAt: run.updatedAt.toISOString(),

@@ -23,6 +23,8 @@ export type SubjectProfile = {
   otherPeople?: string[];
   /** Who named a person subject: user (create form) > news > model. */
   targetSource?: TargetPersonSource | null;
+  /** Strict person media mode for this video (see `person-coverage.ts`). */
+  personStrict?: boolean;
 };
 
 const asStrings = (value: unknown): string[] => {
@@ -46,12 +48,21 @@ export function subjectProfileOf(segment: { keywords?: unknown }): SubjectProfil
   const kind = parseSubjectKind(record.subjectKind);
   const otherPeople = asStrings(record.otherPeople);
   const targetSource = parseTargetPersonSource(record.targetSource);
-  return { subject, aliases, mustInclude: asStrings(record.mustInclude), mustExclude: asStrings(record.mustExclude), ...(kind ? { kind } : {}), ...(otherPeople.length ? { otherPeople } : {}), ...(targetSource ? { targetSource } : {}) };
+  return {
+    subject,
+    aliases,
+    mustInclude: asStrings(record.mustInclude),
+    mustExclude: asStrings(record.mustExclude),
+    ...(kind ? { kind } : {}),
+    ...(otherPeople.length ? { otherPeople } : {}),
+    ...(targetSource ? { targetSource } : {}),
+    ...(record.personStrict === true ? { personStrict: true } : {}),
+  };
 }
 
 /** The person target of a segment's subject profile; `null` unless the subject is one person. */
 export const personTargetOfProfile = (profile: SubjectProfile): PersonTarget | null =>
-  personTargetOf({ kind: profile.kind, main: profile.subject, aliases: profile.aliases, mustInclude: profile.mustInclude, mustExclude: profile.mustExclude, otherPeople: profile.otherPeople, source: profile.targetSource });
+  personTargetOf({ kind: profile.kind, main: profile.subject, aliases: profile.aliases, mustInclude: profile.mustInclude, mustExclude: profile.mustExclude, otherPeople: profile.otherPeople, source: profile.targetSource, strict: profile.personStrict === true });
 
 /** Subject name first, then aliases (>= 2 chars), de-duplicated. */
 export const subjectNames = (profile: SubjectProfile): string[] => {

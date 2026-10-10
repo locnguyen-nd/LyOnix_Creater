@@ -38,7 +38,9 @@ import {
   anchorKeywordToSubject,
   personTargetOfProfile,
   stripPersonNames,
+  personMediaRoleOf,
   METADATA_IDENTITY_CAP,
+  PERSON_VERIFY_MIN_CONFIDENCE,
   type MediaPlanVideoSubject,
   type PersonMatchLevel,
   type PersonTarget,
@@ -82,6 +84,7 @@ import { GrantsService } from "./grants.service.js";
 import { PexelsService } from "./pexels.service.js";
 import { socialFetchEnabled } from "./social-fetch.service.js";
 import { SocialSourceService, socialLedgerIdFromFileName } from "./social-source.service.js";
+import { VideoFramesService } from "./video-frames.service.js";
 import { PrismaService } from "./prisma.service.js";
 
 export type MediaPlanOutcome<T> = { ok: true; data: T } | { ok: false; code: ErrorCode; message: string; status?: number; /** VE2E-130: per-tier reasons the primary sourcing found nothing (feeds the degraded ladder). */ reasons?: string };
@@ -168,6 +171,10 @@ export class SegmentSourceLedger {
   kenBurnsCount = 0;
   /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
   readonly authors = new Set<string>();
+  /** Apify accounts that answered PROVIDER_QUOTA_EXHAUSTED in this job: the next account is used, never this one again. */
+  readonly apifyExhausted = new Set<string>();
+  /** Still frames already taken per clip (each new still uses another instant of the clip). */
+  readonly stills = new Map<string, number>();
   readonly clips = new Map<string, { durationMs: number; provider: "apify" | "pexels" | "social" | undefined; windows: ClipWindow[]; /** VE2E-136: normalised subjects of the segments that took a window of this clip (same-subject segments may take another window instead of a new search). Lost in the dev merge of VE2E-136 + VE2E-147, restored. */ subjects: Set<string>; /** VE2E-151: person evidence of the segment that chose this clip (inherited by a reused window). */ personEvidence?: PersonEvidence }>();
   add(source: SegmentSource) {
     this.assetIds.add(source.mediaAssetVersionId);
@@ -272,6 +279,8 @@ const clipWindowReuseEnabled = () => !/^(0|false|off|no)$/i.test(process.env.CLI
  * of paying for another search + download. Not a degraded source: the clip already passed the relevance filters for this subject.
  */
 export function claimSameSubjectWindow(ledger: SegmentSourceLedger, segment: PlannedSegment): SegmentSource | null {
+  // A window of a clip is a VIDEO: an image slot (template Image-N) must never receive one (it left Image-7 / Image-10 empty).
+  if (segment.visualKind === "image") return null;
   const subject = normalizeSubjectKey(segment.subject);
   if (!subject || !clipWindowReuseEnabled()) return null;
   const candidates = [...ledger.clips].filter(([, clip]) => clip.subjects.has(subject));
@@ -299,15 +308,47 @@ const registerClipWindow = (ledger: SegmentSourceLedger, source: SegmentSource, 
 
 const PERSON_MATCH_RANK: Record<PersonMatchLevel, number> = { generic: 0, metadata: 1, verified: 2 };
 
-/** VE2E-151: an Apify candidate's person ranking as segment evidence. */
-const personEvidenceOf = (person: NonNullable<MediaPlanApifyQuality["person"]>): PersonEvidence => ({
-  match: person.match,
-  identityConfidence: person.identityConfidence,
-  verificationMethod: person.verificationMethod,
-  tier: person.tier,
-  flags: [...person.flags],
-  framing: person.framing,
-});
+/**
+ * VE2E-151: writes a subject (named by the keyword-extraction call, or the resolved target person) onto planned segments that have
+ * none yet, so every tier anchors on it. Segments that already carry a subject are left alone. Mutates in place (like the keywords).
+ */
+export function applySubjectToSegments(segments: PlannedSegment[], subject: MediaPlanVideoSubject | null | undefined): number {
+  if (!subject?.main?.trim()) return 0;
+  let applied = 0;
+  for (const segment of segments) {
+    if (subjectProfileOf(segment).subject) continue;
+    const keywords = (segment.keywords ?? { ja: "", en: "" }) as NonNullable<PlannedSegment["keywords"]>;
+    segment.keywords = {
+      ...keywords,
+      subject: subject.main.trim(),
+      ...(subject.aliases?.length ? { aliases: [...subject.aliases] } : {}),
+      ...(subject.mustInclude?.length ? { mustInclude: [...subject.mustInclude] } : {}),
+      ...(subject.mustExclude?.length ? { mustExclude: [...subject.mustExclude] } : {}),
+      ...(subject.kind ? { subjectKind: subject.kind } : {}),
+      ...(subject.otherPeople?.length ? { otherPeople: [...subject.otherPeople] } : {}),
+      ...(subject.source ? { targetSource: subject.source } : {}),
+    };
+    if (!segment.subject) segment.subject = subject.main.trim();
+    applied += 1;
+  }
+  return applied;
+}
+
+/**
+ * VE2E-151: an Apify candidate's person ranking as segment evidence. The 5-frame identity verdict of the downloaded clip (when
+ * `VISION_VIDEO_FRAMES=1`) refines it: a confident `match` verifies it, `uncertain` / `no_person` halves the confidence (support only).
+ */
+const personEvidenceOf = (person: NonNullable<MediaPlanApifyQuality["person"]>, frameIdentity?: MediaPlanApifyQuality["frameIdentity"]): PersonEvidence => {
+  const base: PersonEvidence = { match: person.match, identityConfidence: person.identityConfidence, verificationMethod: person.verificationMethod, tier: person.tier, flags: [...person.flags], framing: person.framing };
+  if (!frameIdentity || person.match === "generic") return base;
+  if (frameIdentity.match === "match" && frameIdentity.confidence >= PERSON_VERIFY_MIN_CONFIDENCE) {
+    return { ...base, match: "verified", tier: "verified", verificationMethod: "vision", identityConfidence: Math.max(base.identityConfidence, frameIdentity.confidence), flags: [...base.flags, "frames_verified"] };
+  }
+  if (frameIdentity.match === "uncertain" || frameIdentity.match === "no_person" || frameIdentity.match === "match") {
+    return { ...base, match: "metadata", tier: "single_portrait", verificationMethod: "vision", identityConfidence: Math.round(base.identityConfidence * 500) / 1000, flags: [...base.flags, "frame_identity_uncertain"] };
+  }
+  return base;
+};
 
 /** VE2E-151: a social (Shorts / Pinterest) pick is ranked on metadata only - never more than {@link METADATA_IDENTITY_CAP}. */
 const socialPersonEvidence = (identity: { level: string; score: number }): PersonEvidence =>
@@ -332,6 +373,29 @@ export function withPersonEvidence(segment: PlannedSegment, source: SegmentSourc
     : source;
 }
 
+/**
+ * Which provider failed for the segments of a job, in plain words for the block reason / the job page
+ * ("Apify: hết quota (mọi account) - 6 đoạn"). Read from the tier reasons kept on the sources. Empty = nothing failed.
+ */
+export function providerFailureSummary(sourced: ReadonlyArray<{ source: SegmentSource | null; errorCode: string | null }>): string[] {
+  const counts = new Map<string, number>();
+  const label = (reason: string): string | null => {
+    if (reason === "apify_quota_exhausted_all_accounts" || reason === "apify_error:PROVIDER_QUOTA_EXHAUSTED") return "Apify: hết quota (không còn account Apify nào dùng được)";
+    const match = /^apify_error:([A-Z_]+)/.exec(reason);
+    if (match) return `Apify: ${match[1]}`;
+    if (reason === "no_apify_account") return "Apify: chưa có account";
+    return null;
+  };
+  for (const piece of sourced) {
+    const reason = piece.source?.fallbackReason ?? piece.source?.degradeReason ?? piece.errorCode ?? "";
+    for (const part of reason.split(/;\s*/)) {
+      const text = label(part.replace(/^(ja|en|broad|shorts|gallery|pexels):/, "").trim());
+      if (text) counts.set(text, (counts.get(text) ?? 0) + 1);
+    }
+  }
+  return [...counts].map(([text, n]) => `${text} - ${n} đoạn`);
+}
+
 /** VE2E-151: the per-segment person diagnostics (target, who named it, identity evidence, person-rule rejections, why nothing matched). */
 export function segmentPersonDiagnostics(target: PersonTarget, source: SegmentSource | null, errorCode: string | null): SegmentPersonDiagnostics {
   const evidence = source?.personEvidence;
@@ -349,6 +413,8 @@ export function segmentPersonDiagnostics(target: PersonTarget, source: SegmentSo
     ...(rejected && Object.keys(rejected).length > 0 ? { rejected: { ...rejected } } : {}),
     ...(match === "generic" ? { rejectionReason: mostFrequent ?? source?.fallbackReason ?? source?.degradeReason ?? errorCode ?? "no_person_source" } : {}),
     ...(evidence?.framing ? { framing: evidence.framing } : {}),
+    mediaRole: personMediaRoleOf(evidence ?? null),
+    ...(target.strict ? { strict: true } : {}),
   };
 }
 
@@ -360,6 +426,8 @@ export function segmentPersonDiagnostics(target: PersonTarget, source: SegmentSo
 export function personBackdropQueries(segment: PlannedSegment): string[] | null {
   const person = personTargetOfProfile(subjectProfileOf(segment));
   if (!person) return null;
+  // Strict person mode: stock is directly related CONTEXT only (the person's team / group / event / occupation), never a mood backdrop.
+  if (person.strict) return [...new Set(person.context.map((term) => normalizePexelsQuery(term)).filter((term) => term.length > 1))].slice(0, 2);
   const keywords = parseSegmentKeywords(segment.keywords);
   const stripped = [keywords.en[0], keywords.broad[0]]
     .filter((value): value is string => Boolean(value))
@@ -421,6 +489,8 @@ export class MediaPlanService {
     @Optional() @Inject(MediaLibraryService) private readonly library?: MediaLibraryService,
     /** VE2E-147/148: yt-dlp / gallery-dl tiers (YouTube Shorts, Pinterest/X). Absent or switched off (env) = unchanged ladder. */
     @Optional() @Inject(SocialSourceService) private readonly social?: SocialSourceService,
+    /** Still frames of a job clip (media-worker `frame.extract`) as the image fallback of an image slot. Absent = no still fallback. */
+    @Optional() @Inject(VideoFramesService) private readonly videoFrames?: VideoFramesService,
   ) {}
 
   /**
@@ -508,6 +578,8 @@ export class MediaPlanService {
       orderBy: { createdAt: "desc" },
     });
     if (!row || (row.kind !== "video" && row.kind !== "image")) return null;
+    // Template-aware: an image slot never reuses a video (and the other way round).
+    if (segment.visualKind && row.kind !== segment.visualKind) return null;
     const externalId = pexelsExternalIdFromFileName(row.originalFileName) ?? apifyLedgerIdFromFileName(row.originalFileName) ?? socialLedgerIdFromFileName(row.originalFileName);
     if (ledger.assetIds.has(row.id) || (externalId && ledger.externalIds.has(externalId))) return null;
     return { mediaAssetVersionId: row.id, kind: row.kind, durationMs: row.durationMs, externalId, sourcing: "reused", ...(row.origin === "apify" ? { provider: "apify" as const } : row.origin === "social" ? { provider: "social" as const } : {}) };
@@ -560,10 +632,13 @@ export class MediaPlanService {
     }
   }
 
-  private async findApifyAccount(userId: string, role: "admin" | "staff"): Promise<{ id: string; encryptedSecret: string } | null> {
+  private async findApifyAccount(userId: string, role: "admin" | "staff", exhausted: ReadonlySet<string> = new Set()): Promise<{ id: string; encryptedSecret: string } | null> {
     if (!this.apify) return null;
     try {
-      return await this.apify.findAccountForUser(userId, role);
+      // Several accounts: the first one that did not run out of quota in this job.
+      if (typeof this.apify.findAccountsForUser === "function") return (await this.apify.findAccountsForUser(userId, role)).find((account) => !exhausted.has(account.id)) ?? null;
+      const single = await this.apify.findAccountForUser(userId, role);
+      return single && !exhausted.has(single.id) ? single : null;
     } catch {
       return null;
     }
@@ -621,7 +696,7 @@ export class MediaPlanService {
           tier: input.tier,
           apifyProvenance: provenance ? { platform: provenance.platform, actorId: provenance.actorId, actorVersion: provenance.actorVersion, sourceUrl: provenance.sourceUrl, author: provenance.author, fetchedAt: provenance.fetchedAt } : null,
           apifyQuality: attempt.data.quality,
-          ...(attempt.data.quality?.person ? { personEvidence: personEvidenceOf(attempt.data.quality.person) } : {}),
+          ...(attempt.data.quality?.person ? { personEvidence: personEvidenceOf(attempt.data.quality.person, attempt.data.quality.frameIdentity) } : {}),
           ...(attempt.data.quality?.frameCleanliness ?? attempt.data.quality?.cleanliness ? { cleanliness: (attempt.data.quality.frameCleanliness ?? attempt.data.quality.cleanliness)! } : {}),
         },
       };
@@ -692,7 +767,9 @@ export class MediaPlanService {
   ): Promise<MediaPlanOutcome<SegmentSource>> {
     const brief = this.segmentBrief(input.script, input.segment, input.ledger);
     const excluded = new Set<string>();
-    const queries = pexelsQueriesFor(input.queries, brief.phrases, input.script, input.segment);
+    // A person video never falls back to the brief's own phrases / visual queries ("hand holding smartphone"): its stock search is the
+    // backdrop / context query or nothing.
+    const queries = brief.person && (!input.queries || input.queries.length === 0) ? [] : pexelsQueriesFor(input.queries, brief.phrases, input.script, input.segment);
     // Pexels answers an empty query with 400 ("No query param given"): never send one - the segment simply has no searchable words.
     if (queries.length === 0) {
       if (process.env.NODE_ENV !== "test") console.info(`[pexels] ${input.segment.segmentId}: skipped, no searchable keyword (never sends an empty query)`);
@@ -725,7 +802,9 @@ export class MediaPlanService {
         }
         input.ledger.apifyPlainIds.add(externalId); // claim (live set), same tick as the check above
         const cleanliness = outcome.data.cleanliness;
-        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels", ...(cleanliness ? { cleanliness } : {}) } };
+        // Strict person mode: only directly related context survives the ranking, so a stock pick here is context, never the person.
+        const context: PersonEvidence | null = brief.person?.strict ? { match: "generic", identityConfidence: 0, verificationMethod: "none", tier: "context", flags: ["context"] } : null;
+        return { ok: true, data: { mediaAssetVersionId: asset.id, kind: asset.kind, durationMs: asset.durationMs, externalId, sourcing: "imported", provider: "pexels", tier: "pexels", ...(cleanliness ? { cleanliness } : {}), ...(context ? { personEvidence: context } : {}) } };
       }
     }
     return last;
@@ -752,7 +831,7 @@ export class MediaPlanService {
     }
     const tierKeywords = this.apify ? subjectTierKeywords(input.segment.keywords, subjectProfileOf(input.segment), isValidJaSearchKeyword, input.segment.subject) : [];
     // The Apify account is only looked up when at least one tier has a keyword to search.
-    const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role) : Promise.resolve(null)]);
+    const [pexelsAccountId, account] = await Promise.all([this.resolvePexelsAccountId(userId, role, input.providerAccountId), tierKeywords.length > 0 ? this.findApifyAccount(userId, role, input.ledger.apifyExhausted) : Promise.resolve(null)]);
     const reasons: Partial<Record<"ja" | "en" | "broad" | "pexels" | "shorts" | "gallery", string>> = {};
     const qualities: Partial<Record<"ja" | "en" | "broad", MediaPlanApifyQuality | null>> = {};
     const settled = new Set<string>();
@@ -760,16 +839,25 @@ export class MediaPlanService {
     const holder: { pexelsFailure: MediaPlanOutcome<SegmentSource> | null } = { pexelsFailure: null };
     if (this.apify) {
       if (!tierKeywords.some((entry) => entry.tier === "ja")) reasons.ja = "no_ja_keywords";
-      if (tierKeywords.length > 0 && !account) reasons.ja = "no_apify_account";
+      // Every Apify account ran out of quota earlier in this job: say so (no person-specific source), never call it again.
+      if (tierKeywords.length > 0 && !account) reasons.ja = input.ledger.apifyExhausted.size > 0 ? "apify_quota_exhausted_all_accounts" : "no_apify_account";
       else if (account) {
         for (const { tier, keyword } of tierKeywords) {
           tiers.push({
             name: tier,
             run: async () => {
-              const attempt = await this.apifyTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), allowUnverified: !pexelsAccountId, tier, keyword, account });
-              if ("source" in attempt) return attempt.source;
-              reasons[tier] = attempt.reason;
-              qualities[tier] = attempt.quality;
+              let current: { id: string; encryptedSecret: string } | null = account;
+              // PROVIDER_QUOTA_EXHAUSTED: the next Apify account of the user is tried (at most once each); none left = no person source.
+              for (let tries = 0; current && tries < 3; tries += 1) {
+                const attempt = await this.apifyTier(projectId, userId, role, { script: input.script, segment: input.segment, ledger: input.ledger, ...(input.job ? { job: input.job } : {}), allowUnverified: !pexelsAccountId, tier, keyword, account: current });
+                if ("source" in attempt) return attempt.source;
+                reasons[tier] = attempt.reason;
+                qualities[tier] = attempt.quality;
+                if (attempt.reason !== "apify_error:PROVIDER_QUOTA_EXHAUSTED") return null;
+                input.ledger.apifyExhausted.add(current.id);
+                current = await this.findApifyAccount(userId, role, input.ledger.apifyExhausted);
+                if (!current) reasons[tier] = "apify_quota_exhausted_all_accounts";
+              }
               return null;
             },
           });
@@ -878,8 +966,13 @@ export class MediaPlanService {
   ): Promise<SegmentSource | null> {
     const { ledger, segment } = input;
     const reason = input.reason ?? null;
+    // L4 (image slot): a still frame of a clip of this job - the person's own footage beats stock; a video window would leave Image-N empty.
+    if (segment.visualKind === "image") {
+      const still = await this.stillFrameSource(projectId, userId, role, ledger);
+      if (still) return { ...still, degradeReason: reason };
+    }
     // L4 - no await between the search and the window claim.
-    const pick = findFreeWindow(
+    const pick = segment.visualKind === "image" ? null : findFreeWindow(
       [...ledger.clips].map(([id, clip]) => ({ id, durationMs: clip.durationMs, usedWindows: clip.windows, ...windowOptionsFor(clip.provider) })),
       segment.durationMs,
     );
@@ -910,6 +1003,73 @@ export class MediaPlanService {
     // L6
     const background = await this.brandBackgroundSource(projectId, userId, role);
     return background ? { ...background, degradeReason: reason } : null;
+  }
+
+  /**
+   * An image from a clip this job already uses (media-worker `frame.extract`, low cost, no provider call): a clip of the person first,
+   * so an image slot keeps showing the person. Registered as a `generated` image asset; `null` when no clip / no worker.
+   */
+  async stillFrameSource(projectId: string, userId: string, role: "admin" | "staff", ledger: SegmentSourceLedger): Promise<SegmentSource | null> {
+    if (!this.videoFrames || !this.media) return null;
+    const clips = [...ledger.clips].sort(([, a], [, b]) => PERSON_MATCH_RANK[b.personEvidence?.match ?? "generic"] - PERSON_MATCH_RANK[a.personEvidence?.match ?? "generic"]);
+    for (const [clipId, clip] of clips) {
+      try {
+        const used = ledger.stills.get(clipId) ?? 0;
+        // A different instant for every still taken from the same clip.
+        const atMs = Math.max(0, Math.round(clip.durationMs * Math.min(0.9, 0.2 + 0.25 * used)));
+        const frames = await this.videoFrames.framesForAsset(clipId, { frameCount: 1, windowStartMs: atMs, windowDurationMs: 400, maxWidth: 1080 });
+        if (!frames.ok || !frames.frames[0]) continue;
+        const bytes = Buffer.from(frames.frames[0].base64, "base64");
+        const quarantined = await writeQuarantineFile(bytes);
+        const registered = await this.media.registerAsset(projectId, userId, role, {
+          quarantineToken: quarantined.quarantineToken,
+          kind: "image",
+          originalFileName: `lyonix-still-${clipId.slice(0, 8)}-${atMs}.jpg`,
+          mimeType: "image/jpeg",
+          checksumSha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.byteLength,
+          widthPx: null,
+          heightPx: null,
+          durationMs: null,
+          origin: "generated",
+          license: "Still frame of a clip already used in this video",
+          reusable: true,
+          serverProvenance: { stillFrom: clipId, atMs },
+        });
+        if (typeof registered === "string") continue;
+        ledger.stills.set(clipId, used + 1);
+        return {
+          mediaAssetVersionId: registered.id,
+          kind: "image",
+          durationMs: null,
+          externalId: null,
+          sourcing: "imported",
+          ...(clip.provider ? { provider: clip.provider } : {}),
+          degraded: "reuse_window",
+          ...(clip.personEvidence ? { personEvidence: { ...clip.personEvidence, flags: [...clip.personEvidence.flags, "still_frame"] } } : {}),
+        };
+      } catch {
+        // try the next clip
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Template slot fallback (runner preflight): a source of the kind a fixed slot needs for a segment that has the wrong kind / none.
+   * image -> a still frame of a job clip -> a stock / context photo -> the brand background; video -> another window of a job clip.
+   */
+  async resolveSlotFallback(
+    projectId: string,
+    userId: string,
+    role: "admin" | "staff",
+    input: { providerAccountId: string; script: MediaPlanScript; segment: PlannedSegment; ledger: SegmentSourceLedger; expectedKind: "image" | "video" },
+  ): Promise<SegmentSource | null> {
+    const segment: PlannedSegment = { ...input.segment, visualKind: input.expectedKind };
+    const source = await this.resolveDegradedSource(projectId, userId, role, { providerAccountId: input.providerAccountId, script: input.script, segment, ledger: input.ledger, reason: "template_slot_fallback" });
+    if (!source || source.kind !== input.expectedKind) return null;
+    input.ledger.add(source);
+    return withPersonEvidence(segment, source);
   }
 
   private async brandBackgroundSource(projectId: string, userId: string, role: "admin" | "staff"): Promise<SegmentSource | null> {
