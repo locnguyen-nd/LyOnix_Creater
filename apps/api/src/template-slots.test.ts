@@ -100,6 +100,41 @@ describe("template slot preflight in the runner", () => {
     await runner(plan, saved)({ id: "run-1", projectId: "p1" }, { userId: "u", role: "staff", providerAccountId: "acc", planScript: shorter, sourced, mediaPlan: plan.buildBindings(shorter, sourced), slots, sceneCompositions: 10, orshotPages: null, ledger: new SegmentSourceLedger() });
     expect((saved[0]?.value as { applies: boolean }).applies).toBe(false);
   });
+
+  describe("LyOnix Render recipe (composed per scene, no Image-N / Video-N slot): every scene needs a picture", () => {
+    const recipeSlots = [{ key: "headline", kind: "text", required: false }, { key: "badge", kind: "text", required: false }] as AutoTemplateSlot[];
+    const ctx = (plan: MediaPlanService, sourced: SourcedSegment[]) => ({ userId: "u", role: "staff", providerAccountId: "acc", planScript: script(), sourced, mediaPlan: plan.buildBindings(script(), sourced), slots: recipeSlots, engine: "lyonix", sceneCompositions: 0, orshotPages: null, ledger: new SegmentSourceLedger() });
+
+    it("every scene has media -> nothing to fix, no fallback called", async () => {
+      const plan = service();
+      const fallback = vi.spyOn(plan, "resolveSlotFallback");
+      const saved: Array<{ key: string; value: unknown }> = [];
+      await runner(plan, saved)({ id: "run-1", projectId: "p1" }, ctx(plan, sourcedWith({})));
+      expect(fallback).not.toHaveBeenCalled();
+      expect(saved[0]?.value).toMatchObject({ applies: false, mode: "scaled", maxScenes: null });
+    });
+
+    it("scene 3 without media -> a valid fallback (still frame / photo / brand background) fills it before the render", async () => {
+      const plan = service();
+      const fallback = vi.spyOn(plan, "resolveSlotFallback").mockImplementation(async (_p, _u, _r, input) => (input.expectedKind === "image" ? source("brand-bg", "image", { placeholder: true } as Partial<SegmentSource>) : null));
+      const saved: Array<{ key: string; value: unknown }> = [];
+      const result = await runner(plan, saved)({ id: "run-1", projectId: "p1" }, ctx(plan, sourcedWith({ 3: null })));
+      expect(fallback.mock.calls.map((call) => call[3].expectedKind)).toEqual(["video", "image"]); // the planned kind first, then a picture
+      expect(result.scenes.every((scene) => scene.mediaAssetVersionId)).toBe(true);
+      expect(saved[0]?.value).toMatchObject({ applies: true, issues: [{ sceneId: "scene_3", slotKey: "Scene-3.media", expectedKind: null }], fixes: [{ sceneId: "scene_3", fallback: "brand_background", kind: "image" }], unresolved: [] });
+    });
+
+    it("no fallback -> TEMPLATE_REQUIRED_ASSET_MISSING naming the scene, instead of the engine dropping the scene silently", async () => {
+      const plan = service();
+      vi.spyOn(plan, "resolveSlotFallback").mockResolvedValue(null);
+      const saved: Array<{ key: string; value: unknown }> = [];
+      await expect(runner(plan, saved)({ id: "run-1", projectId: "p1" }, ctx(plan, sourcedWith({ 3: null })))).rejects.toMatchObject({
+        code: "TEMPLATE_REQUIRED_ASSET_MISSING",
+        message: expect.stringContaining("Cảnh 3 (scene_3) -> Scene-3.media: cần ảnh hoặc video, chưa có media"),
+      });
+      expect(saved[0]?.value).toMatchObject({ applies: true, blocked: { code: "TEMPLATE_REQUIRED_ASSET_MISSING" } });
+    });
+  });
 });
 
 describe("Apify quota: the next account is tried; none left is said plainly", () => {

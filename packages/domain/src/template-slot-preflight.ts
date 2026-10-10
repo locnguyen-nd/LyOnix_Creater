@@ -9,6 +9,8 @@
  *   required slot past the last scene can never be filled.
  * - `preflightTemplateSlots`: after media sourcing - every scene's source must be the kind its slot expects (an image slot needs an
  *   image, a video slot a video); each issue names the scene and the slot.
+ * - `preflightSceneMedia`: after media sourcing, for a template composed per scene (template-scaled Creatomate, LyOnix Render) -
+ *   every scene must have a picture.
  */
 
 export type TemplateSlotLike = { key: string; kind?: string | null; required?: boolean | null };
@@ -84,8 +86,28 @@ export function preflightTemplateSlots(slots: readonly TemplateSlotLike[], scene
   return { ok: issues.length === 0, issues };
 }
 
+/** A scene of a template composed per scene (template-scaled Creatomate, LyOnix Render) that has no media at all: its picture is required. */
+export type SceneMediaIssue = Omit<TemplateSlotIssue, "expectedKind" | "actualKind"> & { expectedKind: null; actualKind: null };
+
+/** Key naming the per-scene picture of a dynamically composed template in diagnostics / messages (`Scene-3.media`). */
+export const sceneMediaSlotKey = (sceneNumber: number): string => `Scene-${sceneNumber}.media`;
+
+/**
+ * After sourcing (template composed per scene - no positional `Image-N` / `Video-N` slots): every scene needs a picture (image or
+ * video). The engines would otherwise silently drop a scene without media from the render (`skippedSceneIds`), losing its narration.
+ */
+export function preflightSceneMedia(scenes: readonly TemplateSlotScene[]): { ok: boolean; issues: SceneMediaIssue[] } {
+  const ordered = [...scenes].sort((a, b) => a.orderIndex - b.orderIndex);
+  const issues: SceneMediaIssue[] = [];
+  ordered.forEach((scene, index) => {
+    if (scene.mediaAssetVersionId && scene.visualKind) return;
+    issues.push({ sceneId: scene.sceneId, sceneNumber: index + 1, slotKey: sceneMediaSlotKey(index + 1), expectedKind: null, actualKind: null });
+  });
+  return { ok: issues.length === 0, issues };
+}
+
 const KIND_VI = { image: "ảnh", video: "video" } as const;
 
 /** "Cảnh 7 (scene_7) -> Image-7.source: cần ảnh, đang là video" - one line per issue. */
-export const describeTemplateSlotIssues = (issues: readonly TemplateSlotIssue[]): string =>
-  issues.map((issue) => `Cảnh ${issue.sceneNumber} (${issue.sceneId}) -> ${issue.slotKey}: cần ${KIND_VI[issue.expectedKind]}, ${issue.actualKind ? `đang là ${KIND_VI[issue.actualKind]}` : "chưa có media"}`).join("; ");
+export const describeTemplateSlotIssues = (issues: ReadonlyArray<TemplateSlotIssue | SceneMediaIssue>): string =>
+  issues.map((issue) => `Cảnh ${issue.sceneNumber} (${issue.sceneId}) -> ${issue.slotKey}: cần ${issue.expectedKind ? KIND_VI[issue.expectedKind] : "ảnh hoặc video"}, ${issue.actualKind ? `đang là ${KIND_VI[issue.actualKind]}` : "chưa có media"}`).join("; ");

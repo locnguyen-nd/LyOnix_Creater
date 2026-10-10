@@ -50,6 +50,7 @@ import {
   personMediaRoleOf,
   preflightTemplateSceneCount,
   preflightTemplateSlots,
+  preflightSceneMedia,
   describeTemplateSlotIssues,
   type TemplateSlotIssue,
   type MediaPlanVideoSubject,
@@ -608,6 +609,8 @@ export class WorkflowRunnerService {
       sourced: SourcedSegment[];
       mediaPlan: ReturnType<MediaPlanService["buildBindings"]>;
       slots: AutoTemplateSlot[];
+      /** Engine of the pinned template: a LyOnix Render recipe is always composed per scene (it has no positional media slot). */
+      engine?: string | null;
       sceneCompositions: number;
       orshotPages: number | null;
       ledger: SegmentSourceLedger;
@@ -616,17 +619,47 @@ export class WorkflowRunnerService {
     const sceneRows = (plan: ReturnType<MediaPlanService["buildBindings"]>) =>
       plan.scenes.map((scene, index) => ({ sceneId: scene.sceneId, orderIndex: index, visualKind: scene.mediaKind, mediaAssetVersionId: scene.mediaAssetVersionId }));
     const rows = sceneRows(ctx.mediaPlan);
-    const fixed = ctx.orshotPages === null && fixedSlotPathApplies({
+    const lyonix = ctx.engine === "lyonix";
+    const fixed = ctx.orshotPages === null && !lyonix && fixedSlotPathApplies({
       slotCount: ctx.sceneCompositions,
       includedSceneCount: rows.length,
       imageSceneCount: rows.filter((row) => row.visualKind === "image").length,
       templateImageSlots: ctx.slots.filter((slot) => slot.kind === "image").length,
     });
     const capacity = { sceneSlots: new Set(ctx.slots.map((slot) => /^(?:Image|Video)-(\d+)\.source$/.exec(slot.key)?.[1]).filter(Boolean)).size };
-    const base = { sceneCount: rows.length, sceneSlots: capacity.sceneSlots, maxScenes: ctx.sceneCompositions > 0 ? null : capacity.sceneSlots || null, mode: (ctx.sceneCompositions > 0 ? "scaled" : "fixed") as "scaled" | "fixed" };
+    // A LyOnix Render recipe or a template with `Scene` compositions is composed per scene, for any count.
+    const perScene = lyonix || ctx.sceneCompositions > 0;
+    const base = { sceneCount: rows.length, sceneSlots: capacity.sceneSlots, maxScenes: perScene ? null : capacity.sceneSlots || null, mode: (ctx.orshotPages !== null ? "pages" : perScene ? "scaled" : "fixed") as "scaled" | "pages" | "fixed" };
     if (!fixed) {
-      await this.saveStepDiagnostics(run, "template_slot_preflight", { applies: false, ...base, issues: [], fixes: [], unresolved: [] });
-      return ctx.mediaPlan;
+      // Composed per scene (template-scaled Creatomate, LyOnix Render): no positional slot, but every scene needs a picture - the render
+      // would otherwise drop a scene without media silently (its narration lost). Orshot pages keep their own assignment check.
+      const missing = ctx.orshotPages === null ? preflightSceneMedia(rows).issues : [];
+      if (missing.length === 0) {
+        await this.saveStepDiagnostics(run, "template_slot_preflight", { applies: false, ...base, issues: [], fixes: [], unresolved: [] });
+        return ctx.mediaPlan;
+      }
+      const sceneFixes: Array<{ sceneId: string; slotKey: string; kind: "image" | "video"; fallback: string; mediaAssetVersionId: string }> = [];
+      const tried = new Set<SourcedSegment>();
+      for (const issue of missing) {
+        const piece = ctx.sourced.find((entry) => entry.segment.sceneIds.includes(issue.sceneId));
+        if (!piece || tried.has(piece)) continue;
+        tried.add(piece);
+        // the planned kind first, then a picture (a still frame / photo / the brand background is always an image)
+        for (const expectedKind of [...new Set<"image" | "video">([piece.segment.visualKind ?? "video", "image"])]) {
+          const fallback = await this.mediaPlans.resolveSlotFallback(run.projectId, ctx.userId, ctx.role, { providerAccountId: ctx.providerAccountId, script: ctx.planScript, segment: piece.segment, ledger: ctx.ledger, expectedKind });
+          if (!fallback) continue;
+          piece.source = fallback;
+          piece.errorCode = null;
+          sceneFixes.push({ sceneId: issue.sceneId, slotKey: issue.slotKey, kind: fallback.kind, fallback: fallback.placeholder ? "brand_background" : fallback.degraded ?? fallback.tier ?? fallback.provider ?? "source", mediaAssetVersionId: fallback.mediaAssetVersionId });
+          break;
+        }
+      }
+      const fixedPlan = sceneFixes.length > 0 ? this.mediaPlans.buildBindings(ctx.planScript, ctx.sourced) : ctx.mediaPlan;
+      const stillMissing = sceneFixes.length > 0 ? preflightSceneMedia(sceneRows(fixedPlan)).issues : missing;
+      const sceneBlocked = stillMissing.length > 0 ? { code: "TEMPLATE_REQUIRED_ASSET_MISSING", message: `Template thiếu media bắt buộc cho cảnh: ${describeTemplateSlotIssues(stillMissing)}` } : null;
+      await this.saveStepDiagnostics(run, "template_slot_preflight", { applies: true, ...base, issues: missing, fixes: sceneFixes, unresolved: stillMissing, ...(sceneBlocked ? { blocked: sceneBlocked } : {}) });
+      if (sceneBlocked) throw new WorkflowStepFailure("TEMPLATE_REQUIRED_ASSET_MISSING", sceneBlocked.message);
+      return fixedPlan;
     }
     const first = preflightTemplateSlots(ctx.slots, rows);
     const fixes: Array<{ sceneId: string; slotKey: string; kind: "image" | "video"; fallback: string; mediaAssetVersionId: string }> = [];
@@ -1199,6 +1232,7 @@ ${correction.direction}`,
       sourced,
       mediaPlan: sourcedPlan,
       slots,
+      engine: snapshot.engine,
       sceneCompositions: countTemplateSceneSlots(snapshot.rawTemplate),
       orshotPages,
       ledger,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessPersonCoveragePreflight, type PersonMediaRole } from "./person-coverage.js";
-import { describeTemplateSlotIssues, preflightTemplateSceneCount, preflightTemplateSlots, sceneMediaSlots, templateSceneCapacity, type TemplateSlotLike, type TemplateSlotScene } from "./template-slot-preflight.js";
+import { describeTemplateSlotIssues, preflightSceneMedia, preflightTemplateSceneCount, preflightTemplateSlots, sceneMediaSlots, templateSceneCapacity, type TemplateSlotLike, type TemplateSlotScene } from "./template-slot-preflight.js";
 
 // The template of run 19db79bb: 10 positional scene slots, images at scenes 1 / 4 / 7 / 10, videos elsewhere.
 const KINDS: Array<"Image" | "Video"> = ["Image", "Video", "Video", "Image", "Video", "Video", "Image", "Video", "Video", "Image"];
@@ -66,5 +66,21 @@ describe("person coverage threshold (>= 60%)", () => {
     expect(assessPersonCoveragePreflight(roles(Array(10).fill("generic"))).ok).toBe(false);
     const sixty = assessPersonCoveragePreflight(roles(["person_primary", "person_primary", "context", "person_primary", "context", "person_primary", "context", "person_primary", "context", "person_primary"]));
     expect(sixty).toMatchObject({ ok: true, personCoverageRatio: 0.6, minCoverage: 0.6 });
+  });
+});
+
+describe("scene media of a template composed per scene (LyOnix Render, template-scaled Creatomate)", () => {
+  const rows = (media: Array<"image" | "video" | null>): TemplateSlotScene[] =>
+    media.map((kind, i) => ({ sceneId: `scene_${i + 1}`, orderIndex: i, visualKind: kind, mediaAssetVersionId: kind ? `m${i + 1}` : null }));
+
+  it("every scene with an image or a video passes, whatever the kind", () => {
+    expect(preflightSceneMedia(rows(["image", "video", "image"]))).toEqual({ ok: true, issues: [] });
+  });
+
+  it("a scene without media is an issue naming the scene and its picture (Scene-N.media), in video order", () => {
+    const check = preflightSceneMedia(rows(["video", null, "image", null]));
+    expect(check.ok).toBe(false);
+    expect(check.issues.map((issue) => issue.slotKey)).toEqual(["Scene-2.media", "Scene-4.media"]);
+    expect(describeTemplateSlotIssues(check.issues)).toBe("Cảnh 2 (scene_2) -> Scene-2.media: cần ảnh hoặc video, chưa có media; Cảnh 4 (scene_4) -> Scene-4.media: cần ảnh hoặc video, chưa có media");
   });
 });

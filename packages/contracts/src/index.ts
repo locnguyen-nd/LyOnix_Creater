@@ -914,9 +914,10 @@ export type TemplateSlotPreflightDiagnostics = {
   sceneSlots: number;
   maxScenes: number | null;
   mode: "scaled" | "pages" | "fixed";
-  issues: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video"; actualKind: "image" | "video" | null }>;
+  /** `expectedKind` null: a scene of a template composed per scene (`Scene-N.media`) that needs a picture of either kind. */
+  issues: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video" | null; actualKind: "image" | "video" | null }>;
   fixes: Array<{ sceneId: string; slotKey: string; kind: "image" | "video"; fallback: string; mediaAssetVersionId: string }>;
-  unresolved: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video"; actualKind: "image" | "video" | null }>;
+  unresolved: Array<{ sceneId: string; sceneNumber: number; slotKey: string; expectedKind: "image" | "video" | null; actualKind: "image" | "video" | null }>;
   /** Set when the run was blocked (`TEMPLATE_REQUIRED_ASSET_MISSING` / `TEMPLATE_SCENE_COUNT_UNSUPPORTED`). */
   blocked?: { code: string; message: string };
 };

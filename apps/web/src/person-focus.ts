@@ -23,7 +23,7 @@ export function personCoverageLines(gate: QualityGateDiagnostics | null | undefi
 export function templateSlotLines(slots: TemplateSlotPreflightDiagnostics | null | undefined): { missing: string[]; fixed: string[] } | null {
   if (!slots?.applies) return null;
   const kind = (value: "image" | "video" | null) => (value === "image" ? "ảnh" : value === "video" ? "video" : "chưa có media");
-  const missing = slots.unresolved.map((issue) => `${issue.slotKey} (cảnh ${issue.sceneNumber}: cần ${kind(issue.expectedKind)}, đang là ${kind(issue.actualKind)})`);
+  const missing = slots.unresolved.map((issue) => `${issue.slotKey} (cảnh ${issue.sceneNumber}: cần ${issue.expectedKind ? kind(issue.expectedKind) : "ảnh hoặc video"}, đang là ${kind(issue.actualKind)})`);
   const fixed = slots.fixes.map((fix) => `${fix.slotKey} -> ${fix.fallback}`);
   return missing.length || fixed.length ? { missing, fixed } : null;
 }

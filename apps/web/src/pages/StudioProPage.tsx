@@ -1288,7 +1288,7 @@ export function StudioProPage() {
               </Select>
             ) : null}
             <Select className="h-9" value={renderAccountId} onChange={(event) => setRenderAccountId(event.target.value)} disabled={renderAccounts.length === 0} title={isTemplateOnlyRenderProvider(renderAccounts.find((account) => account.id === renderAccountId)?.provider) ? t("studioPro.orshotTemplateOnlyHint") : undefined}>
-              {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "Creatomate / Orshot" })}</option> : null}
+              {renderAccounts.length === 0 ? <option value="">{t("studioPro.noAccountForRole", { role: "render" })}</option> : null}
               {renderAccounts.map((account) => (
                 <option key={account.id} value={account.id}>{renderAccountOptionLabel(account)}</option>
               ))}

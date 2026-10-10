@@ -223,6 +223,18 @@
       "status": "code_done",
       "dependsOn": [],
       "note": "PreviewPlaybackController (thuần, test được): đồng hồ rAF theo cảnh (giọng đọc > đoạn video > hint), hết cảnh sang cảnh kế, hết timeline dừng cuối, Space sau đó phát lại; pause giữ offset; chờ khi media đang tải. Phím: Space, trái/phải, Home, Esc; bỏ qua khi nhập liệu/dialog/modifier/repeat, giữ Space của nút ngoài vùng preview, trái/phải/Esc trong timeline track. Đồng bộ video (đoạn nguồn, tắt tiếng) + giọng đọc về cùng offset; đổi cảnh thì pause cảnh cũ; playhead trên timeline; dọn listener/đồng hồ khi unmount/đổi project. Không render/gọi provider. Chưa commit. Spec .docs/specs/VE2E-155.md."
+    },
+    {
+      "id": "VE2E-156",
+      "title": "Template chọn được nhưng không render được: khoá chọn template chưa sẵn sàng, nhãn engine đúng, kiểm media từng cảnh cho template LyOnix",
+      "group": "Làm mịn — Render",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "V04-01",
+        "VE2E-154"
+      ],
+      "note": "Nguyên nhân: 7/8 recipe LyOnix ở rollout 0 % (thiết kế V04-01, chỉ white-top-caption 100 %); TemplateBrowser (e1633c7) cho chọn template chưa sẵn sàng (nút + double-click không kiểm readiness) nên urgent-headline được lưu vào User Defaults; nhãn Auto ghi Creatomate/Orshot; preflight slot không kiểm recipe LyOnix (fixedSlotPathApplies coi slotCount 0 là cố định), cảnh thiếu media bị engine bỏ qua âm thầm. Sửa: templateChoice + nhãn/đếm/lọc sẵn sàng trong TemplateBrowser; keepsTemplateAfterLoad; nhãn engine trung lập; preflightSceneMedia + fallback hoặc TEMPLATE_REQUIRED_ASSET_MISSING (Scene-N.media). Không đổi rollout/Router/draft. 8 recipe render thật FFmpeg qua QC. Chưa commit. Spec .docs/specs/VE2E-156.md."
     }
   ]
 }

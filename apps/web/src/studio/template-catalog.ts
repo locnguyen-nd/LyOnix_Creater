@@ -61,6 +61,33 @@ export function templateReadiness(template: Pick<PreviewableTemplate, "engine" |
   return state.ready ? { ready: true, hasFallback: state.hasFallback } : { ready: false, reason: state.reason ?? "rollout_off" };
 }
 
+/**
+ * Can this template be chosen ("Dùng template" / "Chọn template này" / double click)? The same readiness the preview modal and the API
+ * use: a template that cannot render now is never chosen, so Auto never stores it and Studio never pins it.
+ */
+export type TemplateChoice = { ok: true } | { ok: false; reason: "current" } | { ok: false; reason: "not_ready"; blockReason: TemplateRenderBlockReason };
+
+export function templateChoice(template: Pick<PreviewableTemplate, "engine" | "internalRender" | "externalTemplateId">, selectedId: string | null | undefined): TemplateChoice {
+  const readiness = templateReadiness(template);
+  if (!readiness.ready) return { ok: false, reason: "not_ready", blockReason: readiness.reason };
+  if (selectedId && template.externalTemplateId === selectedId) return { ok: false, reason: "current" };
+  return { ok: true };
+}
+
+/**
+ * After the template lists (re)load (page reload, render account list changed): the chosen / restored template is KEPT when a list
+ * still has it - even when it cannot render now (Auto shows why and stays blocked; it is never swapped for another template) - or
+ * when a list failed to load (unknown). Only a template no list has any more is cleared (VE2E-124, reported to the user).
+ */
+export const keepsTemplateAfterLoad = (templateId: string, listedTemplateIds: readonly string[], anyListFailed: boolean): boolean =>
+  !templateId || anyListFailed || listedTemplateIds.includes(templateId);
+
+/** "x / y template sẵn sàng render" of a list. */
+export const readinessCount = (items: ReadonlyArray<Pick<PreviewableTemplate, "engine" | "internalRender">>): { ready: number; total: number } => ({
+  ready: items.filter((item) => templateReadiness(item).ready).length,
+  total: items.length,
+});
+
 /** Where the picture / motion shown comes from - never the render engine itself. */
 export type PreviewSourceKind = "lyonix_simulation" | "creatomate_image" | "creatomate_motion" | "orshot_image" | "none";
 

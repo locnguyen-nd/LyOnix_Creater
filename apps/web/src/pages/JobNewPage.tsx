@@ -16,6 +16,7 @@ import {
   accountForTemplate,
   categoryCounts,
   filterByCategory,
+  keepsTemplateAfterLoad,
   templateRecipeId,
   templateSelectionState,
   toLibraryTemplates,
@@ -375,7 +376,7 @@ export function JobNewPage() {
       setLibraryEntries(entries);
       setLibraryFailed(accounts.filter((_, index) => results[index]!.status === "rejected").map((account) => account.name));
       const current = formRef.current.templateId;
-      if (!current || entries.some((entry) => entry.template.externalTemplateId === current) || results.some((result) => result.status === "rejected")) return;
+      if (keepsTemplateAfterLoad(current, entries.map((entry) => entry.template.externalTemplateId), results.some((result) => result.status === "rejected"))) return;
       if (restoredRef.current.has("templateId")) {
         restoredRef.current.delete("templateId");
         markCleared(["templateId"]);
