@@ -263,6 +263,34 @@ describe("Trend Radar runs (VE2E-158)", () => {
     expect(detail.components.find((component) => component.key === "momentum")).toMatchObject({ points: 14, reason: expect.stringContaining("60.0K/giờ") });
   });
 
+  it("TikTok account: unknown / none chosen / switched off / no keywords -> not connected and Apify is never called; a ready account runs", async () => {
+    delete process.env.NEWS_SOURCES; // TikTok is the only possible source here
+    const { config, radar, db, tiktok, advance } = setup({ tiktok: async () => ({ runId: "r1", items: [actorItem("7400000000000000101", "アニメ新作 #アニメ", 120_000)] }) });
+    const tiktokView = async () => (await radar.overview()).sources.find((source) => source.provider === "tiktok")!;
+
+    expect(await config.update({ tiktokEnabled: true, tiktokAccountId: "apify-missing" }, "u-admin")).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+    await config.update({ tiktokEnabled: true, keywords: ["アニメ"] }, "u-admin");
+    expect(await tiktokView()).toMatchObject({ enabled: true, runnable: false, state: "not_connected", message: expect.stringContaining("Chưa chọn tài khoản Apify") });
+    expect((await runOnce(radar)).run).toMatchObject({ status: "failed", error: { code: "NO_SOURCE_AVAILABLE" } });
+
+    await config.update({ tiktokAccountId: "apify-1" }, "u-admin");
+    db.accounts.find((account) => account.id === "apify-1")!.enabled = false;
+    expect(await tiktokView()).toMatchObject({ runnable: false, state: "not_connected", message: expect.stringContaining("chưa sẵn sàng") });
+
+    db.accounts.find((account) => account.id === "apify-1")!.enabled = true;
+    await config.update({ keywords: [], hashtags: [] }, "u-admin");
+    expect(await tiktokView()).toMatchObject({ runnable: false, message: expect.stringContaining("từ khoá / hashtag") });
+    expect(tiktok).not.toHaveBeenCalled();
+
+    await config.update({ keywords: ["アニメ"] }, "u-admin");
+    expect(await tiktokView()).toMatchObject({ runnable: true });
+    advance(61_000);
+    const { run } = await runOnce(radar);
+    expect(tiktok).toHaveBeenCalledTimes(1);
+    // Yahoo is listed as not run (rights not confirmed) - information, not a failure of this run
+    expect(run).toMatchObject({ status: "completed", sources: expect.arrayContaining([expect.objectContaining({ provider: "tiktok", status: "ok", fetched: 1, new: 1 }), expect.objectContaining({ provider: "yahoo_news", status: "rights_unconfirmed", fetched: 0 })]) });
+  });
+
   it("manual TikTok URL: oEmbed fields only (no metrics); oEmbed failure keeps the URL with a clear warning; other sites refused", async () => {
     const { radar, db } = setup({ feeds: { oembed: () => respond(200, JSON.stringify({ title: "手作りアニメ #アニメ", author_name: "maker", author_url: "https://www.tiktok.com/@maker", thumbnail_url: "https://p16.tiktokcdn.com/x.jpg" })) } });
     const imported = await radar.importUrl("https://www.tiktok.com/@maker/video/7400000000000000001?is_from_webapp=1", "u-staff");
