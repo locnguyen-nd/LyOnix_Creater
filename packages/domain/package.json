@@ -25,7 +25,9 @@
     "./caption-presets": "./src/caption-presets.ts",
     "./news": "./src/news.ts",
     "./url-intake": "./src/url-intake.ts",
-    "./transcript": "./src/transcript.ts"
+    "./transcript": "./src/transcript.ts",
+    "./trend-radar": "./src/trend-radar.ts",
+    "./trend-analysis": "./src/trend-analysis.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

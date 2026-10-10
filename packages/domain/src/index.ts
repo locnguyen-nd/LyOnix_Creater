@@ -324,6 +324,8 @@ export * from "./caption-style-capabilities.js";
 export * from "./caption-style.js";
 export * from "./caption-presets.js";
 export * from "./news.js";
+export * from "./trend-radar.js";
+export * from "./trend-analysis.js";
 export * from "./url-intake.js";
 export * from "./transcript.js";
 export {

@@ -59,6 +59,9 @@ import { DraftSaveControl } from "../job-new/DraftSaveControl";
 import { FIELD_LABEL_KEYS, autofillSystemChoices, buildInitialFormState, creationLists, mediaAccountsOf, usableAccounts, type CreationLists } from "../job-new/form-state";
 import { SelectedNewsCard } from "../job-new/SelectedNewsCard";
 import { newsPick, newsUnpick } from "../job-new/news-pick";
+import { trendIntent, trendPick } from "../job-new/trend-pick";
+import { getTrendCluster, linkTrendProduction } from "../trend-radar-api";
+import { anglesOf, composeTrendTopic } from "../trend-radar/trend-ui";
 import { NewsDrawer } from "../news/NewsDrawer";
 import { ContentSourceBar } from "../job-new/ContentSourceBar";
 import { VoicePicker } from "../job-new/VoicePicker";
@@ -232,6 +235,9 @@ export function JobNewPage() {
   const selectedChannel = channels.find((item) => item.id === form.channelId);
   // VE2E-96: the news item the topic came from (stored with the draft, like the topic itself).
   const selectedNews = useMemo(() => parseSelectedNews(form.selectedNews), [form.selectedNews]);
+  // VE2E-158: the Trend Radar topic this page was opened with (`?trend=&angle=`); the created video is linked back to it.
+  const trendIntentRef = useRef(trendIntent(params));
+  const [trendSource, setTrendSource] = useState<{ clusterId: string; angleIndex: number | null; title: string } | null>(null);
   const generatingLabel = selected
     ? t("jobs.generating", { provider: selected.provider, model: selected.model })
     : t("common.loading");
@@ -292,6 +298,32 @@ export function JobNewPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // VE2E-158: fill the topic from Trend Radar once the form is restored (so the draft never overwrites it). Only the topic text, the
+  // `topic` source and the script language change; nothing is created or paid for until the user submits.
+  useEffect(() => {
+    const intent = trendIntentRef.current;
+    if (!hydrated || !intent) return;
+    trendIntentRef.current = null;
+    void (async () => {
+      try {
+        const cluster = await getTrendCluster(intent.clusterId);
+        const angle = intent.angleIndex === null ? null : anglesOf(cluster)[intent.angleIndex] ?? null;
+        const pick = trendPick(formRef.current, composeTrendTopic(cluster, angle));
+        if (pick.kind === "apply") {
+          if (pick.needsConfirm && !(await confirm({ title: t("news.replaceTitle"), message: t("news.replaceMessage"), confirmLabel: t("news.replaceConfirm"), tone: "warn" }))) return;
+          update(pick.patch);
+        }
+        setTrendSource({ clusterId: cluster.id, angleIndex: angle ? intent.angleIndex : null, title: cluster.analysis?.titleJa || cluster.title });
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : t("common.error"));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated]);
+  /** Marks the Trend Radar topic as used by this job / run (best effort: the job exists either way). */
+  const linkTrend = (kind: "job" | "video_production", productionId: string) =>
+    trendSource ? linkTrendProduction(trendSource.clusterId, { kind, productionId, angleIndex: trendSource.angleIndex }).catch(() => undefined) : Promise.resolve(undefined);
 
   // Autosave (debounced in DraftAutosaver) - only after the user changed something.
   useEffect(() => {
@@ -676,6 +708,7 @@ export function JobNewPage() {
 
             {/* VE2E-96: the news item the topic was made from (picked in the news drawer or from a pasted URL). */}
             {selectedNews ? <SelectedNewsCard item={selectedNews} onClear={() => update(newsUnpick(formRef.current))} /> : null}
+            {trendSource ? <Banner variant="info"><span data-testid="trend-prefilled">{t("trendRadar.create.prefilled", { title: trendSource.title })}</span></Banner> : null}
 
             {form.entryMode === "manual" ? (
               <>
@@ -754,6 +787,7 @@ export function JobNewPage() {
                       sceneCount: midpoint(values.sceneCountTarget),
                     });
                     const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice), targetPersonSubmitFields(values), values.channelId);
+                    await linkTrend("video_production", submitted.id);
                     await closeDraft();
                     navigate(`/video-productions/${submitted.id}`);
                   } catch (err) {
@@ -782,6 +816,7 @@ export function JobNewPage() {
                     }),
                   });
                   // The job exists from here on (even if the script generation below fails): the draft is done.
+                  await linkTrend("job", job.id);
                   await closeDraft();
                   try {
                     const targetHint = TARGET_HINT_BY_LOCALE[values.language](values.durationTarget.replace(/s$/, ""), values.sceneCountTarget);

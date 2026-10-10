@@ -197,6 +197,8 @@ model User {
   subtitleVersionsCreated          SubtitleVersion[]          @relation("SubtitleVersionCreatedBy")
   drafts                           UserDraft[]
   creationPreference               UserCreationPreference?
+  notifications                    Notification[]
+  trendAssignments                 TrendAssignment[]          @relation("TrendAssignmentUser")
 }
 
 model Team {
@@ -1108,4 +1110,190 @@ model UserCreationPreference {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// VE2E-158 Trend Radar: the single configuration row (`id = "default"`). Sources are off until enabled; Yahoo additionally needs the
+/// operator's rights confirmation (env `NEWS_SOURCES` contains `yahoo_jp`) - this flag alone never lets it run.
+model TrendRadarConfig {
+  id                    String   @id @default("default")
+  yahooEnabled          Boolean  @default(false)
+  yahooCategories       Json     @default("[\"japan\",\"sports\",\"entertainment\",\"trending\"]")
+  tiktokEnabled         Boolean  @default(false)
+  keywords              Json     @default("[]")
+  hashtags              Json     @default("[]")
+  categories            Json     @default("[]")
+  windowHours           Int      @default(48)
+  scheduleEnabled       Boolean  @default(true)
+  intervalMinutes       Int      @default(45)
+  thresholds            Json     @default("{\"hot\":80,\"rising\":60,\"review\":40}")
+  notifyMinScore        Int      @default(60)
+  tiktokMaxQueries      Int      @default(4)
+  tiktokResultsPerQuery Int      @default(15)
+  tiktokMinViews        Int      @default(0)
+  /// The Apify account the TikTok source uses - chosen by an admin (never someone's personal account by default).
+  tiktokAccountId       String?  @db.Uuid
+  analysisAccountId     String?  @db.Uuid
+  autoAnalysisPerDay    Int      @default(5)
+  analysisPerDay        Int      @default(15)
+  updatedByUserId       String?  @db.Uuid
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
+
+/// One collection run (manual or scheduled). At most one is pending / running (advisory lock in the service); `sources` holds each
+/// source's outcome (status, counts, error) so one failing source is visible without failing the others.
+model TrendRun {
+  id                String    @id @default(uuid()) @db.Uuid
+  trigger           String
+  status            String
+  requestedByUserId String?   @db.Uuid
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  sources           Json      @default("[]")
+  fetchedCount      Int       @default(0)
+  newCount          Int       @default(0)
+  duplicateCount    Int       @default(0)
+  clusterCount      Int       @default(0)
+  notifiedCount     Int       @default(0)
+  analysedCount     Int       @default(0)
+  error             Json?
+  createdAt         DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+/// A topic: items of one or more sources about the same story (each keeps its own link). Score / band / breakdown are recomputed every run.
+model TrendCluster {
+  id               String                 @id @default(uuid()) @db.Uuid
+  title            String
+  normalizedTitle  String
+  category         String?
+  status           String                 @default("new")
+  saved            Boolean                @default(false)
+  score            Int                    @default(0)
+  band             String                 @default("low")
+  scoreBreakdown   Json                   @default("{}")
+  itemCount        Int                    @default(0)
+  firstSeenAt      DateTime               @default(now())
+  lastSeenAt       DateTime               @default(now())
+  analysis         Json?
+  analysisStatus   String                 @default("none")
+  analysisError    String?
+  analysisModel    String?
+  analyzedAt       DateTime?
+  notifiedBands    Json                   @default("[]")
+  productionRefs   Json                   @default("[]")
+  reviewedByUserId String?                @db.Uuid
+  reviewedAt       DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  items            TrendItem[]
+  snapshots        TrendClusterSnapshot[]
+  assignments      TrendAssignment[]
+
+  @@index([score])
+  @@index([lastSeenAt])
+  @@index([status])
+}
+
+/// One source item (news article, TikTok video, manual import), normalised. Unique per provider id and per canonical URL.
+model TrendItem {
+  id               String              @id @default(uuid()) @db.Uuid
+  clusterId        String              @db.Uuid
+  provider         String
+  sourceId         String
+  canonicalUrl     String              @unique
+  url              String
+  title            String
+  normalizedTitle  String
+  author           String?
+  publisher        String?
+  excerpt          String?
+  thumbnailUrl     String?
+  hashtags         Json                @default("[]")
+  keywords         Json                @default("[]")
+  category         String?
+  publishedAt      DateTime?
+  collectedAt      DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  metrics          Json?
+  completeness     String
+  importedByUserId String?             @db.Uuid
+  cluster          TrendCluster        @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  snapshots        TrendItemSnapshot[]
+
+  @@unique([provider, sourceId])
+  @@index([clusterId])
+  @@index([collectedAt])
+}
+
+/// Real metrics of one item at one time (growth is only computed from two of these).
+model TrendItemSnapshot {
+  id         String    @id @default(uuid()) @db.Uuid
+  itemId     String    @db.Uuid
+  measuredAt DateTime
+  metrics    Json
+  item       TrendItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, measuredAt])
+}
+
+/// How many items a topic had at one run (appearance growth between runs).
+model TrendClusterSnapshot {
+  id         String       @id @default(uuid()) @db.Uuid
+  clusterId  String       @db.Uuid
+  runId      String       @db.Uuid
+  measuredAt DateTime
+  itemCount  Int
+  score      Int
+  cluster    TrendCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+
+  @@index([clusterId, measuredAt])
+}
+
+/// A staff member working on a topic, with the angle they took (several people -> different angles).
+model TrendAssignment {
+  id               String       @id @default(uuid()) @db.Uuid
+  clusterId        String       @db.Uuid
+  userId           String       @db.Uuid
+  angleIndex       Int?
+  angleTitle       String?
+  assignedByUserId String?      @db.Uuid
+  createdAt        DateTime     @default(now())
+  cluster          TrendCluster @relation(fields: [clusterId], references: [id], onDelete: Cascade)
+  user             User         @relation("TrendAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([clusterId, userId])
+}
+
+/// AI analysis calls per UTC day, model and kind (auto = by the job, manual = on demand): LyOnix's own cap under the provider's quota.
+model TrendAiUsage {
+  id        String   @id @default(uuid()) @db.Uuid
+  day       String
+  model     String
+  kind      String
+  calls     Int      @default(0)
+  failures  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([day, model, kind])
+}
+
+/// In-app notification of one user. `dedupeKey` is unique per user: the same event (e.g. topic X reached Hot) is never sent twice.
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  kind      String
+  title     String
+  body      String?
+  link      String?
+  dedupeKey String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt, createdAt])
 }

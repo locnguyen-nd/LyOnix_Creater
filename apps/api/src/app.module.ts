@@ -77,6 +77,13 @@ import { TimelineVersionsController } from "./timeline-versions.controller.js";
 import { TimelineVersionsService } from "./timeline-versions.service.js";
 import { NewsController } from "./news.controller.js";
 import { NewsService } from "./news.service.js";
+import { NotificationsController } from "./notifications.controller.js";
+import { NotificationsService } from "./notifications.service.js";
+import { TrendAnalysisService } from "./trend-analysis.service.js";
+import { TrendRadarConfigService } from "./trend-radar-config.service.js";
+import { TrendRadarController } from "./trend-radar.controller.js";
+import { TrendRadarSchedulerService } from "./trend-radar-scheduler.service.js";
+import { TrendRadarService } from "./trend-radar.service.js";
 import { IntakeController } from "./intake.controller.js";
 import { IntakeService } from "./intake.service.js";
 import { TikTokIntakeService } from "./tiktok-intake.service.js";
@@ -117,6 +124,8 @@ import { TranscriptProviderResolver } from "./transcript-config.js";
     StudioBridgeController,
     TimelineVersionsController,
     NewsController,
+    NotificationsController,
+    TrendRadarController,
     IntakeController,
   ],
   providers: [
@@ -169,6 +178,11 @@ import { TranscriptProviderResolver } from "./transcript-config.js";
     TimelineVersionsService,
     // VE2E-96: headlines of the enabled news sources (NEWS_SOURCES), for the create-video page.
     NewsService,
+    NotificationsService,
+    TrendRadarConfigService,
+    TrendAnalysisService,
+    TrendRadarService,
+    TrendRadarSchedulerService,
     // VE2E-96: what a URL pasted on the create-video page gives the form (news feed lookup / article preview).
     IntakeService,
     TikTokIntakeService,
