@@ -13,6 +13,7 @@ import { API_ORIGIN, api, ApiError, csrfHeaders } from "../api";
 import { PERIODS, METRIC_COLORS, channelHandleLabel, formatCount, formatDelta, type ChannelInsights, type PeriodKey, type PublicChannel } from "../channel-api";
 import { useMe } from "../session";
 import type { ChannelVideoResponse } from "@lyonix/contracts";
+import { channelVideoPath, costPartsOf, formatUsd } from "../channel-video";
 
 function formatVideoDuration(ms: number | null) {
   if (!ms) return "—";
@@ -321,13 +322,17 @@ export function ChannelDetailPage() {
               <article key={video.renderJobId} className="lyx-card-hover overflow-hidden rounded-xl border border-lyx-border bg-lyx-bg shadow-sm">
                 <div className="relative">
                   <VideoThumbnail snapshotUrl={video.thumbnailUrl} resultUrl={video.resultUrl} className="aspect-[3/2] w-full" />
+                  <span className={`absolute left-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-semibold text-white ${video.mode === "auto" ? "bg-violet-600/90" : "bg-slate-700/90"}`} data-testid="video-mode-badge" data-mode={video.mode}>{t(video.mode === "auto" ? "channels.videoModeAuto" : "channels.videoModeManual")}</span>
                   <button type="button" onClick={() => setPlaying(video)} aria-label={`${t("videoGallery.play")}: ${video.title}`} className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full bg-black/85 text-white"><Play size={18} fill="currentColor" /></button>
                 </div>
                 <div className="space-y-1.5 p-2.5">
                   <p className="truncate text-[13px] font-semibold">{video.title}</p>
                   {video.caption !== video.title ? <p className="truncate text-[11px] text-lyx-fg-muted">{video.caption}</p> : null}
                   {video.createdByName ? <p className="text-[11px] text-lyx-fg-muted">{t("jobs.creator")}: {video.createdByName}</p> : null}
-                  <div className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted"><span>{formatVideoDuration(video.renderDurationMs)}</span><button type="button" onClick={() => navigate(`/jobs/${video.jobId}/studio?renderJobId=${video.renderJobId}`)} className="underline">{t("videoProduction.openStudio")}</button></div>
+                  <p className="text-[11px] text-lyx-fg-muted" data-testid="video-cost" title={video.cost.totalUsd === null ? t("channels.videoCostNote") : `${t("channels.videoCostNote")} ${costPartsOf(video.cost).map((part) => `${t(`channels.videoCostPart.${part.key}`)} ${formatUsd(part.usd)}`).join(" · ")}`}>
+                    {t("channels.videoCost")}: <span className="font-semibold text-lyx-fg">{video.cost.totalUsd === null ? t("channels.videoCostNone") : formatUsd(video.cost.totalUsd)}</span>
+                  </p>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-lyx-fg-muted"><span>{formatVideoDuration(video.renderDurationMs)}</span><button type="button" onClick={() => navigate(channelVideoPath(video))} className="underline">{t(video.mode === "auto" ? "channels.videoOpenAuto" : "videoProduction.openStudio")}</button></div>
                 </div>
               </article>
             ))}

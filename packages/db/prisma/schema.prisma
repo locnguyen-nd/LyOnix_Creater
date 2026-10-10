@@ -316,6 +316,7 @@ model ChannelConnection {
   snapshots         MetricSnapshot[]
   teamLinks         TeamChannel[]
   userGrants        UserChannelGrant[]
+  workflowRuns      WorkflowRun[]      @relation("WorkflowRunChannel")
 
   @@unique([userId, externalChannelId])
 }
@@ -590,6 +591,9 @@ model WorkflowRun {
   notBefore                  DateTime?
   /// VE2E-151: the person the video must be about ({ user: { main, aliases, context } | null, newsText: string | null }); null = none.
   targetPerson               Json?
+  /// The channel chosen on the create form (Auto and Studio alike): the per-channel video library lists the run under it. Null on runs
+  /// created before this column, or submitted without a channel.
+  channelId                  String?                   @db.Uuid
   createdByUserId            String                    @db.Uuid
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt
@@ -597,6 +601,7 @@ model WorkflowRun {
   automationProfileVersion   AutomationProfileVersion? @relation(fields: [automationProfileVersionId], references: [id], onDelete: SetNull)
   sourceVersion              SourceVersion?            @relation(fields: [sourceVersionId], references: [id], onDelete: SetNull)
   createdBy                  User                      @relation("WorkflowRunCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  channel                    ChannelConnection?        @relation("WorkflowRunChannel", fields: [channelId], references: [id], onDelete: SetNull)
   stepRuns                   StepRun[]
   providerOperations         ProviderOperation[]
   mediaDeliveryTokens        MediaDeliveryToken[]
@@ -604,6 +609,7 @@ model WorkflowRun {
 
   @@index([projectId, status])
   @@index([status, notBefore])
+  @@index([channelId, status])
 }
 
 /// Render reliability: liveness of the background worker processes (`workflow`, `audio`). Each process upserts its own row

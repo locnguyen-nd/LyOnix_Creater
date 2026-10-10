@@ -30,6 +30,7 @@ import { AutomationProfilesService } from "./automation-profiles.service.js";
 import { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import { AutoPreflightService } from "./auto-preflight.service.js";
 import { preflightRefusal } from "./auto-preflight.js";
+import { canAccessChannel } from "./grant-access.js";
 import { GrantsService } from "./grants.service.js";
 import { PrismaService } from "./prisma.service.js";
 import { QueueStatusService } from "./queue-status.service.js";
@@ -225,6 +226,13 @@ export class VideoProductionsService {
     // VE2E-151: the person typed on the create form (highest-priority target) + the selected news text (for the `news` target).
     const personIntake = parseTargetPersonIntake(input.targetPerson, input.newsContext);
     if (!personIntake.ok) return { ok: false, code: "VALIDATION_FAILED", message: personIntake.message };
+    // The channel picked on the create form: checked before any row exists, then stored on the run (the channel's video library lists it).
+    const channelId = input.channelId?.trim() || null;
+    if (channelId) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(channelId)) return { ok: false, code: "VALIDATION_FAILED", message: "channelId không hợp lệ" };
+      if (!canAccessChannel(role, await this.grants.forUser(userId, role), channelId)) return { ok: false, code: "FORBIDDEN", message: "Bạn không có quyền với kênh này", status: 403 };
+      if (!(await this.prisma.channelConnection.findUnique({ where: { id: channelId }, select: { id: true } }))) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy kênh", status: 404 };
+    }
 
     const profile = await this.prisma.automationProfileVersion.findUnique({ where: { id: input.automationProfileId } });
     if (!profile) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy automation profile", status: 404 };
@@ -273,6 +281,8 @@ export class VideoProductionsService {
         ...(backgroundSegments.value.mode === "fixed" ? { backgroundSegments: backgroundSegments.value } : {}),
         // A chosen person changes what the run produces (same source, other person = other video).
         ...(personIntake.value?.user ? { targetPerson: personIntake.value.user } : {}),
+        // Another channel is another run; left out when there is none so a submit without a channel keeps its old fingerprint.
+        ...(channelId ? { channelId } : {}),
       }))
       .digest("hex");
 
@@ -289,6 +299,7 @@ export class VideoProductionsService {
           status: "draft",
           backgroundSegments: backgroundSegments.value as Prisma.InputJsonValue,
           ...(personIntake.value ? { targetPerson: personIntake.value as unknown as Prisma.InputJsonValue } : {}),
+          ...(channelId ? { channelId } : {}),
         },
       });
     } catch (error) {
