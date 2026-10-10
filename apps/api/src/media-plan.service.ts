@@ -29,6 +29,8 @@ import {
   kenBurnsFor,
   parseSegmentKeywords,
   mediaSegmentDeadlineMs,
+  mediaTierMode,
+  gateTiers,
   raceByPriority,
   applySubjectToBrief,
   subjectNames,
@@ -735,6 +737,7 @@ export class MediaPlanService {
    * Primary sourcing of one segment (VE2E-130, ladder L1-L3): the ja / en / broad Apify searches and the Pexels search start
    * CONCURRENTLY under one deadline (`MEDIA_SEGMENT_DEADLINE_MS`, default 75 s); the winner is picked by priority ja > en > broad > Pexels
    * (as soon as every higher tier finished, or at the deadline). At most 3 searches + 1 download per segment, no repeated lenient pass.
+   * `MEDIA_TIER_MODE=sequential|cheap_first` makes the paid searches wait for their turn instead (cost over speed, see `gateTiers`).
    * `ok: false` is NOT a failed job: Auto continues down the degraded ladder (`resolveDegradedSource`, L4-L6).
    */
   async importSegmentSource(
@@ -811,15 +814,24 @@ export class MediaPlanService {
         },
       });
     }
+    // MEDIA_TIER_MODE: `race` (default) starts every tier now; `sequential` / `cheap_first` hold the PAID Apify searches back so a tier that
+    // is not needed is never paid for (see gateTiers). Free tiers (Pexels, shorts, gallery) always start at once.
+    const deadlineMs = mediaSegmentDeadlineMs();
+    const gated = gateTiers(
+      mediaTierMode(),
+      tiers.map((tier) => ({ name: tier.name, paid: tier.name === "ja" || tier.name === "en" || tier.name === "broad", social: tier.name === "shorts" || tier.name === "gallery" })),
+      tiers.map((tier) => tier.run),
+      deadlineMs,
+    );
     const winner = await raceByPriority(
-      tiers.map((tier) => async () => {
+      gated.map((run, index) => async () => {
         try {
-          return await tier.run();
+          return await run();
         } finally {
-          settled.add(tier.name);
+          settled.add(tiers[index]!.name);
         }
       }),
-      mediaSegmentDeadlineMs(),
+      deadlineMs,
       (_index, source) => input.ledger.release(source.externalId ? plainExternalId(source.externalId) : null),
     );
     for (const tier of tiers) if (!settled.has(tier.name)) reasons[tier.name] = "segment_deadline";

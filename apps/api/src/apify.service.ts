@@ -126,6 +126,14 @@ export const apifyMaxConcurrentRuns = () => resolveConcurrencyConfig().apifyMaxC
 const apifyQueueWaitTimeoutMs = () => resolveConcurrencyConfig().apifyQueueWaitTimeoutMs;
 /** VE2E-51/131: phase-1 result count (20 = the adapter ceiling) and how many filtered candidates go on to vision moderation/ranking. */
 export const APIFY_SEARCH_LIMIT = 20;
+/**
+ * Phase-1 result count per paid search. Env `APIFY_SEARCH_LIMIT` (3..20), default 20. Apify bills a search by the results it returns, so a
+ * lower number is cheaper per search - but gives the relevance filters fewer candidates (more `MEDIA_RELEVANCE_BELOW_THRESHOLD`).
+ */
+export const apifySearchLimit = (env: Record<string, string | undefined> = process.env): number => {
+  const value = Math.floor(Number(env.APIFY_SEARCH_LIMIT));
+  return Number.isFinite(value) && value >= 3 ? Math.min(value, APIFY_SEARCH_LIMIT) : APIFY_SEARCH_LIMIT;
+};
 /** VE2E-131: phase 2 failing moves on to the next shortlisted candidate, at most this many candidates per segment (no single-phase re-search). */
 export const APIFY_MAX_PHASE2_CANDIDATES = 2;
 const PLAN_LIMIT_TTL_MS = 10 * 60_000;
@@ -825,7 +833,7 @@ export class ApifyService {
     const twoPhase = input.platform === "tiktok" && apifyTwoPhaseEnabled();
     const quality = emptyQuality(twoPhase);
     const fail = (reason: string): AutoImportOutcome => ({ ok: false, reason, quality });
-    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang, limit: APIFY_SEARCH_LIMIT, download: !twoPhase }, job);
+    const searched = await this.searchShared(projectId, account, { platform: input.platform, keyword: input.keyword, lang, limit: apifySearchLimit(), download: !twoPhase }, job);
     quality.searchReused = searched.reused;
     if (!searched.outcome.ok) return fail(`apify_error:${searched.outcome.code}`);
     const filterContext = { scriptLanguage: input.scriptLanguage ?? "", keyword: input.keyword, minDurationSeconds: input.segmentDurationSeconds ?? 0, usedVideoIds: input.usedExternalIds, tier: lang, ...(input.subjectAliases?.length ? { subjectAliases: input.subjectAliases } : {}), ...(input.brief.person ? { person: input.brief.person } : {}) };

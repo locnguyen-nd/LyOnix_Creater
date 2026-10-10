@@ -36,7 +36,7 @@ function setup(options: Setup = {}) {
 
 describe("VE2E-130 media ladder", () => {
   beforeEach(() => { process.env.APIFY_VIDEO_PLATFORMS = "tiktok"; });
-  afterEach(() => { delete process.env.APIFY_VIDEO_PLATFORMS; delete process.env.MEDIA_SEGMENT_DEADLINE_MS; delete process.env.MEDIA_BRAND_BACKGROUND_COLOR; });
+  afterEach(() => { delete process.env.APIFY_VIDEO_PLATFORMS; delete process.env.MEDIA_SEGMENT_DEADLINE_MS; delete process.env.MEDIA_BRAND_BACKGROUND_COLOR; delete process.env.MEDIA_TIER_MODE; });
 
   describe("race by priority + deadline", () => {
     it("ja beats en and Pexels even when they finish first; the losers' reservations are released", async () => {
@@ -70,6 +70,60 @@ describe("VE2E-130 media ladder", () => {
       // VE2E-89: the relaxed tiers use the en language filter (VE2E-131), no `lenient` pass any more.
       expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => c[4].lang)).toEqual([undefined, "en", "en"]);
       expect(apify.autoImportForSegment.mock.calls.map((c: any[]) => Boolean(c[4].lenient))).toEqual([false, false, false]);
+    });
+
+    describe("MEDIA_TIER_MODE (cost: paid searches wait for their turn)", () => {
+      // The segment has a subject, so all three paid tiers exist: ja "東京夜景1", en "tokyo 1", broad "Shohei Ohtani".
+      const sourceOne = async (options: Setup) => {
+        const made = setup(options);
+        const script = scriptOf(1);
+        const segment = { ...made.service.planSegments(script, { min: 1, max: 1 })[0]!, subject: "Shohei Ohtani" };
+        const outcome = await made.service.importSegmentSource(projectId, "u", "staff", { providerAccountId: "p", script, segment, ledger: new SegmentSourceLedger() });
+        return { ...made, outcome };
+      };
+      const searches = (apify: { autoImportForSegment: { mock: { calls: any[][] } } }) => apify.autoImportForSegment.mock.calls.map((call) => call[4].keyword);
+      const jaWins = async (args: any[]) => (args[4].keyword.startsWith("東京") ? apifyHit("ja1") : noApify);
+
+      it("race (default): a winning ja still pays for the en and broad searches", async () => {
+        const { apify, outcome } = await sourceOne({ apifyImpl: jaWins });
+        expect(outcome).toMatchObject({ ok: true, data: { tier: "ja" } });
+        expect(searches(apify)).toEqual(["東京夜景1", "tokyo 1", "Shohei Ohtani"]);
+      });
+
+      it("an unknown MEDIA_TIER_MODE keeps the race", async () => {
+        process.env.MEDIA_TIER_MODE = "turbo";
+        const { apify } = await sourceOne({ apifyImpl: jaWins });
+        expect(searches(apify)).toHaveLength(3);
+      });
+
+      it("sequential: ja wins with ONE paid search", async () => {
+        process.env.MEDIA_TIER_MODE = "sequential";
+        const { apify, outcome } = await sourceOne({ apifyImpl: jaWins });
+        expect(outcome).toMatchObject({ ok: true, data: { tier: "ja", externalId: "apify:tiktok:ja1" } });
+        expect(searches(apify)).toEqual(["東京夜景1"]);
+      });
+
+      it("sequential: en is searched only after ja came back empty, and broad is never paid for", async () => {
+        process.env.MEDIA_TIER_MODE = "sequential";
+        const { apify, outcome } = await sourceOne({ apifyImpl: async (args) => (args[4].keyword === "tokyo 1" ? apifyHit("en1") : noApify) });
+        expect(outcome).toMatchObject({ ok: true, data: { tier: "en" } });
+        expect(searches(apify)).toEqual(["東京夜景1", "tokyo 1"]);
+      });
+
+      it("sequential: every Apify tier empty ends on Pexels, which started at once because it is free", async () => {
+        process.env.MEDIA_TIER_MODE = "sequential";
+        const { apify, pexels, outcome } = await sourceOne({ pexelsImpl: async () => pexelsHit("px1") });
+        expect(outcome).toMatchObject({ ok: true, data: { provider: "pexels", tier: "pexels", fallbackReason: "apify_no_usable_candidate" } });
+        expect(searches(apify)).toEqual(["東京夜景1", "tokyo 1", "Shohei Ohtani"]);
+        expect(pexels.autoImportForScene).toHaveBeenCalledTimes(1);
+      });
+
+      it("cheap_first without a social tier behaves like sequential", async () => {
+        process.env.MEDIA_TIER_MODE = "cheap_first";
+        const { apify, outcome } = await sourceOne({ apifyImpl: jaWins });
+        expect(outcome).toMatchObject({ ok: true, data: { tier: "ja" } });
+        expect(searches(apify)).toEqual(["東京夜景1"]);
+      });
     });
 
     it("reads the multi-tier keyword format (arrays, broad_en) next to the legacy one", async () => {
