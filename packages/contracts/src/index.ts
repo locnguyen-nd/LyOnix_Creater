@@ -695,9 +695,28 @@ export type RenderJobResponse = {
   updatedAt: string;
 };
 
-/** VE2E-19: per-channel finished-video library entry (GET /channels/:id/videos). */
+/**
+ * What a finished video cost, in USD, from what the system RECORDED: a part no provider reported (or reported in another currency) is null,
+ * so `totalUsd` is a floor, not an invoice. `mediaUsd` is the Apify spend; it is only known for Auto runs.
+ */
+export type VideoCostResponse = {
+  totalUsd: number | null;
+  renderUsd: number | null;
+  contentUsd: number | null;
+  ttsUsd: number | null;
+  mediaUsd: number | null;
+};
+
+/** How the video was made: `auto` = an Auto run (Tạo tự động), `manual` = a Studio (manual) job. */
+export const channelVideoModes = ["auto", "manual"] as const;
+export type ChannelVideoMode = (typeof channelVideoModes)[number];
+
+/** VE2E-19: per-channel finished-video library entry (GET /channels/:id/videos). Auto runs and Studio jobs of the channel are listed together. */
 export type ChannelVideoResponse = {
+  /** The Studio job id (`manual`) or the Auto run id (`auto`, opens /video-productions/:id). */
   jobId: string;
+  mode: ChannelVideoMode;
+  cost: VideoCostResponse;
   renderJobId: string;
   title: string;
   caption: string;
@@ -834,6 +853,8 @@ export type VideoProductionSubmitRequest = {
   targetPerson?: string;
   /** VE2E-151: headline + excerpt of the selected news (max 800 chars): a person the model extracts that is named there is the `news` target. */
   newsContext?: string;
+  /** The channel chosen on the create form; the run is listed in that channel's video library. The caller must have access to it. */
+  channelId?: string;
 };
 
 /**

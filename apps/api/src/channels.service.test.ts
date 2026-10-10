@@ -110,8 +110,14 @@ describe("ChannelsService.listVideos", () => {
     ...overrides,
   });
 
-  const makeService = (jobs: unknown[], channelRowOverrides: Record<string, unknown> = {}) => {
-    const prisma: any = { channelConnection: { findUnique: vi.fn(async () => ({ id: channelId, ...channelRowOverrides })) } };
+  /** `auto`: the Auto-run rows the service reads (workflowRun / renderJob / stepRun); none by default. */
+  const makeService = (jobs: unknown[], channelRowOverrides: Record<string, unknown> = {}, auto: { runs?: unknown[]; renders?: unknown[]; steps?: unknown[] } = {}) => {
+    const prisma: any = {
+      channelConnection: { findUnique: vi.fn(async () => ({ id: channelId, ...channelRowOverrides })) },
+      workflowRun: { findMany: vi.fn(async () => auto.runs ?? []) },
+      renderJob: { findMany: vi.fn(async () => auto.renders ?? []) },
+      stepRun: { findMany: vi.fn(async () => auto.steps ?? []) },
+    };
     const grants: any = { forUser: vi.fn(async () => ({ teamIds: [], projectIds: [], channelIds: [channelId] })) };
     const jobsService: any = { list: vi.fn(async () => jobs) };
     return new ChannelsService(prisma, grants, jobsService);
@@ -152,5 +158,83 @@ describe("ChannelsService.listVideos", () => {
     ]);
     const rows = await service.listVideos(channelId, userId, "staff");
     expect(rows?.map((row) => row.jobId)).toEqual(["newer", "older"]);
+  });
+
+  describe("mode and cost (Auto runs and Studio jobs of the channel are listed together)", () => {
+    const run = (overrides: Record<string, unknown> = {}) => ({
+      id: "run-1",
+      updatedAt: new Date("2026-10-10T08:00:00.000Z"),
+      createdBy: { displayName: "Lan" },
+      sourceVersion: { type: "topic", rawText: "Messi nghỉ hưu\nchi tiết", originRef: null, scriptDraftVersions: [{ title: "Messi giải nghệ", caption: "#messi" }] },
+      ...overrides,
+    });
+    const render = (overrides: Record<string, unknown> = {}) => ({ id: "render-a", workflowRunId: "run-1", status: "completed", resultUrl: "https://api.example/api/v1/render-jobs/render-a/file", snapshotUrl: null, renderDurationMs: 61000, costAmount: "0.0100", costCurrency: "USD", ...overrides });
+
+    it("labels a Studio job manual and prices it by its recorded render cost only", async () => {
+      const service = makeService([job({ render: { ...job().render, costAmount: "0.52", costCurrency: "USD" } })]);
+      const rows = await service.listVideos(channelId, userId, "staff");
+      expect(rows?.[0]).toMatchObject({ mode: "manual", cost: { totalUsd: 0.52, renderUsd: 0.52, contentUsd: null, ttsUsd: null, mediaUsd: null } });
+    });
+
+    it("a Studio job with no recorded cost has an empty (null) cost, not zero", async () => {
+      const rows = await makeService([job()]).listVideos(channelId, userId, "staff");
+      expect(rows?.[0]?.cost).toEqual({ totalUsd: null, renderUsd: null, contentUsd: null, ttsUsd: null, mediaUsd: null });
+    });
+
+    it("lists a finished Auto run of the channel, labelled auto, with render + content + voice + Apify spend", async () => {
+      const steps = [
+        { workflowRunId: "run-1", stepKey: "run_usage", outputRef: { entries: [{ step: "script", kind: "content", costAmount: "0.02", costCurrency: "USD" }, { step: "tts", kind: "tts", costAmount: "0.03", costCurrency: "USD" }] } },
+        { workflowRunId: "run-1", stepKey: "media_plan_diagnostics", outputRef: { segments: [], apifyUsage: { runs: 20, seconds: 400, usd: 0.5 } } },
+      ];
+      const service = makeService([], {}, { runs: [run()], renders: [render()], steps });
+      const rows = await service.listVideos(channelId, userId, "staff");
+      expect(rows).toHaveLength(1);
+      expect(rows?.[0]).toMatchObject({
+        jobId: "run-1",
+        mode: "auto",
+        renderJobId: "render-a",
+        title: "Messi giải nghệ",
+        caption: "#messi",
+        createdByName: "Lan",
+        resultUrl: "https://api.example/api/v1/render-jobs/render-a/file",
+        cost: { totalUsd: 0.56, renderUsd: 0.01, contentUsd: 0.02, ttsUsd: 0.03, mediaUsd: 0.5 },
+      });
+    });
+
+    it("asks only for this channel's completed, not-deleted Auto runs", async () => {
+      const service = makeService([], {}, { runs: [] });
+      const findMany = vi.fn(async (_args: unknown) => []);
+      (service as any).prisma.workflowRun.findMany = findMany;
+      await service.listVideos(channelId, userId, "staff");
+      expect((findMany.mock.calls[0]![0] as { where: unknown }).where).toEqual({ channelId, mode: "auto", deletedAt: null, status: "completed" });
+    });
+
+    it("skips an Auto run whose render has no playable result, and takes the newest completed render of a run", async () => {
+      const service = makeService([], {}, {
+        runs: [run(), run({ id: "run-2" })],
+        renders: [render({ id: "render-new", costAmount: "0.2" }), render({ id: "render-old", costAmount: "9" }), render({ id: "render-x", workflowRunId: "run-2", status: "rendering", resultUrl: null })],
+      });
+      const rows = await service.listVideos(channelId, userId, "staff");
+      expect(rows?.map((row) => [row.jobId, row.renderJobId, row.cost.renderUsd])).toEqual([["run-1", "render-new", 0.2]]);
+    });
+
+    it("uses the highest attempt's ledger (steps arrive newest first) and falls back to the source text for the title", async () => {
+      const steps = [
+        { workflowRunId: "run-1", stepKey: "run_usage", outputRef: { entries: [{ step: "script", kind: "content", costAmount: "0.04", costCurrency: "USD" }] } },
+        { workflowRunId: "run-1", stepKey: "run_usage", outputRef: { entries: [{ step: "script", kind: "content", costAmount: "9", costCurrency: "USD" }] } },
+      ];
+      const noScript = run({ sourceVersion: { type: "topic", rawText: "Chủ đề thô\ndòng 2", originRef: null, scriptDraftVersions: [] } });
+      const rows = await makeService([], {}, { runs: [noScript], renders: [render()], steps }).listVideos(channelId, userId, "staff");
+      expect(rows?.[0]).toMatchObject({ title: "Chủ đề thô", cost: { contentUsd: 0.04 } });
+    });
+
+    it("sorts Auto and Studio videos together, newest first", async () => {
+      const service = makeService([job({ id: "job-mid", updatedAt: "2026-10-09T00:00:00.000Z" })], {}, {
+        runs: [run({ updatedAt: new Date("2026-10-10T08:00:00.000Z") }), run({ id: "run-old", updatedAt: new Date("2026-10-08T00:00:00.000Z") })],
+        renders: [render(), render({ id: "render-b", workflowRunId: "run-old" })],
+      });
+      const rows = await service.listVideos(channelId, userId, "staff");
+      expect(rows?.map((row) => row.mode + ":" + row.jobId)).toEqual(["auto:run-1", "manual:job-mid", "auto:run-old"]);
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import type { ChannelVideoResponse } from "@lyonix/contracts";
 import { canAccessChannel } from "./grant-access.js";
+import { summarizeVideoCost, type UsageEntryCost } from "./video-cost.js";
 import { GrantsService } from "./grants.service.js";
 import { JobsService } from "./jobs.service.js";
 import { PrismaService } from "./prisma.service.js";
@@ -75,10 +76,13 @@ export class ChannelsService {
   async listVideos(id: string, userId: string, role: "admin" | "staff"): Promise<ChannelVideoResponse[] | null> {
     if (!(await this.visible(id, userId, role))) return null;
     const jobs = await this.jobs.list(userId, role);
-    return jobs
+    const manual: ChannelVideoResponse[] = jobs
       .filter((job): job is typeof job & { render: NonNullable<typeof job.render> } => job.channelId === id && job.pipelineStep === "done" && Boolean(job.render?.resultUrl))
       .map((job) => ({
         jobId: job.id,
+        mode: "manual" as const,
+        // A Studio job only has its render cost on record here (its script / voice spend is not tied to the job).
+        cost: summarizeVideoCost({ render: job.render }),
         renderJobId: job.render.id,
         title: job.topic,
         caption: job.script.caption || job.script.hook || job.topic,
@@ -87,8 +91,70 @@ export class ChannelsService {
         resultUrl: job.render.resultUrl!,
         renderDurationMs: job.render.renderDurationMs,
         completedAt: job.updatedAt,
-      }))
-      .sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+      }));
+    return [...manual, ...(await this.autoVideos(id))].sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+  }
+
+  /**
+   * The finished Auto runs created for this channel (the channel picked on the create form). Same shape as a Studio job; the cost adds what
+   * the run recorded: its render, the content / voice ledger (`run_usage`) and the Apify spend of its media step.
+   */
+  private async autoVideos(channelId: string): Promise<ChannelVideoResponse[]> {
+    const runs = await this.prisma.workflowRun.findMany({
+      where: { channelId, mode: "auto", deletedAt: null, status: "completed" },
+      orderBy: { updatedAt: "desc" },
+      take: 200,
+      select: {
+        id: true,
+        updatedAt: true,
+        createdBy: { select: { displayName: true } },
+        sourceVersion: { select: { type: true, rawText: true, originRef: true, scriptDraftVersions: { orderBy: { version: "desc" }, take: 1, select: { title: true, caption: true } } } },
+      },
+    });
+    if (runs.length === 0) return [];
+    const runIds = runs.map((run) => run.id);
+    const [renders, steps] = await Promise.all([
+      this.prisma.renderJob.findMany({
+        where: { workflowRunId: { in: runIds } },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, workflowRunId: true, status: true, resultUrl: true, snapshotUrl: true, renderDurationMs: true, costAmount: true, costCurrency: true },
+      }),
+      this.prisma.stepRun.findMany({
+        where: { workflowRunId: { in: runIds }, stepKey: { in: ["run_usage", "media_plan_diagnostics"] } },
+        orderBy: { attempt: "desc" },
+        select: { workflowRunId: true, stepKey: true, outputRef: true },
+      }),
+    ]);
+    const renderOf = new Map<string, (typeof renders)[number]>();
+    for (const render of renders) if (render.workflowRunId && render.status === "completed" && render.resultUrl && !renderOf.has(render.workflowRunId)) renderOf.set(render.workflowRunId, render);
+    const stepOf = new Map<string, unknown>();
+    for (const step of steps) if (!stepOf.has(`${step.workflowRunId}:${step.stepKey}`)) stepOf.set(`${step.workflowRunId}:${step.stepKey}`, step.outputRef);
+
+    const out: ChannelVideoResponse[] = [];
+    for (const run of runs) {
+      const render = renderOf.get(run.id);
+      if (!render) continue;
+      const source = run.sourceVersion;
+      const script = source?.scriptDraftVersions[0];
+      const sourceTitle = source?.type === "article_url" ? source.originRef : source?.rawText?.trim().split(/\r?\n/)[0];
+      const title = (script?.title?.trim() || sourceTitle?.trim() || "Auto video").slice(0, 160);
+      const usage = (stepOf.get(`${run.id}:run_usage`) as { entries?: UsageEntryCost[] } | null | undefined)?.entries;
+      const apify = (stepOf.get(`${run.id}:media_plan_diagnostics`) as { apifyUsage?: { usd?: unknown } | null } | null | undefined)?.apifyUsage;
+      out.push({
+        jobId: run.id,
+        mode: "auto",
+        cost: summarizeVideoCost({ render: { costAmount: render.costAmount, costCurrency: render.costCurrency }, usage: Array.isArray(usage) ? usage : [], apifyUsd: typeof apify?.usd === "number" ? apify.usd : null }),
+        renderJobId: render.id,
+        title,
+        caption: script?.caption?.trim() || title,
+        createdByName: run.createdBy?.displayName ?? null,
+        thumbnailUrl: render.snapshotUrl,
+        resultUrl: render.resultUrl!,
+        renderDurationMs: render.renderDurationMs,
+        completedAt: run.updatedAt.toISOString(),
+      });
+    }
+    return out;
   }
 
   private async coverage(channelId: string) {
