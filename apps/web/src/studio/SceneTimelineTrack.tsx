@@ -18,6 +18,8 @@ export type TimelineClip = {
 };
 
 type Props = {
+  /** Preview playback position (Space = Play / Pause): a vertical line inside the playing scene; `null` = hidden. */
+  playhead?: { sceneId: string; progress: number } | null;
   clips: TimelineClip[];
   selectedId: string | null;
   /** Gap between clips in px (must match the voice/music tracks below so they stay aligned). */
@@ -42,7 +44,7 @@ const BAR_LANE_PX = TIMELINE_BAR_LANE_PX;
  * the keyboard (Delete, Ctrl+D, S, arrows, Alt+arrows, Ctrl+Z). Presentational: every edit is a callback
  * the page runs through its undoable `mutate()`.
  */
-export function SceneTimelineTrack({ clips, selectedId, gapPx, onSelect, onReorder, onInsert, onDuplicate, onRemove, onSplit, onUndo, onRedo }: Props) {
+export function SceneTimelineTrack({ clips, selectedId, gapPx, playhead = null, onSelect, onReorder, onInsert, onDuplicate, onRemove, onSplit, onUndo, onRedo }: Props) {
   const { t } = useTranslation();
   const [insertAfter, setInsertAfter] = useState<string | null | undefined>(undefined);
   const [insertText, setInsertText] = useState("");
@@ -148,6 +150,8 @@ export function SceneTimelineTrack({ clips, selectedId, gapPx, onSelect, onReord
   const splitPlan = splitClip ? planSplit(splitClip.narration) : null;
   const splitRatios = splitPlan ? splitMarkerRatios(splitPlan.sentences) : [];
 
+  const playheadIndex = playhead ? clips.findIndex((clip) => clip.sceneId === playhead.sceneId) : -1;
+  const playheadLeft = playhead && playheadIndex >= 0 ? Math.round(offsets[playheadIndex]! + Math.max(0, Math.min(1, playhead.progress)) * clips[playheadIndex]!.widthPx) : null;
   const barLeft = selected ? Math.max(0, Math.min(offsets[selectedIndex]!, Math.max(0, totalWidth - 150))) : 0;
 
   return (
@@ -155,6 +159,7 @@ export function SceneTimelineTrack({ clips, selectedId, gapPx, onSelect, onReord
       role="group"
       aria-label={t("studioPro.tlAria")}
       tabIndex={0}
+      data-timeline-track
       onKeyDown={onKeyDown}
       className="relative w-max outline-none focus-visible:ring-1 focus-visible:ring-lyx-fg-muted"
       onDragOver={handleDragOver}
@@ -162,6 +167,10 @@ export function SceneTimelineTrack({ clips, selectedId, gapPx, onSelect, onReord
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropIndex(null); }}
     >
       <div className="relative w-max" style={{ minWidth: totalWidth + 72 }}>
+        {/* Preview playhead: inside the playing scene, moved by the preview clock (no easing, so reduced motion changes nothing). */}
+        {playheadLeft !== null ? (
+          <div aria-hidden="true" data-testid="timeline-playhead" className="pointer-events-none absolute bottom-0 z-30 w-0.5 bg-lyx-danger" style={{ left: playheadLeft, top: BAR_LANE_PX }} />
+        ) : null}
         {/* floating action lane */}
         <div className="relative" style={{ height: BAR_LANE_PX }}>
           {selected ? (

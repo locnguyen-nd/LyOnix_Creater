@@ -102,6 +102,8 @@ import { fetchVideoProductionStudioContext } from "../video-productions-api";
 import { TextStylePanel } from "../studio/text-style/TextStylePanel";
 import { SceneCaptionPreview } from "../studio/text-style/CaptionPreview";
 import { useStudioCaptionStyle } from "../studio/text-style/useStudioCaptionStyle";
+import { mediaBuffering, previewSceneTimings, releasePreviewMedia, syncPreviewMedia } from "../studio/preview-playback";
+import { usePreviewPlayback } from "../studio/usePreviewPlayback";
 
 /** VE2E-13: Studio's Creatomate SDK preview panel state. `unsupported`/`not_configured` are expected fallback states, not errors — the existing LyOnix scene-board canvas stays the always-available preview in both cases. */
 type SdkPreviewState = "off" | "unsupported" | "not_configured" | "loading" | "ready" | "error" | "empty";
@@ -314,9 +316,13 @@ export function StudioProPage() {
   const [previewZoomIdx, setPreviewZoomIdx] = useState(1);
   const [mediaScaleIdx, setMediaScaleIdx] = useState(1);
   const [timelineZoomIdx, setTimelineZoomIdx] = useState(1);
-  const [playing, setPlaying] = useState(false);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioTrackRef = useRef<HTMLAudioElement | null>(null);
+  // Preview playback bookkeeping (read inside the clock's callbacks, which outlive a render).
+  const previewMediaStateRef = useRef<"ready" | "loading" | "failed" | "none">("none");
+  const selectedSceneIdRef = useRef<string | null>(null);
+  const selectedSceneDraftRef = useRef<{ sourceStartMs: number | null; sourceDurationMs: number | null } | null>(null);
+  const playbackSelectionRef = useRef<string | null>(null);
   const thumbInFlight = useRef(new Set<string>());
   // Insertion-ordered `id -> cachedAt` for every `thumbCache` entry - drives the bounded FIFO
   // eviction and the TTL-based refresh below (a signed delivery URL expires server-side after
@@ -685,14 +691,6 @@ export function StudioProPage() {
     player.currentTime = selectedSceneDraft.sourceStartMs / 1000;
   }, [selectedMediaAsset?.id, selectedSceneDraft?.sourceStartMs]);
 
-  // Switching scenes always stops whatever was playing - the media/audio elements below are
-  // re-pointed at the newly selected scene's own source, so a stale play state would otherwise
-  // keep an old clip's audio going under a different scene's preview.
-  useEffect(() => {
-    setPlaying(false);
-    previewVideoRef.current?.pause();
-    previewAudioTrackRef.current?.pause();
-  }, [selectedSceneId]);
 
   // Resolves every scene's already-generated audio so the Giọng đọc track can show a real
   // duration instead of an indefinite "···". Cheap metadata GETs; one batched setState.
@@ -1050,20 +1048,6 @@ export function StudioProPage() {
     }
   };
 
-  // Plays the selected scene's real bound media - video muted (its own audio is never the
-  // intended track, see the render-time auto-mute in timeline-render-mapping.ts) alongside its
-  // real generated narration, so "Phát" previews the actual assets rather than a static frame.
-  const togglePlay = () => {
-    const next = !playing;
-    setPlaying(next);
-    if (next) {
-      void previewVideoRef.current?.play().catch(() => undefined);
-      void previewAudioTrackRef.current?.play().catch(() => undefined);
-    } else {
-      previewVideoRef.current?.pause();
-      previewAudioTrackRef.current?.pause();
-    }
-  };
 
   const zoomPreview = (delta: 1 | -1) => setPreviewZoomIdx((prev) => Math.min(PREVIEW_ZOOM_STEPS.length - 1, Math.max(0, prev + delta)));
   const zoomTimeline = (delta: 1 | -1) => setTimelineZoomIdx((prev) => Math.min(TIMELINE_PX_PER_SECOND.length - 1, Math.max(0, prev + delta)));
@@ -1136,6 +1120,70 @@ export function StudioProPage() {
       </>
     );
   }
+  // --- Studio preview playback (Space = Play / Pause): the scenes in order, each with its real bound media (video muted, its source
+  // range) and its generated voice; the timeline playhead and the selected scene follow the clock. No render / provider call.
+  const previewTimings = previewSceneTimings(
+    orderedScenes.map((scene) => {
+      const bound = draft.scenes.find((row) => row.sceneId === scene.sceneId);
+      return { sceneId: scene.sceneId, excluded: Boolean(bound?.excluded), audioDurationMs: audioBySceneId[scene.sceneId]?.durationMs ?? null, sourceDurationMs: bound?.sourceDurationMs ?? null, durationHintMs: scene.durationHintMs };
+    }),
+  );
+  const playback = usePreviewPlayback({
+    timings: previewTimings,
+    // The clock waits while the scene's media / voice is still loading (small loader, no crash, resumes once loaded).
+    isBuffering: () => previewMediaStateRef.current === "loading" || mediaBuffering(previewVideoRef.current, previewAudioTrackRef.current),
+    onSceneEnter: (sceneId) => {
+      if (sceneId !== selectedSceneIdRef.current) {
+        playbackSelectionRef.current = sceneId;
+        setSelectedSceneId(sceneId);
+      } else {
+        syncPreviewNow();
+      }
+    },
+    enabled: !showFullPreview,
+  });
+  const playing = playback.snapshot.playing;
+  const playbackSceneId = playback.snapshot.sceneId;
+  selectedSceneIdRef.current = selectedScene?.sceneId ?? null;
+  // Puts the current scene's video + voice at the clock's offset and plays / pauses them together (scene entry, resume, media loaded).
+  function syncPreviewNow() {
+    const snap = playback.controller.getSnapshot();
+    if (snap.sceneId && snap.sceneId !== selectedSceneIdRef.current) return; // the elements still belong to the previous scene
+    syncPreviewMedia(
+      { video: previewVideoRef.current, audio: previewAudioTrackRef.current },
+      { playing: snap.playing, offsetMs: snap.offsetMs, sourceStartMs: selectedSceneDraftRef.current?.sourceStartMs ?? 0, sourceDurationMs: selectedSceneDraftRef.current?.sourceDurationMs ?? null, seek: true },
+    );
+  }
+  selectedSceneDraftRef.current = selectedSceneDraft;
+  const togglePlay = () => playback.controller.toggle();
+  // Play / pause / scene entry / new media: video + voice re-synced to the clock.
+  useEffect(() => {
+    syncPreviewNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, playbackSceneId, selectedMediaAsset?.id, selectedAudio?.id]);
+  // A scene picked by hand moves the preview there (it keeps playing when it was playing); the clock's own scene changes are skipped.
+  useEffect(() => {
+    if (!selectedSceneId) return;
+    if (playbackSelectionRef.current === selectedSceneId) {
+      playbackSelectionRef.current = null;
+      return;
+    }
+    playback.controller.seekToScene(selectedSceneId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSceneId]);
+  // The previous scene's video / voice never keep playing under the next scene.
+  useEffect(() => {
+    const video = previewVideoRef.current;
+    const audio = previewAudioTrackRef.current;
+    return () => releasePreviewMedia(video, audio);
+  }, [selectedSceneId, selectedMediaAsset?.id, selectedAudio?.id]);
+  // Another project (or leaving Studio): stop the preview and silence its elements.
+  useEffect(() => () => {
+    playback.controller.stop();
+    releasePreviewMedia(previewVideoRef.current, previewAudioTrackRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [context?.projectId]);
+
   if (error && !context) return <Banner variant="danger">{error}</Banner>;
   if (!context) return <Banner variant="info">{t("common.loading")}</Banner>;
 
@@ -1178,6 +1226,7 @@ export function StudioProPage() {
     : thumbErrors[selectedMediaId] || (!selectedMediaAsset && mediaLibraryStatus === "failed")
       ? "failed"
       : selectedMediaAsset && selectedMediaUrl ? "ready" : "loading";
+  previewMediaStateRef.current = previewMediaState;
   const selectedSceneIndex = selectedScene ? orderedScenes.findIndex((scene) => scene.sceneId === selectedScene.sceneId) : -1;
 
   // Media picker inputs: keyword chips for Pexels, per-segment lengths for the long-video -> shorts planner.
@@ -1580,10 +1629,19 @@ export function StudioProPage() {
           ) : null}
         </div>
 
-        <div className="flex min-h-0 min-w-0 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-col" data-preview-shortcuts="on">
           <div className="flex items-center justify-between gap-3 border-b border-lyx-border px-3 py-1.5">
             <div className="flex items-center gap-1.5">
-              <button type="button" className="lyx-btn lyx-btn-ghost h-8 w-8" title={playing ? t("studioPro.pause") : t("studioPro.play")} onClick={togglePlay} disabled={!selectedMediaAsset && !selectedAudio}>
+              <button
+                type="button"
+                data-preview-play
+                className="lyx-btn lyx-btn-ghost h-8 w-8"
+                aria-label={playing ? t("studioPro.previewPause") : t("studioPro.previewPlay")}
+                aria-pressed={playing}
+                title={t("studioPro.previewShortcutHint")}
+                onClick={togglePlay}
+                disabled={previewTimings.length === 0}
+              >
                 {playing ? <Pause size={15} strokeWidth={1.9} /> : <Play size={15} strokeWidth={1.9} />}
               </button>
               <span className="hidden text-[11px] text-lyx-fg-muted xl:inline">{t("studioPro.previewPlaybackHint")}</span>
@@ -1663,15 +1721,13 @@ export function StudioProPage() {
                           const duration = selectedSceneDraft?.sourceDurationMs;
                           event.currentTarget.currentTime = start / 1000;
                           if (duration != null) event.currentTarget.loop = false;
+                          if (playback.controller.getSnapshot().playing) syncPreviewNow();
                         }}
                         onTimeUpdate={(event) => {
                           const start = selectedSceneDraft?.sourceStartMs ?? 0;
                           const duration = selectedSceneDraft?.sourceDurationMs;
-                          if (duration != null && event.currentTarget.currentTime >= (start + duration) / 1000) {
-                            event.currentTarget.pause();
-                            event.currentTarget.currentTime = start / 1000;
-                            setPlaying(false);
-                          }
+                          // End of the scene's source range: hold the last frame; the preview clock moves on to the next scene.
+                          if (duration != null && event.currentTarget.currentTime >= (start + duration) / 1000) event.currentTarget.pause();
                         }}
                         className="absolute inset-0 h-full w-full object-cover"
                       />
@@ -1702,7 +1758,35 @@ export function StudioProPage() {
                       <span className="px-4 text-[11px] text-white/40">{t("common.previewLabel")}</span>
                     )}
                   </div>
-                  {selectedAudio ? <audio key={selectedAudio.id} ref={previewAudioTrackRef} src={thumbCache[selectedAudio.mediaAssetVersionId]} className="hidden" /> : null}
+                  {selectedAudio ? (
+                    <audio
+                      key={selectedAudio.id}
+                      ref={previewAudioTrackRef}
+                      src={thumbCache[selectedAudio.mediaAssetVersionId]}
+                      className="hidden"
+                      onLoadedMetadata={() => { if (playback.controller.getSnapshot().playing) syncPreviewNow(); }}
+                    />
+                  ) : null}
+                  {/* Play / Pause inside the preview frame (Space does the same); a small loader while the scene's media loads. */}
+                  <button
+                    type="button"
+                    data-preview-play
+                    onClick={togglePlay}
+                    disabled={previewTimings.length === 0}
+                    aria-label={playing ? t("studioPro.previewPause") : t("studioPro.previewPlay")}
+                    aria-pressed={playing}
+                    title={t("studioPro.previewShortcutHint")}
+                    data-testid="preview-play-toggle"
+                    className="absolute bottom-2 left-2 z-20 inline-flex h-8 items-center gap-1 rounded-full bg-black/55 px-2.5 text-[11px] font-semibold text-white hover:bg-black/70 disabled:opacity-40"
+                  >
+                    {playing ? <Pause size={13} strokeWidth={2} aria-hidden="true" /> : <Play size={13} strokeWidth={2} aria-hidden="true" />}
+                    <span>{playing ? t("studioPro.pause") : t("studioPro.play")}</span>
+                  </button>
+                  {playing && playback.snapshot.buffering ? (
+                    <span role="status" className="absolute bottom-2 right-2 z-20 inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-[10.5px] text-white/85" data-testid="preview-buffering">
+                      <LoaderCircle size={12} strokeWidth={2} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />{t("studioPro.previewBuffering")}
+                    </span>
+                  ) : null}
                   {tiktokFrame ? (
                     <>
                       <div className="absolute inset-x-0 top-0 flex h-[12%] items-center justify-center border-b border-dashed border-white/50 bg-black/10">
@@ -1781,6 +1865,7 @@ export function StudioProPage() {
                     })}
                     selectedId={selectedScene?.sceneId ?? null}
                     gapPx={4}
+                    playhead={playbackSceneId && (playing || playback.snapshot.offsetMs > 0) ? { sceneId: playbackSceneId, progress: playback.snapshot.progress } : null}
                     onSelect={setSelectedSceneId}
                     onReorder={reorderScene}
                     onInsert={handleInsertScene}

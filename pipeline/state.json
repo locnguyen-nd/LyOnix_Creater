@@ -214,6 +214,15 @@
         "VE2E-153"
       ],
       "note": "Sự cố run 19db79bb: Image-7/Image-10.source rỗng vì claimSameSubjectWindow/L4 giao cửa sổ video cho đoạn ảnh (cảnh 4, 10) + gán slot theo hàng đợi cùng loại. Sửa: không giao video cho slot ảnh; fallback ảnh = frame tĩnh clip của job (ưu tiên clip đúng người) > stock/context > nền thương hiệu; preflightTemplateSceneCount ngay sau kịch bản (TEMPLATE_SCENE_COUNT_UNSUPPORTED / TEMPLATE_REQUIRED_ASSET_MISSING trước TTS/media); ensureTemplateSlots sau media (fallback hoặc chặn kèm cảnh + slot, step template_slot_preflight); Apify hết quota -> thử account kế tiếp, hết -> apify_quota_exhausted_all_accounts; ngưỡng độ phủ người strict 60%; trang job: đúng người / bối cảnh / generic, slot thiếu, provider lỗi. Chưa commit. Spec .docs/specs/VE2E-154.md."
+    },
+    {
+      "id": "VE2E-155",
+      "title": "Studio Preview: Space Play/Pause, đồng bộ video + giọng đọc + playhead, tự chuyển cảnh",
+      "group": "Làm mịn — Studio",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [],
+      "note": "PreviewPlaybackController (thuần, test được): đồng hồ rAF theo cảnh (giọng đọc > đoạn video > hint), hết cảnh sang cảnh kế, hết timeline dừng cuối, Space sau đó phát lại; pause giữ offset; chờ khi media đang tải. Phím: Space, trái/phải, Home, Esc; bỏ qua khi nhập liệu/dialog/modifier/repeat, giữ Space của nút ngoài vùng preview, trái/phải/Esc trong timeline track. Đồng bộ video (đoạn nguồn, tắt tiếng) + giọng đọc về cùng offset; đổi cảnh thì pause cảnh cũ; playhead trên timeline; dọn listener/đồng hồ khi unmount/đổi project. Không render/gọi provider. Chưa commit. Spec .docs/specs/VE2E-155.md."
     }
   ]
 }
