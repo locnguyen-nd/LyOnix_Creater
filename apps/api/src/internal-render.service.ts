@@ -112,6 +112,22 @@ const stableStringify = (value: unknown): string => {
 
 const isRenderable = (scene: SceneBindingForMapping): boolean => !scene.excluded && Boolean(scene.audioVersionId && scene.audioMediaAssetVersionId && scene.mediaAssetVersionId && scene.mediaKind) && (scene.audioDurationMs ?? 0) > 0;
 
+/**
+ * VE2E-157: what a scene still kept in the video lacks for the internal engine ("Cảnh 3 (scene_3): thiếu media, thiếu giọng đọc"), in
+ * video order. The engine would otherwise drop such a scene (and its narration) silently from the MP4; empty = every kept scene renders.
+ */
+export function unrenderableScenes(scenes: readonly SceneBindingForMapping[]): string[] {
+  const kept = [...scenes].filter((scene) => !scene.excluded).sort((a, b) => a.orderIndex - b.orderIndex);
+  const lines: string[] = [];
+  kept.forEach((scene, index) => {
+    const missing: string[] = [];
+    if (!scene.mediaAssetVersionId || !scene.mediaKind) missing.push("thiếu media");
+    if (!scene.audioVersionId || !scene.audioMediaAssetVersionId || !((scene.audioDurationMs ?? 0) > 0)) missing.push("thiếu giọng đọc");
+    if (missing.length > 0) lines.push(`Cảnh ${index + 1} (${scene.sceneId}): ${missing.join(", ")}`);
+  });
+  return lines;
+}
+
 @Injectable()
 export class InternalRenderService {
   private readonly inflight = new Map<string, Promise<void>>();
@@ -165,6 +181,11 @@ export class InternalRenderService {
     const scenes = (Array.isArray(timeline.scenes) ? timeline.scenes : []) as TimelineSceneBindingResponse[];
     const resolved = await resolveSceneBindingsForMapping(this.prisma, args.projectId, scenes, { fillDefaultVideoRanges: true });
     if (!resolved.some(isRenderable)) return { ok: false, code: "VALIDATION_FAILED", message: "Chưa có cảnh nào đủ audio + media để render — tạo voice/gán media rồi thử lại" };
+    // VE2E-157: never an MP4 with a scene silently missing - refused before any RenderJob, naming each scene and what it lacks.
+    const incomplete = unrenderableScenes(resolved);
+    if (incomplete.length > 0) {
+      return { ok: false, code: "VALIDATION_FAILED", message: `Không render được vì cảnh chưa đủ media/giọng đọc: ${incomplete.join("; ")}. Gán media, tạo giọng đọc hoặc bỏ cảnh đó khỏi video rồi thử lại.` };
+    }
 
     // An Auto run's key repeats across manual retries: the attempt generation (failed jobs so far) keeps a failed attempt from being replayed forever.
     const generation = args.workflowRunId ? await this.prisma.renderJob.count({ where: { workflowRunId: args.workflowRunId, status: "failed", fallbackOfJobId: null } }) : 0;

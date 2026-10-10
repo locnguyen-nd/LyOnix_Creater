@@ -22,15 +22,21 @@ import type { VideoComposer } from "./media-jobs.gateway.js";
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
-const tsx = join(repoRoot, "apps/media-worker/node_modules/.bin/tsx");
+// tsx's own entry run by this Node (portable: Windows cannot spawn the `.bin/tsx.cmd` shim without a shell)
+const tsx = join(repoRoot, "apps/media-worker/node_modules/tsx/dist/cli.mjs");
 const cli = join(repoRoot, "apps/media-worker/scripts/compose-cli.ts");
+// the FFmpeg the media-worker uses (FFMPEG_PATH), else the one on PATH
+const ffmpeg = process.env.FFMPEG_PATH?.trim() || "ffmpeg";
 
 const hasFfmpeg = (() => {
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-filters"], { encoding: "utf8" });
-  return r.status === 0 && ["xfade", "ass", "loudnorm", "ebur128", "blackdetect", "freezedetect"].every((f) => new RegExp(`\\b${f}\\b`).test(r.stdout)) && /libx264/.test(spawnSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8" }).stdout ?? "");
+  const r = spawnSync(ffmpeg, ["-hide_banner", "-filters"], { encoding: "utf8" });
+  return r.status === 0 && ["xfade", "ass", "loudnorm", "ebur128", "blackdetect", "freezedetect"].every((f) => new RegExp(`\\b${f}\\b`).test(r.stdout)) && /libx264/.test(spawnSync(ffmpeg, ["-hide_banner", "-encoders"], { encoding: "utf8" }).stdout ?? "");
 })();
 const fontconfig = spawnSync("fc-list", [":", "family"], { encoding: "utf8" }).status === 0;
+/** A Japanese-capable font family: fontconfig's pick, or `LYONIX_E2E_FONT` on a host without fontconfig tools (e.g. a Windows dev box). */
 const hostFont = (() => {
+  const configured = process.env.LYONIX_E2E_FONT?.trim();
+  if (configured) return configured;
   const r = spawnSync("fc-match", ["-f", "%{family}", ":lang=ja"], { encoding: "utf8" });
   return r.status === 0 ? r.stdout.split(",")[0]!.trim() || null : null;
 })();
@@ -59,7 +65,7 @@ const matches = (row: Row, where: Row | undefined): boolean =>
   });
 
 const generate = (args: string[]) => {
-  const r = spawnSync("ffmpeg", ["-hide_banner", "-nostdin", "-v", "error", "-y", ...args], { encoding: "utf8" });
+  const r = spawnSync(ffmpeg, ["-hide_banner", "-nostdin", "-v", "error", "-y", ...args], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(r.stderr);
 };
 
@@ -75,7 +81,7 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
     const dir = join(mediaDir, "projects/p");
     spawnSync("mkdir", ["-p", dir]);
     generate(["-f", "lavfi", "-i", "gradients=size=1920x1080:rate=1:duration=1:seed=3:n=4", "-frames:v", "1", join(dir, "m1.jpg")]);
-    generate(["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=2.2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", join(dir, "m2.mp4")]);
+    generate(["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=6", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", join(dir, "m2.mp4")]);
     for (const [name, seconds, freq] of [["au1", 3, 220], ["au2", 2.5, 280]] as const) {
       generate(["-f", "lavfi", "-i", `sine=frequency=${freq}:sample_rate=44100:duration=${seconds}`, "-af", "volume=0.5", "-c:a", "libmp3lame", join(dir, `${name}.mp3`)]);
     }
@@ -96,7 +102,7 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
     const timelines: Row[] = [];
     const media: Row[] = [
       { id: "m1", projectId, kind: "image", durationMs: null, relativePath: "projects/p/m1.jpg", checksumSha256: "1".repeat(64), deletedAt: null, sceneId: "scene-1" },
-      { id: "m2", projectId, kind: "video", durationMs: 2200, relativePath: "projects/p/m2.mp4", checksumSha256: "2".repeat(64), deletedAt: null, sceneId: "scene-2" },
+      { id: "m2", projectId, kind: "video", durationMs: 6000, relativePath: "projects/p/m2.mp4", checksumSha256: "2".repeat(64), deletedAt: null, sceneId: "scene-2" },
       { id: "au1", projectId, kind: "audio", durationMs: 3000, relativePath: "projects/p/au1.mp3", checksumSha256: "3".repeat(64), deletedAt: null },
       { id: "au2", projectId, kind: "audio", durationMs: 2500, relativePath: "projects/p/au2.mp3", checksumSha256: "4".repeat(64), deletedAt: null },
     ];
@@ -109,7 +115,8 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
       { id: "snap-lyonix", providerAccountId: LYONIX_ACCOUNT, engine: "lyonix", rolloutPercent: 100, fallbackSnapshotIds: ["snap-cm"], modifications: NEWS_RECAP_BROADCAST_TELOP_JP_V1.slots, rawTemplate: NEWS_RECAP_BROADCAST_TELOP_JP_V1 },
       { id: "snap-cm", providerAccountId: CM_ACCOUNT, engine: "creatomate", rolloutPercent: 0, fallbackSnapshotIds: [], modifications: [], rawTemplate: {} },
     ];
-    const accounts: Row[] = [{ id: LYONIX_ACCOUNT, provider: "lyonix", role: "render", deletedAt: null }, { id: CM_ACCOUNT, provider: "creatomate", role: "render", deletedAt: null }];
+    // the Auto profile's media account (a switched-on Pexels account: the job checks a media source is on before sourcing)
+    const accounts: Row[] = [{ id: LYONIX_ACCOUNT, provider: "lyonix", role: "render", deletedAt: null }, { id: CM_ACCOUNT, provider: "creatomate", role: "render", deletedAt: null }, { id: "media-acc", provider: "pexels", role: "visual", deletedAt: null, enabled: true }];
     let seq = 0;
     const orderIt = (rows: Row[], orderBy: Row | undefined) => (orderBy?.createdAt === "desc" ? [...rows].sort((a, b) => +b.createdAt - +a.createdAt) : [...rows].sort((a, b) => +a.createdAt - +b.createdAt));
     const prisma: any = {
@@ -194,7 +201,7 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
         const jobFile = join(mediaDir, `job-${job.jobKey.replace(/\W/g, "_")}.json`);
         await writeFile(jobFile, JSON.stringify({ schemaVersion: "media-job.v1", type: "video.compose", ...job }));
         return await new Promise((resolveResult, reject) => {
-          const child = spawn(tsx, [cli, "--media-root", mediaDir, "--job", jobFile, "--font", opts.font, "--preset", "veryfast"], { cwd: join(repoRoot, "apps/media-worker") });
+          const child = spawn(process.execPath, [tsx, cli, "--media-root", mediaDir, "--job", jobFile, "--font", opts.font, "--preset", "veryfast"], { cwd: join(repoRoot, "apps/media-worker") });
           let out = "";
           child.stdout.on("data", (chunk) => (out += chunk));
           child.on("error", reject);
@@ -238,7 +245,7 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
       { id: "scene-db-2", sceneId: "scene-2", orderIndex: 1, narration: "物価高への対応を急ぐ方針です。", screenText: "y", visualQuery: "b", durationHintMs: 2500 },
     ];
     const approved = { id: "script-1", sourceVersionId: "source-1", version: 1, status: "approved", language: "ja", title: opts.title ?? "経済対策を発表", hook: "h", body: "b", cta: "c", caption: "cap", providerPin: { accountId: "content-acc", provider: "openai", modelId: "m", configVersion: 1, promptTemplateVersion: "v1" }, supersedesId: null, createdAt: new Date().toISOString(), approvedAt: new Date().toISOString(), scenes };
-    const pexels = { autoImportForScene: async (_p: string, _u: string, _r: string, input: any) => ({ ok: true, data: { asset: input.sceneId === "scene-1" ? { id: "m1", kind: "image", durationMs: null } : { id: "m2", kind: "video", durationMs: 2200 }, externalId: `ext-${input.sceneId}` } }) };
+    const pexels = { autoImportForScene: async (_p: string, _u: string, _r: string, input: any) => ({ ok: true, data: { asset: input.sceneId === "scene-1" ? { id: "m1", kind: "image", durationMs: null } : { id: "m2", kind: "video", durationMs: 6000 }, externalId: `ext-${input.sceneId}` } }) };
     const runner = new WorkflowRunnerService(
       prisma,
       { extractArticle: vi.fn() } as never,
@@ -266,12 +273,12 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
     }
   };
 
-  const ffprobe = (path: string) => JSON.parse(spawnSync("ffprobe", ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", path], { encoding: "utf8" }).stdout) as { streams: Array<Record<string, string>>; format: Record<string, string> };
+  const ffprobe = (path: string) => JSON.parse(spawnSync(process.env.FFPROBE_PATH?.trim() || "ffprobe", ["-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", path], { encoding: "utf8" }).stdout) as { streams: Array<Record<string, string>>; format: Record<string, string> };
 
   it("Auto DAG -> Router -> internal engine -> real FFmpeg -> QC: the run completes with a 1080x1920 60 fps CFR MP4 served from the job", async () => {
     const { jobs, runs, runner, renderJobs, internal } = await build({ font: hostFont! });
     await timed("auto DAG (script..timeline, stubs)", () => runner.processNext());
-    expect(runs[0]).toMatchObject({ status: "render_queued" });
+    expect(runs[0], JSON.stringify(runs[0]?.lastError)).toMatchObject({ status: "render_queued" });
     const [queued] = [...jobs.values()];
     expect(queued).toMatchObject({ engine: "lyonix", status: "preparing_clips", workflowRunId: "run-1", templateSnapshotId: "snap-lyonix" });
 
@@ -280,7 +287,7 @@ describe.skipIf(!canRun)("Auto render end-to-end with real FFmpeg (VE2E-112)", (
       await internal.settle();
     });
     const job = jobs.get(queued!.id)!;
-    expect(job).toMatchObject({ status: "completed", engine: "lyonix", routeReason: "default", progress: 100, outputProfileVersion: "compose.v1", costCurrency: "USD" });
+    expect(job).toMatchObject({ status: "completed", engine: "lyonix", routeReason: "default", progress: 100, outputProfileVersion: "compose.v2", costCurrency: "USD" });
     expect(job.renderDurationMs).toBeGreaterThan(0);
     expect(Number(job.costAmount)).toBeGreaterThanOrEqual(0);
     expect(job.qcReport.passed).toBe(true);

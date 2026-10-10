@@ -44,20 +44,36 @@ export type RecipeCatalogEntry = {
   /** Script languages the recipe is designed for (its fonts / sample layout). */
   languages: readonly string[];
   previewPreset: PreviewPresetId;
+  /**
+   * VE2E-157: the engine output profile (`compose.vN` of @lyonix/media-jobs) this recipe was verified with by a REAL local render (FFmpeg,
+   * full QC, frames checked by eye) and the date. An admin can only switch a recipe on (rollout > 0) when this matches the running profile;
+   * a new profile needs a new verification. Absent = never verified.
+   */
+  renderVerified?: { profile: string; on: string };
 };
 
+/**
+ * VE2E-157: every released recipe rendered for real with the `compose.v2` engine on 2026-10-10: a real job (10 scenes of real footage + voices,
+ * one designed brand-background scene) through the media-worker's ComposeProcessor, full QC passed (no black / white / frozen picture,
+ * -14 LUFS), frames checked by eye; plus the FFmpeg integration test measuring the overlay motion in the MP4.
+ */
+const VERIFIED_COMPOSE_V2 = { profile: "compose.v2", on: "2026-10-10" } as const;
+
 export const RECIPE_CATALOG: readonly RecipeCatalogEntry[] = [
-  { recipeId: "news-recap-white-top-caption-jp", category: "news", styleTags: ["top caption", "picture band", "badge"], languages: ["ja"], previewPreset: "news-clean" },
-  { recipeId: "news-recap-broadcast-telop-jp", category: "news", styleTags: ["telop", "headline band", "word highlight"], languages: ["ja"], previewPreset: "news-clean" },
-  { recipeId: "news-recap-photo-video-mix-jp", category: "faceless", styleTags: ["fullscreen", "b-roll", "lower plate", "word highlight"], languages: ["ja"], previewPreset: "faceless-zoom" },
-  { recipeId: "faceless-story-caption-center-jp", category: "faceless", styleTags: ["fullscreen", "b-roll", "center caption"], languages: ["ja"], previewPreset: "faceless-zoom" },
-  { recipeId: "sports-highlight-score-headline-jp", category: "sports", styleTags: ["headline band", "score headline", "word highlight"], languages: ["ja"], previewPreset: "sports-energy" },
-  { recipeId: "sports-recap-player-focus-jp", category: "sports", styleTags: ["lower third", "push-in zoom", "word highlight"], languages: ["ja"], previewPreset: "sports-energy" },
-  { recipeId: "breaking-news-red-alert-jp", category: "breaking_news", styleTags: ["alert band", "headline box", "colour per scene"], languages: ["ja"], previewPreset: "breaking-alert" },
-  { recipeId: "breaking-news-urgent-headline-jp", category: "breaking_news", styleTags: ["big headline", "picture band", "colour per scene"], languages: ["ja"], previewPreset: "breaking-alert" },
+  { recipeId: "news-recap-white-top-caption-jp", category: "news", styleTags: ["top caption", "picture band", "badge"], languages: ["ja"], previewPreset: "news-clean", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "news-recap-broadcast-telop-jp", category: "news", styleTags: ["telop", "headline band", "word highlight"], languages: ["ja"], previewPreset: "news-clean", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "news-recap-photo-video-mix-jp", category: "faceless", styleTags: ["fullscreen", "b-roll", "lower plate", "word highlight"], languages: ["ja"], previewPreset: "faceless-zoom", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "faceless-story-caption-center-jp", category: "faceless", styleTags: ["fullscreen", "b-roll", "center caption"], languages: ["ja"], previewPreset: "faceless-zoom", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "sports-highlight-score-headline-jp", category: "sports", styleTags: ["headline band", "score headline", "word highlight"], languages: ["ja"], previewPreset: "sports-energy", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "sports-recap-player-focus-jp", category: "sports", styleTags: ["lower third", "push-in zoom", "word highlight"], languages: ["ja"], previewPreset: "sports-energy", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "breaking-news-red-alert-jp", category: "breaking_news", styleTags: ["alert band", "headline box", "colour per scene"], languages: ["ja"], previewPreset: "breaking-alert", renderVerified: VERIFIED_COMPOSE_V2 },
+  { recipeId: "breaking-news-urgent-headline-jp", category: "breaking_news", styleTags: ["big headline", "picture band", "colour per scene"], languages: ["ja"], previewPreset: "breaking-alert", renderVerified: VERIFIED_COMPOSE_V2 },
 ];
 
 const BY_RECIPE = new Map(RECIPE_CATALOG.map((entry) => [entry.recipeId, entry]));
 
 /** Catalog entry of a recipe id, or null (a recipe without an entry is listed under "all" only). */
 export const recipeCatalogEntry = (recipeId: string): RecipeCatalogEntry | null => BY_RECIPE.get(recipeId) ?? null;
+
+/** VE2E-157: was this recipe verified by a real render with the engine output profile `profile`? */
+export const recipeRenderVerified = (recipeId: string, profile: string): boolean => recipeCatalogEntry(recipeId)?.renderVerified?.profile === profile;

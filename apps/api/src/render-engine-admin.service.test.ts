@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { COMPOSE_PROFILE_VERSION } from "@lyonix/media-jobs";
+import { recipeRenderVerified } from "@lyonix/render-recipes";
 import { percentile, RenderEngineAdminService, summarizeRenderMetrics, type MetricRow } from "./render-engine-admin.service.js";
 
 const NOW = new Date("2031-03-15T12:00:00Z");
@@ -69,9 +71,10 @@ describe("summarizeRenderMetrics (VE2E-118)", () => {
 describe("RenderEngineAdminService.updateTemplate (VE2E-118)", () => {
   const make = () => {
     const snapshots: any[] = [
-      { id: "lx", engine: "lyonix", name: "Broadcast", externalTemplateId: "recipe:a@1", rolloutPercent: 0, fallbackSnapshotIds: [] },
+      { id: "lx", engine: "lyonix", name: "Broadcast", externalTemplateId: "recipe:news-recap-broadcast-telop-jp@1", rolloutPercent: 0, fallbackSnapshotIds: [] },
       { id: "cm", engine: "creatomate", name: "CM", externalTemplateId: "t1", rolloutPercent: 0, fallbackSnapshotIds: [] },
-      { id: "lx2", engine: "lyonix", name: "Other", externalTemplateId: "recipe:b@1", rolloutPercent: 0, fallbackSnapshotIds: [] },
+      { id: "lx2", engine: "lyonix", name: "Other", externalTemplateId: "recipe:breaking-news-red-alert-jp@1", rolloutPercent: 0, fallbackSnapshotIds: [] },
+      { id: "lx3", engine: "lyonix", name: "Unverified", externalTemplateId: "recipe:not-yet-verified-jp@1", rolloutPercent: 100, fallbackSnapshotIds: [] },
     ];
     const prisma: any = {
       templateSnapshot: {
@@ -107,6 +110,17 @@ describe("RenderEngineAdminService.updateTemplate (VE2E-118)", () => {
     await service.updateTemplate("lx", { rolloutPercent: 50, fallbackSnapshotIds: ["cm"] }, "a");
     expect(await service.updateTemplate("lx", { fallbackSnapshotIds: [] }, "a")).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
     expect(await service.updateTemplate("lx", { rolloutPercent: 100, fallbackSnapshotIds: [] }, "a")).toMatchObject({ ok: true });
+  });
+
+  it("VE2E-157: a recipe without a real-render verification for the running engine profile cannot be switched on / raised; lowering it can", async () => {
+    const { service, snapshots } = make();
+    expect(recipeRenderVerified("news-recap-broadcast-telop-jp", COMPOSE_PROFILE_VERSION)).toBe(true);
+    expect(recipeRenderVerified("not-yet-verified-jp", COMPOSE_PROFILE_VERSION)).toBe(false);
+    snapshots[3]!.rolloutPercent = 0;
+    expect(await service.updateTemplate("lx3", { rolloutPercent: 100 }, "a")).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining(`chưa qua kiểm thử render thật với engine hiện tại (${COMPOSE_PROFILE_VERSION})`) });
+    expect(snapshots[3]!.rolloutPercent).toBe(0);
+    snapshots[3]!.rolloutPercent = 100;
+    expect(await service.updateTemplate("lx3", { rolloutPercent: 0 }, "a")).toMatchObject({ ok: true, data: { rolloutPercent: 0 } });
   });
 
   it("validates ranges, ids and engine of the target and of the fallbacks", async () => {

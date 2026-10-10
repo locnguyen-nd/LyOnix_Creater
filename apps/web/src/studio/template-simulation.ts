@@ -7,9 +7,11 @@
  *    `alternate` (photos only), at most +0.2 (`motionFor`);
  *  - captions: the scene's sample sentence laid out by the shared `buildCaptionAss` (same pages, at most 2 lines); with
  *    `highlight: "word"` the spoken part turns `highlightColor`, otherwise the scene's `colorCycle` colour applies.
- * Boxes / text layers are static and the tint covers the whole frame (drawn by RecipePreview). Never part of a job or a render.
+ * VE2E-157: boxes / text layers enter and leave with the engine's shared motion preset (`layerMotionAt`, the numbers the media-worker
+ * writes as libass tags) and every caption phrase appears with the same fade + pop (`captionMotionAt`); the tint covers the whole frame
+ * (drawn by RecipePreview). The loop starts like the video: overlays enter at 0 and leave over its last 0.3 s. Never part of a job or a render.
  */
-import type { CatalogSample, PreviewPreset, RecipeTransitionKind, RenderRecipe } from "@lyonix/render-recipes";
+import { captionMotionAt, layerMotionAt, layerMotionFor, type CatalogSample, type MotionState, type PreviewPreset, type RecipeLayer, type RecipeTransitionKind, type RenderRecipe } from "@lyonix/render-recipes";
 import { layoutSceneCaption, pageAt, type PreviewCaptionPage } from "./full-preview-plan";
 
 export const MAX_SCENE_ZOOM = 0.2;
@@ -31,7 +33,15 @@ export type SimulationScene = {
 
 export type SimulationPlan = { loopMs: number; sceneMs: number; transitionKind: RecipeTransitionKind; scenes: SimulationScene[] };
 
-export type SimulationCaption = { lines: readonly string[]; fontSizePx: number; color: string; highlightColor: string; spokenChars: number | null };
+export type SimulationCaption = {
+  lines: readonly string[];
+  fontSizePx: number;
+  color: string;
+  highlightColor: string;
+  spokenChars: number | null;
+  /** Entrance of the phrase on screen (fade + pop), as the engine draws it. */
+  entrance: { opacity: number; scale: number };
+};
 
 export type SimulationFrame = {
   sceneIndex: number;
@@ -39,6 +49,9 @@ export type SimulationFrame = {
   layers: Array<{ scene: SimulationScene; scale: number }>;
   transition: { kind: Exclude<RecipeTransitionKind, "none">; progress: number } | null;
   caption: SimulationCaption | null;
+  /** Time in the loop (= in the video) and the loop length, for the overlay layers' motion (`overlayMotion`). */
+  overlayMs: number;
+  loopMs: number;
 };
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
@@ -99,10 +112,14 @@ export function simulationFrame(recipe: RenderRecipe, plan: SimulationPlan, tMs:
       color: current.captionColor,
       highlightColor: recipe.captions.highlightColor,
       spokenChars: recipe.captions.highlight === "word" ? Math.min(total, Math.floor(total * share)) : null,
+      entrance: captionMotionAt(offset - page.startMs),
     };
   }
-  return { sceneIndex: current.index, layers, transition, caption };
+  return { sceneIndex: current.index, layers, transition, caption, overlayMs: t, loopMs: plan.loopMs };
 }
+
+/** VE2E-157: motion state of a recipe layer at the frame's time - the engine's shared preset, so the preview moves like the MP4. */
+export const overlayMotion = (layer: RecipeLayer, frame: Pick<SimulationFrame, "overlayMs" | "loopMs">): MotionState => layerMotionAt(layerMotionFor(layer), frame.overlayMs, frame.loopMs);
 
 /** The still frame used as the template's picture: well into the first scene (zoom under way, part of the caption spoken). */
 export const posterTimeMs = (plan: SimulationPlan): number => Math.round(plan.sceneMs * 0.6);

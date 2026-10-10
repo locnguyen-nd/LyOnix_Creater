@@ -12,8 +12,10 @@ import {
   NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1,
   NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1,
   RecipeRegistry,
+  RELEASED_RECIPES,
   SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1,
   SPORTS_RECAP_PLAYER_FOCUS_JP_V1,
+  layerMotionFor,
   type RenderRecipe,
 } from "@lyonix/render-recipes";
 import { runProcess } from "../process.js";
@@ -41,6 +43,13 @@ const withHostFont = (source: RenderRecipe): RenderRecipe => {
 const releasedWithHostFont = (): RenderRecipe => withHostFont(NEWS_RECAP_BROADCAST_TELOP_JP_V1);
 /** V04-01: the default template library recipes (sports / faceless / breaking news) - same engine features, rendered for real below. */
 const LIBRARY_RECIPES = [SPORTS_HIGHLIGHT_SCORE_HEADLINE_JP_V1, SPORTS_RECAP_PLAYER_FOCUS_JP_V1, FACELESS_STORY_CAPTION_CENTER_JP_V1, BREAKING_NEWS_RED_ALERT_JP_V1, BREAKING_NEWS_URGENT_HEADLINE_JP_V1];
+/**
+ * VE2E-157: all released recipes (host font), and each one WITHOUT the layer whose motion is measured (`<id>-bare`: same media, zoom, tint,
+ * captions, other layers and audio), so |animated - bare| in that layer's rectangle is exactly how much of the layer is on screen.
+ */
+const ALL_RECIPES = RELEASED_RECIPES.map(withHostFont);
+const watchedLayer = (recipe: RenderRecipe) => recipe.layers.find((entry) => entry.type === "text" && entry.slot === "headline") ?? recipe.layers.find((entry) => entry.type === "text")!;
+const BARE_RECIPES = ALL_RECIPES.map((recipe) => ({ ...recipe, id: `${recipe.id}-bare`, layers: recipe.layers.filter((entry) => entry.id !== watchedLayer(recipe).id) }));
 
 describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
   let root: string;
@@ -56,7 +65,7 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       compose: { queue: "lyonix.render.test", prefetch: 1, timeoutMs: 180_000, x264Preset: "ultrafast", x264Threads: 0, fontsDir: null },
       runner: runProcess,
       ffmpegVersion: version,
-      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont(), withHostFont(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1), withHostFont(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1), ...LIBRARY_RECIPES.map(withHostFont)]),
+      recipes: new RecipeRegistry([testRecipe(FONT), releasedWithHostFont(), withHostFont(NEWS_RECAP_WHITE_TOP_CAPTION_JP_V1), withHostFont(NEWS_RECAP_PHOTO_VIDEO_MIX_JP_V1), ...LIBRARY_RECIPES.map(withHostFont), ...BARE_RECIPES]),
     });
   }, 120_000);
 
@@ -155,6 +164,37 @@ describe.skipIf(!availability.ok)("video.compose with real FFmpeg", () => {
       if (process.env.LYONIX_KEEP_RENDER) console.info(`${recipe.id} render kept at ${join(root, result.output.relativePath)}`);
     }
   }, 900_000);
+
+  it("VE2E-157: every released recipe ANIMATES its overlays in the MP4 (headline / badge absent at the start, half-way during the fade, fully there once settled) and passes the full QC incl. QC_WHITE_FRAMES", async () => {
+    const texts = japaneseFont ? ["政府は新しい経済対策を発表しました。", "物価高への対応を急ぐ方針です。", "来月から実施される見通しです。"] : ["First scene text", "Second scene text", "Third scene text"];
+    const plan = makePlan(files, { texts, withMusic: true, params: { headline: japaneseFont ? "経済対策を発表" : "NEWS HEADLINE", badge: japaneseFont ? "速報" : "BREAKING" }, padStartMs: 300, padEndMs: 800 });
+    // gray pixels (64x16) of a canvas rectangle at time t: frame-accurate input seek, then crop + downscale
+    const region = (path: string, tSec: number, rect: { x: number; y: number; w: number; h: number }): Buffer =>
+      spawnSync(ffmpegPath, ["-v", "error", "-ss", tSec.toFixed(4), "-i", path, "-frames:v", "1", "-vf", `crop=${rect.w}:${rect.h}:${rect.x}:${rect.y},scale=64:16:flags=area`, "-f", "rawvideo", "-pix_fmt", "gray", "-"], { encoding: "buffer" }).stdout;
+    const meanAbsDiff = (a: Buffer, b: Buffer): number => a.reduce((sum, value, index) => sum + Math.abs(value - b[index]!), 0) / a.length;
+    const measured: Record<string, { early: number; mid: number; settled: number }> = {};
+    for (const source of ALL_RECIPES) {
+      const animated = await processor.handle(buildVideoComposeJob({ jobKey: `compose:it-motion-${source.id}`, recipe: { id: source.id, version: 1 }, plan }));
+      if (!animated.ok) throw new Error(`${source.id} failed: ${animated.error.code}: ${animated.error.message}`);
+      expect(animated.qc.passed, `${source.id}: ${JSON.stringify(animated.qc.checks.filter((c) => !c.ok))}`).toBe(true);
+      expect(animated.qc.checks.map((c) => c.code)).toContain("QC_WHITE_FRAMES");
+      const bare = await processor.handle(buildVideoComposeJob({ jobKey: `compose:it-bare-${source.id}`, recipe: { id: `${source.id}-bare`, version: 1 }, plan }));
+      if (!bare.ok) throw new Error(`${source.id}-bare failed: ${bare.error.code}: ${bare.error.message}`);
+      // the layer to watch: the headline text, else the badge text; its own entrance window from the shared preset
+      const layer = watchedLayer(source);
+      const motion = layerMotionFor(layer);
+      const rect = { x: layer.x, y: layer.y, w: layer.w - (layer.w % 2), h: layer.h - (layer.h % 2) };
+      const at = (tSec: number) => meanAbsDiff(region(join(root, animated.output.relativePath), tSec, rect), region(join(root, bare.output.relativePath), tSec, rect));
+      const sample = { early: at(0.05), mid: at((motion.delayMs + motion.fadeInMs / 2) / 1000), settled: at(1.2) };
+      measured[source.id] = sample;
+      expect(sample.early, `${source.id} ${JSON.stringify(sample)}`).toBeLessThan(1.5); // not drawn yet: same pixels as without the layer
+      expect(sample.settled, `${source.id} ${JSON.stringify(sample)}`).toBeGreaterThan(6); // drawn
+      expect(sample.mid, `${source.id} ${JSON.stringify(sample)}`).toBeGreaterThan(sample.early + 1); // already entering...
+      expect(sample.mid, `${source.id} ${JSON.stringify(sample)}`).toBeLessThan(sample.settled * 0.85); // ...but not fully there: a real fade, not a cut
+      if (process.env.LYONIX_KEEP_RENDER) console.info(`${source.id} animated render kept at ${join(root, animated.output.relativePath)}`);
+    }
+    console.info(`[VE2E-157] overlay motion measured in the MP4 (mean |animated - bare|, gray levels): ${JSON.stringify(measured)}`);
+  }, 1_800_000);
 
   it("fails fast with FONT_MISSING (a technical failure: the Router falls back) when the recipe font is not installed", async () => {
     const ghost = { ...testRecipe("Definitely Not Installed Font"), id: "ghost-font" };

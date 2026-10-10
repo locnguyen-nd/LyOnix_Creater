@@ -74,7 +74,7 @@ import { ProviderError, isValidJaSearchKeyword, normalizePexelsQuery, normalizeS
 import { getSharedProviderLimiter } from "./concurrency-config.js";
 import { isApifyPlatform, type ApifyPlatform } from "@lyonix/providers";
 import { createHash, randomUUID } from "node:crypto";
-import { BRAND_BACKGROUND_HEIGHT, BRAND_BACKGROUND_WIDTH, brandBackgroundColorFromEnv, buildBrandBackgroundPng } from "./brand-background.js";
+import { BRAND_BACKGROUND_HEIGHT, BRAND_BACKGROUND_VARIANTS, BRAND_BACKGROUND_WIDTH, brandBackgroundColorFromEnv, buildBrandBackgroundPng } from "./brand-background.js";
 import { MediaLibraryService, libraryL0Enabled } from "./media-library.service.js";
 import { MediaService } from "./media.service.js";
 import { writeQuarantineFile } from "./quarantine.js";
@@ -169,6 +169,8 @@ export class SegmentSourceLedger {
   readonly apifyPlainIds = new Set<string>();
   /** VE2E-130 (L4): video clips already chosen in this job, by asset id, with the windows other segments occupy. */
   kenBurnsCount = 0;
+  /** VE2E-157: brand backgrounds handed out so far (L6): the next one takes the next variant of the designed set. */
+  brandBackgroundCount = 0;
   /** VE2E-89: authors of the social clips chosen so far (light cross-segment coherence in the ranking). */
   readonly authors = new Set<string>();
   /** Apify accounts that answered PROVIDER_QUOTA_EXHAUSTED in this job: the next account is used, never this one again. */
@@ -1001,7 +1003,7 @@ export class MediaPlanService {
       if (image) return { ...image.value, degraded: "stock_image", kenBurns: kenBurnsFor(ledger.kenBurnsCount++, segment.durationMs), degradeReason: reason };
     }
     // L6
-    const background = await this.brandBackgroundSource(projectId, userId, role);
+    const background = await this.brandBackgroundSource(projectId, userId, role, ledger.brandBackgroundCount++);
     return background ? { ...background, degradeReason: reason } : null;
   }
 
@@ -1072,16 +1074,17 @@ export class MediaPlanService {
     return withPersonEvidence(segment, source);
   }
 
-  private async brandBackgroundSource(projectId: string, userId: string, role: "admin" | "staff"): Promise<SegmentSource | null> {
+  private async brandBackgroundSource(projectId: string, userId: string, role: "admin" | "staff", variant = 0): Promise<SegmentSource | null> {
     if (!this.media) return null;
     try {
       const color = brandBackgroundColorFromEnv();
-      const png = buildBrandBackgroundPng(color);
+      const variantIndex = variant % BRAND_BACKGROUND_VARIANTS;
+      const png = buildBrandBackgroundPng(color, BRAND_BACKGROUND_WIDTH, BRAND_BACKGROUND_HEIGHT, variantIndex);
       const quarantined = await writeQuarantineFile(png);
       const registered = await this.media.registerAsset(projectId, userId, role, {
         quarantineToken: quarantined.quarantineToken,
         kind: "image",
-        originalFileName: `lyonix-brand-background-${color.slice(1).toLowerCase()}.png`,
+        originalFileName: `lyonix-brand-background-${color.slice(1).toLowerCase()}-v${variantIndex + 1}.png`,
         mimeType: "image/png",
         checksumSha256: createHash("sha256").update(png).digest("hex"),
         bytes: png.byteLength,
@@ -1089,9 +1092,9 @@ export class MediaPlanService {
         heightPx: BRAND_BACKGROUND_HEIGHT,
         durationMs: null,
         origin: "generated",
-        license: "LyOnix placeholder (flat brand background, not stock footage)",
+        license: "LyOnix placeholder (designed brand background, not stock footage)",
         reusable: true,
-        serverProvenance: { placeholder: "brand_background", qualityDegraded: true, color },
+        serverProvenance: { placeholder: "brand_background", qualityDegraded: true, color, variant: variantIndex + 1 },
       });
       if (typeof registered === "string") return null;
       return { mediaAssetVersionId: registered.id, kind: "image", durationMs: null, externalId: null, sourcing: "imported", degraded: "brand_background", placeholder: true };

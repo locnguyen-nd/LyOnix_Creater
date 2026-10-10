@@ -79,7 +79,15 @@ export type CaptionStyleOptions = {
    */
   verticalAnchor?: "bottom" | "top" | "middle";
   marginVPercent?: number;
+  /**
+   * VE2E-157: entrance animation of every event, rendered by libass (absent = static text, the historical output). `fadeInMs` / `fadeOutMs` ->
+   * `\fad`; `popFromPct` -> starts at that scale and reaches 100 % after `popMs` (`\t`); `risePx` -> with `placement`, moves up into place over
+   * `fadeInMs` (`\move`). Times are relative to each event's start / end.
+   */
+  entrance?: CaptionEntrance | undefined;
 };
+
+export type CaptionEntrance = { fadeInMs: number; fadeOutMs?: number; risePx?: number; popFromPct?: number; popMs?: number };
 
 export type CaptionLaidOutCue = {
   startMs: number;
@@ -93,7 +101,7 @@ export type CaptionLaidOutCue = {
 
 export type CaptionAssResult = { ass: string; cues: CaptionLaidOutCue[]; warnings: string[] };
 
-const DEFAULTS: Omit<Required<CaptionStyleOptions>, "placement"> = {
+const DEFAULTS: Omit<Required<CaptionStyleOptions>, "placement" | "entrance"> = {
   verticalAnchor: "bottom",
   marginVPercent: CAPTION_SAFE_ZONE.bottom * 100,
   canvas: { width: 1080, height: 1920 },
@@ -312,7 +320,7 @@ function applyKinsoku(glyphs: Glyph[], lines: Range[], maxWidthEm: number): void
 }
 
 type FitResult = { fontSizePx: number; lines: Range[] } | null;
-type ResolvedOptions = Required<Omit<CaptionStyleOptions, "canvas" | "placement">> & { canvas: { width: number; height: number }; placement: CaptionStyleOptions["placement"] };
+type ResolvedOptions = Required<Omit<CaptionStyleOptions, "canvas" | "placement" | "entrance">> & { canvas: { width: number; height: number }; placement: CaptionStyleOptions["placement"]; entrance: CaptionStyleOptions["entrance"] };
 
 function fit(glyphs: Glyph[], from: number, to: number, o: ResolvedOptions, sizes: number[]): FitResult {
   const availablePx = (o.placement?.widthPx ?? o.canvas.width * (1 - 2 * CAPTION_SAFE_ZONE.side)) * o.widthSafety;
@@ -363,9 +371,30 @@ function paginate(glyphs: Glyph[], o: ResolvedOptions, size: number): Range[] {
 // ---------------------------------------------------------------------------------------------------------------------
 // ASS writer
 
-function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean, placement: CaptionStyleOptions["placement"], color?: string): string {
+/** VE2E-157: the libass tags of an entrance (fade, pop, rise); position tags are written by the caller. Empty without an entrance. */
+export function entranceTags(entrance: CaptionEntrance | undefined): string {
+  if (!entrance) return "";
+  let tags = "";
+  const fadeIn = Math.max(0, Math.round(entrance.fadeInMs));
+  const fadeOut = Math.max(0, Math.round(entrance.fadeOutMs ?? 0));
+  if (fadeIn > 0 || fadeOut > 0) tags += `\\fad(${fadeIn},${fadeOut})`;
+  const pop = entrance.popFromPct ?? 100;
+  if (pop !== 100 && (entrance.popMs ?? 0) > 0) tags += `\\fscx${pop}\\fscy${pop}\\t(0,${Math.round(entrance.popMs!)},\\fscx100\\fscy100)`;
+  return tags ? `{${tags}}` : "";
+}
+
+/** `\an5\pos` of a placed event, or `\move` from `risePx` lower when the entrance rises. */
+const placementTags = (placement: NonNullable<CaptionStyleOptions["placement"]>, entrance: CaptionEntrance | undefined): string => {
+  const x = Math.round(placement.x);
+  const y = Math.round(placement.y);
+  const rise = Math.round(entrance?.risePx ?? 0);
+  return rise !== 0 && entrance ? `{\\an5\\move(${x},${y + rise},${x},${y},0,${Math.max(1, Math.round(entrance.fadeInMs))})}` : `{\\an5\\pos(${x},${y})}`;
+};
+
+function eventText(glyphs: Glyph[], lines: Range[], eventStartMs: number, fontSizePx: number, baseFontSizePx: number, highlight: boolean, placement: CaptionStyleOptions["placement"], color?: string, entrance?: CaptionEntrance): string {
   let out = color && !highlight ? `{\\1c${assOverrideColor(color)}}` : "";
-  out += placement ? `{\\an5\\pos(${Math.round(placement.x)},${Math.round(placement.y)})}` : "";
+  out += placement ? placementTags(placement, entrance) : "";
+  out += entranceTags(entrance);
   if (fontSizePx !== baseFontSizePx) out += `{\\fs${fontSizePx}}`;
   let cursorCs = 0;
   let lastUnit = -1;
@@ -470,7 +499,7 @@ export function buildCaptionAss(cues: readonly CaptionCueInput[], options: Capti
       if (prev && prev.endMs > startMs) prev.endMs = Math.max(prev.startMs + frameMs, startMs); // never overlap the previous event
       if (prev && prev.endMs > startMs) startMs = prev.endMs;
       if (endMs < startMs + frameMs - 0.001) endMs = startMs + frameMs;
-      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, base.placement, cue.color);
+      const body = eventText(glyphs.slice(page.range.s, page.range.e), page.lines.map((l) => ({ s: l.s - page.range.s, e: l.e - page.range.s })), startMs, page.size, o.fontSizePx, highlight, base.placement, cue.color, base.entrance);
       const lines = page.lines.map((l) => glyphs.slice(l.s, l.e).map((g) => g.ch).join("").trim());
       laidOut.push({ startMs, endMs, fontSizePx: page.size, lines, timing: prepared.timing, split: pages.length > 1 });
       bodies.push(body);

@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { CATEGORY_SAMPLES, PREVIEW_PRESETS, recipeCatalogEntry, type RenderRecipe, type TemplateCategory } from "@lyonix/render-recipes";
 import { buildCaptionAss } from "@lyonix/domain/caption-ass";
-import { buildSimulationPlan, posterTimeMs, simulationFrame, type SimulationFrame } from "../studio/template-simulation";
+import { buildSimulationPlan, overlayMotion, posterTimeMs, simulationFrame, type SimulationFrame } from "../studio/template-simulation";
 
 /** The recipes name the Debian CJK font; the browser has Google's Noto Sans JP (same family). */
 const cssFont = (family: string) => `"${family}", "Noto Sans JP", "Noto Sans CJK JP", sans-serif`;
@@ -80,7 +80,7 @@ export function RecipePreview({ recipe, playing = false, atMs, className = "" }:
         <Pictures frame={frame} category={category} band={band} width={width} uid={uid} />
       </g>
       {recipe.background.tint ? <rect width={width} height={height} fill={recipe.background.tint.color} opacity={recipe.background.tint.opacity} /> : null}
-      {textLayers}
+      <OverlayLayers recipe={recipe} frame={frame} nodes={textLayers} />
       <Caption recipe={recipe} frame={frame} />
     </svg>
   );
@@ -127,6 +127,36 @@ function Pictures({ frame, category, band, width, uid }: { frame: SimulationFram
   );
 }
 
+/**
+ * VE2E-157: each recipe layer moves with the engine's shared motion preset (same numbers as the libass tags of the render): panels are revealed
+ * from the left, rules grow from their start edge, the badge pops around its centre, the headline rises 28 px while fading in.
+ */
+function OverlayLayers({ recipe, frame, nodes }: { recipe: RenderRecipe; frame: SimulationFrame; nodes: ReactNode[] }) {
+  return (
+    <>
+      {recipe.layers.map((layer, index) => {
+        const node = nodes[index];
+        if (!node) return null;
+        const state = overlayMotion(layer, frame);
+        const cx = layer.x + layer.w / 2;
+        const cy = layer.y + layer.h / 2;
+        const transforms: string[] = [];
+        if (state.dy !== 0) transforms.push(`translate(0 ${state.dy.toFixed(2)})`);
+        if (state.growScale !== 1) {
+          const vertical = layer.type === "box" && layer.w <= 16 && layer.h > 16;
+          transforms.push(vertical ? `translate(${cx} ${layer.y}) scale(1 ${state.growScale.toFixed(4)}) translate(${-cx} ${-layer.y})` : `translate(${layer.x} ${layer.y}) scale(${state.growScale.toFixed(4)} 1) translate(${-layer.x} ${-layer.y})`);
+        }
+        if (state.scale !== 1) transforms.push(`translate(${cx} ${cy}) scale(${state.scale.toFixed(4)}) translate(${-cx} ${-cy})`);
+        return (
+          <g key={layer.id} opacity={state.opacity.toFixed(3)} {...(transforms.length ? { transform: transforms.join(" ") } : {})} data-testid="recipe-preview-layer" data-layer={layer.id}>
+            {node}
+          </g>
+        );
+      })}
+    </>
+  );
+}
+
 function Caption({ recipe, frame }: { recipe: RenderRecipe; frame: SimulationFrame }) {
   const caption = frame.caption;
   if (!caption) return null;
@@ -135,9 +165,12 @@ function Caption({ recipe, frame }: { recipe: RenderRecipe; frame: SimulationFra
   const placement = recipe.captions.placement ?? { anchor: "bottom" as const, marginPct: 20 };
   const blockHeight = caption.lines.length * lineHeight;
   const top = placement.anchor === "top" ? (height * placement.marginPct) / 100 : height * (1 - placement.marginPct / 100) - blockHeight;
+  // VE2E-157: the phrase pops around its anchor edge (top-centre / bottom-centre, like libass alignment 8 / 2) while fading in
+  const anchorY = placement.anchor === "top" ? top : top + blockHeight;
+  const { opacity, scale } = caption.entrance;
   let consumed = 0;
   return (
-    <>
+    <g opacity={opacity.toFixed(3)} transform={`translate(${width / 2} ${anchorY}) scale(${scale.toFixed(4)}) translate(${-width / 2} ${-anchorY})`} data-testid="recipe-preview-caption-block">
       {caption.lines.map((line, index) => {
         const chars = [...line];
         const spoken = caption.spokenChars === null ? null : Math.max(0, Math.min(chars.length, caption.spokenChars - consumed));
@@ -167,11 +200,11 @@ function Caption({ recipe, frame }: { recipe: RenderRecipe; frame: SimulationFra
           </text>
         );
       })}
-    </>
+    </g>
   );
 }
 
-/** Static boxes / text layers of the recipe with the sample headline (laid out by the engine's line breaker: shrink, then maxLines). */
+/** Boxes / text layers of the recipe with the sample headline (laid out by the engine's line breaker: shrink, then maxLines); moved by `OverlayLayers`. */
 function layoutTextLayers(recipe: RenderRecipe, headline: string): ReactNode[] {
   const textForSlot = (slot: string) => (slot === "headline" ? headline : slotDefault(recipe, slot));
   return recipe.layers.map((layer) => {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MediaJobClientError, COMPOSE_PROFILE_VERSION, MEDIA_JOB_SCHEMA_VERSION, VIDEO_COMPOSE_RESULT_TYPE, type VideoComposeJobInput, type VideoComposeResult } from "@lyonix/media-jobs";
 import { NEWS_RECAP_BROADCAST_TELOP_JP_V1 } from "@lyonix/render-recipes";
-import { InternalRenderService, loadRouterConfig, localUsdPerCpuHour } from "./internal-render.service.js";
+import { InternalRenderService, loadRouterConfig, localUsdPerCpuHour, unrenderableScenes } from "./internal-render.service.js";
 import type { CreatomateTemplatesService } from "./creatomate-templates.service.js";
 import type { VideoComposer } from "./media-jobs.gateway.js";
 
@@ -188,6 +188,27 @@ describe("InternalRenderService (VE2E-110)", () => {
     expect(await service.enqueue({ projectId, timelineVersionId: "tl-1", userId: "u", role: "admin", input: { providerAccountId: LYONIX_ACCOUNT } })).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
   });
 
+  it("VE2E-157: a kept scene without media / voice is refused before any RenderJob, naming the scene (the MP4 never silently drops it); excluding it renders", async () => {
+    const scenes = structuredClone(scenesJson) as Array<Record<string, unknown>>;
+    db.stored.timelineVersion[0]!.scenes = scenes;
+    scenes[1]!.mediaAssetVersionId = null;
+    const refused = await service.enqueue({ projectId, timelineVersionId: "tl-1", userId: "u", role: "staff", input: { providerAccountId: LYONIX_ACCOUNT } });
+    expect(refused).toMatchObject({ ok: false, code: "VALIDATION_FAILED", message: expect.stringContaining("Cảnh 2 (s2): thiếu media") });
+    expect(db.jobs.size).toBe(0);
+    scenes[1]!.excluded = true;
+    expect(await enqueue()).toMatchObject({ status: "preparing_clips", engine: "lyonix" });
+  });
+
+  it("unrenderableScenes lists every kept scene and what it lacks, in video order", () => {
+    const base = { subtitleVersionId: null, screenTextOverride: null, annotation: null, excluded: false, audioNarration: "", audioDurationMs: 2000 };
+    expect(unrenderableScenes([
+      { ...base, sceneId: "b", orderIndex: 1, mediaAssetVersionId: null, mediaKind: null, audioVersionId: "a", audioMediaAssetVersionId: "v" },
+      { ...base, sceneId: "a", orderIndex: 0, mediaAssetVersionId: "m", mediaKind: "image", audioVersionId: null, audioMediaAssetVersionId: null },
+      { ...base, sceneId: "x", orderIndex: 2, mediaAssetVersionId: null, mediaKind: null, audioVersionId: null, audioMediaAssetVersionId: null, excluded: true },
+      { ...base, sceneId: "c", orderIndex: 3, mediaAssetVersionId: "m", mediaKind: "video", audioVersionId: "a", audioMediaAssetVersionId: "v" },
+    ] as never)).toEqual(["Cảnh 1 (a): thiếu giọng đọc", "Cảnh 2 (b): thiếu media"]);
+  });
+
   it("renders internally: sends a frame-exact plan with real paths + hashes + alignment timing, then completes with cost, duration, hash, profile and QC", async () => {
     const queued = await enqueue({}, "staff", "run-1");
     const done = await run(queued.id);
@@ -216,7 +237,7 @@ describe("InternalRenderService (VE2E-110)", () => {
       renderDurationMs: 80_000,
       outputSha256: "f".repeat(64),
       outputBytes: 12345,
-      outputProfileVersion: "compose.v1",
+      outputProfileVersion: COMPOSE_PROFILE_VERSION,
       outputRelativePath: "working/renders/abc/video.mp4",
       thumbnailRelativePath: "working/renders/abc/thumb.jpg",
       costCurrency: "USD",

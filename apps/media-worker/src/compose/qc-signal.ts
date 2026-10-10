@@ -5,7 +5,7 @@ import { evaluateStructure, measurementsFromProbe, probeOutput, reportFromChecks
 
 /**
  * VE2E-106: signal-level QC of a finished render (decodes the file): integrated loudness + true peak (EBU R128 `ebur128`), black frames
- * (`blackdetect`), frozen picture (`freezedetect`). Combined with the structural checks of `qc.ts` this is the full acceptance gate of
+ * (`blackdetect`), frozen picture (`freezedetect`), VE2E-157: blank white picture (`blackdetect` on the negated picture). Combined with the structural checks of `qc.ts` this is the full acceptance gate of
  * docs/plans/self-render-engine.md §3; a video only becomes `completed` when every check passes.
  */
 
@@ -18,6 +18,13 @@ export const QC_SIGNAL = {
   blackMinSec: 0.2,
   /** Pixel luma threshold (0..1) under which a pixel counts as black. */
   blackPixTh: 0.1,
+  /**
+   * VE2E-157: a blank white picture (a missing / transparent media layer, an empty white canvas) for at least this long (s) is a defect: at
+   * least `whitePicTh` of the pixels brighter than 1 - `whitePixTh`. Bright real footage (snow, a white studio) stays well under it.
+   */
+  whiteMinSec: 0.5,
+  whitePixTh: 0.06,
+  whitePicTh: 0.9,
   /** Frozen picture at least this long (s) is a defect. */
   freezeMinSec: 1,
   /** `freezedetect` noise tolerance. Slow zooms on smooth photos change a frame by only a few grey levels, so this is deliberately sensitive. */
@@ -42,8 +49,14 @@ export function parseEbur128Summary(stderr: string): { integratedLufs: number | 
   return { integratedLufs: num(integrated?.[1]), truePeakDbtp: num(peaks.at(-1)?.[1]) };
 }
 
-/** Durations (s) of every `black_duration` FFmpeg reported. */
-export const parseBlackdetect = (stderr: string): number[] => [...stderr.matchAll(/black_duration:\s*([\d.]+)/g)].map((m) => Number(m[1]));
+/**
+ * Durations (s) of every `black_duration` FFmpeg reported - of one named detector instance (`blackdetect@<instance>`, its log prefix) when
+ * given, since the same pass runs one detector for black and one (on the negated picture) for white.
+ */
+export const parseBlackdetect = (stderr: string, instance?: string): number[] => {
+  const lines = instance ? stderr.split(/\r?\n/).filter((line) => line.includes(`blackdetect@${instance} `)) : [stderr];
+  return lines.flatMap((line) => [...line.matchAll(/black_duration:\s*([\d.]+)/g)].map((m) => Number(m[1])));
+};
 
 /**
  * Durations (s) of every frozen stretch. FFmpeg prints `freeze_start`, then `freeze_duration`/`freeze_end` when the picture moves again; a
@@ -82,7 +95,7 @@ export type FullQcContext = {
 const check = (code: ComposeQcCheck["code"], ok: boolean, measured: ComposeQcCheck["measured"], expected: ComposeQcCheck["expected"], message: string): ComposeQcCheck => ({ code, ok, measured, expected, message });
 
 export function evaluateSignal(
-  signal: { integratedLufs: number | null; truePeakDbtp: number | null; blackSegmentsSec: number[]; freezeSegmentsSec: number[] },
+  signal: { integratedLufs: number | null; truePeakDbtp: number | null; blackSegmentsSec: number[]; freezeSegmentsSec: number[]; whiteSegmentsSec?: number[] },
   targetLufs: number,
   freezeCheck: boolean,
 ): ComposeQcCheck[] {
@@ -90,11 +103,14 @@ export function evaluateSignal(
   const loudnessOk = integratedLufs !== null && Number.isFinite(integratedLufs) && Math.abs(integratedLufs - targetLufs) <= QC_SIGNAL.loudnessToleranceLu;
   const peakOk = truePeakDbtp !== null && truePeakDbtp <= QC_SIGNAL.truePeakMaxDb;
   const black = signal.blackSegmentsSec.reduce((sum, s) => sum + s, 0);
+  const whiteSegments = signal.whiteSegmentsSec ?? [];
+  const white = whiteSegments.reduce((sum, s) => sum + s, 0);
   const freeze = Math.max(0, ...signal.freezeSegmentsSec);
   return [
     check("QC_LOUDNESS", loudnessOk, integratedLufs, `${targetLufs} ±${QC_SIGNAL.loudnessToleranceLu} LUFS`, "integrated loudness must be within ±1 LU of the target"),
     check("QC_TRUE_PEAK", peakOk, truePeakDbtp, `<= ${QC_SIGNAL.truePeakMaxDb} dBTP`, "true peak must not exceed -1 dBTP"),
     check("QC_BLACK_FRAMES", signal.blackSegmentsSec.length === 0, Math.round(black * 1000), `no black segment >= ${QC_SIGNAL.blackMinSec * 1000} ms`, `no unintended black picture longer than ${QC_SIGNAL.blackMinSec * 1000} ms`),
+    check("QC_WHITE_FRAMES", whiteSegments.length === 0, Math.round(white * 1000), `no blank white segment >= ${QC_SIGNAL.whiteMinSec * 1000} ms`, `no blank white picture (missing media layer) longer than ${QC_SIGNAL.whiteMinSec * 1000} ms`),
     check("QC_FREEZE", !freezeCheck || signal.freezeSegmentsSec.length === 0, freezeCheck ? Math.round(freeze * 1000) : "skipped (static by design)", `no frozen stretch >= ${QC_SIGNAL.freezeMinSec * 1000} ms`, "the picture must not stand still for a second or more"),
   ];
 }
@@ -105,7 +121,7 @@ const runDetector = async (ctx: FullQcContext, args: string[]): Promise<string> 
   return result.stderrTail;
 };
 
-/** The full gate: structural checks + loudness / true peak + black + freeze. Throws OUTPUT_INVALID only when the file cannot be decoded at all. */
+/** The full gate: structural checks + loudness / true peak + black + white + freeze. Throws OUTPUT_INVALID only when the file cannot be decoded at all. */
 export async function runFullQc(ctx: FullQcContext): Promise<ComposeQcReport> {
   const probe: ProbedOutput = await probeOutput(ctx.runner, ctx.ffprobePath, ctx.videoPath, ctx.timeoutMs);
   const checks = evaluateStructure(probe, ctx.expectedDurationMs, ctx.expectedFrames);
@@ -121,18 +137,20 @@ export async function runFullQc(ctx: FullQcContext): Promise<ComposeQcReport> {
   }
   const videoStderr = await runDetector(ctx, [
     "-i", ctx.videoPath, "-an",
-    "-vf", `scale=${QC_SIGNAL.detectWidth}:${QC_SIGNAL.detectHeight}:flags=fast_bilinear,blackdetect=d=${QC_SIGNAL.blackMinSec}:pix_th=${QC_SIGNAL.blackPixTh},freezedetect=n=${QC_SIGNAL.freezeNoiseDb}dB:d=${QC_SIGNAL.freezeMinSec}`,
+    "-vf", `scale=${QC_SIGNAL.detectWidth}:${QC_SIGNAL.detectHeight}:flags=fast_bilinear,blackdetect@dark=d=${QC_SIGNAL.blackMinSec}:pix_th=${QC_SIGNAL.blackPixTh},freezedetect=n=${QC_SIGNAL.freezeNoiseDb}dB:d=${QC_SIGNAL.freezeMinSec},negate,blackdetect@bright=d=${QC_SIGNAL.whiteMinSec}:pix_th=${QC_SIGNAL.whitePixTh}:pic_th=${QC_SIGNAL.whitePicTh}`,
     "-f", "null", "-",
   ]);
-  const blackSegmentsSec = parseBlackdetect(videoStderr);
+  const blackSegmentsSec = parseBlackdetect(videoStderr, "dark");
+  const whiteSegmentsSec = parseBlackdetect(videoStderr, "bright");
   const freezeSegmentsSec = parseFreezedetect(videoStderr, (probe.video?.durationMs ?? probe.formatDurationMs ?? 0) / 1000 || null);
 
-  checks.push(...evaluateSignal({ integratedLufs, truePeakDbtp, blackSegmentsSec, freezeSegmentsSec }, ctx.targetLufs, ctx.freezeCheck));
+  checks.push(...evaluateSignal({ integratedLufs, truePeakDbtp, blackSegmentsSec, freezeSegmentsSec, whiteSegmentsSec }, ctx.targetLufs, ctx.freezeCheck));
   return reportFromChecks(checks, {
     ...measured,
     integratedLufs: integratedLufs !== null && Number.isFinite(integratedLufs) ? Math.round(integratedLufs * 10) / 10 : null,
     truePeakDbtp: truePeakDbtp !== null && Number.isFinite(truePeakDbtp) ? Math.round(truePeakDbtp * 10) / 10 : null,
     blackMs: Math.round(blackSegmentsSec.reduce((sum, s) => sum + s, 0) * 1000),
+    whiteMs: Math.round(whiteSegmentsSec.reduce((sum, s) => sum + s, 0) * 1000),
     freezeMs: freezeSegmentsSec.length ? Math.round(Math.max(...freezeSegmentsSec) * 1000) : 0,
   });
 }

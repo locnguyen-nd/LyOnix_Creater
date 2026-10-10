@@ -134,6 +134,7 @@ export const emptyMeasurements = (): ComposeQcMeasurements => ({
   integratedLufs: null,
   truePeakDbtp: null,
   blackMs: null,
+  whiteMs: null,
   freezeMs: null,
 });
 

@@ -5,6 +5,8 @@ import { makePlan, testRecipe, type FixtureFiles } from "./test-fixtures.js";
 /**
  * VE2E-93: regression cases for the burned-in text of a render. `overlays-baseline.json` holds the output of these cases captured
  * BEFORE VE2E-93 changed the caption code; a timeline without any VE2E-93 style key must keep producing exactly those bytes.
+ * VE2E-157 (`compose.v2`) adds motion tags + animated box documents on top: `layers` keeps the TEXT layers only, and the test strips the
+ * motion tags before comparing, so line breaks / sizes / styles are still pinned byte for byte.
  * Test-only (never imported by runtime code); no FFmpeg needed - only the plan's structure is read.
  */
 
@@ -51,7 +53,7 @@ export function overlayBaselineCases(): OverlayBaselineCase[] {
     for (const [paramName, params] of Object.entries(PARAM_SETS)) {
       for (const [planName, plan] of [["static", makePlan(files, { texts: TEXTS })], ["timed", timedPlan()]] as const) {
         const docs = buildOverlayDocuments(plan, recipe, params);
-        cases.push({ name: `${recipe.id}@${recipe.version}/${paramName}/${planName}`, captions: docs.captions?.ass ?? null, layers: docs.layers.map((layer) => layer.ass), warnings: docs.warnings });
+        cases.push({ name: `${recipe.id}@${recipe.version}/${paramName}/${planName}`, captions: docs.captions?.ass ?? null, layers: docs.layers.filter((layer) => layer.kind === "text").map((layer) => layer.ass), warnings: docs.warnings });
       }
     }
   }

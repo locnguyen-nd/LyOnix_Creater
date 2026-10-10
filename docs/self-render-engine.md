@@ -75,6 +75,7 @@ Mọi video phải qua cổng QC trước khi `completed`; báo cáo đầy đ�
 | `QC_LOUDNESS` | −14 LUFS ±1 LU |
 | `QC_TRUE_PEAK` | ≤ −1 dBTP |
 | `QC_BLACK_FRAMES` | không có đoạn đen ≥ 200 ms |
+| `QC_WHITE_FRAMES` | không có đoạn trắng trống ≥ 500 ms (≥ 90 % điểm ảnh gần trắng: lớp media bị mất, khung trắng) — `compose.v2` |
 | `QC_FREEZE` | không có đoạn đứng hình ≥ 1 s (bỏ qua khi ảnh tĩnh chủ ý: tắt animation ảnh) |
 
 Các ngưỡng `QC_BLACK_FRAMES`/`QC_FREEZE` mới chỉnh bằng video tổng hợp, **chưa hiệu chỉnh trên footage thật**.
@@ -85,9 +86,29 @@ Recipe là object TypeScript bất biến, có phiên bản, trong `packages/ren
 
 Phần chính: `timing` (đệm đầu/cuối), `transition` (`none|fade|wipe|slide|circle`), `background` (chuyển động ảnh/video, `tint`, tuỳ chọn `frame` = dải ảnh trên nền màu), `layers` (`box` và `text`, `visibleIfSlot`), `captions` (phông, cỡ, `highlight: word|none`, tuỳ chọn `placement` top/bottom và `colorCycle`), `audio` (nhạc nền/ducking 12 dB, −14 LUFS, −1 dBTP), `slots` (tuỳ chọn người dùng đổi, cùng dạng với slot của template provider), `fonts`.
 
-Mẫu hiện có: `news-recap-broadcast-telop-jp@1`, `news-recap-white-top-caption-jp@1`, `news-recap-photo-video-mix-jp@1`. Hai mẫu sau là **bản xấp xỉ** từ mô tả template Creatomate (không có JSON gốc); A/B với bản Creatomate do owner thực hiện ở máy local.
+Mẫu hiện có (V04-01): 3 mẫu tin tức `news-recap-*-jp@1`, 2 thể thao, 1 faceless, 2 breaking news (`packages/render-recipes/src/catalog.ts`). Hai mẫu sau là **bản xấp xỉ** từ mô tả template Creatomate (không có JSON gốc); A/B với bản Creatomate do owner thực hiện ở máy local.
 
 An toàn TikTok: chữ nằm ngoài 10 % trên, 20 % dưới và 12 % hai bên; test kiểm tra điều này cho mọi recipe phát hành.
+
+### Chuyển động chữ và đồ hoạ (VE2E-157, `compose.v2`)
+
+Một **motion preset dùng chung** cho mọi recipe (`packages/render-recipes/src/motion.ts`). Engine viết nó thành tag libass trong MP4; preview mô phỏng tính bằng đúng các số đó (`layerMotionAt`, `captionMotionAt`). Recipe không đổi (bất biến); chuyển động thuộc về profile đầu ra `compose.v2`.
+
+| Vai trò (theo hình học + slot) | Vào | Bắt đầu |
+|---|---|---|
+| panel: dải / khung lớn (rộng ≥ 900 px hoặc cao ≥ 150 px) | lộ dần từ trái + fade (350 ms) | 0 ms |
+| badge: hộp + chữ badge | pop 80 % → 100 % + fade (280 ms) | 150 ms |
+| headline: chữ tiêu đề | fade + trồi 28 px (450 ms) | 250 ms |
+| rule: đường mảnh (≤ 16 px) | mọc từ cạnh đầu (450 ms) | 400 ms |
+
+- Box của recipe là **ASS drawing** (không còn `drawbox` tĩnh), nên dải / badge / đường kẻ vào cùng chữ của nó. Tint toàn khung vẫn là `drawbox`.
+- Mọi layer mờ dần ở 300 ms cuối video (trong đệm cuối).
+- Phụ đề: mỗi cụm (cue) xuất hiện với fade 90 ms + pop 92 % → 100 % (150 ms) đúng lúc giọng đọc tới; không fade-out giữa hai cue (không nháy); cue kết thúc cùng giọng đọc.
+- Test: tag ASS từng recipe (`overlays-motion.test.ts`); baseline VE2E-93 = bản trước + đúng phần tag chuyển động; integration FFmpeg đo trong MP4 vùng tiêu đề/badge: 0 % ở đầu, ~50 % giữa nhịp, 100 % khi ổn định.
+
+### Nền thương hiệu (bậc fallback cuối, VE2E-157)
+
+Khi không có media nào khác, cảnh dùng một **bộ nền thương hiệu thiết kế sẵn** (4 biến thể, màu `MEDIA_BRAND_BACKGROUND_COLOR`): gradient, quầng sáng, dải và sọc chéo, lưới chấm, vignette. Không bao giờ trắng; hoạ tiết đủ để zoom chậm nhất của thư viện (+5 %, cả chế độ dải ảnh 46 %) vượt ngưỡng `freezedetect` của QC (nền màu phẳng trước đây làm job lỗi `QC_FREEZE`). Cảnh fallback liên tiếp lấy biến thể kế tiếp.
 
 ### Thêm một mẫu mới
 
@@ -110,7 +131,8 @@ Một hiệu ứng chỉ được dùng trong recipe khi engine dựng được 
 
 ## 6. Vận hành
 
-- Admin: *Settings → Render nội bộ* (`GET /admin/render-engine`, `PATCH /admin/render-engine/templates/:id`). Rollout một phần (1–99 %) bắt buộc có ≥ 1 mẫu provider dự phòng; 0 % và 100 % thì không (V04-01). Số liệu (job theo engine, QC lỗi theo mã, p50/p95, dự phòng theo lý do, chi phí theo ngày, ngân sách dự phòng) tính từ các dòng `RenderJob` thật; chi phí là **ước tính** ghi lúc render, không phải hoá đơn của provider.
+- Admin: *Settings → Render nội bộ* (`GET /admin/render-engine`, `PATCH /admin/render-engine/templates/:id`). Rollout một phần (1–99 %) bắt buộc có ≥ 1 mẫu provider dự phòng; 0 % và 100 % thì không (V04-01). VE2E-157: chỉ **tăng** rollout được khi recipe đã qua kiểm thử render thật với profile đầu ra đang chạy (`renderVerified` trong catalog = `COMPOSE_PROFILE_VERSION`); đổi profile thì phải kiểm thử lại.
+- Studio (engine nội bộ): cảnh còn giữ trong video mà thiếu media hoặc giọng đọc bị **chặn trước khi tạo RenderJob**, báo từng cảnh (không còn âm thầm bỏ cảnh khỏi MP4). Số liệu (job theo engine, QC lỗi theo mã, p50/p95, dự phòng theo lý do, chi phí theo ngày, ngân sách dự phòng) tính từ các dòng `RenderJob` thật; chi phí là **ước tính** ghi lúc render, không phải hoá đơn của provider.
 - Ép engine khi thử: chỉ admin, ở màn Render (không gửi `forceEngine` = Router tự chọn).
 - Công cụ dev: `corepack pnpm --filter @lyonix/media-worker compose:cli` chạy một job `video.compose` không cần RabbitMQ; `corepack pnpm render:parity`; `corepack pnpm template:lint`.
 - Test tích hợp cần FFmpeg (libx264, libass, xfade, loudnorm) và **bị bỏ qua trên CI**; chạy local. Test số liệu admin trên PostgreSQL thật bật bằng `LYONIX_TEST_DATABASE_URL`.

@@ -190,15 +190,14 @@ export function buildVideoGraph(input: VideoGraphInput): VideoGraph {
   const tint = recipe.background.tint;
   if (tint && tint.opacity > 0) post.push(`drawbox=x=0:y=0:w=iw:h=ih:color=${hexToFfmpeg(tint.color)}@${tint.opacity}:t=fill`);
   const fontsOption = input.fontsDir ? `:fontsdir=${quoteFilterPath(input.fontsDir)}` : "";
+  // VE2E-157: every visible layer, box or text, is an animated ASS document (overlays.ts) drawn in the recipe's order; a box without one
+  // (a caller that did not build overlays) stays the static drawbox.
   for (const layer of recipe.layers) {
     if (layer.visibleIfSlot && !(params[layer.visibleIfSlot] ?? "").trim()) continue;
-    if (layer.type === "box") {
-      post.push(`drawbox=x=${layer.x}:y=${layer.y}:w=${layer.w}:h=${layer.h}:color=${hexToFfmpeg(resolveBoxColor(layer, recipe, params))}@${layer.opacity}:t=fill`);
-    } else {
-      const file = input.overlays.layerAss[layer.id];
-      if (file) post.push(`ass=filename=${file}${fontsOption}`);
-      else warnings.push(`text layer ${layer.id} has no overlay file and was skipped`);
-    }
+    const file = input.overlays.layerAss[layer.id];
+    if (file) post.push(`ass=filename=${file}${fontsOption}`);
+    else if (layer.type === "box") post.push(`drawbox=x=${layer.x}:y=${layer.y}:w=${layer.w}:h=${layer.h}:color=${hexToFfmpeg(resolveBoxColor(layer, recipe, params))}@${layer.opacity}:t=fill`);
+    else warnings.push(`text layer ${layer.id} has no overlay file and was skipped`);
   }
   if (input.overlays.captionsAss) post.push(`ass=filename=${input.overlays.captionsAss}${fontsOption}`);
   post.push("format=yuv420p", "setsar=1");

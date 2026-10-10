@@ -117,7 +117,7 @@ describe("fingerprint and job key", () => {
     const hashed = job();
     hashed.plan.scenes[0]!.media.sha256 = "a".repeat(64);
     expect(composeFingerprint(hashed)).not.toBe(composeFingerprint(a));
-    expect(COMPOSE_PROFILE_VERSION).toBe("compose.v1");
+    expect(COMPOSE_PROFILE_VERSION).toBe("compose.v2");
     expect(canonicalJson({ b: 1, a: [2, { d: 1, c: undefined }] })).toBe('{"a":[2,{"d":1}],"b":1}');
   });
 });

@@ -235,6 +235,18 @@
         "VE2E-154"
       ],
       "note": "Nguyên nhân: 7/8 recipe LyOnix ở rollout 0 % (thiết kế V04-01, chỉ white-top-caption 100 %); TemplateBrowser (e1633c7) cho chọn template chưa sẵn sàng (nút + double-click không kiểm readiness) nên urgent-headline được lưu vào User Defaults; nhãn Auto ghi Creatomate/Orshot; preflight slot không kiểm recipe LyOnix (fixedSlotPathApplies coi slotCount 0 là cố định), cảnh thiếu media bị engine bỏ qua âm thầm. Sửa: templateChoice + nhãn/đếm/lọc sẵn sàng trong TemplateBrowser; keepsTemplateAfterLoad; nhãn engine trung lập; preflightSceneMedia + fallback hoặc TEMPLATE_REQUIRED_ASSET_MISSING (Scene-N.media). Không đổi rollout/Router/draft. 8 recipe render thật FFmpeg qua QC. Chưa commit. Spec .docs/specs/VE2E-156.md."
+    },
+    {
+      "id": "VE2E-157",
+      "title": "Template LyOnix render thật: animation chữ/đồ hoạ trong MP4 (compose.v2), nền thương hiệu thiết kế, QC khung trắng, rollout có kiểm chứng",
+      "group": "Làm mịn — Render",
+      "assignee": "DNT",
+      "status": "code_done",
+      "dependsOn": [
+        "V04-01",
+        "VE2E-156"
+      ],
+      "note": "Motion preset dùng chung (render-recipes motion.ts): panel lộ từ trái, badge pop, headline fade+trồi 28px, rule mọc, exit 300ms; phụ đề fade 90ms + pop 92%->100% mỗi cụm. Engine: box thành ASS drawing có animation, text \\move/\\fad, entrance ở caption-ass; COMPOSE_PROFILE_VERSION compose.v2; QC_WHITE_FRAMES (blackdetect@bright trên ảnh negate, cùng lượt decode). Nền thương hiệu L6: 4 biến thể có hoạ tiết (đo bằng freezedetect của QC), hết QC_FREEZE của nền phẳng. Studio: cảnh thiếu media/giọng bị chặn trước RenderJob. Catalog renderVerified + chốt admin chỉ tăng rollout khi đã kiểm thử với profile đang chạy. Preview mô phỏng dùng đúng preset. Render thật 8 template bằng dữ liệu job thật: QC pass, frame đã xem; e2e Auto render chạy được trên Windows. Rollout 8/8 = 100% trên DB dev local. Spec .docs/specs/VE2E-157.md."
     }
   ]
 }

@@ -73,10 +73,13 @@ describe("overlays", () => {
     const plan = makePlan(files, { texts: ["一つ目", "二つ目", "三つ目"] });
     const recipe = testRecipe("Noto Sans JP");
     const empty = buildOverlayDocuments(plan, recipe, {});
-    expect(empty.layers).toEqual([]);
+    expect(empty.layers.filter((layer) => layer.kind === "text")).toEqual([]);
     const withHeadline = buildOverlayDocuments(plan, recipe, { headline: "速報", "dynamicStyle.captionFontFamily": "M PLUS Rounded 1c", "dynamicStyle.captionFillColor": "#00FF00" });
-    expect(withHeadline.layers).toHaveLength(1);
-    expect(withHeadline.layers[0]!.ass).toContain("\\an5\\pos(540,216)");
+    const texts = withHeadline.layers.filter((layer) => layer.kind === "text");
+    expect(texts).toHaveLength(1);
+    // VE2E-157: the headline rises 28 px into its centre (540,216) while fading in, from its entrance delay (0.25 s) to the end of the video
+    expect(texts[0]!.ass).toContain("\\an5\\move(540,244,540,216,0,450)");
+    expect(texts[0]!.ass).toMatch(/Dialogue: 0,0:00:00\.25,/);
     expect(withHeadline.captions!.ass).toContain("M PLUS Rounded 1c");
     expect(withHeadline.captions!.ass).toContain("&H0000FF00"); // green text colour (unspoken)
     const noCaptions = buildOverlayDocuments(plan, { ...recipe, captions: { ...recipe.captions, enabled: false } }, {});

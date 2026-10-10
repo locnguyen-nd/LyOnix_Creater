@@ -20,8 +20,8 @@ import {
 export const VIDEO_COMPOSE_JOB_TYPE = "video.compose" as const;
 export const VIDEO_COMPOSE_RESULT_TYPE = "video.compose.result" as const;
 export const VIDEO_COMPOSE_PROGRESS_TYPE = "video.compose.progress" as const;
-/** Bumped whenever the filtergraph/encode/QC rules change in a way that changes output bytes. */
-export const COMPOSE_PROFILE_VERSION = "compose.v1" as const;
+/** Bumped whenever the filtergraph/encode/QC rules change in a way that changes output bytes. v2 (VE2E-157): animated overlays (motion.v1), QC_WHITE_FRAMES. */
+export const COMPOSE_PROFILE_VERSION = "compose.v2" as const;
 /** Dedicated queue so long renders never starve clip.prepare / frame.extract on `lyonix.media`. */
 export const DEFAULT_RENDER_QUEUE = "lyonix.render";
 
@@ -99,6 +99,7 @@ export const COMPOSE_QC_CODES = [
   "QC_LOUDNESS",
   "QC_TRUE_PEAK",
   "QC_BLACK_FRAMES",
+  "QC_WHITE_FRAMES",
   "QC_FREEZE",
 ] as const;
 export type ComposeQcCode = (typeof COMPOSE_QC_CODES)[number];
@@ -143,6 +144,8 @@ export type ComposeQcMeasurements = {
   integratedLufs: number | null;
   truePeakDbtp: number | null;
   blackMs: number | null;
+  /** VE2E-157 (`compose.v2`): total near-white blank picture (ms); absent in reports of older renders. */
+  whiteMs?: number | null;
   freezeMs: number | null;
 };
 

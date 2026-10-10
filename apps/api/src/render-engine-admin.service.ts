@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { rolloutNeedsFallback } from "@lyonix/domain";
+import { COMPOSE_PROFILE_VERSION } from "@lyonix/media-jobs";
+import { recipeRenderVerified } from "@lyonix/render-recipes";
 import type { RenderEngineAdminOverviewResponse, RenderEngineAdminTemplateResponse, RenderEngineMetricsResponse } from "@lyonix/contracts";
 import { PrismaService } from "./prisma.service.js";
 import { FALLBACK_REASONS, loadRouterConfig } from "./internal-render.service.js";
@@ -11,6 +13,8 @@ import { FALLBACK_REASONS, loadRouterConfig } from "./internal-render.service.js
  * A PARTIAL rollout (1..99 %) needs at least one provider fallback: the jobs outside it go to the provider. V04-01 (owner decision 2b):
  * 100 % may be set without a fallback - the template then renders on the internal engine only, and an engine failure fails the job
  * clearly (the Router returns NO_FALLBACK_TEMPLATE) instead of silently sending it to a paid provider.
+ * VE2E-157: raising a recipe's rollout needs a real-render verification of that recipe with the running engine output profile
+ * (`renderVerified` in the recipe catalog) - a template is never switched on before its render was checked.
  */
 
 export type MetricRow = {
@@ -176,6 +180,10 @@ export class RenderEngineAdminService {
       const found = fallbackSnapshotIds.length ? await this.prisma.templateSnapshot.findMany({ where: { id: { in: fallbackSnapshotIds } } }) : [];
       const bad = fallbackSnapshotIds.find((id) => !found.some((row) => row.id === id && row.engine !== "lyonix"));
       if (bad) return invalid(`Mẫu dự phòng ${bad} không tồn tại hoặc không phải mẫu provider (creatomate/orshot)`);
+    }
+    const recipeId = /^recipe:(.+)@\d+$/.exec(snapshot.externalTemplateId)?.[1] ?? null;
+    if (rolloutPercent > snapshot.rolloutPercent && (!recipeId || !recipeRenderVerified(recipeId, COMPOSE_PROFILE_VERSION))) {
+      return invalid(`Mẫu ${recipeId ?? snapshot.externalTemplateId} chưa qua kiểm thử render thật với engine hiện tại (${COMPOSE_PROFILE_VERSION}): chưa thể tăng rollout.`);
     }
     if (rolloutNeedsFallback(rolloutPercent) && fallbackSnapshotIds.length === 0) {
       return invalid("Rollout một phần (1–99 %) cần ít nhất một mẫu provider dự phòng cho các job ngoài rollout. 0 % và 100 % không bắt buộc (100 % không có dự phòng: engine lỗi thì job lỗi, không chuyển sang provider).");
