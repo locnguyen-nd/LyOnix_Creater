@@ -786,7 +786,7 @@ export function JobNewPage() {
                       durationSec: midpoint(values.durationTarget),
                       sceneCount: midpoint(values.sceneCountTarget),
                     });
-                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice), targetPersonSubmitFields(values));
+                    const submitted = await submitVideoProduction(setup.projectId, setup.automationProfileId, source, toBackgroundSegmentsSetting(values.backgroundSegmentsChoice), targetPersonSubmitFields(values), values.channelId);
                     await linkTrend("video_production", submitted.id);
                     await closeDraft();
                     navigate(`/video-productions/${submitted.id}`);

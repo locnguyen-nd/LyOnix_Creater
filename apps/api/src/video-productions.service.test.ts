@@ -148,6 +148,61 @@ describe("VideoProductionsService", () => {
       expect(first.ok && second.ok && first.data.id === second.data.id).toBe(true);
       expect(prisma.workflowRun.create).toHaveBeenCalledTimes(2);
     });
+
+    describe("channelId (the channel picked on the create form)", () => {
+      const channelId = "11111111-1111-4111-8111-111111111111";
+      const otherChannelId = "22222222-2222-4222-8222-222222222222";
+      const submit = (extra: Record<string, unknown> = {}) => service.submit(userId, "staff", { mode: "auto", projectId, automationProfileId, sourceId, ...extra } as never);
+      beforeEach(() => {
+        prisma.channelConnection = { findUnique: vi.fn(async ({ where }: any) => (where.id === channelId || where.id === otherChannelId ? { id: where.id } : null)) };
+        grants.forUser.mockResolvedValue({ projectIds: [projectId], channelIds: [channelId] });
+      });
+
+      it("stores the channel on the run when the caller has access to it", async () => {
+        const outcome = await submit({ channelId });
+        expect(outcome.ok).toBe(true);
+        expect(prisma.workflowRun.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ channelId }) }));
+      });
+
+      it("a submit without a channel leaves the column out", async () => {
+        await submit();
+        const data = prisma.workflowRun.create.mock.calls[0]![0].data;
+        expect(data).not.toHaveProperty("channelId");
+        await submit({ channelId: "  " });
+        expect(prisma.workflowRun.create.mock.calls[1]![0].data).not.toHaveProperty("channelId");
+      });
+
+      it("refuses a channel the caller has no grant for, before any source or run exists", async () => {
+        const outcome = await submit({ channelId: otherChannelId });
+        expect(outcome).toMatchObject({ ok: false, code: "FORBIDDEN", status: 403 });
+        expect(prisma.workflowRun.create).not.toHaveBeenCalled();
+      });
+
+      it("an admin may use any existing channel, but a missing one is not found", async () => {
+        const admin = await service.submit(userId, "admin", { mode: "auto", projectId, automationProfileId, sourceId, channelId: otherChannelId } as never);
+        expect(admin.ok).toBe(true);
+        const missing = await service.submit(userId, "admin", { mode: "auto", projectId, automationProfileId, sourceId, channelId: "33333333-3333-4333-8333-333333333333" } as never);
+        expect(missing).toMatchObject({ ok: false, code: "NOT_FOUND" });
+      });
+
+      it("rejects a malformed channel id without touching the database", async () => {
+        const outcome = await submit({ channelId: "not-a-uuid" });
+        expect(outcome).toMatchObject({ ok: false, code: "VALIDATION_FAILED" });
+        expect(prisma.channelConnection.findUnique).not.toHaveBeenCalled();
+      });
+
+      it("the same source for another channel is another run; with no channel the fingerprint is unchanged", async () => {
+        grants.forUser.mockResolvedValue({ projectIds: [projectId], channelIds: [channelId, otherChannelId] });
+        const plain = await submit();
+        const a = await submit({ channelId });
+        const b = await submit({ channelId: otherChannelId });
+        const again = await submit({ channelId });
+        expect(plain.ok && a.ok && b.ok && again.ok).toBe(true);
+        const ids = [plain, a, b, again].map((outcome) => (outcome.ok ? outcome.data.id : ""));
+        expect(new Set(ids.slice(0, 3)).size).toBe(3);
+        expect(ids[3]).toBe(ids[1]);
+      });
+    });
   });
 
   describe("backgroundSegments (VE2E-40)", () => {

@@ -64,11 +64,13 @@ export async function submitVideoProduction(
   backgroundSegments?: BackgroundSegmentsSetting,
   /** VE2E-151: the typed target person and the selected news text (both optional). */
   person: { targetPerson?: string; newsContext?: string } = {},
+  /** The channel picked on the create form: the run is listed in that channel's video library. */
+  channelId?: string,
 ): Promise<VideoProductionSubmitResponse> {
   return api<VideoProductionSubmitResponse>("/video-productions", {
     method: "POST",
     headers: await csrfHeaders(),
-    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source, ...(backgroundSegments ? { backgroundSegments } : {}), ...person }),
+    body: JSON.stringify({ mode: "auto", projectId, automationProfileId, source, ...(backgroundSegments ? { backgroundSegments } : {}), ...person, ...(channelId ? { channelId } : {}) }),
   });
 }
 
